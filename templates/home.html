@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>军事资料智能分析系统</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <h1><span>📄</span>军事资料智能分析系统</h1>
+        <p class="subtitle">
+          请选择功能入口：分类与信息抽取 / 对话（上传资料后与模型多轮交互）
+        </p>
+      </div>
+
+      <div style="display:flex; gap:16px; justify-content:center; flex-wrap:wrap;">
+        <a class="btn" href="{{ url_for('classify.classify_page') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
+          🧭 分类与信息抽取
+        </a>
+        <a class="btn" href="{{ url_for('chat.chat_page') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
+          💬 对话
+        </a>
+      </div>
+
+      <div style="margin-top:24px; color:#6b7280; text-align:center; line-height:1.6;">
+        <div>分类与信息抽取：支持 PDF/图片/Office 文档，自动 OCR + AnythingLLM 分析并输出 JSON。</div>
+        <div>对话：预留多轮对话入口（实现逻辑由对话模块补全）。</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

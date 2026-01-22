@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>对话 - 军事资料智能分析系统</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <h1><span>💬</span>对话</h1>
+        <p class="subtitle">上传文件或文件夹后，与模型进行多轮对话（本页面为占位，可独立开发）。</p>
+      </div>
+
+      <div class="btn-group" style="margin-top:-12px; margin-bottom:16px;">
+        <a class="btn" href="{{ url_for('main.home') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
+          ⬅ 返回首页
+        </a>
+        <a class="btn" href="{{ url_for('classify.classify_page') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
+          🧭 分类与信息抽取
+        </a>
+      </div>
+
+      <div id="chat-placeholder" style="padding:16px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; color:#6b7280; line-height:1.7;">
+        <div style="font-weight:600; color:#374151; margin-bottom:8px;">对话模块开发说明</div>
+        <div>1. 你可以在 <code>app/blueprints/chat.py</code> 中补全 /api/chat/upload 与 /api/chat/message 的逻辑。</div>
+        <div>2. 推荐将 AnythingLLM 调用封装到 app/services/chat_service.py（本项目未创建，留给对话开发者）。</div>
+        <div>3. 页面前端脚本请写入 static/chat.js（已创建占位）。</div>
+      </div>
+
+      <div style="margin-top:16px;">
+        <label class="btn btn-file" style="margin-right:8px;">
+          📂 选择文件（占位）
+          <input type="file" disabled />
+        </label>
+        <label class="btn btn-folder">
+          📁 选择文件夹（占位）
+          <input type="file" webkitdirectory directory multiple disabled />
+        </label>
+      </div>
+
+      <button class="btn" style="margin-top:16px;" disabled>发送消息（占位）</button>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='chat.js') }}" defer></script>
+</body>
+</html>

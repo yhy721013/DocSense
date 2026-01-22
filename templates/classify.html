@@ -1,0 +1,98 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>军事资料智能分类系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="header">
+        <h1><span>📄</span>军事资料智能分类系统</h1>
+        <p class="subtitle">上传军事相关资料（PDF、图片、Word等），自动完成 OCR + AI 智能分析<br>支持目录提取、军事分类、关键信息抽取</p>
+      </div>
+
+      <div class="btn-group" style="margin-top:-12px; margin-bottom:16px;">
+        <a class="btn" href="{{ url_for('main.home') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
+          ⬅ 返回首页
+        </a>
+        <a class="btn" href="{{ url_for('chat.chat_page') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
+          💬 进入对话
+        </a>
+      </div>
+
+      <div id="uploader" class="uploader">
+        <div class="upload-icon">📁</div>
+        <p class="upload-text">拖拽文件到此处，或点击选择</p>
+        <div class="btn-group">
+          <label class="btn btn-file">
+            📂 选择文件
+            <input id="file-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt" />
+          </label>
+          <label class="btn btn-folder">
+            📁 选择文件夹
+            <input id="folder-input" type="file" webkitdirectory directory multiple />
+          </label>
+        </div>
+        <div id="file-info"></div>
+      </div>
+        
+      <button id="start-btn" class="btn" disabled>🚀 开始处理</button>
+
+      <div id="progress">
+        <div class="progress-header">
+          <div class="spinner"></div>
+          <strong>正在处理中...</strong>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar"></div>
+        </div>
+        <span id="progress-text"></span>
+      </div>
+
+      <div id="error"></div>
+    </div>
+
+    <div id="result">
+      <div class="result-header">
+        <h2>✨ 处理结果</h2>
+      </div>
+
+      <section id="batch-section" style="display:none;">
+        <h3>📦 批量处理汇总</h3>
+        <div id="batch-summary"></div>
+        <div id="batch-details"></div>
+      </section>
+
+      <section id="outline-section" style="display:none;">
+        <h3>📚 文档目录</h3>
+        <ul id="outline-list"></ul>
+      </section>
+
+      <section id="summary-section" style="display:none;">
+        <h3>📝 信息抽取</h3>
+        <div id="summary-text"></div>
+      </section>
+
+      <section id="category-section" style="display:none;">
+        <h3>🎯 军事分类</h3>
+        <div id="category-text"></div>
+        <div id="category-candidates" style="display:none;"></div>
+        <div id="subcategory-options" style="display:none;"></div>
+        <button id="category-confirm-btn" class="btn" style="display:none;">✅ 确认分类</button>
+        <div id="category-manual-message"></div>
+      </section>
+
+      <details>
+        <summary>🔍 查看原始 JSON 数据</summary>
+        <pre id="result-json"></pre>
+      </details>
+    </div>
+  </div>
+    
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>
+
