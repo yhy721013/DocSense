@@ -10,16 +10,27 @@ from app.settings import UPLOAD_DIR
 
 
 def move_file_to_category_folder(file_path: Path, category: str) -> Tuple[bool, str]:
-    """根据军事分类将文件移动到对应的文件夹。"""
+    """
+    根据军事分类将文件移动到对应的文件夹
+
+    Args:
+        file_path: 文件路径
+        category: 分类名称，支持子分类格式如 "装备型号/空中装备"
+
+    Returns:
+        (成功标志, 消息 - 包含最终路径)
+    """
     if not file_path.exists():
         return False, f"文件不存在: {file_path}"
 
     if category not in CATEGORY_FOLDERS:
         return False, f"未知的分类: {category}"
 
+    # 获取目标文件夹
     target_folder = UPLOAD_DIR / CATEGORY_FOLDERS[category]
     target_folder.mkdir(parents=True, exist_ok=True)
 
+    # 目标文件路径
     target_path = target_folder / file_path.name
 
     # 如果目标文件已存在，添加时间戳
@@ -30,10 +41,12 @@ def move_file_to_category_folder(file_path: Path, category: str) -> Tuple[bool, 
         target_path = target_folder / f"{stem}_{timestamp}{suffix}"
 
     try:
+        # 移动文件
         shutil.move(str(file_path), str(target_path))
-        return True, f"文件已移动到: {target_path.relative_to(UPLOAD_DIR.parent)}"
-    except Exception as exc:  # pylint: disable=broad-except
-        return False, f"移动文件失败: {exc}"
+        # 返回绝对路径，确保格式一致
+        return True, f"文件已移动到: {str(target_path)}"
+    except Exception as e:
+        return False, f"移动文件失败: {e}"
 
 
 def normalize_category_path(category: Optional[str], sub_category: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
