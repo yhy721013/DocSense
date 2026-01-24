@@ -48,6 +48,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadFilesModalBtn.addEventListener('click', loadFilesForModal);
     cancelSelectionBtn.addEventListener('click', closeFileSelectionModal);
     confirmSelectionBtn.addEventListener('click', confirmFileSelection);
+    startChatBtn.addEventListener('click', startChat);
     
     // 点击模态框背景关闭
     fileSelectionModal.addEventListener('click', function(e) {
@@ -403,18 +404,33 @@ function hideModalError() {
 /**
  * 开始对话
  */
-function startChat() {
+async function startChat() {
     if (selectedFiles.length === 0) {
         alert('请先选择文件');
         return;
     }
     
-    // TODO: 实现对话逻辑
-    // 这里可以调用后端的 /api/chat/setup 接口
-    // 传递选中的文件路径，创建workspace
-    
-    alert(`开始与 ${selectedFiles.length} 个文件对话！\n\n选中的文件：\n${selectedFiles.map(f => f.name).join('\n')}`);
-    
-    // 示例：跳转到对话界面或显示对话框
-    // window.location.href = '/chat/conversation';
+    try {
+        const filePaths = selectedFiles.map(file => file.path);
+        const response = await fetch(`${API_BASE}/setup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_paths: filePaths })
+        });
+        
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error);
+        }
+        
+        // 保存workspace和thread信息用于后续对话
+        currentWorkspaceSlug = data.workspace_slug;
+        currentThreadSlug = data.thread_slug;
+        
+        // 跳转到对话界面或显示对话框
+        // showChatInterface();
+        
+    } catch (error) {
+        alert(`创建对话工作区失败：${error.message}`);
+    }
 }

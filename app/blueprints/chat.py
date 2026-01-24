@@ -65,3 +65,53 @@ def chat_message():
     payload = request.get_json(silent=True) or {}
     _ = payload.get("message")
     return jsonify({"error": "对话功能尚未实现"}), 501
+
+
+@chat_bp.post("/api/chat/setup")
+def chat_setup():
+    """根据选定的文件创建对话工作区。
+    
+    请求格式：
+    {
+        "file_paths": ["uploads/军事基地/文件.pdf", "uploads/装备型号/文档.docx", ...]
+    }
+    
+    返回格式：
+    {
+        "workspace_slug": "chat_workspace_1234567890",
+        "thread_slug": "thread_1234567890", 
+        "message": "对话工作区创建成功"
+    }
+    
+    或错误：
+    {
+        "error": "错误信息"
+    }
+    """
+    try:
+        # 获取请求数据
+        payload = request.get_json(silent=True) or {}
+        file_paths = payload.get("file_paths", [])
+        
+        if not file_paths:
+            return jsonify({"error": "请提供文件路径列表"}), 400
+        
+        if not isinstance(file_paths, list):
+            return jsonify({"error": "file_paths必须是数组"}), 400
+        
+        # 调用服务层创建工作区
+        from app.services.chat_service import setup_chat_workspace
+        
+        workspace_slug, thread_slug, error = setup_chat_workspace(file_paths)
+        
+        if error:
+            return jsonify({"error": error}), 500
+
+        return jsonify({
+            "workspace_slug": workspace_slug,
+            "thread_slug": thread_slug,
+            "message": "对话工作区创建成功"
+        })
+        
+    except Exception as exc:
+        return jsonify({"error": f"设置对话工作区失败：{exc}"}), 500
