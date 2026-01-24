@@ -41,6 +41,7 @@
   padding: 12px 16px;
   border-bottom: 1px solid #f3f4f6;
   transition: background-color 0.2s;
+  cursor: pointer;
 }
 
 .file-item:hover {
@@ -52,7 +53,6 @@
 }
 
 .file-icon {
-  margin-right: 12px;
   font-size: 18px;
 }
 
@@ -187,7 +187,6 @@
 }
 
 .file-checkbox {
-  margin-right: 12px;
   transform: scale(1.2);
 }
 
@@ -374,4 +373,38 @@
 
 .btn-secondary:hover {
   background-color: #4b5563;
+}
+
+/* 文件控制区域样式 */
+.file-controls {
+  display: flex;
+  align-items: center;
+  margin-right: 12px;
+  flex-shrink: 0;
+}
+
+.file-controls .file-checkbox {
+  margin-right: 12px;
+  margin-left: 0;
+  transform: scale(1.2);
+}
+
+.file-controls .file-icon {
+  margin-right: 0;
+  font-size: 18px;
+}
+
+.selected-files-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.header-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
 }
