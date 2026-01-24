@@ -195,3 +195,183 @@
   background-color: #eff6ff;
   border-left: 3px solid #3b82f6;
 }
+
+/* 模态框样式 */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  max-width: 800px;
+  max-height: 80vh;
+  width: 90%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-header h3 {
+  margin: 0;
+  color: #1f2937;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: #6b7280;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.close-btn:hover {
+  background-color: #f3f4f6;
+  color: #374151;
+}
+
+.modal-body {
+  padding: 20px 24px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.modal-actions {
+  display: flex;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.modal-footer {
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.selection-info {
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.modal-buttons {
+  display: flex;
+  gap: 12px;
+}
+
+/* 已选文件区域样式 */
+.selected-files-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.selected-files-list {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.selected-file-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f3f4f6;
+  transition: background-color 0.2s;
+}
+
+.selected-file-item:last-child {
+  border-bottom: none;
+}
+
+.selected-file-item:hover {
+  background-color: #f9fafb;
+}
+
+.selected-file-icon {
+  margin-right: 12px;
+  font-size: 18px;
+}
+
+.selected-file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.selected-file-name {
+  font-weight: 500;
+  color: #1f2937;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.selected-file-meta {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.remove-file-btn {
+  background: none;
+  border: none;
+  color: #dc2626;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 18px;
+  transition: background-color 0.2s;
+}
+
+.remove-file-btn:hover {
+  background-color: #fef2f2;
+}
+
+/* 按钮样式增强 */
+.btn-primary {
+  background-color: #3b82f6;
+  color: white;
+  border: none;
+}
+
+.btn-primary:hover {
+  background-color: #2563eb;
+}
+
+.btn-primary:disabled {
+  background-color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background-color: #6b7280;
+  color: white;
+  border: none;
+}
+
+.btn-secondary:hover {
+  background-color: #4b5563;
+}

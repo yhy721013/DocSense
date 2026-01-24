@@ -29,13 +29,17 @@
         <div class="file-selection-header">
           <h2>📁 选择对话文件</h2>
           <p class="subtitle">从已上传的文件中选择用于对话的文档</p>
+          <button id="select-files-btn" class="btn btn-primary">📂 选择对话文件</button>
         </div>
 
-        <div class="file-actions">
-          <button id="load-files-btn" class="btn">🔄 加载文件列表</button>
-          <div id="loading-indicator" style="display:none; margin-left:16px;">
-            <div class="spinner" style="display:inline-block; margin-right:8px;"></div>
-            正在加载文件列表...
+        <!-- 已选文件显示区域 -->
+        <div id="selected-files-section" style="display:none; margin-top:20px;">
+          <div class="selected-files-header">
+            <h3>✅ 已选文件列表</h3>
+            <button id="reselect-files-btn" class="btn btn-secondary">🔄 重新选择</button>
+          </div>
+          <div id="selected-files-list" class="selected-files-list">
+            <!-- 已选文件将在这里显示 -->
           </div>
         </div>
 
@@ -55,6 +59,55 @@
           
           <div id="error-message" class="error-message" style="display:none;">
             <!-- 错误信息将在这里显示 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 文件选择模态框 -->
+      <div id="file-selection-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3>📂 选择对话文件</h3>
+            <button id="close-modal-btn" class="close-btn">&times;</button>
+          </div>
+          
+          <div class="modal-body">
+            <div class="modal-actions">
+              <button id="load-files-modal-btn" class="btn">🔄 刷新列表</button>
+              <div id="modal-loading-indicator" style="display:none; margin-left:16px;">
+                <div class="spinner" style="display:inline-block; margin-right:8px;"></div>
+                正在加载...
+              </div>
+            </div>
+
+            <div id="modal-file-list-container" style="display:none; margin-top:16px;">
+              <div class="file-list-header">
+                <h4>📋 可选文件列表</h4>
+                <div class="file-stats" id="modal-file-stats"></div>
+              </div>
+              
+              <div id="modal-file-list" class="file-list">
+                <!-- 文件列表将在这里动态生成 -->
+              </div>
+              
+              <div id="modal-no-files-message" class="no-files-message" style="display:none;">
+                <p>📭 暂无可用的文件，请先在分类页面上传文件。</p>
+              </div>
+              
+              <div id="modal-error-message" class="error-message" style="display:none;">
+                <!-- 错误信息将在这里显示 -->
+              </div>
+            </div>
+          </div>
+          
+          <div class="modal-footer">
+            <div class="selection-info">
+              <span id="selection-count">已选择 0 个文件</span>
+            </div>
+            <div class="modal-buttons">
+              <button id="cancel-selection-btn" class="btn btn-secondary">取消</button>
+              <button id="confirm-selection-btn" class="btn btn-primary" disabled>确认选择</button>
+            </div>
           </div>
         </div>
       </div>
