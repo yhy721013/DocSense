@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>对话 - 军事资料智能分析系统</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='chat_styles.css') }}">
 </head>
 <body>
   <div class="container">
@@ -23,7 +24,42 @@
         </a>
       </div>
 
-      <div id="chat-placeholder" style="padding:16px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; color:#6b7280; line-height:1.7;">
+      <!-- 文件选择模块 -->
+      <div id="file-selection-section">
+        <div class="file-selection-header">
+          <h2>📁 选择对话文件</h2>
+          <p class="subtitle">从已上传的文件中选择用于对话的文档</p>
+        </div>
+
+        <div class="file-actions">
+          <button id="load-files-btn" class="btn">🔄 加载文件列表</button>
+          <div id="loading-indicator" style="display:none; margin-left:16px;">
+            <div class="spinner" style="display:inline-block; margin-right:8px;"></div>
+            正在加载文件列表...
+          </div>
+        </div>
+
+        <div id="file-list-container" style="display:none; margin-top:16px;">
+          <div class="file-list-header">
+            <h3>📋 可选文件列表</h3>
+            <div class="file-stats" id="file-stats"></div>
+          </div>
+          
+          <div id="file-list" class="file-list">
+            <!-- 文件列表将在这里动态生成 -->
+          </div>
+          
+          <div id="no-files-message" class="no-files-message" style="display:none;">
+            <p>📭 暂无可用的文件，请先在分类页面上传文件。</p>
+          </div>
+          
+          <div id="error-message" class="error-message" style="display:none;">
+            <!-- 错误信息将在这里显示 -->
+          </div>
+        </div>
+      </div>
+
+      <!-- <div id="chat-placeholder" style="padding:16px; background:#f9fafb; border:1px solid #e5e7eb; border-radius:12px; color:#6b7280; line-height:1.7;">
         <div style="font-weight:600; color:#374151; margin-bottom:8px;">对话模块开发说明</div>
         <div>1. 你可以在 <code>app/blueprints/chat.py</code> 中补全 /api/chat/upload 与 /api/chat/message 的逻辑。</div>
         <div>2. 推荐将 AnythingLLM 调用封装到 app/services/chat_service.py（本项目未创建，留给对话开发者）。</div>
@@ -41,7 +77,7 @@
         </label>
       </div>
 
-      <button class="btn" style="margin-top:16px;" disabled>发送消息（占位）</button>
+      <button class="btn" style="margin-top:16px;" disabled>发送消息（占位）</button> -->
     </div>
   </div>
 

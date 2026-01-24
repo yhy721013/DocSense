@@ -15,6 +15,32 @@ def chat_page():
 # =============================
 # 对话功能 API（占位实现）
 # =============================
+@chat_bp.get("/api/chat/files")
+def get_chat_files():
+    """获取uploads文件夹中的所有文件列表，用于对话文件选择。
+    
+    返回格式：
+    {
+        "files": [
+            {
+                "path": "相对路径，如 'uploads/军事基地/文件.pdf'",
+                "name": "文件名，如 '文件.pdf'", 
+                "size": 文件大小(字节),
+                "modified": "修改时间，如 '2024-01-01 12:00:00'"
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        # 调用服务层获取文件列表
+        from app.services.chat_service import list_uploaded_files
+        
+        files = list_uploaded_files()
+        return jsonify({"files": files})
+        
+    except Exception as exc:
+        return jsonify({"error": f"获取文件列表失败：{exc}"}), 500
 
 
 @chat_bp.post("/api/chat/upload")
