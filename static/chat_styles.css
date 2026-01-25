@@ -334,21 +334,6 @@
   color: #6b7280;
 }
 
-.remove-file-btn {
-  background: none;
-  border: none;
-  color: #dc2626;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  font-size: 18px;
-  transition: background-color 0.2s;
-}
-
-.remove-file-btn:hover {
-  background-color: #fef2f2;
-}
-
 /* 按钮样式增强 */
 .btn-primary {
   background-color: #3b82f6;

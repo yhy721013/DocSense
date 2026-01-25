@@ -360,32 +360,9 @@ function createSelectedFileItem(file, index) {
                 <span class="file-modified">🕒 ${file.modified}</span>
             </div>
         </div>
-        <button class="remove-file-btn" data-index="${index}" title="移除文件">×</button>
     `;
     
-    // 绑定移除按钮事件
-    const removeBtn = item.querySelector('.remove-file-btn');
-    removeBtn.addEventListener('click', function() {
-        removeSelectedFile(index);
-    });
-    
     return item;
-}
-
-/**
- * 移除已选文件
- * @param {number} index - 文件索引
- */
-function removeSelectedFile(index) {
-    selectedFiles.splice(index, 1);
-    renderSelectedFiles();
-    
-    // 如果没有文件了，隐藏已选文件区域
-    if (selectedFiles.length === 0) {
-        selectedFilesSection.style.display = 'none';
-        startChatBtn.style.display = 'none';
-        document.querySelector('.file-selection-header').style.display = 'block';
-    }
 }
 
 /**
