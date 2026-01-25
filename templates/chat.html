@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>对话 - 军事资料智能分析系统</title>
+  <title>问答 - 资料智能分析系统</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='chat_styles.css') }}">
 </head>
@@ -11,7 +11,7 @@
   <div class="container">
     <div class="card">
       <div class="header">
-        <h1><span>💬</span>对话</h1>
+        <h1><span>💬</span>问答</h1>
         <p class="subtitle">上传文件或文件夹后，与模型进行多轮对话。</p>
       </div>
 
@@ -20,7 +20,7 @@
           ⬅ 返回首页
         </a>
         <a class="btn" href="{{ url_for('classify.classify_page') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
-          🧭 分类与信息抽取
+          🧭 智能索引
         </a>
       </div>
 
