@@ -12,13 +12,9 @@ def chat_page():
     return render_template("chat.html")
 
 
-# =============================
-# 对话功能 API（占位实现）
-# =============================
 @chat_bp.get("/api/chat/files")
 def get_chat_files():
     """获取uploads文件夹中的所有文件列表，用于对话文件选择。
-    
     返回格式：
     {
         "files": [

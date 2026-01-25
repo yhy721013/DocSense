@@ -30,6 +30,15 @@ const selectionCount = document.getElementById('selection-count');
 const cancelSelectionBtn = document.getElementById('cancel-selection-btn');
 const confirmSelectionBtn = document.getElementById('confirm-selection-btn');
 
+// 对话框相关元素
+const chatSection = document.getElementById('chat-section');
+const chatMessages = document.getElementById('chat-messages');
+const messageInput = document.getElementById('message-input');
+const sendBtn = document.getElementById('send-btn');
+const sendIcon = document.getElementById('send-icon');
+const sendingIndicator = document.getElementById('sending-indicator');
+const charCount = document.getElementById('char-count');
+
 // API 基础路径
 const API_BASE = '/api/chat';
 
@@ -37,19 +46,28 @@ const API_BASE = '/api/chat';
 let availableFiles = []; // 所有可用文件
 let selectedFiles = [];  // 已选中的文件
 
+// 对话相关状态
+let currentWorkspaceSlug = null;
+let currentThreadSlug = null;
+let isSendingMessage = false;
+let chatHistory = [];
+
 // 初始化
 document.addEventListener('DOMContentLoaded', function() {
     console.log('[chat] 文件选择功能已加载');
     
     // 绑定事件
     selectFilesBtn.addEventListener('click', openFileSelectionModal);
-    reselectFilesBtn.addEventListener('click', openFileSelectionModal);
     closeModalBtn.addEventListener('click', closeFileSelectionModal);
     loadFilesModalBtn.addEventListener('click', loadFilesForModal);
     cancelSelectionBtn.addEventListener('click', closeFileSelectionModal);
     confirmSelectionBtn.addEventListener('click', confirmFileSelection);
     startChatBtn.addEventListener('click', startChat);
-    
+    // 对话框相关事件
+    messageInput.addEventListener('input', updateInputState);
+    messageInput.addEventListener('keydown', handleInputKeydown);
+    sendBtn.addEventListener('click', sendMessage);
+
     // 点击模态框背景关闭
     fileSelectionModal.addEventListener('click', function(e) {
         if (e.target === fileSelectionModal) {
@@ -62,6 +80,21 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.key === 'Escape' && fileSelectionModal.style.display !== 'none') {
             closeFileSelectionModal();
         }
+    });
+
+    // 修改 reselectFilesBtn 的点击处理
+    reselectFilesBtn.addEventListener('click', () => {
+        // 如果有正在进行的对话，显示确认对话框
+        if (currentWorkspaceSlug && currentThreadSlug) {
+            const confirmed = confirm('重新选择文件将会清除现有对话，是否继续？');
+            if (!confirmed) {
+                return;
+            }
+            // 清除对话状态
+            clearChatSession();
+        }
+        // 打开文件选择模态框
+        openFileSelectionModal();
     });
 });
 
@@ -427,10 +460,191 @@ async function startChat() {
         currentWorkspaceSlug = data.workspace_slug;
         currentThreadSlug = data.thread_slug;
         
-        // 跳转到对话界面或显示对话框
-        // showChatInterface();
+        // 隐藏开始对话按钮
+        startChatBtn.style.display = 'none';
+        
+        // 显示对话框
+        chatSection.style.display = 'block';
+        
+        // 清空之前的对话历史
+        chatHistory = [];
+        
+        // 滚动到底部
+        scrollToBottom();
+        
+        console.log('对话工作区创建成功:', data);
         
     } catch (error) {
         alert(`创建对话工作区失败：${error.message}`);
     }
+}
+
+/**
+ * 清除对话会话
+ */
+function clearChatSession() {
+    currentWorkspaceSlug = null;
+    currentThreadSlug = null;
+    chatHistory = [];
+    
+    // 隐藏对话框
+    chatSection.style.display = 'none';
+    
+    // 重新显示开始对话按钮
+    startChatBtn.style.display = 'inline-block';
+    
+    // 清空消息区域
+    chatMessages.innerHTML = `
+        <div class="welcome-message">
+            <div class="message-content">
+                <p>您好！我已经准备好基于您选择的文件与您对话了。</p>
+                <p>请问您有什么问题吗？</p>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * 更新输入框状态
+ */
+function updateInputState() {
+    const text = messageInput.value.trim();
+    const length = text.length;
+    
+    // 更新字符计数
+    charCount.textContent = `${length}/2000`;
+    
+    // 更新发送按钮状态
+    sendBtn.disabled = length === 0 || isSendingMessage;
+    
+    // 字符数接近上限时改变颜色
+    if (length > 1800) {
+        charCount.style.color = '#dc2626';
+    } else if (length > 1500) {
+        charCount.style.color = '#d97706';
+    } else {
+        charCount.style.color = '#6b7280';
+    }
+}
+
+/**
+ * 处理输入框键盘事件
+ */
+function handleInputKeydown(event) {
+    if (event.key === 'Enter') {
+        if (event.shiftKey) {
+            // Shift+Enter 换行
+            return;
+        } else {
+            // Enter 发送消息
+            event.preventDefault();
+            sendMessage();
+        }
+    }
+}
+
+/**
+ * 发送消息
+ */
+async function sendMessage() {
+    if (isSendingMessage || !messageInput.value.trim()) {
+        return;
+    }
+    
+    const message = messageInput.value.trim();
+    
+    try {
+        // 设置发送状态
+        setSendingState(true);
+        
+        // 添加用户消息到界面
+        addMessage('user', message);
+        
+        // 清空输入框
+        messageInput.value = '';
+        updateInputState();
+        
+        // 调用API发送消息
+        const response = await fetch(`${API_BASE}/message`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                workspace_slug: currentWorkspaceSlug,
+                thread_slug: currentThreadSlug,
+                message: message
+            })
+        });
+        
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || '发送消息失败');
+        }
+        
+        // 添加AI回复到界面
+        addMessage('assistant', data.response);
+        
+    } catch (error) {
+        console.error('发送消息失败:', error);
+        addMessage('assistant', `抱歉，发送消息时出现错误：${error.message}`, 'error');
+    } finally {
+        setSendingState(false);
+    }
+}
+
+/**
+ * 添加消息到对话界面
+ */
+function addMessage(role, content, status = null) {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${role}`;
+    if (status) {
+        messageDiv.classList.add(status);
+    }
+    
+    const avatar = role === 'user' ? '👤' : '🤖';
+    
+    messageDiv.innerHTML = `
+        <div class="message-avatar">${avatar}</div>
+        <div class="message-content">
+            <div>${escapeHtml(content).replace(/\n/g, '<br>')}</div>
+        </div>
+    `;
+    
+    chatMessages.appendChild(messageDiv);
+    scrollToBottom();
+    
+    // 添加到对话历史
+    chatHistory.push({
+        role: role,
+        content: content,
+        timestamp: new Date().toISOString()
+    });
+}
+
+/**
+ * 设置发送状态
+ */
+function setSendingState(sending) {
+    isSendingMessage = sending;
+    
+    if (sending) {
+        sendIcon.style.display = 'none';
+        sendingIndicator.style.display = 'inline-block';
+        messageInput.disabled = true;
+        sendBtn.disabled = true;
+    } else {
+        sendIcon.style.display = 'inline';
+        sendingIndicator.style.display = 'none';
+        messageInput.disabled = false;
+        updateInputState();
+    }
+}
+
+/**
+ * 滚动到底部
+ */
+function scrollToBottom() {
+    setTimeout(() => {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }, 100);
 }

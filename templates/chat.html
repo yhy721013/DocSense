@@ -44,6 +44,49 @@
           </div>
         </div>
 
+        <!-- 对话框区域 -->
+        <div id="chat-section" style="display:none; margin-top:20px;">
+          <div class="chat-container">
+            <div class="chat-header">
+              <h3>💬 与AI对话</h3>
+              <div class="chat-info">
+                <span>基于已选文件进行对话</span>
+              </div>
+            </div>
+            
+            <div id="chat-messages" class="chat-messages">
+              <!-- 对话消息将在这里显示 -->
+              <div class="welcome-message">
+                <div class="message-content">
+                  <p>您好！我已经准备好基于您选择的文件与您对话了。</p>
+                  <p>请问您有什么问题吗？</p>
+                </div>
+              </div>
+            </div>
+            
+            <div class="chat-input-area">
+              <div class="input-container">
+                <textarea 
+                  id="message-input" 
+                  placeholder="输入您的问题..."
+                  rows="2"
+                  maxlength="2000"
+                ></textarea>
+                <button id="send-btn" class="send-btn" disabled>
+                  <span id="send-icon">📤</span>
+                  <span id="sending-indicator" style="display:none;">
+                    <div class="spinner" style="width:16px; height:16px;"></div>
+                  </span>
+                </button>
+              </div>
+              <div class="input-footer">
+                <span id="char-count">0/2000</span>
+                <span class="input-hint">Enter发送，Shift+Enter换行</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div id="file-list-container" style="display:none; margin-top:16px;">
           <div class="file-list-header">
             <h3>📋 可选文件列表</h3>
