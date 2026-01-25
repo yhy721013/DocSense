@@ -10,7 +10,6 @@ from typing import List, Tuple, Optional
 
 def list_uploaded_files() -> List[Dict[str, Any]]:
     """获取uploads文件夹中的所有文件列表。
-    
     返回格式：
     [
         {
@@ -21,7 +20,6 @@ def list_uploaded_files() -> List[Dict[str, Any]]:
         },
         ...
     ]
-    
     Raises:
         Exception: 当文件系统操作失败时抛出异常
     """
@@ -62,15 +60,13 @@ def list_uploaded_files() -> List[Dict[str, Any]]:
 
 def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """根据选定的文件创建对话工作区。
-    
     Args:
         file_paths: 文件路径列表（相对于项目根目录的路径，如 'uploads/军事基地/文件.pdf'）
         user_id: 用户ID
-        
     Returns:
-        (workspace_slug, thread_slug, error_message)
-        成功时返回workspace_slug和thread_slug，error_message为None
-        失败时返回None, None, error_message
+        (workspace_slug, thread_slug, error_message, document_ids)
+        成功时返回workspace_slug、thread_slug、None、document_ids列表
+        失败时返回None, None, error_message, None
     """
     from config import load_anythingllm_config
     from anythingllm_client import AnythingLLMClient
@@ -106,12 +102,12 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
                 if absolute_path.exists():
                     absolute_file_paths.append(str(absolute_path))
                 else:
-                    return None, None, f"文件不存在: {file_path}"
+                    return None, None, f"文件不存在: {file_path}", None
             else:
-                return None, None, f"无效的文件路径格式: {file_path}"
+                return None, None, f"无效的文件路径格式: {file_path}", None
         
         if not absolute_file_paths:
-            return None, None, "没有有效的文件路径"
+            return None, None, "没有有效的文件路径", None
         
         # 5. 对每个文件进行OCR预处理
         files_to_upload = []
@@ -120,7 +116,7 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
             files_to_upload.extend(processed_files)
         
         if not files_to_upload:
-            return None, None, "文件预处理失败，没有可上传的文件"
+            return None, None, "文件预处理失败，没有可上传的文件", None
         
         # 6. 创建workspace和thread，但不发送prompt
         # 复用 run_anythingllm_rag 的逻辑，但使用一个空的prompt来避免实际发送
@@ -132,19 +128,19 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
         # 手动执行workspace和thread创建流程（不发送prompt）
         workspace_info = client.create_workspace(workspace_name, user_id=user_id)
         if not workspace_info:
-            return None, None, "创建workspace失败"
+            return None, None, "创建workspace失败", None
         
         workspace_slug = workspace_info.get("slug") or str(workspace_info.get("id"))
         if not workspace_slug:
-            return None, None, "获取workspace_slug失败"
+            return None, None, "获取workspace_slug失败", None
         
         thread_info = client.create_thread(workspace_slug, thread_name, user_id=user_id)
         if not thread_info:
-            return None, None, "创建thread失败"
+            return None, None, "创建thread失败", None
         
         thread_slug = client.extract_thread_slug(thread_info) or thread_info.get("id")
         if not thread_slug:
-            return None, None, "获取thread_slug失败"
+            return None, None, "获取thread_slug失败", None
         
         # 7. 上传文件并处理embeddings
         attached_document_ids = []
@@ -189,9 +185,43 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
             attached_document_ids.append(str(doc_id))
 
         if not attached_document_ids:
-            return None, None, "没有成功上传的文档"
+            return None, None, "没有成功上传的文档", None
         
-        return workspace_slug, thread_slug, None
+        return workspace_slug, thread_slug, None, attached_document_ids
         
     except Exception as exc:
-        return None, None, f"创建对话工作区失败：{exc}"
+        return None, None, f"创建对话工作区失败：{exc}", None
+
+
+def send_chat_message(workspace_slug: str, thread_slug: str, message: str, document_ids: List[str], user_id: int = 1) -> Optional[str]:
+    """发送对话消息到AnythingLLM。
+    Args:
+        workspace_slug: 工作区标识
+        thread_slug: 对话线程标识  
+        message: 用户消息
+        document_ids: 文档ID列表（每次发送都包含，确保基于这些文档回答）
+        user_id: 用户ID
+    Returns:
+        AI回复文本，失败时返回None
+    """
+    from config import load_anythingllm_config
+    from anythingllm_client import AnythingLLMClient
+    
+    try:
+        # 创建AnythingLLM客户端
+        client = AnythingLLMClient(load_anythingllm_config())
+        
+        # 发送消息，每次都包含document_ids确保基于选定文件回答
+        response = client.send_prompt_to_thread(
+            workspace_slug=workspace_slug,
+            thread_slug=thread_slug,
+            prompt=message,
+            user_id=user_id,
+            document_ids=document_ids,  # 每次都包含，确保基于这些文档回答
+            mode="chat"
+        )
+        
+        return response
+        
+    except Exception as exc:
+        return f"发送消息失败：{exc}"

@@ -49,6 +49,7 @@ let selectedFiles = [];  // 已选中的文件
 // 对话相关状态
 let currentWorkspaceSlug = null;
 let currentThreadSlug = null;
+let currentDocumentIds = [];  // 添加文档ID数组
 let isSendingMessage = false;
 let chatHistory = [];
 
@@ -433,9 +434,10 @@ async function startChat() {
             throw new Error(data.error);
         }
         
-        // 保存workspace和thread信息用于后续对话
+        // 保存workspace、thread和document_ids信息
         currentWorkspaceSlug = data.workspace_slug;
         currentThreadSlug = data.thread_slug;
+        currentDocumentIds = data.document_ids || [];  // 保存文档ID数组
         
         // 隐藏开始对话按钮
         startChatBtn.style.display = 'none';
@@ -463,7 +465,7 @@ function clearChatSession() {
     currentWorkspaceSlug = null;
     currentThreadSlug = null;
     chatHistory = [];
-    
+    currentDocumentIds = [];  // 清空文档ID数组
     // 隐藏对话框
     chatSection.style.display = 'none';
     
@@ -548,7 +550,8 @@ async function sendMessage() {
             body: JSON.stringify({
                 workspace_slug: currentWorkspaceSlug,
                 thread_slug: currentThreadSlug,
-                message: message
+                message: message,
+                document_ids: currentDocumentIds    // 每次都发送文档ID
             })
         });
         
