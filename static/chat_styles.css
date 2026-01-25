@@ -599,3 +599,53 @@
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
 }
+
+/* 消息内容格式化 */
+.message-content code {
+  background: rgba(0, 0, 0, 0.1);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.9em;
+}
+
+.message-content pre {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  padding: 12px;
+  margin: 8px 0;
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+
+.message-content pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+/* 发送按钮发送中状态 */
+.send-btn.sending {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 错误消息样式增强 */
+.message.error .message-content {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+}
+
+.message.error .message-avatar {
+  background: #dc2626;
+  color: white;
+}
+
+/* 输入框禁用状态 */
+#message-input:disabled {
+  background: #f9fafb;
+  cursor: not-allowed;
+  opacity: 0.7;
+}

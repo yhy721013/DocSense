@@ -445,6 +445,9 @@ async function startChat() {
         // 显示对话框
         chatSection.style.display = 'block';
         
+        // 初始化对话框
+        initializeChatInterface();
+        
         // 清空之前的对话历史
         chatHistory = [];
         
@@ -462,17 +465,28 @@ async function startChat() {
  * 清除对话会话
  */
 function clearChatSession() {
+    // 清理后端状态
     currentWorkspaceSlug = null;
     currentThreadSlug = null;
-    chatHistory = [];
     currentDocumentIds = [];  // 清空文档ID数组
+    
+    // 清理前端状态
+    chatHistory = [];
+    isSendingMessage = false;
+    
+    // 重置UI状态
+    messageInput.disabled = false;
+    sendBtn.disabled = true;
+    messageInput.value = '';
+    charCount.textContent = '0/2000';
+    
     // 隐藏对话框
     chatSection.style.display = 'none';
     
     // 重新显示开始对话按钮
     startChatBtn.style.display = 'inline-block';
     
-    // 清空消息区域
+    // 重置消息区域，显示欢迎消息
     chatMessages.innerHTML = `
         <div class="welcome-message">
             <div class="message-content">
@@ -542,6 +556,15 @@ async function sendMessage() {
         // 清空输入框
         messageInput.value = '';
         updateInputState();
+
+        // 检查必要的会话信息
+        if (!currentWorkspaceSlug || !currentThreadSlug) {
+            throw new Error('对话会话未初始化，请重新选择文件');
+        }
+        
+        if (!currentDocumentIds || currentDocumentIds.length === 0) {
+            throw new Error('没有可用的文档，请重新选择文件');
+        }
         
         // 调用API发送消息
         const response = await fetch(`${API_BASE}/message`, {
@@ -560,12 +583,27 @@ async function sendMessage() {
             throw new Error(data.error || '发送消息失败');
         }
         
+        // 检查响应数据
+        if (!data.response) {
+            throw new Error('服务器返回了空的响应');
+        }
+
         // 添加AI回复到界面
         addMessage('assistant', data.response);
         
     } catch (error) {
         console.error('发送消息失败:', error);
+        
+        // 显示错误消息
         addMessage('assistant', `抱歉，发送消息时出现错误：${error.message}`, 'error');
+        
+        // 如果是会话错误，提示用户重新开始
+        if (error.message.includes('会话未初始化') || error.message.includes('重新选择文件')) {
+            setTimeout(() => {
+                alert('对话会话出现问题，请重新选择文件开始新的对话。');
+                clearChatSession();
+            }, 2000);
+        }
     } finally {
         setSendingState(false);
     }
@@ -582,11 +620,23 @@ function addMessage(role, content, status = null) {
     }
     
     const avatar = role === 'user' ? '👤' : '🤖';
+
+    // 格式化消息内容
+    let formattedContent = content;
     
+    // 处理换行符
+    formattedContent = formattedContent.replace(/\n/g, '<br>');
+    
+    // 处理代码块（简单处理）
+    formattedContent = formattedContent.replace(/```(.*?)```/gs, '<code>$1</code>');
+
+    // 处理内联代码（简单处理）
+    formattedContent = formattedContent.replace(/`([^`]+)`/g, '<code>$1</code>');
+
     messageDiv.innerHTML = `
         <div class="message-avatar">${avatar}</div>
         <div class="message-content">
-            <div>${escapeHtml(content).replace(/\n/g, '<br>')}</div>
+            <div>${formattedContent}</div>
         </div>
     `;
     
@@ -597,8 +647,14 @@ function addMessage(role, content, status = null) {
     chatHistory.push({
         role: role,
         content: content,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        status: status
     });
+
+    // 限制对话历史长度（保留最近50条消息）
+    if (chatHistory.length > 50) {
+        chatHistory = chatHistory.slice(-50);
+    }
 }
 
 /**
@@ -608,16 +664,37 @@ function setSendingState(sending) {
     isSendingMessage = sending;
     
     if (sending) {
+        // 发送中状态
         sendIcon.style.display = 'none';
         sendingIndicator.style.display = 'inline-block';
         messageInput.disabled = true;
         sendBtn.disabled = true;
+        sendBtn.style.opacity = '0.6';
+        
+        // 显示正在输入的AI消息
+        addMessage('assistant', '正在思考中...', 'typing');
     } else {
+        // 正常状态
         sendIcon.style.display = 'inline';
         sendingIndicator.style.display = 'none';
         messageInput.disabled = false;
+        sendBtn.style.opacity = '1';
         updateInputState();
+        
+        // 移除"正在思考"的消息
+        removeTypingMessage();
     }
+}
+
+/**
+ * 移除正在输入的消息
+ */
+function removeTypingMessage() {
+    const typingMessages = chatMessages.querySelectorAll('.message.typing');
+    typingMessages.forEach(msg => msg.remove());
+    
+    // 从历史记录中移除
+    chatHistory = chatHistory.filter(msg => msg.status !== 'typing');
 }
 
 /**
@@ -627,4 +704,16 @@ function scrollToBottom() {
     setTimeout(() => {
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }, 100);
+}
+
+/**
+ * 初始化对话界面
+ */
+function initializeChatInterface() {
+    // 确保消息输入框可用
+    messageInput.disabled = false;
+    messageInput.focus();
+    
+    // 重置输入状态
+    updateInputState();
 }
