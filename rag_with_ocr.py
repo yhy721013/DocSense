@@ -125,11 +125,11 @@ def process_file_with_rag(
     workspace_name: str = "1928",
     thread_name: str = "文档分析",
     user_id: int = 1,
-    ocr_dpi: int = 150,
-    ocr_workers: Optional[int] = None,
-    ocr_use_gpu: bool = True,
 ) -> Optional[str]:
-    # CLI/脚本入口：加载配置并执行统一流水线
+    """
+    CLI/脚本入口：加载配置并执行统一流水线。
+    所有文件直接上传到 AnythingLLM 进行解析存储。
+    """
     client = AnythingLLMClient(load_anythingllm_config())
     return pipeline_process_file_with_rag(
         client=client,
@@ -138,23 +138,17 @@ def process_file_with_rag(
         workspace_name=workspace_name,
         thread_name=thread_name,
         user_id=user_id,
-        ocr_dpi=ocr_dpi,
-        ocr_workers=ocr_workers,
-        ocr_use_gpu=ocr_use_gpu,
     )
 
 
 def main() -> Optional[str]:
     parser = argparse.ArgumentParser(
-        description="OCR + AnythingLLM RAG pipeline",
+        description="AnythingLLM RAG pipeline - 文件直接上传到 AnythingLLM 进行解析",
     )
     parser.add_argument("file_path", type=str, help="File path to process")
     parser.add_argument("--workspace", type=str, default="1928", help="Workspace name")
     parser.add_argument("--thread", type=str, default="文档分析", help="Thread name")
     parser.add_argument("--user-id", type=int, default=1, help="User id")
-    parser.add_argument("--ocr-dpi", type=int, default=150, help="OCR DPI")
-    parser.add_argument("--ocr-workers", type=int, default=None, help="OCR worker count")
-    parser.add_argument("--ocr-use-gpu", action="store_true", help="Use GPU for OCR")
 
     args = parser.parse_args()
 
@@ -163,9 +157,6 @@ def main() -> Optional[str]:
         workspace_name=args.workspace,
         thread_name=args.thread,
         user_id=args.user_id,
-        ocr_dpi=args.ocr_dpi,
-        ocr_workers=args.ocr_workers,
-        ocr_use_gpu=args.ocr_use_gpu,
     )
 
 

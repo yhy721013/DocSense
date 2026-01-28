@@ -11,13 +11,10 @@
   对 AnythingLLM REST API 做统一封装：workspace/thread 创建、文档上传、embedding 更新、流式响应解析等。
 
 - `document_utils.py`  
-  文档类型判断与扫描 PDF 识别的工具函数。
-
-- `ocr_utils.py`  
-  OCR 调用封装：图片 OCR 与 PDF OCR（通过 `paddle_ocr_pdf.py`）。
+  文档类型判断工具函数。
 
 - `pipeline.py`  
-  核心处理流水线：根据文件类型决定 OCR -> 上传 AnythingLLM -> 更新 embedding -> 发送 Prompt -> 返回结构化结果。
+  核心处理流水线：所有文件直接上传到 AnythingLLM -> 更新 embedding -> 发送 Prompt -> 返回结构化结果。
 
 - `rag_with_ocr.py`  
   CLI 入口：加载配置并调用 `pipeline.process_file_with_rag` 完成整体处理。
@@ -46,11 +43,9 @@
 - `static/chat.js`  
   对话模块前端（占位）。
 
-- `paddle_ocr_pdf.py`  
-  大型 PDF OCR 工具，支持多进程与版面保留，供 `ocr_utils.py` 调用。
-
 - `ssh.py`  
   SSH 端口转发工具，用于连接远程 Ollama/模型服务。
+
 
 ## 主要调用关系
 
@@ -65,9 +60,6 @@
 web_ui.py
   └─> rag_with_ocr.py (process_file_with_rag)
         └─> pipeline.py
-              ├─> document_utils.py
-              ├─> ocr_utils.py
-              │     └─> paddle_ocr_pdf.py
               └─> anythingllm_client.py
                     └─> config.py
 ```
@@ -78,9 +70,7 @@ web_ui.py
 2. 进入 `/classify` 后，渲染 `templates/classify.html` 并加载 `static/styles.css`、`static/app.js`。
 3. `static/app.js` 选择文件并调用 `/api/classify/upload` 或 `/api/classify/upload_folder` 上传。
 3. `web_ui.py` 启动后台线程调用 `rag_with_ocr.process_file_with_rag`。
-4. `pipeline.prepare_upload_files` 判断文件类型：
-   - PDF/图片：必要时 OCR
-   - 其他文件：直接上传
+4. `pipeline.prepare_upload_files` 直接将所有类型文件添加到上传列表（OCR 由 AnythingLLM 处理）。
 5. `pipeline.run_anythingllm_rag`：
    - 创建 workspace/thread
    - 上传文档、等待处理
