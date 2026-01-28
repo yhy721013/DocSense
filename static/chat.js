@@ -4,7 +4,6 @@
 // 2) 发送消息 -> POST /api/chat/message
 // 3) 维护会话ID / thread_slug / workspace_slug 等必要状态
 
-console.info('[chat] 对话功能尚未实现：请在 static/chat.js 补全前端交互。');
 
 
 // 对话模块前端 - 文件列表显示功能
