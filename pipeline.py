@@ -6,43 +6,19 @@ from pathlib import Path
 from typing import List, Optional
 
 from anythingllm_client import AnythingLLMClient
-from document_utils import is_image_file, is_pdf_file, is_scanned_pdf
-from ocr_utils import process_image_with_paddleocr, process_pdf_with_paddleocr
 
 
-def prepare_upload_files(
-    file_path: str,
-    ocr_dpi: int = 150,
-    ocr_workers: Optional[int] = None,
-    ocr_use_gpu: bool = True,
-) -> List[str]:
-    # 根据文件类型决定是否执行 OCR
+def prepare_upload_files(file_path: str) -> List[str]:
+    """
+    准备上传文件列表。
+    所有类型的文件都直接上传到 AnythingLLM 进行解析存储，
+    由 AnythingLLM 内置的文档处理能力完成 OCR 和文本提取。
+    """
     path = Path(file_path)
     if not path.exists():
         return []
 
-    files_to_upload: List[str] = []
-    if is_pdf_file(str(path)):
-        if is_scanned_pdf(str(path)):
-            ocr_output = process_pdf_with_paddleocr(
-                str(path),
-                lang="ch",
-                dpi=ocr_dpi,
-                num_workers=ocr_workers,
-                use_gpu=ocr_use_gpu,
-            )
-            if ocr_output:
-                files_to_upload.append(ocr_output)
-        else:
-            files_to_upload.append(str(path))
-    elif is_image_file(str(path)):
-        ocr_output = process_image_with_paddleocr(str(path), lang="ch", use_gpu=ocr_use_gpu)
-        if ocr_output:
-            files_to_upload.append(ocr_output)
-    else:
-        files_to_upload.append(str(path))
-
-    return files_to_upload
+    return [str(path)]
 
 
 def run_anythingllm_rag(
@@ -135,16 +111,12 @@ def process_file_with_rag(
     workspace_name: str,
     thread_name: str,
     user_id: int,
-    ocr_dpi: int = 150,
-    ocr_workers: Optional[int] = None,
-    ocr_use_gpu: bool = True,
 ) -> Optional[str]:
-    files_to_upload = prepare_upload_files(
-        file_path=file_path,
-        ocr_dpi=ocr_dpi,
-        ocr_workers=ocr_workers,
-        ocr_use_gpu=ocr_use_gpu,
-    )
+    """
+    处理文件并执行 RAG 查询。
+    所有文件直接上传到 AnythingLLM，由其内置能力进行解析。
+    """
+    files_to_upload = prepare_upload_files(file_path=file_path)
     return run_anythingllm_rag(
         client=client,
         files_to_upload=files_to_upload,
