@@ -58,7 +58,7 @@ def list_uploaded_files() -> List[Dict[str, Any]]:
     return files
 
 
-def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[List[str]]]:
     """根据选定的文件创建对话工作区。
     Args:
         file_paths: 文件路径列表（相对于项目根目录的路径，如 'uploads/军事基地/文件.pdf'）
@@ -70,7 +70,7 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
     """
     from config import load_anythingllm_config
     from anythingllm_client import AnythingLLMClient
-    from pipeline import prepare_upload_files, run_anythingllm_rag
+    from pipeline import prepare_upload_files
     import time
     
     try:
@@ -92,13 +92,19 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
         # 4. 准备文件路径（转换为绝对路径）
         from app.settings import UPLOAD_DIR
         absolute_file_paths = []
+        upload_root = UPLOAD_DIR.resolve()
         
         for file_path in normalized_file_paths:
             # file_path 是相对于项目根目录的路径，如 'uploads/军事基地/文件.pdf'
             # 我们需要将其转换为相对于UPLOAD_DIR的路径
             if file_path.startswith('uploads/'):
                 relative_to_upload = file_path[len('uploads/'):]
-                absolute_path = UPLOAD_DIR / relative_to_upload
+                # 通过 resolve 标准化路径，并确保其仍位于 UPLOAD_DIR 下，防止路径遍历
+                absolute_path = (UPLOAD_DIR / relative_to_upload).resolve()
+                try:
+                    absolute_path.relative_to(upload_root)
+                except ValueError:
+                    return None, None, f"无效的文件路径: {file_path}", None
                 if absolute_path.exists():
                     absolute_file_paths.append(str(absolute_path))
                 else:
@@ -119,11 +125,7 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
             return None, None, "文件预处理失败，没有可上传的文件", None
         
         # 6. 创建workspace和thread，但不发送prompt
-        # 复用 run_anythingllm_rag 的逻辑，但使用一个空的prompt来避免实际发送
-        dummy_prompt = ""  # 不会实际发送，因为我们只做准备工作
-        
-        # 调用 run_anythingllm_rag，但捕获其创建的workspace和thread信息
-        # 由于我们不发送prompt，我们需要修改这个调用方式
+        # 此处仅做会话环境的准备工作：创建workspace和thread，后续再发送实际对话内容
         
         # 手动执行workspace和thread创建流程（不发送prompt）
         workspace_info = client.create_workspace(workspace_name, user_id=user_id)
