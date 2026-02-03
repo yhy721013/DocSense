@@ -7,7 +7,7 @@ from typing import Optional
 
 # AnythingLLM 默认连接配置，可通过环境变量覆盖
 DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1"
-DEFAULT_API_KEY = "ZRVHTGG-6FN47RS-N2QHYDW-ZEHR8X4"
+DEFAULT_API_KEY = "V9FHG94-2MP4RT3-GSP8N2H-2DCM4EQ"
 
 
 @dataclass(frozen=True)

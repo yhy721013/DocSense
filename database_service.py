@@ -215,6 +215,36 @@ class DocumentDatabase:
             logging.error(f"搜索文档结果失败: {filters}, 错误: {str(e)}")
             return []
 
+    def update_document_category(self, result_id: str, selected_category: str, selected_sub_category: str,
+                                 new_file_path: Optional[str] = None) -> bool:
+        """
+        更新文档的分类信息
+        """
+        try:
+            updates = {
+                "category": selected_category,
+                "sub_category": selected_sub_category,
+                "full_category": f"{selected_category}/{selected_sub_category}" if selected_sub_category else selected_category,
+                "updated_at": datetime.utcnow()
+            }
+
+            # 同时更新parsed_result中的分类信息
+            result = self.collection.update_one(
+                {"_id": ObjectId(result_id)},
+                {"$set": updates}
+            )
+
+            if result.modified_count > 0:
+                logging.info(f"成功更新文档分类: ID={result_id}, 分类={updates['full_category']}")
+                return True
+            else:
+                logging.warning(f"未找到需要更新的文档: ID={result_id}")
+                return False
+
+        except Exception as e:
+            logging.error(f"更新文档分类失败: {result_id}, 错误: {str(e)}")
+            return False
+
 
 # 全局数据库实例
 document_db = DocumentDatabase()

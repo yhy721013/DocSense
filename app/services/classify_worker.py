@@ -306,16 +306,12 @@ def process_single_upload_task(
             workspace_name=workspace_name,
             thread_name=thread_name,
             user_id=user_id,
-            store_in_db=True,  # 总是存储到数据库
-            store_original_file=True,  # 存储原始文件
+            store_in_db=False,  # 不立即存储到数据库
+            store_original_file=True,
             additional_metadata=additional_metadata,
         )
 
-        final_path = file_path  # 默认为原始路径
-        move_message = ""
-
         if result:
-            # ✅ 使用 _handle_category_move 函数处理分类逻辑
             try:
                 parsed_result = json.loads(result) if isinstance(result, str) else result
 
@@ -323,41 +319,50 @@ def process_single_upload_task(
                     Path(file_path), parsed_result
                 )
 
-                # 如果分类确定且移动成功，更新最终路径
-                if success and not manual_required and move_message.startswith("📁"):
-                    final_path_parts = move_message.split(": ")
-                    if len(final_path_parts) > 1:
-                        final_path = final_path_parts[1]
-
-                # 存储到数据库
-                db_result_id = document_db.save_result(
-                    original_file_path=file_path,
-                    final_file_path=final_path,
-                    result=result,
-                    metadata=additional_metadata
-                )
-                if db_result_id:
-                    print(f"✅ 文档结果已保存到MongoDB，ID: {db_result_id}")
-                else:
-                    print(f"⚠️  文档结果保存到MongoDB失败")
-
-                store.update(
-                    task_id,
-                    status="completed",
-                    progress=100,
-                    message="处理完成" + (f" - {move_message}" if move_message else ""),
-                    result=parsed_result,  # 使用解析后的结果
-                    manual_selection_required=manual_required,
-                    category_candidates=candidates if manual_required else [],
-                )
-
-                # 如果需要人工选择，不自动完成任务
+                # 根据是否需要人工选择决定存储策略
                 if manual_required:
+                    # 需要人工选择时，先存储初始记录但标记为待处理
+                    initial_db_id = document_db.save_result(
+                        original_file_path=file_path,
+                        final_file_path=file_path,  # 初始路径
+                        result=result,
+                        metadata=additional_metadata,
+                        store_original_file=True
+                    )
+
                     store.update(
                         task_id,
                         status="requires_manual_selection",
-                        message="等待人工选择分类"
+                        message="等待人工选择分类",
+                        manual_selection_required=True,
+                        category_candidates=candidates,
+                        result=parsed_result,
+                        db_result_id=initial_db_id  # 保存数据库ID供后续更新使用
                     )
+                else:
+                    # 自动分类完成，直接存储最终结果
+                    final_path = file_path
+                    if success and move_message.startswith("📁"):
+                        final_path_parts = move_message.split(": ")
+                        if len(final_path_parts) > 1:
+                            final_path = final_path_parts[1]
+
+                    db_result_id = document_db.save_result(
+                        original_file_path=file_path,
+                        final_file_path=final_path,
+                        result=result,
+                        metadata=additional_metadata
+                    )
+
+                    store.update(
+                        task_id,
+                        status="completed",
+                        progress=100,
+                        message="处理完成" + (f" - {move_message}" if move_message else ""),
+                        result=parsed_result,
+                        manual_selection_required=False,
+                    )
+
             except (json.JSONDecodeError, Exception) as e:
                 print(f"⚠️  解析分类信息失败: {e}，文件保留在原位置")
                 store.update(
@@ -366,14 +371,7 @@ def process_single_upload_task(
                     message=f"解析分类信息失败: {e}",
                     error=f"解析分类信息失败: {e}"
                 )
-        else:
-            store.update(
-                task_id,
-                status="error",
-                message="处理失败：未收到 AnythingLLM 的响应",
-                error="处理失败：未收到 AnythingLLM 的响应",
-            )
-    except Exception as exc:  # pylint: disable=broad-except
+    except Exception as exc:
         store.update(
             task_id,
             status="error",
@@ -415,8 +413,8 @@ def process_folder_upload_task(
                 workspace_name=workspace_name,
                 thread_name=specific_thread_name,
                 user_id=user_id,
-                store_in_db=True,  # 总是存储到数据库
-                store_original_file=True,  # 存储原始文件
+                store_in_db=False,  # 不立即存储到数据库
+                store_original_file=True,
                 additional_metadata=additional_metadata,
             )
 
@@ -439,24 +437,42 @@ def process_folder_upload_task(
                     manual_selection_required = manual_required
                     category_candidates = candidates if manual_required else []
 
-                    # 如果分类确定且移动成功，更新最终路径
-                    if success and not manual_required and move_message.startswith("📁"):
-                        # 从消息中提取新路径
-                        final_path_parts = move_message.split(": ")
-                        if len(final_path_parts) > 1:
-                            final_path = final_path_parts[1]
+                    if manual_required:
+                        # 需要人工选择时，先存储初始记录但标记为待处理
+                        initial_db_id = document_db.save_result(
+                            original_file_path=str(file_path),
+                            final_file_path=str(file_path),  # 初始路径
+                            result=result,
+                            metadata=additional_metadata,
+                            store_original_file=True
+                        )
 
-                    # 存储到数据库
-                    db_result_id = document_db.save_result(
-                        original_file_path=str(file_path),
-                        final_file_path=final_path,
-                        result=result,
-                        metadata=additional_metadata
-                    )
-                    if db_result_id:
-                        print(f"✅ 文档结果已保存到MongoDB，ID: {db_result_id}")
+                        # 如果需要人工选择，更新最终路径
+                        if success and not manual_required and move_message.startswith("📁"):
+                            # 从消息中提取新路径
+                            final_path_parts = move_message.split(": ")
+                            if len(final_path_parts) > 1:
+                                final_path = final_path_parts[1]
                     else:
-                        print(f"⚠️  文档结果保存到MongoDB失败")
+                        # 自动分类完成，直接存储最终结果
+                        # 如果分类确定且移动成功，更新最终路径
+                        if success and not manual_required and move_message.startswith("📁"):
+                            # 从消息中提取新路径
+                            final_path_parts = move_message.split(": ")
+                            if len(final_path_parts) > 1:
+                                final_path = final_path_parts[1]
+
+                        # 存储到数据库
+                        db_result_id = document_db.save_result(
+                            original_file_path=str(file_path),
+                            final_file_path=final_path,
+                            result=result,
+                            metadata=additional_metadata
+                        )
+                        if db_result_id:
+                            print(f"✅ 文档结果已保存到MongoDB，ID: {db_result_id}")
+                        else:
+                            print(f"⚠️  文档结果保存到MongoDB失败")
 
                 except (json.JSONDecodeError, Exception) as e:
                     print(f"⚠️ 解析分类信息失败: {e}")
@@ -518,3 +534,75 @@ def process_folder_upload_task(
         pending_files=[r["file_path"] for r in results if r.get("manual_selection_required")]
     )
 
+
+def handle_manual_category_selection(
+        store: InMemoryTaskStore,
+        task_id: str,
+        document_id: str,  # 这应该是数据库中已有的文档ID
+        selected_category: str,
+        selected_sub_category: str,
+        file_path: str
+) -> None:
+    """
+    处理人工选择的分类
+    """
+    try:
+        # 规范化分类路径
+        full_category, normalize_error = normalize_category_path(selected_category, selected_sub_category)
+        if not full_category:
+            store.update(
+                task_id,
+                status="error",
+                message=f"无效的分类路径: {normalize_error}",
+                error=f"无效的分类路径: {normalize_error}",
+            )
+            return
+
+        # 移动文件到新分类目录
+        moved, move_message = move_file_to_category_folder(Path(file_path), full_category)
+        if not moved:
+            store.update(
+                task_id,
+                status="error",
+                message=f"文件移动失败: {move_message}",
+                error=f"文件移动失败: {move_message}",
+            )
+            return
+
+        # 更新数据库中的分类信息（只更新，不插入新记录）
+        updated = document_db.update_document_category(
+            document_id,
+            selected_category,
+            selected_sub_category,
+            new_file_path=str(Path(file_path).parent / move_message.split(": ")[1]) if move_message.startswith("📁") else file_path
+        )
+
+        if updated:
+            store.update(
+                task_id,
+                status="completed",
+                progress=100,
+                message=f"人工分类确认完成，文件已移动到: {move_message}",
+                result={
+                    "category": selected_category,
+                    "sub_category": selected_sub_category,
+                    "new_file_path": move_message
+                },
+                manual_selection_required=False,
+                manual_selected=True
+            )
+        else:
+            store.update(
+                task_id,
+                status="error",
+                message="数据库更新失败",
+                error="数据库更新失败"
+            )
+
+    except Exception as exc:
+        store.update(
+            task_id,
+            status="error",
+            message=f"处理人工分类选择失败：{exc}",
+            error=f"处理人工分类选择失败：{exc}",
+        )

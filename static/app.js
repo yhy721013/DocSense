@@ -841,7 +841,39 @@ function pollStatus() {
   fetch(`${API_BASE}/status/${currentTask}`)
     .then(resp => resp.json())
     .then(data => {
-      if (data.status === 'processing') {
+      // 检查是否需要人工分类选择
+      if (data.manual_selection_required === true) {
+        // 停止轮询，显示人工分类界面
+        progressBox.style.display = 'none';
+        startBtn.disabled = false;
+        resultBox.style.display = 'block';
+
+        // 渲染人工分类界面
+        const rawString = typeof data.result === 'string'
+          ? data.result
+          : JSON.stringify(data.result, null, 2);
+        resultJson.textContent = rawString || '';
+
+        try {
+          const parsed = typeof data.result === 'string'
+            ? JSON.parse(data.result)
+            : data.result;
+
+          // 显示分类候选选项
+          const candidates = data.category_candidates || (parsed && parsed.category_candidates);
+          const hasCandidates = Array.isArray(candidates) && candidates.length > 0;
+
+          if (hasCandidates) {
+            categoryText.textContent = '模型无法完全确定分类，请选择可能的类别：';
+            renderCategoryCandidates(candidates);
+            categorySection.style.display = 'block';
+          }
+
+        } catch (err) {
+          console.warn('解析 JSON 失败', err);
+        }
+
+      } else if (data.status === 'processing') {
         if (data.total_files && data.processed !== undefined) {
           const percent = Math.round((data.processed / data.total_files) * 100);
           progressText.textContent = `${data.message || '处理中...'} (${percent}%)`;
@@ -873,14 +905,13 @@ function pollStatus() {
               .map((item, index) => `<li><span style="font-weight:600;margin-right:8px;">${index + 1}.</span>${item}</li>`)
               .join('');
             outlineSection.style.display = 'block';
-            }
-            
+          }
+
           if (parsed && typeof parsed.summary === 'string' && parsed.summary.trim() !== '') {
             summaryText.textContent = parsed.summary.trim();
             summarySection.style.display = 'block';
-            }
-          
-          // 处理信息抽取结果 (extract)
+          }
+
           if (parsed && parsed.extract && typeof parsed.extract === 'object') {
             const extractHtml = formatExtractData(parsed.extract);
             if (extractHtml) {
@@ -888,8 +919,7 @@ function pollStatus() {
               summarySection.style.display = 'block';
             }
           }
-          
-          // 处理军事分类（支持多候选）
+
           const candidates = parsed && parsed.category_candidates;
           const hasCandidates = Array.isArray(candidates) && candidates.length > 0;
           if (hasCandidates) {
@@ -902,11 +932,10 @@ function pollStatus() {
               if (typeof parsed.category === 'string') {
                 categoryValue = parsed.category.trim();
               } else if (Array.isArray(parsed.category) && parsed.category.length > 0) {
-                // 如果错误地返回了数组，只取第一个
                 categoryValue = String(parsed.category[0]).trim();
               }
             }
-            
+
             if (categoryValue && categoryValue !== '') {
               const categoryName = categoryValue;
               const subCategory = parsed.sub_category ? parsed.sub_category.trim() : '';
@@ -921,12 +950,12 @@ function pollStatus() {
         progressBox.style.display = 'none';
         startBtn.disabled = false;
         errorBox.textContent = data.error || '处理失败';
-    }
+      }
     })
     .catch(err => {
       progressBox.style.display = 'none';
       startBtn.disabled = false;
       errorBox.textContent = '状态查询失败：' + err.message;
-            });
-    }
+    });
+}
 

@@ -154,23 +154,35 @@ def select_category():
     if not file_path:
         return jsonify({"error": "无法定位文件路径"}), 400
 
-    file_path_obj = Path(file_path)
-    if not file_path_obj.exists():
-        return jsonify({"error": "文件不存在或已移动"}), 400
+    # 优先从任务状态中获取数据库文档ID
+    document_id = status.get("db_result_id")
 
-    success, move_message = move_file_to_category_folder(file_path_obj, full_category)
-    if not success:
-        return jsonify({"error": move_message}), 500
+    if not document_id:
+        # 如果任务状态中没有ID，尝试从数据库中查找
+        try:
+            recent_doc = document_db.collection.find_one(
+                {"original_file_path": file_path},
+                sort=[("created_at", -1)]
+            )
+            if recent_doc:
+                document_id = str(recent_doc.get("_id"))
+        except Exception as e:
+            print(f"查找文档ID时出错: {e}")
 
-    # 写回任务状态（注意：task_store.get 返回的是拷贝，这里用 update 写回）
-    task_store.update(
-        task_id,
-        manual_selection_required=False,
-        manual_selected=True,
-        selected_category=full_category,
-        message="已人工选择分类 - " + move_message,
-    )
-    return jsonify({"message": move_message, "category": full_category})
+    if document_id:
+        from app.services.classify_worker import handle_manual_category_selection
+        import threading
+
+        thread = threading.Thread(
+            target=handle_manual_category_selection,
+            args=(task_store, task_id, str(document_id), category, sub_category, file_path)
+        )
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({"message": f"人工分类更新任务已启动", "task_id": task_id})
+    else:
+        return jsonify({"error": "无法找到对应的数据库文档"}), 500
 
 
 @classify_bp.post("/api/classify/select_category_batch")
@@ -216,9 +228,34 @@ def select_category_batch():
     if not full_category:
         return jsonify({"error": normalize_error or "分类无效"}), 400
 
+    # 移动文件到指定分类目录
     success, move_message = move_file_to_category_folder(file_path_obj, full_category)
     if not success:
         return jsonify({"error": move_message}), 500
+
+    # ✅ 关键：查找并更新数据库中的文档记录
+    try:
+        # 从数据库中查找对应文件的记录
+        doc_record = document_db.collection.find_one(
+            {"original_file_path": file_path},
+            sort=[("created_at", -1)]
+        )
+
+        if doc_record:
+            # 更新数据库中的分类信息
+            update_success = document_db.update_document_category(
+                str(doc_record["_id"]),
+                category,
+                sub_category,
+                new_file_path=move_message.split(": ")[1] if move_message.startswith("📁") else file_path
+            )
+
+            if not update_success:
+                print(f"⚠️ 更新数据库分类信息失败: {file_path}")
+        else:
+            print(f"⚠️ 未找到数据库中的对应记录: {file_path}")
+    except Exception as e:
+        print(f"⚠️ 更新数据库时发生错误: {str(e)}")
 
     # 更新批量处理结果
     entry.update({
@@ -235,3 +272,34 @@ def select_category_batch():
     task_store.set(task_id, status)
 
     return jsonify({"message": move_message, "category": full_category})
+
+
+"""处理人工分类选择并更新数据库"""
+@classify_bp.post("/api/classify/update_document_category")
+def update_document_category():
+    """处理人工分类选择并更新数据库"""
+    payload = request.get_json(silent=True) or {}
+    task_id = payload.get("task_id")
+    document_id = payload.get("document_id")
+    category = payload.get("category")
+    sub_category = payload.get("sub_category", "")
+    file_path = payload.get("file_path")
+
+    if not all([task_id, document_id, category, file_path]):
+        return jsonify({"error": "缺少必要参数"}), 400
+
+    # 创建异步任务来处理分类更新
+    from app.services.classify_worker import handle_manual_category_selection
+    import threading
+
+    thread = threading.Thread(
+        target=handle_manual_category_selection,
+        args=(task_store, task_id, document_id, category, sub_category, file_path)
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "message": "分类更新任务已启动",
+        "task_id": task_id
+    })
