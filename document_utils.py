@@ -18,17 +18,19 @@ def is_pdf_file(file_path: str) -> bool:
 def is_scanned_pdf(pdf_path: str, sample_pages: int = 3, text_threshold: int = 50) -> bool:
     # 通过抽样页文本长度判断是否为扫描件
     try:
-        doc = fitz.open(pdf_path)
-        total_pages = len(doc)
-        pages_to_check = min(sample_pages, total_pages)
-        total_text_length = 0
-        for page_num in range(pages_to_check):
-            page = doc[page_num]
-            text = page.get_text().strip()
-            total_text_length += len(text)
-        doc.close()
+        with fitz.open(pdf_path) as doc:
+            total_pages = len(doc)
+            pages_to_check = min(sample_pages, total_pages)
+            if pages_to_check <= 0:
+                return True
 
-        avg_text_per_page = total_text_length / pages_to_check if pages_to_check > 0 else 0
+            total_text_length = 0
+            for page_num in range(pages_to_check):
+                page = doc[page_num]
+                text = page.get_text().strip()
+                total_text_length += len(text)
+
+        avg_text_per_page = total_text_length / pages_to_check
         return avg_text_per_page < text_threshold
     except Exception:
         return True

@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.services.classify_worker import process_folder_task, process_single_file_task
 from app.services.file_ops import normalize_category_path, move_file_to_category_folder
 from app.services.task_store import InMemoryTaskStore
-from app.settings import UPLOAD_DIR
+from app.settings import TEMP_UPLOAD_DIR
 
 
 classify_bp = Blueprint("classify", __name__)
@@ -37,7 +37,8 @@ def upload_file():
     workspace_name = f"workspace_{timestamp}_{file_stem}"
     thread_name = request.form.get("thread", "文档分析")
 
-    file_path = UPLOAD_DIR / upload.filename
+    safe_name = Path(upload.filename).name
+    file_path = TEMP_UPLOAD_DIR / safe_name
     file_path.parent.mkdir(parents=True, exist_ok=True)
     upload.save(file_path)
 
@@ -85,7 +86,7 @@ def upload_folder():
     if not uploaded_files:
         return jsonify({"error": "没有上传文件"}), 400
 
-    temp_dir = UPLOAD_DIR / f"temp_{int(time.time())}"
+    temp_dir = TEMP_UPLOAD_DIR / f"temp_{int(time.time())}"
     temp_dir.mkdir(exist_ok=True)
 
     saved_files = []

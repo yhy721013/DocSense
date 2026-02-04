@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -14,6 +15,23 @@ from app.services.task_store import InMemoryTaskStore
 
 # “100% 确信”阈值：用于兼容模型把 100/100%/1/1.0 等不同格式写入 category_confidence 的情况
 AUTO_CLASSIFY_THRESHOLD = 0.999
+REFUSAL_MARKERS = (
+    "很抱歉，我无法从提供的文档中找到相关信息来回答该问题",
+    "无法从提供的文档中找到相关信息",
+)
+
+
+def _build_refusal_fallback(raw_text: str) -> Dict[str, Any]:
+    return {
+        "outline": [],
+        "security_level": "公开",
+        "category_confidence": 0.1,
+        "category": None,
+        "sub_category": None,
+        "category_candidates": [],
+        "extract": {},
+        "summary": raw_text.strip() or "未能从文档中检索到足够信息",
+    }
 
 
 def _parse_result(result: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -22,17 +40,53 @@ def _parse_result(result: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]
     if isinstance(result, dict):
         return result, None
     if isinstance(result, str):
-        text = result.strip()
-        # 兼容模型偶尔输出 ```json ... ``` 的围栏
-        if text.startswith("```"):
-            text = text.strip("`").strip()
-            # 再次尝试去掉可能的 'json' 前缀
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        try:
-            return json.loads(text), None
-        except json.JSONDecodeError as exc:
-            return None, f"结果不是合法 JSON: {exc}"
+        text = result.lstrip("\ufeff").strip()
+        if not text:
+            return None, "结果为空，未返回可解析内容"
+
+        if any(marker in text for marker in REFUSAL_MARKERS):
+            return _build_refusal_fallback(text), None
+
+        candidates: List[str] = [text]
+
+        # 兼容模型输出 ```json ... ``` 围栏
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+        if fence_match:
+            fenced = fence_match.group(1).strip()
+            if fenced:
+                candidates.append(fenced)
+
+        # 兼容前后带说明文字，只截取 JSON 主体
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if 0 <= first_brace < last_brace:
+            body = text[first_brace:last_brace + 1].strip()
+            if body:
+                candidates.append(body)
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate = candidate.lstrip("\ufeff").strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed, None
+            except json.JSONDecodeError:
+                # 容错：去掉尾随逗号再尝试一次
+                normalized = re.sub(r",\s*([}\]])", r"\1", candidate)
+                try:
+                    parsed = json.loads(normalized)
+                    if isinstance(parsed, dict):
+                        return parsed, None
+                except json.JSONDecodeError:
+                    continue
+
+        preview = text[:180].replace("\n", " ")
+        return None, f"结果不是合法 JSON（响应片段：{preview}）"
     return None, "未知的结果类型"
 
 
@@ -145,6 +199,7 @@ def process_single_file_task(
                 status="error",
                 message=f"处理失败：{parse_error}",
                 error=f"处理失败：{parse_error}",
+                raw_result=result,
             )
             return
 

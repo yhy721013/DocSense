@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -10,6 +11,9 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from config import AnythingLLMConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,8 +71,11 @@ class AnythingLLMClient:
                 "4. JSON 的字段名、层级和类型必须严格保持一致。\n"
                 "5. 不允许补充文档中未明确出现的信息。\n"
             ),
+            # 返回可解析 JSON，避免“无检索结果”时前端因纯文本报错
             "queryRefusalResponse": (
-                "很抱歉，我无法从提供的文档中找到相关信息来回答该问题。"
+                '{"outline":[],"security_level":"公开","category_confidence":0.1,'
+                '"category":null,"sub_category":null,"category_candidates":[],'
+                '"extract":{},"summary":"未能从文档中检索到足够信息"}'
             ),
             "chatMode": "query",
             "topN": 6,
@@ -273,21 +280,48 @@ class AnythingLLMClient:
             return None
 
     def wait_for_processing(self, doc_relative_path: str, retries: int = 300, delay: float = 2.0) -> bool:
-        # 根据 AnythingLLM 桌面版的存储路径轮询文件是否生成
-        if os.name == "nt":
-            appdata = os.getenv("APPDATA", "")
-            storage_root = os.path.join(appdata, "anythingllm-desktop", "storage")
-        else:
-            storage_root = os.path.expanduser("~/.anythingllm/storage")
+        # 根据配置/平台推导的 storage 根路径轮询文档文件是否生成。
+        # 若 storage 根路径不可用（如服务端部署无本地 documents 目录），保守降级为“跳过等待”。
+        storage_root = self._resolve_storage_root()
+        if not storage_root:
+            logger.warning("未配置可用的 AnythingLLM storage 根路径，跳过处理等待")
+            return True
+
+        documents_root = os.path.normpath(os.path.join(storage_root, "documents"))
+        if not os.path.isdir(documents_root):
+            logger.warning("AnythingLLM documents 目录不存在: %s，跳过处理等待", documents_root)
+            return True
 
         safe_relative_path = doc_relative_path.replace("\\", "/").strip("/")
-        target_path = os.path.normpath(os.path.join(storage_root, "documents", safe_relative_path))
+        target_path = os.path.normpath(os.path.join(documents_root, safe_relative_path))
+        documents_root_abs = os.path.abspath(documents_root)
+        target_abs = os.path.abspath(target_path)
+        try:
+            if os.path.commonpath([documents_root_abs, target_abs]) != documents_root_abs:
+                logger.warning("检测到异常 doc 路径，拒绝等待: %s", doc_relative_path)
+                return False
+        except ValueError:
+            logger.warning("检测到不可比较的 doc 路径，拒绝等待: %s", doc_relative_path)
+            return False
 
         for attempt in range(retries):
             if os.path.exists(target_path):
                 return True
             time.sleep(delay)
         return False
+
+    def _resolve_storage_root(self) -> Optional[str]:
+        configured_root = (self.config.storage_root or "").strip()
+        if configured_root:
+            return configured_root
+
+        if os.name == "nt":
+            appdata = os.getenv("APPDATA", "").strip()
+            if not appdata:
+                return None
+            return os.path.join(appdata, "anythingllm-desktop", "storage")
+
+        return os.path.expanduser("~/.anythingllm/storage")
 
     def update_embeddings(
         self,

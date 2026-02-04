@@ -1,11 +1,40 @@
-﻿# README.md
+# DocSense - 智能文档处理系统
 
-本说明用于快速理解项目内各个 `.py` 文件的职责与关系，以及给出运行与调试的建议。
+DocSense 是一个基于 AnythingLLM 的智能文档处理平台，提供文档分类、信息抽取和 AI 对话等功能。
+
+## 🚀 主要功能
+
+### 📂 文档智能分类
+- **自动分类**：利用 RAG（检索增强生成）技术，自动分析文档内容并进行分类
+- **批量处理**：支持单文件上传和文件夹批量上传，高效处理大量文档
+- **人工确认**：提供分类结果确认机制，支持人工调整和确认分类
+- **自动归档**：确认分类后自动将文件移动到对应的分类目录
+
+### 🔍 信息抽取
+- **结构化输出**：从非结构化文档中自动提取关键信息，返回结构化 JSON 结果
+- **多格式支持**：支持 PDF、Word、Excel、图片等多种文档格式
+- **前置 OCR**：扫描件 PDF 在上传前自动 OCR 为 Markdown，再交给 AnythingLLM 处理
+- **实时进度**：任务处理过程中实时显示进度，支持前端轮询状态
+
+### 💬 AI 对话
+- **文档问答**：基于上传的文档进行智能问答，获取文档相关信息
+- **多文件对话**：支持选择多个文件建立对话上下文
+- **流式响应**：支持流式返回 AI 回复，提升用户体验
+
+### 🛠️ 技术特性
+- **AnythingLLM 集成**：深度集成 AnythingLLM，利用其强大的文档处理和 RAG 能力
+- **模块化架构**：采用 Flask Blueprint 架构，业务逻辑清晰分离，便于扩展和维护
+- **异步处理**：后台线程处理文档，避免阻塞主服务
+- **Web UI**：提供简洁直观的 Web 界面，开箱即用
+
+---
+
+以下说明用于快速理解项目内各个 `.py` 文件的职责与关系，以及给出运行与调试的建议。
 
 ## 文件职责概览
 
 - `config.py`  
-  读取 AnythingLLM 的基础配置（Base URL、API Key、Timeout），通过环境变量覆盖默认值。
+  读取 AnythingLLM 与 OCR 配置（Base URL、API Key、Timeout、Storage Root、OCR参数），通过环境变量覆盖默认值。
 
 - `anythingllm_client.py`  
   对 AnythingLLM REST API 做统一封装：workspace/thread 创建、文档上传、embedding 更新、流式响应解析等。
@@ -13,8 +42,11 @@
 - `document_utils.py`  
   文档类型判断工具函数。
 
+- `ocr_preprocessor.py`  
+  扫描件 PDF 前置处理：扫描检测、OCR 转 Markdown、缓存复用、失败降级。
+
 - `pipeline.py`  
-  核心处理流水线：所有文件直接上传到 AnythingLLM -> 更新 embedding -> 发送 Prompt -> 返回结构化结果。
+  核心处理流水线：文件预处理（扫描 PDF OCR 转 Markdown）-> 上传 AnythingLLM -> 更新 embedding -> 发送 Prompt -> 返回结构化结果。
 
 - `rag_with_ocr.py`  
   CLI 入口：加载配置并调用 `pipeline.process_file_with_rag` 完成整体处理。
@@ -70,7 +102,10 @@ web_ui.py
 2. 进入 `/classify` 后，渲染 `templates/classify.html` 并加载 `static/styles.css`、`static/app.js`。
 3. `static/app.js` 选择文件并调用 `/api/classify/upload` 或 `/api/classify/upload_folder` 上传。
 3. `web_ui.py` 启动后台线程调用 `rag_with_ocr.process_file_with_rag`。
-4. `pipeline.prepare_upload_files` 直接将所有类型文件添加到上传列表（OCR 由 AnythingLLM 处理）。
+4. `pipeline.prepare_upload_files` 执行前置预处理：
+   - 非 PDF 或可提取文本 PDF：原文件直传；
+   - 扫描件 PDF：OCR 转 Markdown 并上传 Markdown；
+   - OCR 失败：自动降级直传原 PDF。
 5. `pipeline.run_anythingllm_rag`：
    - 创建 workspace/thread
    - 上传文档、等待处理
@@ -88,6 +123,59 @@ web_ui.py
   - 分类与抽取：`/classify`
   - 对话（占位）：`/chat`
 - 远程模型：先运行 `ssh.py` 建立端口转发
+
+## OCR 部署说明（Windows / Linux）
+
+### 1) 安装 Tesseract
+
+- Windows：
+  - 推荐安装 [UB Mannheim 构建版](https://github.com/UB-Mannheim/tesseract/wiki)
+  - 安装后将 `tesseract.exe` 所在目录加入 `PATH`
+  - 如语言包不在默认路径，可设置 `DOCSENSE_OCR_TESSDATA`
+
+- Linux：
+  - Ubuntu/Debian 示例：
+    - `sudo apt-get update`
+    - `sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng`
+  - 若语言包路径非默认，设置 `DOCSENSE_OCR_TESSDATA`
+
+> OCR 采用 CPU 本地离线方案
+
+### 2) 环境变量配置
+
+#### AnythingLLM
+
+- `ANYTHINGLLM_BASE_URL`：AnythingLLM API 地址，默认 `http://localhost:3001/api/v1`
+- `ANYTHINGLLM_API_KEY`：API Key
+- `ANYTHINGLLM_TIMEOUT`：请求超时（秒），可设 `none` 关闭超时
+- `ANYTHINGLLM_STORAGE_ROOT`：AnythingLLM storage 根目录（可选）
+  - 未设置时：
+    - Windows 默认 `%APPDATA%/anythingllm-desktop/storage`
+    - Linux 默认 `~/.anythingllm/storage`
+  - 若该目录不可用，将跳过“本地文件生成等待”并继续后续 embedding 逻辑
+
+#### OCR
+
+- `DOCSENSE_OCR_ENABLED`：是否启用前置 OCR，默认 `true`
+- `DOCSENSE_OCR_LANGUAGES`：OCR 语言，默认 `chi_sim+eng`
+- `DOCSENSE_OCR_DPI`：OCR DPI，默认 `300`
+- `DOCSENSE_OCR_SAMPLE_PAGES`：扫描件判定抽样页数，默认 `3`
+- `DOCSENSE_OCR_TEXT_THRESHOLD`：扫描件判定文本阈值，默认 `50`
+- `DOCSENSE_OCR_CACHE_DIR`：OCR Markdown 缓存目录，默认 `.runtime/ocr_markdown`
+- `DOCSENSE_OCR_TESSDATA`：Tesseract 语言包目录（可选）
+
+#### 文件落盘目录
+
+- `DOCSENSE_FILE_STORE_DIR`：分类后文件存放目录，默认 `uploads`
+- `DOCSENSE_TEMP_UPLOAD_DIR`：上传暂存目录，默认 `.runtime/inbox`
+
+### 3) OCR 缓存与降级策略
+
+- 扫描件 PDF OCR 产物会缓存为：
+  - `<fingerprint>.md`
+  - `<fingerprint>.meta.json`
+- 同一文件未变更时复用缓存，不重复 OCR。
+- OCR 失败时不会中断任务，会自动降级为上传原 PDF。
 
 ## 前端开发/调试说明
 
