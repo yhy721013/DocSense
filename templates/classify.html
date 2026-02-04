@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>军事资料智能分类系统</title>
+  <title>资料智能索引系统</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
   <div class="container">
     <div class="card">
       <div class="header">
-        <h1><span>📄</span>军事资料智能分类系统</h1>
-        <p class="subtitle">上传军事相关资料（PDF、图片、Word等），自动完成 OCR + AI 智能分析<br>支持目录提取、军事分类、关键信息抽取</p>
+        <h1><span>📄</span>资料智能索引系统</h1>
+        <p class="subtitle">上传资料（PDF、图片、Word等），自动完成分析<br>支持目录提取、分类、关键信息抽取</p>
       </div>
 
       <div class="btn-group" style="margin-top:-12px; margin-bottom:16px;">
@@ -19,7 +19,7 @@
           ⬅ 返回首页
         </a>
         <a class="btn" href="{{ url_for('chat.chat_page') }}" style="text-decoration:none; display:inline-flex; align-items:center;">
-          💬 进入对话
+          💬 进入问答
         </a>
       </div>
 
