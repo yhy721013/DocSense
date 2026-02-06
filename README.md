@@ -193,13 +193,13 @@ web_ui.py
 - Windows：
   - 推荐安装 [UB Mannheim 构建版](https://github.com/UB-Mannheim/tesseract/wiki)
   - 安装后将 `tesseract.exe` 所在目录加入 `PATH`
-  - 如语言包不在默认路径，可设置 `DOCSENSE_OCR_TESSDATA`
+  - 如语言包不在默认路径，可设置 `TESSDATA_PREFIX`
 
 - Linux：
   - Ubuntu/Debian 示例：
     - `sudo apt-get update`
     - `sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng`
-  - 若语言包路径非默认，设置 `DOCSENSE_OCR_TESSDATA`
+  - 若语言包路径非默认，设置 `TESSDATA_PREFIX`
 
 > OCR 采用 CPU 本地离线方案
 
@@ -224,7 +224,7 @@ web_ui.py
 - `DOCSENSE_OCR_SAMPLE_PAGES`：扫描件判定抽样页数，默认 `3`
 - `DOCSENSE_OCR_TEXT_THRESHOLD`：扫描件判定文本阈值，默认 `50`
 - `DOCSENSE_OCR_CACHE_DIR`：OCR Markdown 缓存目录，默认 `.runtime/ocr_markdown`
-- `DOCSENSE_OCR_TESSDATA`：Tesseract 语言包目录（可选）
+- `TESSDATA_PREFIX`：Tesseract 语言包目录（可选，沿用 Tesseract 官方环境变量名）
 
 #### 文件落盘目录
 
