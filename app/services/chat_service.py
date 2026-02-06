@@ -9,7 +9,10 @@ from app.settings import UPLOAD_DIR
 
 
 def _upload_root_label() -> str:
-    return UPLOAD_DIR.as_posix().strip("./")
+    try:
+        return UPLOAD_DIR.relative_to(UPLOAD_DIR.parent).as_posix()
+    except ValueError:
+        return UPLOAD_DIR.name
 
 
 def list_uploaded_files() -> List[Dict[str, Any]]:
