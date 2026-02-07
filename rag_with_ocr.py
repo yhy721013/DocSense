@@ -23,8 +23,7 @@ PROMPT = (
 
     "【输出 JSON 结构】\n"
     "{\n"
-    '  "outline": ["..."],\n'
-    '  "category_confidence": 0.0,\n'
+    '  "outline": ["..."],\n'    '  "security_level": "",\n'    '  "category_confidence": 0.0,\n'
     '  "category": null,\n'
     '  "sub_category": null,\n'
     '  "category_candidates": [\n'
@@ -65,6 +64,15 @@ PROMPT = (
     "A. outline\n"
     "1) 必须是数组；按文档顺序列出章节标题，保留原有序号/编号。\n"
     "2) 若文档没有明确章节标题，返回空数组 []。\n\n"
+
+    "A2. security_level（保密类别）\n"
+    "1) 取值只能是以下四种之一：\"公开\"、\"非公开：1级\"、\"非公开：2级\"、\"非公开：3级\"。\n"
+    "2) 提取规则：检查文档首页是否明确出现上述四种保密标识之一。\n"
+    "   - 若第一页明确出现\"非公开：1级\"或类似标识（如\"非公开 1级\"、\"一级保密\"等），输出\"非公开：1级\"；\n"
+    "   - 若第一页明确出现\"非公开：2级\"或类似标识（如\"非公开 2级\"、\"二级保密\"等），输出\"非公开：2级\"；\n"
+    "   - 若第一页明确出现\"非公开：3级\"或类似标识（如\"非公开 3级\"、\"三级保密\"等），输出\"非公开：3级\"；\n"
+    "   - 若第一页未出现任何上述保密标识，默认输出\"公开\"。\n"
+    "3) 不得臆测或推断保密级别，必须以文档首页的明确标识为准。\n\n"
 
     "B. 分类输出采用“严格二选一模式”（互斥，不得混用）\n"
     "【总原则：默认不确信】\n"
@@ -128,7 +136,7 @@ def process_file_with_rag(
 ) -> Optional[str]:
     """
     CLI/脚本入口：加载配置并执行统一流水线。
-    所有文件直接上传到 AnythingLLM 进行解析存储。
+    扫描件 PDF 会先 OCR 转 Markdown，再上传到 AnythingLLM 进行解析存储。
     """
     client = AnythingLLMClient(load_anythingllm_config())
     return pipeline_process_file_with_rag(
@@ -143,7 +151,7 @@ def process_file_with_rag(
 
 def main() -> Optional[str]:
     parser = argparse.ArgumentParser(
-        description="AnythingLLM RAG pipeline - 文件直接上传到 AnythingLLM 进行解析",
+        description="AnythingLLM RAG pipeline - 扫描件 PDF OCR 转 Markdown 后上传 AnythingLLM",
     )
     parser.add_argument("file_path", type=str, help="File path to process")
     parser.add_argument("--workspace", type=str, default="1928", help="Workspace name")

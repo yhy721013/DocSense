@@ -21,7 +21,8 @@ const categoryCandidates = document.getElementById('category-candidates');
 const subcategoryOptions = document.getElementById('subcategory-options');
 const categoryConfirmBtn = document.getElementById('category-confirm-btn');
 const categoryManualMessage = document.getElementById('category-manual-message');
-
+const securitySection = document.getElementById('security-section');
+const securityText = document.getElementById('security-text');
 // 统一 API 命名空间，避免未来与“对话”模块接口冲突
 const API_BASE = '/api/classify';
 
@@ -498,6 +499,19 @@ function renderFileDetail(file, index) {
       html += `<div id="${categoryDisplayId}" style="margin:8px 0;"></div>`;
     }
 
+    // 批量处理：显示保密类别
+    if (parsed && parsed.security_level) {
+      const securityLevel = String(parsed.security_level).trim();
+      const securityStyles = {
+        '公开': { color: '#059669', bg: '#d1fae5', icon: '🟢' },
+        '非公开：1级': { color: '#d97706', bg: '#fef3c7', icon: '🟡' },
+        '非公开：2级': { color: '#ea580c', bg: '#ffedd5', icon: '🟠' },
+        '非公开：3级': { color: '#dc2626', bg: '#fee2e2', icon: '🔴' }
+      };
+      const style = securityStyles[securityLevel] || securityStyles['公开'];
+      html += `<div style="margin:8px 0;"><strong>🔒 保密类别:</strong> <span style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:6px;background:${style.bg};color:${style.color};font-weight:600;font-size:0.9em;">${style.icon} ${securityLevel}</span></div>`;
+    }
+
     const candidates = file.category_candidates || (parsed ? parsed.category_candidates : null);
     if (Array.isArray(candidates) && candidates.length > 0) {
       const candidateLines = candidates.map((candidate) => {
@@ -564,6 +578,8 @@ function resetUI() {
   outlineList.innerHTML = '';
   summarySection.style.display = 'none';
   summaryText.textContent = '';
+  securitySection.style.display = 'none';
+  securityText.innerHTML = '';
   categorySection.style.display = 'none';
   categoryText.textContent = '';
   categoryCandidates.innerHTML = '';
@@ -879,6 +895,20 @@ function pollStatus() {
             summaryText.textContent = parsed.summary.trim();
             summarySection.style.display = 'block';
             }
+          
+          // 处理保密类别 (security_level)
+          if (parsed && parsed.security_level) {
+            const securityLevel = String(parsed.security_level).trim();
+            const securityStyles = {
+              '公开': { color: '#059669', bg: '#d1fae5', icon: '🟢' },
+              '非公开：1级': { color: '#d97706', bg: '#fef3c7', icon: '🟡' },
+              '非公开：2级': { color: '#ea580c', bg: '#ffedd5', icon: '🟠' },
+              '非公开：3级': { color: '#dc2626', bg: '#fee2e2', icon: '🔴' }
+            };
+            const style = securityStyles[securityLevel] || securityStyles['公开'];
+            securityText.innerHTML = `<span style="display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:8px;background:${style.bg};color:${style.color};font-weight:600;">${style.icon} ${securityLevel}</span>`;
+            securitySection.style.display = 'block';
+          }
           
           // 处理信息抽取结果 (extract)
           if (parsed && parsed.extract && typeof parsed.extract === 'object') {

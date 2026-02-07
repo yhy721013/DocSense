@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Any
-from app.settings import UPLOAD_DIR
 import os
-from typing import List, Tuple, Optional
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.settings import UPLOAD_DIR
+
+
+def _upload_root_label() -> str:
+    try:
+        return UPLOAD_DIR.relative_to(UPLOAD_DIR.parent).as_posix()
+    except ValueError:
+        return UPLOAD_DIR.name
 
 
 def list_uploaded_files() -> List[Dict[str, Any]]:
-    """获取uploads文件夹中的所有文件列表。
+    """获取文件存储目录中的所有文件列表。
     返回格式：
     [
         {
-            "path": "相对路径，如 'uploads/军事基地/文件.pdf'",
+            "path": "相对路径，如 '<存储目录>/军事基地/文件.pdf'",
             "name": "文件名，如 '文件.pdf'", 
             "size": 文件大小(字节),
             "modified": "修改时间，如 '2024-01-01 12:00:00'"
@@ -25,10 +32,15 @@ def list_uploaded_files() -> List[Dict[str, Any]]:
     """
     files = []
     
-    # 递归扫描uploads目录
+    # 递归扫描存储目录
     for file_path in UPLOAD_DIR.rglob("*"):
         # 只处理文件，跳过目录
         if not file_path.is_file():
+            continue
+
+        # 跳过隐藏目录
+        relative_parts = file_path.relative_to(UPLOAD_DIR).parts
+        if any(part.startswith(".") for part in relative_parts):
             continue
         
         # 过滤掉临时文件和系统文件
@@ -61,7 +73,7 @@ def list_uploaded_files() -> List[Dict[str, Any]]:
 def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[List[str]]]:
     """根据选定的文件创建对话工作区。
     Args:
-        file_paths: 文件路径列表（相对于项目根目录的路径，如 'uploads/军事基地/文件.pdf'）
+        file_paths: 文件路径列表（相对于项目根目录，如 '<存储目录>/军事基地/文件.pdf'）
         user_id: 用户ID
     Returns:
         (workspace_slug, thread_slug, error_message, document_ids)
@@ -90,15 +102,15 @@ def setup_chat_workspace(file_paths: List[str], user_id: int = 1) -> Tuple[Optio
             normalized_file_paths.append(normalized_path)
         
         # 4. 准备文件路径（转换为绝对路径）
-        from app.settings import UPLOAD_DIR
         absolute_file_paths = []
         upload_root = UPLOAD_DIR.resolve()
+        upload_prefix = _upload_root_label().rstrip("/") + "/"
         
         for file_path in normalized_file_paths:
-            # file_path 是相对于项目根目录的路径，如 'uploads/军事基地/文件.pdf'
+            # file_path 是相对于项目根目录的路径，如 '<存储目录>/军事基地/文件.pdf'
             # 我们需要将其转换为相对于UPLOAD_DIR的路径
-            if file_path.startswith('uploads/'):
-                relative_to_upload = file_path[len('uploads/'):]
+            if file_path.startswith(upload_prefix):
+                relative_to_upload = file_path[len(upload_prefix):]
                 # 通过 resolve 标准化路径，并确保其仍位于 UPLOAD_DIR 下，防止路径遍历
                 absolute_path = (UPLOAD_DIR / relative_to_upload).resolve()
                 try:

@@ -14,11 +14,11 @@ def chat_page():
 
 @chat_bp.get("/api/chat/files")
 def get_chat_files():
-    """获取uploads文件夹中的所有文件列表，用于对话文件选择。
+    """获取文件存储目录中的所有文件列表，用于对话文件选择。
     返回格式：{
         "files": [
             {
-                "path": "相对路径，如 'uploads/军事基地/文件.pdf'",
+                "path": "相对路径，如 '<存储目录>/军事基地/文件.pdf'",
                 "name": "文件名，如 '文件.pdf'", 
                 "size": 文件大小(字节),
                 "modified": "修改时间，如 '2024-01-01 12:00:00'"
@@ -112,7 +112,7 @@ def chat_message():
 def chat_setup():
     """根据选定的文件创建对话工作区。
     请求格式：{
-        "file_paths": ["uploads/军事基地/文件.pdf", "uploads/装备型号/文档.docx", ...]
+        "file_paths": ["<存储目录>/军事基地/文件.pdf", "<存储目录>/装备型号/文档.docx", ...]
     }
     
     返回格式：{

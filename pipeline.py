@@ -6,19 +6,30 @@ from pathlib import Path
 from typing import List, Optional
 
 from anythingllm_client import AnythingLLMClient
+from config import load_ocr_config
+from ocr_preprocessor import prepare_file_for_upload
+
+
+OCR_CONFIG = load_ocr_config()
 
 
 def prepare_upload_files(file_path: str) -> List[str]:
     """
     准备上传文件列表。
-    所有类型的文件都直接上传到 AnythingLLM 进行解析存储，
-    由 AnythingLLM 内置的文档处理能力完成 OCR 和文本提取。
+    - 非 PDF 或可提取文本 PDF：保持原文件上传。
+    - 扫描件 PDF：先 OCR 生成 Markdown，再上传 Markdown。
+    - OCR 失败：自动降级上传原 PDF（不中断流程）。
     """
     path = Path(file_path)
     if not path.exists():
         return []
 
-    return [str(path)]
+    upload_path = prepare_file_for_upload(str(path), OCR_CONFIG)
+    upload_path_obj = Path(upload_path)
+    if not upload_path_obj.exists():
+        return [str(path)]
+
+    return [str(upload_path_obj)]
 
 
 def run_anythingllm_rag(
@@ -114,7 +125,7 @@ def process_file_with_rag(
 ) -> Optional[str]:
     """
     处理文件并执行 RAG 查询。
-    所有文件直接上传到 AnythingLLM，由其内置能力进行解析。
+    扫描件 PDF 会先 OCR 为 Markdown 再上传到 AnythingLLM。
     """
     files_to_upload = prepare_upload_files(file_path=file_path)
     return run_anythingllm_rag(
