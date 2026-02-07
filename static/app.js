@@ -20,7 +20,8 @@ const categoryText = document.getElementById('category-text');
 const categoryCandidates = document.getElementById('category-candidates');
 const subcategoryOptions = document.getElementById('subcategory-options');
 const categoryConfirmBtn = document.getElementById('category-confirm-btn');
-const categoryManualMessage = document.getElementById('category-manual-message');const securitySection = document.getElementById('security-section');
+const categoryManualMessage = document.getElementById('category-manual-message');
+const securitySection = document.getElementById('security-section');
 const securityText = document.getElementById('security-text');
 // 统一 API 命名空间，避免未来与“对话”模块接口冲突
 const API_BASE = '/api/classify';

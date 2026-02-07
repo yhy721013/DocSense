@@ -296,6 +296,14 @@ class AnythingLLMClient:
         target_path = os.path.normpath(os.path.join(documents_root, safe_relative_path))
         documents_root_abs = os.path.abspath(documents_root)
         target_abs = os.path.abspath(target_path)
+
+        # 在 Windows 上，若盘符不同，os.path.commonpath 会抛 ValueError，这里先显式检查盘符。
+        if os.name == "nt":
+            root_drive, _ = os.path.splitdrive(documents_root_abs)
+            target_drive, _ = os.path.splitdrive(target_abs)
+            if root_drive.lower() != target_drive.lower():
+                logger.warning("检测到不同盘符的 doc 路径，拒绝等待: %s", doc_relative_path)
+                return False
         try:
             if os.path.commonpath([documents_root_abs, target_abs]) != documents_root_abs:
                 logger.warning("检测到异常 doc 路径，拒绝等待: %s", doc_relative_path)
