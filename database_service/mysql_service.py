@@ -55,19 +55,42 @@ class MySQLService:
             raise e
 
     def init_database(self):
-        """初始化数据库：创建数据库+创建所有表"""
+        """初始化数据库：创建数据库+创建所有表（已存在的表不会重复创建）"""
         try:
             with self.connection.cursor() as cursor:
-                # 按顺序创建所有表（主表优先）
-                table_order = [
+                # 获取当前数据库中已存在的表
+                cursor.execute("SHOW TABLES")
+                existing_tables = {row[0] for row in cursor.fetchall()}
+                logging.info(f"当前数据库中存在的表: {existing_tables}")
+
+                # 定义所有需要的表（包括军事基地表）
+                all_tables = [
                     "military_main", "equip_basic", "equip_tactical", "equip_apply", "equip_eff_model",
                     "combat_system_scene", "combat_war_case", "org_structure", "military_regulation",
-                    "ocean_environment"
+                    "ocean_environment", "military_base"  # 添加军事基地表
                 ]
-                for table in table_order:
-                    cursor.execute(CREATE_TABLE_SQL[table])
-                    logging.info(f"表{table}创建/验证成功")
+
+                # 按顺序创建缺失的表
+                created_tables = []
+                for table_name in all_tables:
+                    if table_name not in existing_tables:
+                        try:
+                            cursor.execute(CREATE_TABLE_SQL[table_name])
+                            created_tables.append(table_name)
+                            logging.info(f"✅ 表{table_name}创建成功")
+                        except Exception as create_error:
+                            logging.error(f"❌ 表{table_name}创建失败: {create_error}")
+                            # 不中断其他表的创建
+                    else:
+                        logging.info(f"ℹ️  表{table_name}已存在，跳过创建")
+
                 self.connection.commit()
+
+                if created_tables:
+                    logging.info(f"✅ 新创建了 {len(created_tables)} 个表: {created_tables}")
+                else:
+                    logging.info("✅ 所有表均已存在，无需创建")
+
         except Exception as e:
             self.connection.rollback()
             logging.error(f"数据库初始化失败: {e}")
@@ -82,7 +105,20 @@ class MySQLService:
         """
         try:
             with self.connection.cursor() as cursor:
-                fields = ", ".join(data.keys())
+                # 处理MySQL保留关键字 - 用反引号包围
+                mysql_reserved_keywords = {
+                    'function', 'order', 'group', 'select', 'insert', 'update', 'delete',
+                    'from', 'where', 'join', 'left', 'right', 'inner', 'outer'
+                }
+
+                processed_fields = []
+                for field in data.keys():
+                    if field.lower() in mysql_reserved_keywords:
+                        processed_fields.append(f"`{field}`")
+                    else:
+                        processed_fields.append(field)
+
+                fields = ", ".join(processed_fields)
                 values = ", ".join([f"%({k})s" for k in data.keys()])
                 sql = f"INSERT INTO {table_name} ({fields}) VALUES ({values})"
                 cursor.execute(sql, data)
@@ -106,12 +142,26 @@ class MySQLService:
             return
         try:
             with self.connection.cursor() as cursor:
-                fields = ", ".join(data_list[0].keys())
-                values = ", ".join([f"%({k})s" for k in data_list[0].keys()])
-                sql = f"INSERT INTO {table_name} ({fields}) VALUES ({values})"
-                cursor.executemany(sql, data_list)
-                self.connection.commit()
-                logging.info(f"表{table_name}批量插入{len(data_list)}条数据成功")
+            # 处理MySQL保留关键字
+                mysql_reserved_keywords = {
+                    'function', 'order', 'group', 'select', 'insert', 'update', 'delete',
+                    'from', 'where', 'join', 'left', 'right', 'inner', 'outer'
+                }
+
+                if data_list:
+                    processed_fields = []
+                    for field in data_list[0].keys():
+                        if field.lower() in mysql_reserved_keywords:
+                            processed_fields.append(f"`{field}`")
+                        else:
+                            processed_fields.append(field)
+
+                    fields = ", ".join(processed_fields)
+                    values = ", ".join([f"%({k})s" for k in data_list[0].keys()])
+                    sql = f"INSERT INTO {table_name} ({fields}) VALUES ({values})"
+                    cursor.executemany(sql, data_list)
+                    self.connection.commit()
+                    logging.info(f"表{table_name}批量插入{len(data_list)}条数据成功")
         except Exception as e:
             self.connection.rollback()
             logging.error(f"表{table_name}批量插入数据失败: {e}")

@@ -259,6 +259,41 @@ def select_category_batch():
     except Exception as e:
         print(f"⚠️ 更新数据库时发生错误: {str(e)}")
 
+    # ✅ 新增：调用MySQL数据插入
+    try:
+        from database_service.mysql_data_converter import MySQLDataConverter
+        import json
+        import logging
+
+        # 构造parsed_result用于MySQL插入
+        # 从entry中获取原始解析结果，如果没有则构建基础结构
+        original_result = entry.get("result", {})
+        if isinstance(original_result, str):
+            try:
+                parsed_result = json.loads(original_result)
+            except:
+                parsed_result = {}
+        else:
+            parsed_result = original_result if isinstance(original_result, dict) else {}
+
+        # 确保包含必要的分类信息
+        parsed_result.update({
+            "category": category,
+            "sub_category": sub_category
+        })
+
+        # 获取移动后的文件路径
+        moved_file_path = move_message.split(": ")[1] if move_message.startswith("📁") else file_path
+
+        # 调用MySQL插入
+        converter = MySQLDataConverter()
+        converter.convert_and_insert(parsed_result, moved_file_path)
+        logging.info(f"✅ 批处理人工分类MySQL插入成功 - {category}/{sub_category} - 文件: {moved_file_path}")
+
+    except Exception as mysql_error:
+        logging.error(f"❌ 批处理人工分类MySQL插入失败: {mysql_error}")
+        # 不中断流程，但记录错误以便排查
+
     # 更新批量处理结果
     entry.update({
         "manual_selection_required": False,

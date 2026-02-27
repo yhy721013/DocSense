@@ -215,6 +215,23 @@ CREATE_TABLE_SQL = {
         INDEX idx_main_id (main_id),
         FOREIGN KEY (main_id) REFERENCES military_main(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT '海洋环境表';
-    """
+    """,
+
+    # 军事基地表：military_base
+    "military_base": """
+    CREATE TABLE IF NOT EXISTS military_base (
+    id BIGINT NOT NULL AUTO_INCREMENT COMMENT '自增标识',
+    main_id BIGINT NOT NULL COMMENT '关联主表id',
+    base_name VARCHAR(255) COMMENT '基地名称',
+    location VARCHAR(255) COMMENT '地理位置',
+    facility_type VARCHAR(100) COMMENT '设施类型',
+    `function` TEXT COMMENT '基地功能/作用',  -- 使用反引号包围保留关键字
+    capacity VARCHAR(255) COMMENT '承载能力/规模',
+    status VARCHAR(50) COMMENT '状态：现役/退役等',
+    PRIMARY KEY (id),
+    INDEX idx_main_id (main_id),
+    FOREIGN KEY (main_id) REFERENCES military_main(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT '军事基地表';
+    """,
 }
 

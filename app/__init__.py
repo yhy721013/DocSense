@@ -16,6 +16,7 @@ from app.blueprints.chat import chat_bp
 from app.blueprints.classify import classify_bp
 from app.blueprints.main import main_bp
 from app.settings import MAX_CONTENT_LENGTH
+from database_service.mysql_init import init_database
 
 
 def create_app() -> Flask:
@@ -35,5 +36,9 @@ def create_app() -> Flask:
     # 功能模块（API + 页面）
     app.register_blueprint(classify_bp)
     app.register_blueprint(chat_bp)
+
+    # 应用启动时初始化数据库
+    with app.app_context():
+        init_database()
 
     return app

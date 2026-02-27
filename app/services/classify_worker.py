@@ -490,8 +490,14 @@ def process_folder_upload_task(
 
                         # ✅ 只调用一次MySQL数据转换器插入数据
                         converter = MySQLDataConverter()
-                        logging.debug(f"[DEBUG] parsed_result: {parsed_result}")
-                        converter.convert_and_insert(parsed_result, final_path)
+                        logging.info(
+                            f"🔍 批处理MySQL插入 - 分类: {parsed_result.get('category', '未知')}, 文件: {final_path}")
+                        try:
+                            converter.convert_and_insert(parsed_result, final_path)
+                            logging.info(f"✅ 批处理MySQL插入成功")
+                        except Exception as mysql_error:
+                            logging.error(f"❌ 批处理MySQL插入失败: {mysql_error}")
+                            logging.error(f"❌ 失败的解析结果: {parsed_result}")
 
                 except (json.JSONDecodeError, Exception) as e:
                     print(f"⚠️ 解析分类信息失败: {e}")
