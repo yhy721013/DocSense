@@ -1,20 +1,22 @@
+# 加入数据库存储，修改后的pipeline.py
 from __future__ import annotations
 
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from anythingllm_client import AnythingLLMClient
 from document_utils import is_image_file, is_pdf_file, is_scanned_pdf
 from ocr_utils import process_image_with_paddleocr, process_pdf_with_paddleocr
+from database_service import document_db  # 导入数据库服务
 
 
 def prepare_upload_files(
-    file_path: str,
-    ocr_dpi: int = 150,
-    ocr_workers: Optional[int] = None,
-    ocr_use_gpu: bool = True,
+        file_path: str,
+        ocr_dpi: int = 150,
+        ocr_workers: Optional[int] = None,
+        ocr_use_gpu: bool = True,
 ) -> List[str]:
     # 根据文件类型决定是否执行 OCR
     path = Path(file_path)
@@ -45,15 +47,20 @@ def prepare_upload_files(
     return files_to_upload
 
 
+# 修改 pipeline.py 中的 run_anythingllm_rag 函数
 def run_anythingllm_rag(
-    client: AnythingLLMClient,
-    files_to_upload: List[str],
-    prompt: str,
-    workspace_name: str,
-    thread_name: str,
-    user_id: int,
-    mode: str = "query",
-    reuse_workspace: bool = False,
+        client: AnythingLLMClient,
+        files_to_upload: List[str],
+        prompt: str,
+        workspace_name: str,
+        thread_name: str,
+        user_id: int,
+        mode: str = "query",
+        reuse_workspace: bool = False,
+        store_in_db: bool = True,
+        additional_metadata: Optional[Dict[str, Any]] = None,
+        final_file_path: Optional[str] = None,  # 新增参数:最终文件路径
+        store_original_file: bool = True  # 新增参数:保存原始文件
 ) -> Optional[str]:
     # 负责：建 workspace/thread -> 上传 -> 绑 embedding -> 发送 prompt
     if not files_to_upload:
@@ -92,9 +99,9 @@ def run_anythingllm_rag(
 
         filename = os.path.basename(upload_file)
         doc_relative_path = (
-            doc_info.get("location")
-            or doc_info.get("docpath")
-            or f"custom-documents/{filename}-{doc_id}.json"
+                doc_info.get("location")
+                or doc_info.get("docpath")
+                or f"custom-documents/{filename}-{doc_id}.json"
         )
 
         if not client.wait_for_processing(doc_relative_path):
@@ -118,7 +125,7 @@ def run_anythingllm_rag(
     if not attached_document_ids:
         return None
 
-    return client.send_prompt_to_thread(
+    result = client.send_prompt_to_thread(
         workspace_slug,
         thread_slug,
         prompt,
@@ -127,17 +134,62 @@ def run_anythingllm_rag(
         mode=mode,
     )
 
+    # 如果需要存储到数据库，则保存结果
+    if store_in_db and result and len(files_to_upload) > 0:
+        # 准备元数据
+        metadata = {
+            "user_id": user_id,
+            "workspace_name": workspace_name,
+            "thread_name": thread_name,
+            "original_file_path": files_to_upload[0],  # 使用第一个文件作为主要文件路径
+            "uploaded_files": files_to_upload,
+            "prompt_used": prompt,
+            "mode": mode,
+            "created_at": time.time(),
+        }
 
+        # 合并附加元数据
+        if additional_metadata:
+            metadata.update(additional_metadata)
+
+        # 保存到MongoDB - 使用原始路径和最终路径
+        try:
+            original_path = files_to_upload[0]
+            # 如果提供了最终路径，使用它；否则使用原始路径
+            actual_final_path = final_file_path if final_file_path else original_path
+
+            db_result_id = document_db.save_result(
+                original_file_path=original_path,
+                final_file_path=actual_final_path,
+                result=result,
+                metadata=metadata,
+                store_original_file=store_original_file  # 传递存储原始文件的参数
+            )
+            if db_result_id:
+                print(f"✅ 文档结果已保存到MongoDB，ID: {db_result_id}")
+            else:
+                print(f"⚠️  文档结果保存到MongoDB失败")
+        except Exception as e:
+            print(f"⚠️  保存到MongoDB时出错: {str(e)}")
+
+    return result
+
+
+# 在 pipeline.py 中修改 process_file_with_rag 函数，增加 final_file_path 参数
 def process_file_with_rag(
-    client: AnythingLLMClient,
-    file_path: str,
-    prompt: str,
-    workspace_name: str,
-    thread_name: str,
-    user_id: int,
-    ocr_dpi: int = 150,
-    ocr_workers: Optional[int] = None,
-    ocr_use_gpu: bool = True,
+        client: AnythingLLMClient,
+        file_path: str,
+        prompt: str,
+        workspace_name: str,
+        thread_name: str,
+        user_id: int,
+        ocr_dpi: int = 150,
+        ocr_workers: Optional[int] = None,
+        ocr_use_gpu: bool = True,
+        store_in_db: bool = True,
+        additional_metadata: Optional[Dict[str, Any]] = None,
+        final_file_path: Optional[str] = None,  # 新增参数
+        store_original_file: bool = True  # 新增参数
 ) -> Optional[str]:
     files_to_upload = prepare_upload_files(
         file_path=file_path,
@@ -154,4 +206,8 @@ def process_file_with_rag(
         user_id=user_id,
         mode="query",
         reuse_workspace=False,
+        store_in_db=store_in_db,
+        additional_metadata=additional_metadata,
+        final_file_path=final_file_path,  # 传递最终文件路径
+        store_original_file=store_original_file,  # 传递参数
     )

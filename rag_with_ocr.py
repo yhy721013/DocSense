@@ -6,7 +6,7 @@ Pipeline entrypoint: OCR (if needed) + AnythingLLM RAG call.
 from __future__ import annotations
 
 import argparse
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from anythingllm_client import AnythingLLMClient
 from config import load_anythingllm_config
@@ -128,6 +128,9 @@ def process_file_with_rag(
     ocr_dpi: int = 150,
     ocr_workers: Optional[int] = None,
     ocr_use_gpu: bool = True,
+    store_in_db: bool = True,  # 新增参数
+    additional_metadata: Optional[Dict[str, Any]] = None,  # 新增参数
+    store_original_file: bool = True  # 新增参数
 ) -> Optional[str]:
     # CLI/脚本入口：加载配置并执行统一流水线
     client = AnythingLLMClient(load_anythingllm_config())
@@ -141,6 +144,9 @@ def process_file_with_rag(
         ocr_dpi=ocr_dpi,
         ocr_workers=ocr_workers,
         ocr_use_gpu=ocr_use_gpu,
+        store_in_db=store_in_db,
+        additional_metadata=additional_metadata,
+        store_original_file=store_original_file,  # 传递参数
     )
 
 

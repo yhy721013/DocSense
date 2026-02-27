@@ -2,15 +2,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from database_service import document_db
+from database_service.mysql_data_converter import MySQLDataConverter
 from rag_with_ocr import process_file_with_rag
 
 from app.services.file_ops import move_file_to_category_folder, normalize_category_path
 from app.services.task_store import InMemoryTaskStore
 
+# 创建专门的logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+# 确保有处理器
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 # “100% 确信”阈值：用于兼容模型把 100/100%/1/1.0 等不同格式写入 category_confidence 的情况
 AUTO_CLASSIFY_THRESHOLD = 0.999
@@ -279,3 +291,385 @@ def process_folder_task(
             "files": results,
         },
     )
+
+
+def process_single_upload_task(
+        store: InMemoryTaskStore,
+        task_id: str,
+        file_path: str,
+        workspace_name: str,
+        thread_name: str,
+        user_id: int,
+        original_filename: str,
+        upload_timestamp: int
+) -> None:
+    """处理单文件上传任务"""
+    try:
+        # 准备附加元数据
+        additional_metadata = {
+            "upload_timestamp": upload_timestamp,
+            "source": "web_ui_single_upload",
+            "original_filename": original_filename,
+        }
+
+        result = process_file_with_rag(
+            file_path=file_path,
+            workspace_name=workspace_name,
+            thread_name=thread_name,
+            user_id=user_id,
+            store_in_db=False,  # 不立即存储到数据库
+            store_original_file=True,
+            additional_metadata=additional_metadata,
+        )
+
+        if result:
+            try:
+                parsed_result = json.loads(result) if isinstance(result, str) else result
+                logging.info(f"[DEBUG] 原始解析结果: {parsed_result}")
+                success, move_message, manual_required, candidates = _handle_category_move(
+                    Path(file_path), parsed_result
+                )
+                logging.info(f"[DEBUG] 分类处理结果 - 成功: {success}, 需要人工: {manual_required}")
+                # 根据是否需要人工选择决定存储策略
+                if manual_required:
+                    # 需要人工选择时，先存储初始记录但标记为待处理
+                    initial_db_id = document_db.save_result(
+                        original_file_path=file_path,
+                        final_file_path=file_path,  # 初始路径
+                        result=result,
+                        metadata=additional_metadata,
+                        store_original_file=True
+                    )
+
+                    store.update(
+                        task_id,
+                        status="requires_manual_selection",
+                        message="等待人工选择分类",
+                        manual_selection_required=True,
+                        category_candidates=candidates,
+                        result=parsed_result,
+                        db_result_id=initial_db_id  # 保存数据库ID供后续更新使用
+                    )
+                else:
+                    # 自动分类完成，直接存储最终结果
+                    final_path = file_path
+                    if success and move_message.startswith("📁"):
+                        final_path_parts = move_message.split(": ")
+                        if len(final_path_parts) > 1:
+                            final_path = final_path_parts[1]
+
+                    db_result_id = document_db.save_result(
+                        original_file_path=file_path,
+                        final_file_path=final_path,
+                        result=result,
+                        metadata=additional_metadata
+                    )
+
+                    # 调用MySQL数据转换器插入数据
+                    logging.debug(f"[DEBUG] 准备插入MySQL数据: {parsed_result}")
+                    converter = MySQLDataConverter()
+                    # 确保parsed_result包含必要字段
+                    if 'category' not in parsed_result:
+                        logging.warning("parsed_result缺少category字段，尝试从移动消息中提取")
+                        # 这里可以根据需要添加更多逻辑来恢复分类信息
+                    converter.convert_and_insert(parsed_result, final_path)
+
+                    store.update(
+                        task_id,
+                        status="completed",
+                        progress=100,
+                        message="处理完成" + (f" - {move_message}" if move_message else ""),
+                        result=parsed_result,
+                        manual_selection_required=False,
+                    )
+
+            except (json.JSONDecodeError, Exception) as e:
+                logging.error(f"⚠️ 解析分类信息失败: {e}，文件保留在原位置")
+                store.update(
+                    task_id,
+                    status="error",
+                    message=f"解析分类信息失败: {e}",
+                    error=f"解析分类信息失败: {e}"
+                )
+    except Exception as exc:
+        logging.error(f"❌ 处理单文件上传任务失败: {exc}")
+        store.update(
+            task_id,
+            status="error",
+            message=f"处理失败：{exc}",
+            error=f"处理失败：{exc}",
+        )
+
+
+def process_folder_upload_task(
+        store: InMemoryTaskStore,
+        task_id: str,
+        saved_files: List[Path],
+        workspace_name: str,
+        thread_name: str,
+        user_id: int
+) -> None:
+    """处理文件夹上传任务"""
+    results = []
+    processed = 0
+    total_files = len(saved_files)
+
+    for idx, file_path in enumerate(saved_files):
+        try:
+            # 为每个文件创建特定的线程名称
+            specific_thread_name = f"{thread_name}-{idx + 1}-{file_path.stem}"
+
+            # 准备附加元数据
+            additional_metadata = {
+                "upload_timestamp": int(time.time() * 1000),  # 使用当前时间戳
+                "source": "web_ui_folder_upload",
+                "original_filename": file_path.name,
+                "file_index": idx,
+                "total_files_in_batch": len(saved_files),
+            }
+
+            # 不立即存储到数据库
+            result = process_file_with_rag(
+                file_path=str(file_path),
+                workspace_name=workspace_name,
+                thread_name=specific_thread_name,
+                user_id=user_id,
+                store_in_db=False,  # 不立即存储到数据库
+                store_original_file=True,
+                additional_metadata=additional_metadata,
+            )
+
+            final_path = str(file_path)  # 默认为原始路径
+            manual_selection_required = False
+            move_message = ""
+            category_candidates = []
+
+            if result:
+                # 解析分类结果并移动文件
+                try:
+                    parsed_result = json.loads(result) if isinstance(result, str) else result
+
+                    # ✅ 使用 _handle_category_move 函数来处理分类和移动逻辑
+                    success, move_message, manual_required, candidates = _handle_category_move(
+                        file_path, parsed_result
+                    )
+
+                    # 更新标志位
+                    manual_selection_required = manual_required
+                    category_candidates = candidates if manual_required else []
+
+                    # 统一处理文件移动逻辑 - 无论是否需要人工选择
+                    if success and move_message.startswith("📁"):
+                        # 从消息中提取新路径
+                        final_path_parts = move_message.split(": ")
+                        if len(final_path_parts) > 1:
+                            final_path = final_path_parts[1]
+
+                    if manual_required:
+                        # 需要人工选择时，存储记录但标记为待处理
+                        initial_db_id = document_db.save_result(
+                            original_file_path=str(file_path),
+                            final_file_path=final_path,  # 使用更新后的路径
+                            result=result,
+                            metadata=additional_metadata,
+                            store_original_file=True
+                        )
+                    else:
+                        # 自动分类完成，直接存储最终结果
+                        db_result_id = document_db.save_result(
+                            original_file_path=str(file_path),
+                            final_file_path=final_path,
+                            result=result,
+                            metadata=additional_metadata
+                        )
+
+                        if db_result_id:
+                            print(f"✅ 文档结果已保存到MongoDB，ID: {db_result_id}")
+                        else:
+                            print(f"⚠️  文档结果保存到MongoDB失败")
+
+                        # ✅ 只调用一次MySQL数据转换器插入数据
+                        converter = MySQLDataConverter()
+                        logging.debug(f"[DEBUG] parsed_result: {parsed_result}")
+                        converter.convert_and_insert(parsed_result, final_path)
+
+                except (json.JSONDecodeError, Exception) as e:
+                    print(f"⚠️ 解析分类信息失败: {e}")
+
+            results.append({
+                "file": str(file_path.name),
+                "file_path": str(file_path),
+                "result": result,
+                "success": result is not None,
+                "thread_name": specific_thread_name,
+                # ✅ 正确设置人工选择标志
+                "manual_selection_required": manual_selection_required,
+                "category_candidates": category_candidates,
+                "move_message": move_message,
+                "category_error": "" if manual_selection_required or "📁" in move_message else "处理失败"
+            })
+
+            processed += 1
+            store.update(
+                task_id,
+                progress=int(processed / total_files * 100),
+                processed=processed,
+                message=f"正在处理第 {processed}/{total_files} 个文件 ({file_path.name})..."
+            )
+
+        except Exception as exc:
+            results.append({
+                "file": str(file_path.name),
+                "file_path": str(file_path),
+                "result": None,
+                "success": False,
+                "error": str(exc),
+                "thread_name": f"{thread_name}-{idx + 1}-{file_path.stem}",
+                # 设置为不需要人工选择，标记为处理失败
+                "manual_selection_required": False,
+                "category_candidates": [],
+                "move_message": "",
+                "category_error": "处理失败"
+            })
+            processed += 1
+
+    # 更新最终状态
+    store.update(
+        task_id,
+        status="completed",
+        progress=100,
+        message=f"文件夹处理完成，成功 {sum(1 for r in results if r['success'])}/{len(results)}",
+        result={
+            "batch_summary": {
+                "total": len(results),
+                "successful": sum(1 for r in results if r["success"]),
+                "failed": sum(1 for r in results if not r["success"]),
+            },
+            "files": results,
+        },
+        # 添加一个标识，表示这是批量处理
+        is_batch=True,
+        # 收集所有需要人工选择的文件
+        pending_files=[r["file_path"] for r in results if r.get("manual_selection_required")]
+    )
+
+
+def handle_manual_category_selection(
+        store: InMemoryTaskStore,
+        task_id: str,
+        document_id: str,
+        selected_category: str,
+        selected_sub_category: str,
+        file_path: str,
+        parsed_result: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    处理人工选择的分类
+    """
+    # 加强parsed_result校验和完整性确保
+    if parsed_result is None or not isinstance(parsed_result, dict):
+        logging.error(f"❌ parsed_result无效或缺失 (task_id: {task_id}, document_id: {document_id})")
+        logging.error(f"❌ received parsed_result type: {type(parsed_result)}, value: {parsed_result}")
+
+        # 从任务状态恢复并确保完整性
+        task_status = store.get(task_id)
+        if task_status and 'result' in task_status:
+            parsed_result = task_status['result']
+            logging.info(f"✅ 从任务状态恢复parsed_result: {type(parsed_result)}")
+        else:
+            # 创建基础的parsed_result结构
+            parsed_result = {
+                "category": selected_category,
+                "sub_category": selected_sub_category
+            }
+            logging.info("✅ 创建新的parsed_result结构")
+
+    # 确保parsed_result包含必要的分类字段
+    if 'category' not in parsed_result or not parsed_result['category']:
+        parsed_result['category'] = selected_category
+        logging.info(f"✅ 补充category字段: {selected_category}")
+
+    if 'sub_category' not in parsed_result:
+        parsed_result['sub_category'] = selected_sub_category
+        logging.info(f"✅ 补充sub_category字段: {selected_sub_category}")
+
+    try:
+        # 规范化分类路径
+        full_category, normalize_error = normalize_category_path(selected_category, selected_sub_category)
+        if not full_category:
+            store.update(
+                task_id,
+                status="error",
+                message=f"无效的分类路径: {normalize_error}",
+                error=f"无效的分类路径: {normalize_error}",
+            )
+            return
+
+        # 移动文件到新分类目录
+        moved, move_message = move_file_to_category_folder(Path(file_path), full_category)
+        if not moved:
+            store.update(
+                task_id,
+                status="error",
+                message=f"文件移动失败: {move_message}",
+                error=f"文件移动失败: {move_message}",
+            )
+            return
+
+        # 更新MongoDB数据库中的分类信息
+        updated = document_db.update_document_category(
+            document_id,
+            selected_category,
+            selected_sub_category,
+            new_file_path=str(Path(file_path).parent / move_message.split(": ")[1]) if move_message.startswith(
+                "📁") else file_path
+        )
+
+        if updated:
+            # 调用 MySQL 数据转换器插入数据
+            converter = MySQLDataConverter()
+            logging.debug(f"[DEBUG] 最终使用的parsed_result: {parsed_result}")
+
+            # 额外验证确保数据完整性
+            category = parsed_result.get('category')
+            sub_category = parsed_result.get('sub_category', '')
+
+            if not category:
+                raise ValueError("分类信息不完整：缺少category字段")
+
+            logging.info(f"✅ 准备插入MySQL数据 - 分类: {category}, 子分类: {sub_category}")
+            #converter.convert_and_insert(parsed_result, file_path)
+            # 使用移动后的文件路径
+            moved_file_path = str(Path(file_path).parent / move_message.split(": ")[1]) if move_message.startswith(
+                "📁") else file_path
+            converter.convert_and_insert(parsed_result, moved_file_path)
+
+            store.update(
+                task_id,
+                status="completed",
+                progress=100,
+                message=f"人工分类确认完成，文件已移动到: {move_message}",
+                result={
+                    "category": selected_category,
+                    "sub_category": selected_sub_category,
+                    "new_file_path": move_message
+                },
+                manual_selection_required=False,
+                manual_selected=True
+            )
+        else:
+            store.update(
+                task_id,
+                status="error",
+                message="数据库更新失败",
+                error="数据库更新失败"
+            )
+
+    except Exception as exc:
+        logging.error(f"❌ 处理人工分类选择失败: {exc}")
+        store.update(
+            task_id,
+            status="error",
+            message=f"处理人工分类选择失败：{exc}",
+            error=f"处理人工分类选择失败：{exc}",
+        )

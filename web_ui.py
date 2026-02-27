@@ -9,9 +9,11 @@ from __future__ import annotations
 import os
 
 from app import create_app
+from app.logging_config import setup_logging  # 导入日志配置
 
 
 def main() -> None:
+    setup_logging("DEBUG")  # 可以通过环境变量控制日志级别
     port = int(os.environ.get("WEB_UI_PORT", 5001))
     app = create_app()
     app.run(host="127.0.0.1", port=port, debug=True)
