@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
+from app.services.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
 
 
@@ -27,6 +28,91 @@ class LLMAnalysisServiceTests(unittest.TestCase):
     def test_build_file_callback_payload_uses_fixed_success_message(self):
         payload = build_file_callback_payload("demo.pdf", {"summary": "摘要"}, status="2")
         self.assertEqual(payload["msg"], "解析成功")
+
+    def test_map_analysis_result_supports_current_chinese_object_response(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "country": [{"key": "02", "value": "美国"}],
+            "channel": [{"key": "02", "value": "装发"}],
+            "maturity": [{"key": "02", "value": "阶段成果"}],
+            "format": [{"key": "03", "value": "文档类"}],
+            "architectureList": [{"id": 1768464916588441, "name": "测试"}],
+        }
+        parsed_result = {
+            "领域体系": {
+                "id": 1768464916588441,
+                "name": "测试",
+            },
+            "国家": {"value": "美国", "key": "02"},
+            "渠道": {"value": "装发", "key": "02"},
+            "成熟度": {"value": "阶段成果", "key": "02"},
+            "格式": {"value": "文档类", "key": "03"},
+            "资料年代": "2025-08-25",
+            "摘要": "达里尔·考德尔正式担任美国海军作战部长。",
+            "原文链接": "https://www.navy.mil/example",
+            "语种": "中英双语",
+            "文件概述": "美国海军人事任命新闻。",
+        }
+
+        result = map_analysis_result(parsed_result, request_params, original_text="demo text")
+
+        self.assertEqual(result["country"], "美国")
+        self.assertEqual(result["channel"], "装发")
+        self.assertEqual(result["maturity"], "阶段成果")
+        self.assertEqual(result["format"], "文档类")
+        self.assertEqual(result["architectureId"], 1768464916588441)
+        self.assertEqual(result["fileDataItem"]["dataTime"], "2025-08-25")
+        self.assertEqual(result["fileDataItem"]["summary"], "达里尔·考德尔正式担任美国海军作战部长。")
+        self.assertEqual(result["fileDataItem"]["originalLink"], "https://www.navy.mil/example")
+        self.assertEqual(result["fileDataItem"]["language"], "中英双语")
+        self.assertEqual(result["fileDataItem"]["documentOverview"], "美国海军人事任命新闻。")
+
+    def test_build_file_analysis_prompt_requires_protocol_schema(self):
+        prompt = build_file_analysis_prompt(
+            {
+                "architectureList": [{"id": 1, "name": "测试"}],
+                "country": [{"key": "02", "value": "美国"}],
+                "channel": [{"key": "02", "value": "装发"}],
+                "maturity": [{"key": "02", "value": "阶段成果"}],
+                "format": [{"key": "03", "value": "文档类"}],
+            }
+        )
+
+        self.assertIn('"country"', prompt)
+        self.assertIn('"architectureId"', prompt)
+        self.assertIn('"fileDataItem"', prompt)
+        self.assertIn("不要直接原样返回候选对象", prompt)
+
+    def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
+        original_text = (
+            "标题\n"
+            "达里尔·考德尔正式担任美国海军作战部长\n\n"
+            "内容\n"
+            "【美国海军网2025年8月25日报道】8月25日，达里尔·考德尔海军上将在美国华盛顿特区正式就任第34任海军作战部长。\n\n"
+            "原文链接\n"
+            "https://www.navy.mil/example\n\n"
+            "原文\n"
+            "Caudle Takes Helm as 34th Chief of Naval Operations\n"
+            "25 August 2025\n"
+        )
+        request_params = {
+            "fileName": "sample.txt",
+            "country": [{"key": "02", "value": "美国"}],
+            "channel": [{"key": "02", "value": "装发"}],
+            "maturity": [{"key": "02", "value": "阶段成果"}],
+            "format": [{"key": "03", "value": "文档类"}],
+            "architectureList": [{"id": 1768464916588441, "name": "测试"}],
+        }
+
+        result = map_analysis_result({}, request_params, original_text=original_text)
+
+        self.assertEqual(result["country"], "美国")
+        self.assertEqual(result["fileDataItem"]["dataTime"], "2025-08-25")
+        self.assertEqual(result["fileDataItem"]["source"], "美国海军网")
+        self.assertEqual(result["fileDataItem"]["originalLink"], "https://www.navy.mil/example")
+        self.assertEqual(result["fileDataItem"]["language"], "中英双语")
+        self.assertEqual(result["fileDataItem"]["summary"], "达里尔·考德尔正式担任美国海军作战部长")
+        self.assertEqual(result["fileDataItem"]["documentOverview"], "达里尔·考德尔正式担任美国海军作战部长")
 
     @patch("app.services.llm_analysis_service.post_callback_payload", return_value=True)
     @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
