@@ -35,6 +35,7 @@ class LLMIntegrationConfig:
     callback_timeout: float
     task_db_path: str
     download_timeout: float
+    download_dir: str
 
 
 def _parse_timeout(raw_value: Optional[str]) -> Optional[float]:
@@ -103,4 +104,6 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
         task_db_path=os.getenv("DOCSENSE_LLM_TASK_DB", ".runtime/llm_tasks.sqlite3").strip()
         or ".runtime/llm_tasks.sqlite3",
         download_timeout=float(os.getenv("DOCSENSE_LLM_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
+        download_dir=os.getenv("DOCSENSE_LLM_DOWNLOAD_DIR", ".runtime/llm_downloads").strip()
+        or ".runtime/llm_downloads",
     )
