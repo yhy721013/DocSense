@@ -14,7 +14,7 @@ from flask import Flask
 
 from app.blueprints.chat import chat_bp
 from app.blueprints.classify import classify_bp
-from app.blueprints.llm import llm_bp
+from app.blueprints.llm import llm_bp, sock
 from app.blueprints.main import main_bp
 from app.settings import MAX_CONTENT_LENGTH
 
@@ -29,6 +29,7 @@ def create_app() -> Flask:
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
     )
+    sock.init_app(app)
 
     # 页面入口
     app.register_blueprint(main_bp)

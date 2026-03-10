@@ -15,3 +15,7 @@ class LLMRouteValidationTests(unittest.TestCase):
     def test_generate_report_rejects_missing_params(self):
         response = self.client.post("/llm/generate-report", json={"businessType": "report"})
         self.assertEqual(response.status_code, 400)
+
+    def test_progress_route_is_registered(self):
+        response = self.client.get("/llm/progress")
+        self.assertNotEqual(response.status_code, 404)

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
+from app.services.llm_callback_service import post_callback_payload
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -171,9 +173,39 @@ class LLMTaskService:
                 ("failed", error, now, business_type, business_key),
             )
 
+    def mark_callback_success(self, business_type: str, business_key: str) -> None:
+        now = _utc_now_iso()
+        with self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE llm_tasks
+                SET callback_status = ?, callback_attempts = callback_attempts + 1,
+                    last_callback_error = '', updated_at = ?
+                WHERE business_type = ? AND business_key = ?
+                """,
+                ("success", now, business_type, business_key),
+            )
+
     def should_replay_callback(self, business_type: str, business_key: str) -> bool:
         task = self.get_task(business_type, business_key)
         if not task:
             return False
         completed_statuses = {"file": {"2", "3"}, "report": {"1", "2"}}
         return task["status"] in completed_statuses.get(business_type, set()) and task["callback_status"] != "success"
+
+    def replay_callback_if_needed(self, business_type: str, business_key: str, *, callback_url: str, timeout: float) -> bool:
+        if not callback_url or not self.should_replay_callback(business_type, business_key):
+            return False
+
+        task = self.get_task(business_type, business_key)
+        if not task:
+            return False
+
+        payload = task["result_payload"] or {}
+        callback_ok = post_callback_payload(callback_url, payload, timeout=timeout)
+        if callback_ok:
+            self.mark_callback_success(business_type, business_key)
+            return True
+
+        self.mark_callback_failed(business_type, business_key, "callback replay failed")
+        return False
