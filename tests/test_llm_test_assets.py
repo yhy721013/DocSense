@@ -1,0 +1,15 @@
+import json
+import pathlib
+import unittest
+
+
+class LLMTestAssetsTests(unittest.TestCase):
+    def test_analysis_request_fixture_has_required_fields(self):
+        payload = json.loads(pathlib.Path("tests/fixtures/llm/analysis_request.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["businessType"], "file")
+        self.assertIn("filePath", payload["params"][0])
+
+    def test_report_request_fixture_has_required_fields(self):
+        payload = json.loads(pathlib.Path("tests/fixtures/llm/report_request.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["businessType"], "report")
+        self.assertIn("filePathList", payload["params"][0])

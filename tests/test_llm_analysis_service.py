@@ -1,0 +1,77 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from app.services.llm_progress_hub import LLMProgressHub
+from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
+from app.services.llm_task_service import LLMTaskService
+
+
+class LLMAnalysisServiceTests(unittest.TestCase):
+    def test_map_analysis_result_keeps_translation_fields_blank(self):
+        result = map_analysis_result(
+            parsed_result={"summary": "摘要", "language": "中文", "score": 3.6},
+            request_params={
+                "fileName": "demo.pdf",
+                "country": [{"key": "02", "value": "美国"}],
+                "channel": [{"key": "01", "value": "装发"}],
+                "maturity": [{"key": "02", "value": "阶段成果"}],
+                "format": [{"key": "03", "value": "文档类"}],
+                "architectureList": [{"id": 10, "name": "测试"}],
+            },
+        )
+        self.assertEqual(result["fileDataItem"]["documentTranslationOne"], "")
+        self.assertEqual(result["fileDataItem"]["documentTranslationTwo"], "")
+
+    def test_build_file_callback_payload_uses_fixed_success_message(self):
+        payload = build_file_callback_payload("demo.pdf", {"summary": "摘要"}, status="2")
+        self.assertEqual(payload["msg"], "解析成功")
+
+    @patch("app.services.llm_analysis_service.post_callback_payload", return_value=True)
+    @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
+    @patch("app.services.llm_analysis_service.download_to_temp_file")
+    def test_run_file_analysis_task_marks_success(self, mock_download, _mock_pipeline, _mock_callback):
+        with tempfile.TemporaryDirectory() as tmp:
+            sample = Path(tmp) / "sample.txt"
+            sample.write_text("sample", encoding="utf-8")
+            mock_download.return_value = str(sample)
+
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "sample.txt",
+                        "filePath": "http://127.0.0.1:8000/sample.txt",
+                        "country": [],
+                        "channel": [],
+                        "maturity": [],
+                        "format": [],
+                        "architectureList": [],
+                    }
+                ],
+            }
+
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("sample.txt", request_payload)
+            hub = LLMProgressHub()
+            events = []
+            hub.subscribe("file", "sample.txt", events.append)
+
+            from app.services.llm_analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                progress_hub=hub,
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="http://127.0.0.1:9000/llm/callback",
+                callback_timeout=5,
+            )
+
+            task = task_service.get_task("file", "sample.txt")
+            self.assertIsNotNone(task)
+            self.assertEqual(task["status"], "2")
+            self.assertEqual(task["callback_status"], "success")
+            self.assertEqual(task["result_payload"]["msg"], "解析成功")
+            self.assertEqual(events[-1]["data"]["progress"], 1.0)
