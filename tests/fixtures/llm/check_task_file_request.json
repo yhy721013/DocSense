@@ -1,0 +1,8 @@
+{
+  "businessType": "file",
+  "params": [
+    {
+      "fileName": "sample.txt"
+    }
+  ]
+}

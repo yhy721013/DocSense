@@ -1,0 +1,2 @@
+DocSense local integration test sample.
+This file is used for /llm/analysis and /llm/generate-report smoke tests.
