@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable
@@ -39,7 +40,7 @@ def _round_score(value: Any) -> float:
 
 
 def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
-    target = _as_text(value)
+    target = _scalar_text(value)
     if not target:
         return ""
     for item in options:
@@ -51,14 +52,25 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
 
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
-    raw_id = parsed_result.get("architectureId")
+    raw_id = _first_non_empty_value(parsed_result, "architectureId", "领域体系ID")
     if raw_id is not None:
         try:
             return int(raw_id)
         except (TypeError, ValueError):
             return 0
 
-    target_name = _as_text(parsed_result.get("architectureName") or parsed_result.get("architecture"))
+    architecture_obj = _first_non_empty_value(parsed_result, "领域体系")
+    if isinstance(architecture_obj, dict):
+        raw_arch_id = architecture_obj.get("id")
+        if raw_arch_id is not None:
+            try:
+                return int(raw_arch_id)
+            except (TypeError, ValueError):
+                return 0
+
+    target_name = _scalar_text(
+        _first_non_empty_value(parsed_result, "architectureName", "architecture", "领域体系名称", "领域体系")
+    )
     if not target_name:
         return 0
 
@@ -73,30 +85,173 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
     return 0
 
 
+def _first_non_empty_value(container: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key not in container:
+            continue
+        value = container.get(key)
+        if value in (None, "", [], {}):
+            continue
+        return value
+    return None
+
+
+def _scalar_text(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("value", "name", "text", "label", "content"):
+            candidate = _as_text(value.get(key))
+            if candidate:
+                return candidate
+        for candidate in value.values():
+            text = _as_text(candidate)
+            if text:
+                return text
+        return ""
+    return _as_text(value)
+
+
+def _resolve_field(parsed_result: Dict[str, Any], file_item: Dict[str, Any], *aliases: str) -> str:
+    nested = _first_non_empty_value(file_item, *aliases)
+    if nested not in (None, "", [], {}):
+        return _scalar_text(nested)
+    top_level = _first_non_empty_value(parsed_result, *aliases)
+    if top_level not in (None, "", [], {}):
+        return _scalar_text(top_level)
+    return ""
+
+
+def _extract_original_link(original_text: str) -> str:
+    match = re.search(r"https?://\S+", original_text)
+    return match.group(0) if match else ""
+
+
+def _extract_date(original_text: str) -> str:
+    match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", original_text)
+    if match:
+        year, month, day = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+
+    month_map = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+    match = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", original_text)
+    if not match:
+        return ""
+    day, month_name, year = match.groups()
+    month = month_map.get(month_name.lower())
+    if not month:
+        return ""
+    return f"{year}-{month:02d}-{int(day):02d}"
+
+
+def _infer_language(original_text: str) -> str:
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", original_text))
+    has_latin = bool(re.search(r"[A-Za-z]", original_text))
+    if has_cjk and has_latin:
+        return "中英双语"
+    if has_cjk:
+        return "中文"
+    if has_latin:
+        return "英文"
+    return ""
+
+
+def _match_option_value_from_text(options: Iterable[Dict[str, Any]], original_text: str) -> str:
+    for item in options:
+        if not isinstance(item, dict):
+            continue
+        for key in ("value", "key"):
+            candidate = _as_text(item.get(key))
+            if candidate and candidate in original_text:
+                return _as_text(item.get("value"))
+    return ""
+
+
+def _extract_title(original_text: str) -> str:
+    lines = [line.strip() for line in original_text.splitlines()]
+    for index, line in enumerate(lines):
+        if line == "标题":
+            for candidate in lines[index + 1:]:
+                if candidate:
+                    return candidate
+    for line in lines:
+        if line and line not in {"内容", "原文链接", "原文"} and not line.startswith("http"):
+            return line
+    return ""
+
+
+def _extract_source(original_text: str) -> str:
+    match = re.search(r"【([^】]+?)(\d{4}年\d{1,2}月\d{1,2}日)", original_text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
 def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str, Any], original_text: str = "") -> Dict[str, Any]:
     file_name = _as_text(request_params.get("fileName"))
+    file_item = parsed_result.get("fileDataItem")
+    if not isinstance(file_item, dict):
+        file_item = parsed_result.get("文件解析详细数据")
+    if not isinstance(file_item, dict):
+        file_item = {}
+
+    resolved_country = _match_option_value(
+        _first_non_empty_value(parsed_result, "country", "国家"),
+        request_params.get("country", []),
+    )
+    resolved_channel = _match_option_value(
+        _first_non_empty_value(parsed_result, "channel", "渠道"),
+        request_params.get("channel", []),
+    )
+    resolved_maturity = _match_option_value(
+        _first_non_empty_value(parsed_result, "maturity", "成熟度"),
+        request_params.get("maturity", []),
+    )
+    resolved_format = _match_option_value(
+        _first_non_empty_value(parsed_result, "format", "格式"),
+        request_params.get("format", []),
+    )
+
+    resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
+    resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
+    resolved_language = _resolve_field(parsed_result, file_item, "language", "语种")
+    normalized_original_text = _as_text(original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
+    extracted_title = _extract_title(normalized_original_text)
+
     return {
-        "country": _match_option_value(parsed_result.get("country"), request_params.get("country", [])),
-        "channel": _match_option_value(parsed_result.get("channel"), request_params.get("channel", [])),
-        "maturity": _match_option_value(parsed_result.get("maturity"), request_params.get("maturity", [])),
-        "format": _match_option_value(parsed_result.get("format"), request_params.get("format", [])),
+        "country": resolved_country or _match_option_value_from_text(request_params.get("country", []), normalized_original_text),
+        "channel": resolved_channel,
+        "maturity": resolved_maturity,
+        "format": resolved_format,
         "architectureId": _match_architecture_id(parsed_result, request_params.get("architectureList", [])),
         "fileDataItem": {
             "fileName": file_name,
-            "dataTime": _as_text(parsed_result.get("dataTime")),
-            "keyword": _as_text(parsed_result.get("keyword")),
-            "summary": _as_text(parsed_result.get("summary")),
-            "score": _round_score(parsed_result.get("score")),
-            "fileNo": _as_text(parsed_result.get("fileNo")),
-            "source": _as_text(parsed_result.get("source")),
-            "originalLink": _as_text(parsed_result.get("originalLink")),
-            "language": _as_text(parsed_result.get("language")),
-            "dataFormat": _as_text(parsed_result.get("dataFormat")),
-            "associatedEquipment": _as_text(parsed_result.get("associatedEquipment")),
-            "relatedTechnology": _as_text(parsed_result.get("relatedTechnology")),
-            "equipmentModel": _as_text(parsed_result.get("equipmentModel")),
-            "documentOverview": _as_text(parsed_result.get("documentOverview")),
-            "originalText": _as_text(original_text or parsed_result.get("originalText")),
+            "dataTime": resolved_date or _extract_date(normalized_original_text),
+            "keyword": _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+            "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
+            "score": _round_score(_first_non_empty_value(parsed_result, "score", "评分")),
+            "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
+            "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(normalized_original_text),
+            "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
+            "language": resolved_language or _infer_language(normalized_original_text),
+            "dataFormat": _resolve_field(parsed_result, file_item, "dataFormat", "资料格式"),
+            "associatedEquipment": _resolve_field(parsed_result, file_item, "associatedEquipment", "所属装备"),
+            "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
+            "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),
+            "documentOverview": _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述")
+            or extracted_title,
+            "originalText": normalized_original_text,
             "documentTranslationOne": "",
             "documentTranslationTwo": "",
         },
