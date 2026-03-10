@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 from flask_sock import Sock
 
 from config import load_llm_integration_config
+from app.services.llm_analysis_service import run_file_analysis_task
 from app.services.llm_progress_hub import LLMProgressHub
+from app.services.llm_report_service import run_report_task
 from app.services.llm_task_service import LLMTaskService
 from app.settings import LLM_TASK_DB_PATH
 
@@ -60,8 +63,30 @@ def llm_analysis():
     file_name = params.get("fileName")
     if not isinstance(file_name, str) or not file_name.strip():
         return jsonify({"error": "fileName不能为空"}), 400
+    file_path = params.get("filePath")
+    if not isinstance(file_path, str) or not file_path.strip():
+        return jsonify({"error": "filePath不能为空"}), 400
 
     task = task_service.create_file_task(file_name=file_name.strip(), request_payload=payload)
+    progress_hub.publish(
+        "file",
+        file_name.strip(),
+        {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
+    )
+
+    worker = threading.Thread(
+        target=run_file_analysis_task,
+        kwargs={
+            "task_service": task_service,
+            "progress_hub": progress_hub,
+            "request_payload": payload,
+            "download_root": llm_config.download_dir,
+            "callback_url": llm_config.callback_url or "",
+            "callback_timeout": llm_config.callback_timeout,
+        },
+        daemon=True,
+    )
+    worker.start()
     return jsonify({"message": "accepted", "businessType": "file", "task": task}), 202
 
 
@@ -77,8 +102,30 @@ def llm_generate_report():
     report_id = params.get("reportId")
     if report_id is None:
         return jsonify({"error": "reportId不能为空"}), 400
+    file_path_list = params.get("filePathList")
+    if not isinstance(file_path_list, list) or not file_path_list:
+        return jsonify({"error": "filePathList不能为空"}), 400
 
     task = task_service.create_report_task(report_id=int(report_id), request_payload=payload)
+    progress_hub.publish(
+        "report",
+        str(report_id),
+        {"businessType": "report", "data": {"reportId": int(report_id), "progress": 0.0}},
+    )
+
+    worker = threading.Thread(
+        target=run_report_task,
+        kwargs={
+            "task_service": task_service,
+            "progress_hub": progress_hub,
+            "request_payload": payload,
+            "download_root": llm_config.download_dir,
+            "callback_url": llm_config.callback_url or "",
+            "callback_timeout": llm_config.callback_timeout,
+        },
+        daemon=True,
+    )
+    worker.start()
     return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
 
 
@@ -155,6 +202,14 @@ def llm_progress(ws):
 
     progress_hub.subscribe(business_type, business_key, _forward)
     try:
+        current_task = task_service.get_task(business_type, business_key)
+        if current_task is not None:
+            message = {"businessType": business_type, "data": {"progress": current_task["progress"]}}
+            if business_type == "file":
+                message["data"]["fileName"] = business_key
+            else:
+                message["data"]["reportId"] = int(business_key)
+            _forward(message)
         while ws.receive() is not None:
             continue
     finally:

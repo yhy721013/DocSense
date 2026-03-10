@@ -149,15 +149,56 @@ class LLMTaskService:
         *,
         status: str,
     ) -> None:
+        self.mark_business_result(
+            business_type,
+            business_key,
+            result_payload=result_payload,
+            status=status,
+        )
+
+    def mark_business_result(
+        self,
+        business_type: str,
+        business_key: str,
+        result_payload: Dict[str, Any],
+        *,
+        status: str,
+        message: str = "",
+    ) -> None:
         now = _utc_now_iso()
         with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE llm_tasks
-                SET status = ?, progress = ?, result_payload = ?, updated_at = ?
+                SET status = ?, progress = ?, message = ?, result_payload = ?, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
                 """,
-                (status, 1.0, self._serialize(result_payload), now, business_type, business_key),
+                (status, 1.0, message, self._serialize(result_payload), now, business_type, business_key),
+            )
+
+    def update_task_progress(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        progress: float,
+        message: str,
+        status: Optional[str] = None,
+    ) -> None:
+        now = _utc_now_iso()
+        status_sql = "status = ?, " if status is not None else ""
+        params: list[Any] = []
+        if status is not None:
+            params.append(status)
+        params.extend([progress, message, now, business_type, business_key])
+        with self._connection() as conn:
+            conn.execute(
+                f"""
+                UPDATE llm_tasks
+                SET {status_sql}progress = ?, message = ?, updated_at = ?
+                WHERE business_type = ? AND business_key = ?
+                """,
+                tuple(params),
             )
 
     def mark_callback_failed(self, business_type: str, business_key: str, error: str) -> None:
