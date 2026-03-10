@@ -4,8 +4,12 @@ from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
+from app.services.llm_task_service import LLMTaskService
+from app.settings import LLM_TASK_DB_PATH
+
 
 llm_bp = Blueprint("llm", __name__)
+task_service = LLMTaskService(str(LLM_TASK_DB_PATH))
 
 
 def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -25,8 +29,12 @@ def llm_analysis():
     params = _get_first_param(payload)
     if params is None:
         return jsonify({"error": "params不能为空"}), 400
+    file_name = params.get("fileName")
+    if not isinstance(file_name, str) or not file_name.strip():
+        return jsonify({"error": "fileName不能为空"}), 400
 
-    return jsonify({"message": "accepted", "businessType": "file", "params": params}), 202
+    task = task_service.create_file_task(file_name=file_name.strip(), request_payload=payload)
+    return jsonify({"message": "accepted", "businessType": "file", "task": task}), 202
 
 
 @llm_bp.post("/llm/generate-report")
@@ -38,5 +46,9 @@ def llm_generate_report():
     params = _get_first_param(payload)
     if params is None:
         return jsonify({"error": "params不能为空"}), 400
+    report_id = params.get("reportId")
+    if report_id is None:
+        return jsonify({"error": "reportId不能为空"}), 400
 
-    return jsonify({"message": "accepted", "businessType": "report", "params": params}), 202
+    task = task_service.create_report_task(report_id=int(report_id), request_payload=payload)
+    return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
