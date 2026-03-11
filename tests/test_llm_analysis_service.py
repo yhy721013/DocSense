@@ -83,6 +83,26 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn('"fileDataItem"', prompt)
         self.assertIn("不要直接原样返回候选对象", prompt)
 
+    def test_build_file_analysis_prompt_uses_default_ranges_when_missing(self):
+        prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
+        self.assertIn('"音频类"', prompt)
+        self.assertIn('"文档类"', prompt)
+        self.assertIn('"图片类"', prompt)
+        self.assertIn('"军事基地"', prompt)
+
+    def test_build_file_analysis_prompt_uses_explicit_ranges_over_defaults(self):
+        prompt = build_file_analysis_prompt(
+            {
+                "fileName": "demo.txt",
+                "country": [{"key": "99", "value": "德国"}],
+                "format": [{"key": "88", "value": "数据库类"}],
+            }
+        )
+        self.assertIn('"德国"', prompt)
+        self.assertIn('"数据库类"', prompt)
+        self.assertNotIn('"美国"', prompt)
+        self.assertNotIn('"文档类"', prompt)
+
     def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
         original_text = (
             "标题\n"
