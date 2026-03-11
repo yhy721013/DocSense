@@ -258,6 +258,7 @@ def _extract_source(original_text: str) -> str:
 
 def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str, Any], original_text: str = "") -> Dict[str, Any]:
     file_name = _as_text(request_params.get("fileName"))
+    ranges = build_effective_analysis_ranges(request_params)
     file_item = parsed_result.get("fileDataItem")
     if not isinstance(file_item, dict):
         file_item = parsed_result.get("文件解析详细数据")
@@ -266,19 +267,19 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
 
     resolved_country = _match_option_value(
         _first_non_empty_value(parsed_result, "country", "国家"),
-        request_params.get("country", []),
+        ranges["country"],
     )
     resolved_channel = _match_option_value(
         _first_non_empty_value(parsed_result, "channel", "渠道"),
-        request_params.get("channel", []),
+        ranges["channel"],
     )
     resolved_maturity = _match_option_value(
         _first_non_empty_value(parsed_result, "maturity", "成熟度"),
-        request_params.get("maturity", []),
+        ranges["maturity"],
     )
     resolved_format = _match_option_value(
         _first_non_empty_value(parsed_result, "format", "格式"),
-        request_params.get("format", []),
+        ranges["format"],
     )
 
     resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
@@ -288,11 +289,11 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     extracted_title = _extract_title(normalized_original_text)
 
     return {
-        "country": resolved_country or _match_option_value_from_text(request_params.get("country", []), normalized_original_text),
+        "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
         "format": resolved_format,
-        "architectureId": _match_architecture_id(parsed_result, request_params.get("architectureList", [])),
+        "architectureId": _match_architecture_id(parsed_result, ranges["architectureList"]),
         "fileDataItem": {
             "fileName": file_name,
             "dataTime": resolved_date or _extract_date(normalized_original_text),

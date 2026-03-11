@@ -67,6 +67,24 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["language"], "中英双语")
         self.assertEqual(result["fileDataItem"]["documentOverview"], "美国海军人事任命新闻。")
 
+    def test_map_analysis_result_rejects_out_of_range_country(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "country": [{"key": "02", "value": "美国"}],
+        }
+
+        result = map_analysis_result({"country": "俄罗斯"}, request_params)
+
+        self.assertEqual(result["country"], "")
+
+    def test_map_analysis_result_uses_default_ranges_when_request_missing(self):
+        result = map_analysis_result(
+            {"国家": {"value": "美国", "key": "02"}},
+            {"fileName": "demo.txt"},
+        )
+
+        self.assertEqual(result["country"], "美国")
+
     def test_build_file_analysis_prompt_requires_protocol_schema(self):
         prompt = build_file_analysis_prompt(
             {
