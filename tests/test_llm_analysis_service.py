@@ -67,6 +67,24 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["language"], "中英双语")
         self.assertEqual(result["fileDataItem"]["documentOverview"], "美国海军人事任命新闻。")
 
+    def test_map_analysis_result_rejects_out_of_range_country(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "country": [{"key": "02", "value": "美国"}],
+        }
+
+        result = map_analysis_result({"country": "俄罗斯"}, request_params)
+
+        self.assertEqual(result["country"], "")
+
+    def test_map_analysis_result_uses_default_ranges_when_request_missing(self):
+        result = map_analysis_result(
+            {"国家": {"value": "美国", "key": "02"}},
+            {"fileName": "demo.txt"},
+        )
+
+        self.assertEqual(result["country"], "美国")
+
     def test_build_file_analysis_prompt_requires_protocol_schema(self):
         prompt = build_file_analysis_prompt(
             {
@@ -82,6 +100,26 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn('"architectureId"', prompt)
         self.assertIn('"fileDataItem"', prompt)
         self.assertIn("不要直接原样返回候选对象", prompt)
+
+    def test_build_file_analysis_prompt_uses_default_ranges_when_missing(self):
+        prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
+        self.assertIn('"音频类"', prompt)
+        self.assertIn('"文档类"', prompt)
+        self.assertIn('"图片类"', prompt)
+        self.assertIn('"军事基地"', prompt)
+
+    def test_build_file_analysis_prompt_uses_explicit_ranges_over_defaults(self):
+        prompt = build_file_analysis_prompt(
+            {
+                "fileName": "demo.txt",
+                "country": [{"key": "99", "value": "德国"}],
+                "format": [{"key": "88", "value": "数据库类"}],
+            }
+        )
+        self.assertIn('"德国"', prompt)
+        self.assertIn('"数据库类"', prompt)
+        self.assertNotIn('"美国"', prompt)
+        self.assertNotIn('"文档类"', prompt)
 
     def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
         original_text = (

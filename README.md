@@ -245,6 +245,17 @@ web_ui.py
 - `DOCSENSE_LLM_DOWNLOAD_TIMEOUT`：文件下载超时秒数，默认 `60`
 - `DOCSENSE_LLM_DOWNLOAD_DIR`：甲方文件下载暂存目录，默认 `.runtime/llm_downloads`
 
+#### 文件解析范围约束
+
+- `/llm/analysis` 中 `channel`、`country`、`format`、`maturity`、`architectureList` 若由甲方请求显式传入，则以后端收到的请求范围为准。
+- 若这些字段缺失或为空，后端会自动注入默认测试范围，仅用于当前测试联调。
+- 默认 `format` 测试范围为：`音频类`、`文档类`、`图片类`。
+- 默认 `architectureList` 测试范围按 `rag_with_ocr.py` 中的分类体系生成。
+- 最终回调时：
+  - 命中范围内值才返回
+  - 未命中或越界则留空
+  - `architectureId` 未命中返回 `0`
+
 ### 3) OCR 缓存与降级策略
 
 - 扫描件 PDF OCR 产物会缓存为：

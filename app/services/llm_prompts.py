@@ -9,6 +9,9 @@ def _format_options(title: str, items: Iterable[Any]) -> str:
 
 
 def build_file_analysis_prompt(request_params: dict) -> str:
+    from app.services.llm_analysis_service import build_effective_analysis_ranges
+
+    ranges = build_effective_analysis_ranges(request_params)
     schema = {
         "country": "",
         "channel": "",
@@ -44,11 +47,11 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "documentTranslationOne 和 documentTranslationTwo 当前固定输出空字符串。\n"
         "输出 JSON 必须严格匹配以下结构：\n"
         f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
-        + _format_options("领域体系候选", request_params.get("architectureList", []))
-        + _format_options("国家候选", request_params.get("country", []))
-        + _format_options("渠道候选", request_params.get("channel", []))
-        + _format_options("成熟度候选", request_params.get("maturity", []))
-        + _format_options("格式候选", request_params.get("format", []))
+        + _format_options("领域体系候选", ranges["architectureList"])
+        + _format_options("国家候选", ranges["country"])
+        + _format_options("渠道候选", ranges["channel"])
+        + _format_options("成熟度候选", ranges["maturity"])
+        + _format_options("格式候选", ranges["format"])
         + "请优先抽取：资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述、文件原文。\n"
     )
 
