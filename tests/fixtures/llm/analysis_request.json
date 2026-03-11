@@ -2,42 +2,8 @@
   "businessType": "file",
   "params": [
     {
-      "architectureList": [
-        {
-          "id": 1768464916588441,
-          "level": 1,
-          "name": "测试",
-          "path": "1768464916588441",
-          "pathName": "测试",
-          "sort": 1
-        }
-      ],
-      "channel": [
-        {
-          "value": "装发",
-          "key": "02"
-        }
-      ],
-      "country": [
-        {
-          "value": "美国",
-          "key": "02"
-        }
-      ],
       "fileName": "sample.txt",
-      "filePath": "http://127.0.0.1:8000/sample.txt",
-      "format": [
-        {
-          "value": "文档类",
-          "key": "03"
-        }
-      ],
-      "maturity": [
-        {
-          "value": "阶段成果",
-          "key": "02"
-        }
-      ]
+      "filePath": "http://127.0.0.1:8000/sample.txt"
     }
   ]
 }
