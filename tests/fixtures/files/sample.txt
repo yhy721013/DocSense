@@ -1,2 +1,44 @@
-DocSense local integration test sample.
-This file is used for /llm/analysis and /llm/generate-report smoke tests.
+标题
+达里尔·考德尔正式担任美国海军作战部长
+
+非公开：2级
+
+内容
+【美国海军网2025年8月25日报道】8月25日，达里尔·考德尔海军上将在美国华盛顿特区华盛顿海军船厂举行的就职仪式上正式就任第34任海军作战部长，超过300名国防部高级领导、贵宾和家属出席了仪式。海军作战部长是参谋长联席会议成员，担任美国总统、国家安全委员会、国土安全委员会和国防部长的顾问，负责全球海军和岸上活动的指挥和资源调配。考德尔出生于北卡罗来纳州，1985年毕业于北卡罗来纳州立大学，他此前的三个职务分别是美国舰队司令部司令、海军潜艇部队司令和大西洋潜艇部队司令。（船舶信息研究中心 刘子豪 供稿 戚艳嘉 审核）
+
+
+原文链接
+https://www.navy.mil/Press-Office/Press-Releases/display-pressreleases/Article/4284710/caudle-takes-helm-as-34th-chief-of-naval-operations/
+
+原文
+Caudle Takes Helm as 34th Chief of Naval Operations
+25 August 2025
+
+Adm. Daryl Caudle assumed the duties as the 34th Chief of Naval Operations (CNO) during an assumption of office ceremony, attended by over 300 Department of Defense (DoD) senior leaders, distinguished guests and families at the Washington Navy Yard in Washington D.C., Aug. 25. 
+
+The CNO is a member of the Joint Chief of Staff and serves as an advisor to the President of the United States, the National Security Council, the Homeland Security Council, and the Secretary of Defense and is responsible for the command, utilization of resources, and operating efficiency of worldwide naval forces and shore activities. 
+
+“As I step into the role as your 34th Chief of Naval Operations, I do so with great pride, immense gratitude, and an absolute focus on the mission ahead,” Caudle said in a video to the Fleet, released shortly before the ceremony.
+
+The full video message is available here: https://youtu.be/4WDgh66edoo?si=ZgvDq-KjW8WWoV5Z
+
+During the ceremony he further discussed his priorities of Sailors, operational readiness and fleet modernization.
+
+“The Sailor will be front and center in my vision throughout my tenure as CNO – hands down, no exception,” said Caudle during the ceremony. “To ensure that they are ready to fight and win decisively–today, tomorrow, and well into the future—we will view everything we do we through an operational lens focused on three priorities: the foundry, the fleet, and the way we fight.” 
+
+Secretary of the Navy John Phelan acted as the presiding officer and keynote speaker of the ceremony highlighting the importance of the Navy and the prioritization of future shipbuilding development. 
+
+“Admiral Caudle, ‘the honey badger,’ is the right man for the job,” said Secretary Phelan. “He has a reputation for challenging the status quo, demanding results and refusing to accept excuses. I look forward to seeing that relentlessness pursuit of excellence and persistence pervade the halls of the Pentagon.”
+
+During his remarks Caudle emphasized his gratitude to his family and especially his wife, Donna Caudle, for their steadfast support throughout his 40-year career.
+
+“Your influence is woven into the very fabric of my being, into every decision I've ever made,” said Caudle, addressing his family. “From the moment we met, you’ve been the bedrock of my life. You’re the anchor that has kept me grounded, especially in the sometimes turbulent seas of this profession.”
+
+As a native of Winston-Salem, North Carolina and a 1985 graduate of North Carolina State University, Caudle is a proud member of the “Wolfpack.”
+
+Caudle’s previous three assignments were commander, U.S. Fleet Forces Command; commander, Submarine Forces; and commander, Submarine Force Atlantic.
+
+Vice Chief of Naval Operations Adm. Jim Kilby relinquished the office of the CNO after serving as the acting CNO from February to August 2025.  
+
+Caudle and Phelan commended Kilby for his leadership, ensuring the uninterrupted performance of the Navy’s mission and continuing to foster positive relationships with our allies and partners.
+
