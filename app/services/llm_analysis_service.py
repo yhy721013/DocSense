@@ -110,10 +110,19 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
 
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
+    candidate_items = [item for item in architecture_list if isinstance(item, dict)]
+    candidate_ids = set()
+    for item in candidate_items:
+        try:
+            candidate_ids.add(int(item.get("id") or 0))
+        except (TypeError, ValueError):
+            continue
+
     raw_id = _first_non_empty_value(parsed_result, "architectureId", "领域体系ID")
     if raw_id is not None:
         try:
-            return int(raw_id)
+            matched_id = int(raw_id)
+            return matched_id if matched_id in candidate_ids else 0
         except (TypeError, ValueError):
             return 0
 
@@ -122,24 +131,46 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
         raw_arch_id = architecture_obj.get("id")
         if raw_arch_id is not None:
             try:
-                return int(raw_arch_id)
+                matched_id = int(raw_arch_id)
+                return matched_id if matched_id in candidate_ids else 0
             except (TypeError, ValueError):
                 return 0
 
-    target_name = _scalar_text(
-        _first_non_empty_value(parsed_result, "architectureName", "architecture", "领域体系名称", "领域体系")
-    )
-    if not target_name:
+    name_candidates = []
+    for value in (
+        _first_non_empty_value(parsed_result, "architectureName", "architecture", "领域体系名称"),
+        architecture_obj,
+    ):
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, dict):
+            for key in ("name", "pathName", "value", "text", "label", "content"):
+                candidate = _as_text(value.get(key))
+                if candidate:
+                    name_candidates.append(candidate)
+        else:
+            candidate = _scalar_text(value)
+            if candidate:
+                name_candidates.append(candidate)
+
+    if not name_candidates:
         return 0
 
-    for item in architecture_list:
-        if not isinstance(item, dict):
-            continue
-        if target_name == _as_text(item.get("name")):
-            try:
-                return int(item.get("id") or 0)
-            except (TypeError, ValueError):
-                return 0
+    for target_name in name_candidates:
+        normalized_targets = {target_name}
+        if "/" in target_name:
+            normalized_targets.add(target_name.split("/")[-1].strip())
+
+        for item in candidate_items:
+            item_name = _as_text(item.get("name"))
+            item_path_name = _as_text(item.get("pathName"))
+            item_path_tail = item_path_name.split("/")[-1].strip() if item_path_name and "/" in item_path_name else ""
+            if normalized_targets.intersection({item_name, item_path_name, item_path_tail}):
+                try:
+                    return int(item.get("id") or 0)
+                except (TypeError, ValueError):
+                    return 0
+
     return 0
 
 

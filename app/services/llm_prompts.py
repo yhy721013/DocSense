@@ -4,6 +4,21 @@ import json
 from typing import Any, Iterable
 
 
+ARCHITECTURE_CLASSIFICATION_RULES = (
+    "【领域分类判定规则】\n"
+    "1. 军事基地：军事设施、基地建设、基地布局、军事要塞、港口码头、机场跑道、后勤保障设施、营房工程、防御工事。\n"
+    "2. 体系运用：作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗。\n"
+    "3. 装备型号：武器装备、装备参数、技术指标、装备性能。若候选中存在二级节点，应优先判断为空中装备、水面装备或水下装备。\n"
+    "4. 作战环境：战场环境、地理条件、气象水文、电磁环境、海洋环境。\n"
+    "5. 作战指挥：指挥控制、决策流程、作战计划、战术战法。若候选中存在二级节点，应优先判断为条令条例或组织机构。\n"
+    "6. 组织机构：机构编制、隶属关系、职责分工、司令部、部门设置、岗位任命、职能说明等内容更偏向该类。\n"
+    "7. 条令条例：发布机构、编号、版本、规范、条令、条例、制度等内容更偏向该类。\n"
+    "8. 必须从领域体系候选中选择一个最可能的节点；如果候选中同时存在上级和下级节点，应优先选择最具体的可匹配节点。\n"
+    "9. 不要输出分类名称、候选列表或概率，只输出最终 architectureId。\n"
+    "10. 只有当文档内容与所有候选领域都明显无关时才输出 0。\n"
+)
+
+
 def _format_options(title: str, items: Iterable[Any]) -> str:
     return f"{title}: {json.dumps(list(items), ensure_ascii=False)}\n"
 
@@ -43,10 +58,11 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "不要直接原样返回候选对象、候选数组、key/value 对象或中文键名。\n"
         "country、channel、maturity、format 只能输出候选项中的 value 字符串；"
         "architectureId 只能输出候选项中的 id 数字。\n"
-        "如果文档证据不足，对应字符串字段输出空字符串，architectureId 输出 0，score 输出 0.0。\n"
+        "如果文档证据不足，对应字符串字段输出空字符串，score 输出 0.0。\n"
         "documentTranslationOne 和 documentTranslationTwo 当前固定输出空字符串。\n"
-        "输出 JSON 必须严格匹配以下结构：\n"
-        f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
+        + ARCHITECTURE_CLASSIFICATION_RULES
+        + "输出 JSON 必须严格匹配以下结构：\n"
+        + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
         + _format_options("领域体系候选", ranges["architectureList"])
         + _format_options("国家候选", ranges["country"])
         + _format_options("渠道候选", ranges["channel"])

@@ -121,6 +121,15 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertNotIn('"美国"', prompt)
         self.assertNotIn('"文档类"', prompt)
 
+    def test_build_file_analysis_prompt_includes_architecture_classification_rules(self):
+        prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
+
+        self.assertIn("军事基地：", prompt)
+        self.assertIn("作战指挥：", prompt)
+        self.assertIn("组织机构", prompt)
+        self.assertIn("必须从领域体系候选中选择一个最可能的节点", prompt)
+        self.assertIn("只有当文档内容与所有候选领域都明显无关时才输出 0", prompt)
+
     def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
         original_text = (
             "标题\n"
@@ -151,6 +160,32 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["language"], "中英双语")
         self.assertEqual(result["fileDataItem"]["summary"], "达里尔·考德尔正式担任美国海军作战部长")
         self.assertEqual(result["fileDataItem"]["documentOverview"], "达里尔·考德尔正式担任美国海军作战部长")
+
+    def test_map_analysis_result_matches_architecture_by_path_name(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [
+                {"id": 105, "name": "作战指挥", "pathName": "作战指挥"},
+                {"id": 10502, "name": "组织机构", "pathName": "作战指挥/组织机构"},
+            ],
+        }
+
+        result = map_analysis_result({"领域体系名称": "作战指挥/组织机构"}, request_params)
+
+        self.assertEqual(result["architectureId"], 10502)
+
+    def test_map_analysis_result_matches_architecture_by_nested_name(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [
+                {"id": 105, "name": "作战指挥", "pathName": "作战指挥"},
+                {"id": 10502, "name": "组织机构", "pathName": "作战指挥/组织机构"},
+            ],
+        }
+
+        result = map_analysis_result({"领域体系": {"name": "组织机构"}}, request_params)
+
+        self.assertEqual(result["architectureId"], 10502)
 
     @patch("app.services.llm_analysis_service.post_callback_payload", return_value=True)
     @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')

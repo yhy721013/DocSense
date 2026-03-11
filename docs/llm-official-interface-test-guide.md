@@ -229,6 +229,70 @@ Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf
 - [analysis_request.json](/e:/DocSense/tests/fixtures/llm/analysis_request.json) 当前未传范围字段，后端会自动注入默认测试范围
 - 正式联调时，如果甲方请求显式传入 `channel/country/format/maturity/architectureList`，最终以甲方请求范围为准
 
+#### 步骤 5：查看 `architectureList` 候选结构与命中结果
+
+正式回调只返回 `data.architectureId`，不会把完整 `architectureList` 原样回传。因此验证领域体系结果时，需要分两步看：
+
+- 先看本次实际使用的 `architectureList` 候选结构
+- 再看回调里的 `architectureId` 命中了哪个节点
+
+如果请求里显式传了 `architectureList`，可直接从请求体查看：
+
+```powershell
+Get-Content -Path "tests/fixtures/llm/analysis_request.json" -Raw -Encoding utf8 |
+  ConvertFrom-Json |
+  Select-Object -ExpandProperty params |
+  Select-Object -First 1 |
+  Select-Object -ExpandProperty architectureList |
+  ConvertTo-Json -Depth 10
+```
+
+如果请求里没有传 `architectureList`，当前代码会使用后端默认测试范围，可直接查看默认候选结构：
+
+```powershell
+@'
+from app.services.llm_analysis_service import DEFAULT_ARCHITECTURE_OPTIONS
+import json
+print(json.dumps(DEFAULT_ARCHITECTURE_OPTIONS, ensure_ascii=False, indent=2))
+'@ | .\.venv\Scripts\python.exe -
+```
+
+查看本次回调中的最终命中结果：
+
+```powershell
+Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8 |
+  ConvertFrom-Json |
+  Select-Object -ExpandProperty data |
+  Select-Object architectureId
+```
+
+如果要把回调中的 `architectureId` 反查为完整节点结构，可执行：
+
+```powershell
+$archId = (
+  Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8 |
+  ConvertFrom-Json
+).data.architectureId
+
+if ($archId -eq 0) {
+  Write-Output "本次未命中领域体系，architectureId=0"
+} else {
+@'
+from app.services.llm_analysis_service import DEFAULT_ARCHITECTURE_OPTIONS
+import json, sys
+arch_id = int(sys.argv[1])
+matched = [item for item in DEFAULT_ARCHITECTURE_OPTIONS if int(item["id"]) == arch_id]
+print(json.dumps(matched, ensure_ascii=False, indent=2))
+'@ | .\.venv\Scripts\python.exe - $archId
+}
+```
+
+预期说明：
+
+- 如果 `architectureId` 为某个有效节点 id，上述命令会打印对应节点的完整元素结构
+- 如果 `architectureId = 0`，反查结果为空数组 `[]` 或直接提示“本次未命中领域体系”，这属于正常现象，不是命令错误
+- 当甲方请求显式传入 `architectureList` 时，反查应优先针对甲方请求中的实际候选列表，而不是默认候选列表
+
 ### 1.6 报告生成成功链路
 
 #### 步骤 1：提交报告生成任务
