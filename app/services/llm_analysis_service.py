@@ -19,6 +19,64 @@ from app.services.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
 
 
+DEFAULT_COUNTRY_OPTIONS = [
+    {"key": "02", "value": "美国"},
+    {"key": "03", "value": "俄罗斯"},
+    {"key": "04", "value": "日本"},
+    {"key": "05", "value": "英国"},
+    {"key": "06", "value": "法国"},
+]
+
+DEFAULT_CHANNEL_OPTIONS = [
+    {"key": "02", "value": "装发"},
+    {"key": "03", "value": "军情"},
+    {"key": "04", "value": "科技"},
+    {"key": "05", "value": "训练"},
+]
+
+DEFAULT_FORMAT_OPTIONS = [
+    {"key": "01", "value": "音频类"},
+    {"key": "03", "value": "文档类"},
+    {"key": "04", "value": "图片类"},
+]
+
+DEFAULT_MATURITY_OPTIONS = [
+    {"key": "01", "value": "概念研究"},
+    {"key": "02", "value": "阶段成果"},
+    {"key": "03", "value": "定型成果"},
+]
+
+DEFAULT_ARCHITECTURE_OPTIONS = [
+    {"id": 101, "level": 1, "name": "军事基地", "path": "101", "pathName": "军事基地", "sort": 1},
+    {"id": 102, "level": 1, "name": "体系运用", "path": "102", "pathName": "体系运用", "sort": 2},
+    {"id": 103, "level": 1, "name": "装备型号", "path": "103", "pathName": "装备型号", "sort": 3},
+    {"id": 10301, "level": 2, "name": "空中装备", "path": "103/10301", "pathName": "装备型号/空中装备", "sort": 1},
+    {"id": 10302, "level": 2, "name": "水面装备", "path": "103/10302", "pathName": "装备型号/水面装备", "sort": 2},
+    {"id": 10303, "level": 2, "name": "水下装备", "path": "103/10303", "pathName": "装备型号/水下装备", "sort": 3},
+    {"id": 104, "level": 1, "name": "作战环境", "path": "104", "pathName": "作战环境", "sort": 4},
+    {"id": 105, "level": 1, "name": "作战指挥", "path": "105", "pathName": "作战指挥", "sort": 5},
+    {"id": 10501, "level": 2, "name": "条令条例", "path": "105/10501", "pathName": "作战指挥/条令条例", "sort": 1},
+    {"id": 10502, "level": 2, "name": "组织机构", "path": "105/10502", "pathName": "作战指挥/组织机构", "sort": 2},
+]
+
+
+def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return list(default)
+    items = [item for item in value if isinstance(item, dict) and item]
+    return items if items else list(default)
+
+
+def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str, list[dict[str, Any]]]:
+    return {
+        "country": _normalize_range_list(request_params.get("country"), DEFAULT_COUNTRY_OPTIONS),
+        "channel": _normalize_range_list(request_params.get("channel"), DEFAULT_CHANNEL_OPTIONS),
+        "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
+        "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
+        "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
+    }
+
+
 def _as_text(value: Any) -> str:
     if value is None:
         return ""
