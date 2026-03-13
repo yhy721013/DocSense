@@ -210,6 +210,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     }
                 ],
             }
+            request_params = request_payload["params"][0]
 
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task("sample.txt", request_payload)
@@ -222,7 +223,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             run_file_analysis_task(
                 task_service=task_service,
                 progress_hub=hub,
-                request_payload=request_payload,
+                request_params=request_params,
                 download_root=tmp,
                 callback_url="http://127.0.0.1:9000/llm/callback",
                 callback_timeout=5,
@@ -234,3 +235,6 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             self.assertEqual(task["callback_status"], "success")
             self.assertEqual(task["result_payload"]["msg"], "解析成功")
             self.assertEqual(events[-1]["data"]["progress"], 1.0)
+            # Verify finer progress granularity: at least 7 progress events
+            progress_values = [e["data"]["progress"] for e in events]
+            self.assertGreaterEqual(len(progress_values), 7, "应至少有7个进度更新步骤")

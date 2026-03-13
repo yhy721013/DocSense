@@ -57,37 +57,48 @@ def llm_analysis():
     if payload.get("businessType") != "file":
         return jsonify({"error": "businessType必须为file"}), 400
 
-    params = _get_first_param(payload)
-    if params is None:
+    raw_params = payload.get("params")
+    if not isinstance(raw_params, list) or not raw_params:
         return jsonify({"error": "params不能为空"}), 400
-    file_name = params.get("fileName")
-    if not isinstance(file_name, str) or not file_name.strip():
-        return jsonify({"error": "fileName不能为空"}), 400
-    file_path = params.get("filePath")
-    if not isinstance(file_path, str) or not file_path.strip():
-        return jsonify({"error": "filePath不能为空"}), 400
 
-    task = task_service.create_file_task(file_name=file_name.strip(), request_payload=payload)
-    progress_hub.publish(
-        "file",
-        file_name.strip(),
-        {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
-    )
+    accepted_tasks = []
+    for param in raw_params:
+        if not isinstance(param, dict):
+            continue
+        file_name = param.get("fileName")
+        if not isinstance(file_name, str) or not file_name.strip():
+            continue
+        file_path = param.get("filePath")
+        if not isinstance(file_path, str) or not file_path.strip():
+            continue
 
-    worker = threading.Thread(
-        target=run_file_analysis_task,
-        kwargs={
-            "task_service": task_service,
-            "progress_hub": progress_hub,
-            "request_payload": payload,
-            "download_root": llm_config.download_dir,
-            "callback_url": llm_config.callback_url or "",
-            "callback_timeout": llm_config.callback_timeout,
-        },
-        daemon=True,
-    )
-    worker.start()
-    return jsonify({"message": "accepted", "businessType": "file", "task": task}), 202
+        file_name = file_name.strip()
+        task = task_service.create_file_task(file_name=file_name, request_payload=payload)
+        progress_hub.publish(
+            "file",
+            file_name,
+            {"businessType": "file", "data": {"fileName": file_name, "progress": 0.0}},
+        )
+
+        worker = threading.Thread(
+            target=run_file_analysis_task,
+            kwargs={
+                "task_service": task_service,
+                "progress_hub": progress_hub,
+                "request_params": param,
+                "download_root": llm_config.download_dir,
+                "callback_url": llm_config.callback_url or "",
+                "callback_timeout": llm_config.callback_timeout,
+            },
+            daemon=True,
+        )
+        worker.start()
+        accepted_tasks.append(task)
+
+    if not accepted_tasks:
+        return jsonify({"error": "params中没有有效的文件信息"}), 400
+
+    return jsonify({"message": "accepted", "businessType": "file", "tasks": accepted_tasks}), 202
 
 
 @llm_bp.post("/llm/generate-report")
@@ -136,46 +147,57 @@ def llm_check_task():
     if business_type not in {"file", "report"}:
         return jsonify({"error": "businessType无效"}), 400
 
-    params = _get_first_param(payload)
-    if params is None:
+    raw_params = payload.get("params")
+    if not isinstance(raw_params, list) or not raw_params:
         return jsonify({"error": "params不能为空"}), 400
 
-    if business_type == "file":
-        business_key = params.get("fileName")
-        if not isinstance(business_key, str) or not business_key.strip():
-            return jsonify({"error": "fileName不能为空"}), 400
-        response_key = "fileName"
-        normalized_key = business_key.strip()
-    else:
-        report_id = params.get("reportId")
-        if report_id is None:
-            return jsonify({"error": "reportId不能为空"}), 400
-        response_key = "reportId"
-        normalized_key = str(report_id)
+    results = []
+    for param in raw_params:
+        if not isinstance(param, dict):
+            continue
 
-    task = task_service.get_task(business_type, normalized_key)
-    if not task:
-        return jsonify({"error": "任务不存在"}), 404
+        if business_type == "file":
+            business_key = param.get("fileName")
+            if not isinstance(business_key, str) or not business_key.strip():
+                continue
+            response_key = "fileName"
+            normalized_key = business_key.strip()
+        else:
+            report_id = param.get("reportId")
+            if report_id is None:
+                continue
+            response_key = "reportId"
+            normalized_key = str(report_id)
 
-    replayed = task_service.replay_callback_if_needed(
-        business_type,
-        normalized_key,
-        callback_url=llm_config.callback_url or "",
-        timeout=llm_config.callback_timeout,
-    )
-    task = task_service.get_task(business_type, normalized_key)
-    assert task is not None
+        task = task_service.get_task(business_type, normalized_key)
+        if not task:
+            continue
 
-    return jsonify(
-        {
-            "businessType": business_type,
-            "data": {
+        task_service.replay_callback_if_needed(
+            business_type,
+            normalized_key,
+            callback_url=llm_config.callback_url or "",
+            timeout=llm_config.callback_timeout,
+        )
+        task = task_service.get_task(business_type, normalized_key)
+        assert task is not None
+
+        results.append(
+            {
                 response_key: int(normalized_key) if business_type == "report" else normalized_key,
                 "status": task["status"],
                 "progress": task["progress"],
                 "callbackStatus": task["callback_status"],
-            },
-            "callbackReplayed": replayed,
+            }
+        )
+
+    if not results:
+        return jsonify({"error": "任务不存在"}), 404
+
+    return jsonify(
+        {
+            "businessType": business_type,
+            "data": results,
         }
     )
 
@@ -210,7 +232,28 @@ def llm_progress(ws):
             else:
                 message["data"]["reportId"] = int(business_key)
             _forward(message)
-        while ws.receive() is not None:
-            continue
+        while True:
+            raw_query = ws.receive()
+            if raw_query is None:
+                break
+            try:
+                query = json.loads(raw_query)
+            except json.JSONDecodeError:
+                continue
+            query_bt, query_key = _extract_progress_key(query)
+            if not query_bt or not query_key:
+                continue
+            current = task_service.get_task(query_bt, query_key)
+            if current is None:
+                continue
+            response: Dict[str, Any] = {"businessType": query_bt, "data": {"progress": current["progress"]}}
+            if query_bt == "file":
+                response["data"]["fileName"] = query_key
+            else:
+                response["data"]["reportId"] = int(query_key)
+            try:
+                ws.send(json.dumps(response, ensure_ascii=False))
+            except Exception:
+                break
     finally:
         progress_hub.unsubscribe(business_type, business_key, _forward)

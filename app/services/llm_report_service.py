@@ -55,18 +55,26 @@ def run_report_task(
     report_id = int(params["reportId"])
 
     try:
-        task_service.update_task_progress("report", str(report_id), progress=0.15, message="正在下载报告文件", status="0")
-        _publish_progress(progress_hub, report_id, 0.15)
+        task_service.update_task_progress("report", str(report_id), progress=0.10, message="正在下载报告文件", status="0")
+        _publish_progress(progress_hub, report_id, 0.10)
 
         files_to_upload = []
-        for index, file_url in enumerate(params.get("filePathList", []), start=1):
+        file_path_list = params.get("filePathList", [])
+        for index, file_url in enumerate(file_path_list, start=1):
             downloaded_path = download_to_temp_file(file_url, f"report-{report_id}-{index}{Path(file_url).suffix}", download_root, timeout=60)
             files_to_upload.extend(prepare_upload_files(downloaded_path))
+            download_progress = 0.10 + 0.20 * (index / max(len(file_path_list), 1))
+            task_service.update_task_progress("report", str(report_id), progress=download_progress, message=f"已下载 {index}/{len(file_path_list)} 个文件")
+            _publish_progress(progress_hub, report_id, download_progress)
 
-        task_service.update_task_progress("report", str(report_id), progress=0.35, message="正在生成报告")
-        _publish_progress(progress_hub, report_id, 0.35)
+        task_service.update_task_progress("report", str(report_id), progress=0.40, message="文件下载完成，正在初始化报告生成")
+        _publish_progress(progress_hub, report_id, 0.40)
 
         client = AnythingLLMClient(load_anythingllm_config())
+
+        task_service.update_task_progress("report", str(report_id), progress=0.55, message="正在执行AI报告生成")
+        _publish_progress(progress_hub, report_id, 0.55)
+
         details = run_anythingllm_rag(
             client=client,
             files_to_upload=files_to_upload,
@@ -77,7 +85,15 @@ def run_report_task(
             mode="query",
             reuse_workspace=False,
         )
+
+        task_service.update_task_progress("report", str(report_id), progress=0.80, message="AI生成完成，正在处理报告内容")
+        _publish_progress(progress_hub, report_id, 0.80)
+
         html_details = ensure_report_html(details or "")
+
+        task_service.update_task_progress("report", str(report_id), progress=0.90, message="正在准备回调数据")
+        _publish_progress(progress_hub, report_id, 0.90)
+
         callback_payload = build_report_callback_payload(report_id, html_details, status="1")
 
         task_service.mark_business_result("report", str(report_id), callback_payload, status="1", message="报告生成完成")

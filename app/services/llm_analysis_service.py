@@ -392,35 +392,49 @@ def run_file_analysis_task(
     *,
     task_service: LLMTaskService,
     progress_hub: LLMProgressHub,
-    request_payload: Dict[str, Any],
+    request_params: Dict[str, Any],
     download_root: str,
     callback_url: str,
     callback_timeout: float,
 ) -> None:
-    params = request_payload["params"][0]
-    file_name = _as_text(params.get("fileName"))
-    file_path = _as_text(params.get("filePath"))
+    file_name = _as_text(request_params.get("fileName"))
+    file_path = _as_text(request_params.get("filePath"))
 
     try:
-        task_service.update_task_progress("file", file_name, progress=0.15, message="正在下载文件", status="1")
-        _publish_progress(progress_hub, file_name, 0.15)
+        task_service.update_task_progress("file", file_name, progress=0.10, message="正在下载文件", status="1")
+        _publish_progress(progress_hub, file_name, 0.10)
 
         downloaded_path = download_to_temp_file(file_path, file_name, download_root, timeout=60)
 
-        task_service.update_task_progress("file", file_name, progress=0.35, message="正在执行文档解析")
-        _publish_progress(progress_hub, file_name, 0.35)
+        task_service.update_task_progress("file", file_name, progress=0.30, message="文件下载完成，准备解析")
+        _publish_progress(progress_hub, file_name, 0.30)
+
+        task_service.update_task_progress("file", file_name, progress=0.45, message="正在初始化文档解析")
+        _publish_progress(progress_hub, file_name, 0.45)
 
         client = AnythingLLMClient(load_anythingllm_config())
+
+        task_service.update_task_progress("file", file_name, progress=0.55, message="正在执行AI分析")
+        _publish_progress(progress_hub, file_name, 0.55)
+
         raw_result = pipeline_process_file_with_rag(
             client=client,
             file_path=downloaded_path,
-            prompt=build_file_analysis_prompt(params),
+            prompt=build_file_analysis_prompt(request_params),
             workspace_name=f"llm-file-{int(time.time() * 1000)}",
             thread_name=f"analysis-{Path(file_name).stem}",
             user_id=1,
         )
+
+        task_service.update_task_progress("file", file_name, progress=0.75, message="AI分析完成，正在处理结果")
+        _publish_progress(progress_hub, file_name, 0.75)
+
         parsed_result = _parse_model_result(raw_result)
-        mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(downloaded_path))
+        mapped_result = map_analysis_result(parsed_result, request_params, original_text=_read_original_text(downloaded_path))
+
+        task_service.update_task_progress("file", file_name, progress=0.90, message="正在准备回调数据")
+        _publish_progress(progress_hub, file_name, 0.90)
+
         callback_payload = build_file_callback_payload(file_name, mapped_result, status="2")
 
         task_service.mark_business_result("file", file_name, callback_payload, status="2", message="解析完成")
