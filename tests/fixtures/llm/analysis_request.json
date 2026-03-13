@@ -1,0 +1,9 @@
+{
+  "businessType": "file",
+  "params": [
+    {
+      "fileName": "sample.txt",
+      "filePath": "http://127.0.0.1:8000/sample.txt"
+    }
+  ]
+}
