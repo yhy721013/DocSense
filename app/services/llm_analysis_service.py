@@ -17,7 +17,7 @@ from app.services.llm_download_service import download_to_temp_file
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
-
+from app.services.llm_translation_service import get_translation_service
 
 DEFAULT_COUNTRY_OPTIONS = [
     {"key": "02", "value": "美国"},
@@ -118,7 +118,7 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
         except (TypeError, ValueError):
             continue
 
-    raw_id = _first_non_empty_value(parsed_result, "architectureId", "领域体系ID")
+    raw_id = _first_non_empty_value(parsed_result, "architectureId", "领域体系 ID")
     if raw_id is not None:
         try:
             matched_id = int(raw_id)
@@ -138,8 +138,8 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
 
     name_candidates = []
     for value in (
-        _first_non_empty_value(parsed_result, "architectureName", "architecture", "领域体系名称"),
-        architecture_obj,
+            _first_non_empty_value(parsed_result, "architectureName", "architecture", "领域体系名称"),
+            architecture_obj,
     ):
         if value in (None, "", [], {}):
             continue
@@ -281,13 +281,14 @@ def _extract_title(original_text: str) -> str:
 
 
 def _extract_source(original_text: str) -> str:
-    match = re.search(r"【([^】]+?)(\d{4}年\d{1,2}月\d{1,2}日)", original_text)
+    match = re.search(r"([^】]+?)(\d{4}年\d{1,2}月\d{1,2}日)", original_text)
     if match:
         return match.group(1).strip()
     return ""
 
 
-def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str, Any], original_text: str = "") -> Dict[str, Any]:
+def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str, Any], original_text: str = "") -> Dict[
+    str, Any]:
     file_name = _as_text(request_params.get("fileName"))
     ranges = build_effective_analysis_ranges(request_params)
     file_item = parsed_result.get("fileDataItem")
@@ -316,7 +317,8 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
     resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
     resolved_language = _resolve_field(parsed_result, file_item, "language", "语种")
-    normalized_original_text = _as_text(original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
+    normalized_original_text = _as_text(
+        original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
     extracted_title = _extract_title(normalized_original_text)
 
     return {
@@ -332,7 +334,8 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
             "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
             "score": _round_score(_first_non_empty_value(parsed_result, "score", "评分")),
             "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
-            "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(normalized_original_text),
+            "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(
+                normalized_original_text),
             "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
             "language": resolved_language or _infer_language(normalized_original_text),
             "dataFormat": _resolve_field(parsed_result, file_item, "dataFormat", "资料格式"),
@@ -340,12 +343,77 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
             "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
             "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),
             "documentOverview": _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述")
-            or extracted_title,
+                                or extracted_title,
             "originalText": normalized_original_text,
             "documentTranslationOne": "",
             "documentTranslationTwo": "",
         },
     }
+
+
+def enrich_with_translations(
+        mapped_result: Dict[str, Any],
+        file_path: str,
+        enable_full_translation: bool = False,
+) -> Dict[str, Any]:
+    """
+    为映射结果添加翻译内容
+
+    :param mapped_result: map_analysis_result 返回的映射结果
+    :param file_path: 原始文件路径
+    :param enable_full_translation: 是否启用全文翻译（否则只翻译摘要）
+    :return: 更新后的映射结果
+    """
+    try:
+        translation_service = get_translation_service()
+
+        # 检查是否需要翻译
+        file_item = mapped_result.get("fileDataItem", {})
+        original_text = file_item.get("originalText", "")
+        summary = file_item.get("summary", "")
+
+        if not original_text and not summary:
+            return mapped_result
+
+        if enable_full_translation:
+            # 全文翻译模式：翻译整个文档
+            print(f"[LLMAnalysis] 开始全文翻译：{file_path}")
+
+            # 【新增】定义进度回调函数，将翻译进度反馈到任务状态
+            def translation_progress_callback(progress: float, message: str):
+                # 计算总体进度（翻译占 0.35~0.95 区间，共 0.6 权重）
+                overall_progress = 0.35 + (progress * 0.6)
+                print(f"[LLMAnalysis] 翻译进度：{message} ({overall_progress:.0%})")
+
+            # 设置进度回调
+            translation_service.set_progress_callback(translation_progress_callback)
+
+            translated_text, bilingual_html = translation_service.translate_document(
+                file_path=file_path,
+                target_lang="Chinese",
+                translate_all=0,
+            )
+
+            if translated_text:
+                mapped_result["fileDataItem"]["documentTranslationOne"] = translated_text
+                mapped_result["fileDataItem"]["documentTranslationTwo"] = bilingual_html or translated_text
+            else:
+                # 翻译失败时，尝试只翻译摘要
+                if summary:
+                    translated_summary = translation_service.translate_text_only(summary)
+                    mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
+        else:
+            # 快速模式：只翻译摘要
+            if summary:
+                print(f"[LLMAnalysis] 翻译摘要：{summary[:50]}...")
+                translated_summary = translation_service.translate_text_only(summary)
+                mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
+
+        return mapped_result
+
+    except Exception as e:
+        print(f"[LLMAnalysis] 翻译过程中出错：{e}，返回未翻译的结果")
+        return mapped_result
 
 
 def build_file_callback_payload(file_name: str, mapped_result: Dict[str, Any], status: str) -> Dict[str, Any]:
@@ -389,13 +457,13 @@ def _read_original_text(file_path: str) -> str:
 
 
 def run_file_analysis_task(
-    *,
-    task_service: LLMTaskService,
-    progress_hub: LLMProgressHub,
-    request_payload: Dict[str, Any],
-    download_root: str,
-    callback_url: str,
-    callback_timeout: float,
+        *,
+        task_service: LLMTaskService,
+        progress_hub: LLMProgressHub,
+        request_payload: Dict[str, Any],
+        download_root: str,
+        callback_url: str,
+        callback_timeout: float,
 ) -> None:
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
@@ -421,8 +489,18 @@ def run_file_analysis_task(
         )
         parsed_result = _parse_model_result(raw_result)
         mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(downloaded_path))
-        callback_payload = build_file_callback_payload(file_name, mapped_result, status="2")
 
+        # 【新增】在回调前添加翻译
+        task_service.update_task_progress("file", file_name, progress=0.65, message="正在翻译文档", status="1")
+        _publish_progress(progress_hub, file_name, 0.65)
+        # 根据配置决定是否启用全文翻译（可通过环境变量或请求参数控制）
+        enable_full_translation = params.get("enableFullTranslation", True)
+        enriched_result = enrich_with_translations(mapped_result, downloaded_path, enable_full_translation)
+        # 翻译完成后更新进度到 0.95（接近完成）
+        task_service.update_task_progress("file", file_name, progress=0.95, message="翻译完成，准备回调", status="1")
+        _publish_progress(progress_hub, file_name, 0.95)
+
+        callback_payload = build_file_callback_payload(file_name, enriched_result, status="2")
         task_service.mark_business_result("file", file_name, callback_payload, status="2", message="解析完成")
         _publish_progress(progress_hub, file_name, 1.0)
 
@@ -440,3 +518,4 @@ def run_file_analysis_task(
                 task_service.mark_callback_success("file", file_name)
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
+
