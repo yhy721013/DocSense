@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+# 在文件开头加载 .env
+from dotenv import load_dotenv
+load_dotenv()
 
 class CallbackHandler(BaseHTTPRequestHandler):
     output_dir = Path(".runtime/mock_callback")
@@ -32,8 +36,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Local callback receiver for DocSense integration tests")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=9000)
+    parser.add_argument("--host", default=os.getenv("MOCK_CALLBACK_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("MOCK_CALLBACK_PORT", "9000")))
     args = parser.parse_args()
 
     server = HTTPServer((args.host, args.port), CallbackHandler)
