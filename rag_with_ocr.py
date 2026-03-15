@@ -8,6 +8,10 @@ from __future__ import annotations
 import argparse
 from typing import Optional
 
+# 必须在其他导入之前加载 .env
+from dotenv import load_dotenv
+load_dotenv()
+
 from anythingllm_client import AnythingLLMClient
 from config import load_anythingllm_config
 from pipeline import process_file_with_rag as pipeline_process_file_with_rag

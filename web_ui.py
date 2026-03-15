@@ -8,13 +8,19 @@ from __future__ import annotations
 
 import os
 
+# 在导入 app 之前加载 .env
+from dotenv import load_dotenv
+load_dotenv()
+
 from app import create_app
 
 
 def main() -> None:
-    port = int(os.environ.get("WEB_UI_PORT", 5001))
     app = create_app()
-    app.run(host="127.0.0.1", port=port, debug=True)
+    host = os.environ.get("WEB_UI_HOST", "127.0.0.1")
+    port = int(os.environ.get("WEB_UI_PORT", 5001))
+    debug = os.environ.get("WEB_UI_DEBUG", "true").lower() in ("true", "1", "yes")
+    app.run(host=host, port=port, debug=debug)
 
 
 if __name__ == "__main__":

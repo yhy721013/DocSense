@@ -21,4 +21,4 @@ LLM_TASK_DB_PATH = Path(os.getenv("DOCSENSE_LLM_TASK_DB", str(RUNTIME_DIR / "llm
 LLM_TASK_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Web UI 限制：单次请求最大 500MB
-MAX_CONTENT_LENGTH = 500 * 1024 * 1024
+MAX_CONTENT_LENGTH = int(os.getenv("DOCSENSE_MAX_CONTENT_LENGTH", str(500 * 1024 * 1024)))
