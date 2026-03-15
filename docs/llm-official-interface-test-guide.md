@@ -192,6 +192,16 @@ pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1"
 
 #### 步骤 4：查看文件回调体
 
+当你调用了你的测试脚本之后，
+
+后端会自动启动一个耗时的模拟分析任务，
+
+分析完成后，它会把处理结果以一条 JSON 格式的回调请求，
+
+推送到你本地开启的模拟回调服务器里，
+
+并最终保存在 .runtime/mock_callback/last_callback.json 文件中。
+
 ```powershell
 Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8
 ```

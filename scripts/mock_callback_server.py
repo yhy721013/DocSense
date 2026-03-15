@@ -14,6 +14,14 @@ class CallbackHandler(BaseHTTPRequestHandler):
     output_dir = Path(".runtime/mock_callback")
 
     def do_POST(self) -> None:  # noqa: N802
+        # 只处理 /llm/callback 路径的请求
+        if self.path != "/llm/callback":
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b'{"error": "Not Found"}')
+            return
+            
         length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(length)
         text = raw_body.decode("utf-8", errors="replace")

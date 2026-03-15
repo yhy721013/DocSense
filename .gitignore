@@ -1,15 +1,23 @@
+# 测试工具和示例文件 | Test fixtures and sample files
 tests/fixtures/files/sample.txt
 
+# 用户上传的文件 | User uploaded files
 uploads/
 
+# Python 运行时和缓存文件 | Python runtime and cache files
 __pycache__/
 .runtime/
 .worktrees/
 
+# Python 虚拟环境 | Python virtual environments
 .venv/
 venv/
 
+# IDE 和编辑器配置目录 | IDE and editor configuration directories
 .idea/
 .vscode/
 .cursor/
 .cursorignore
+
+# 环境变量配置文件 | Environment variables
+.env
