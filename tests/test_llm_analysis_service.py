@@ -1,4 +1,3 @@
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +6,7 @@ from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
 from app.services.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
+from tests import workspace_tempdir
 
 
 class LLMAnalysisServiceTests(unittest.TestCase):
@@ -191,7 +191,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
     @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
     @patch("app.services.llm_analysis_service.download_to_temp_file")
     def test_run_file_analysis_task_marks_success(self, mock_download, _mock_pipeline, _mock_callback):
-        with tempfile.TemporaryDirectory() as tmp:
+        with workspace_tempdir() as tmp:
             sample = Path(tmp) / "sample.txt"
             sample.write_text("sample", encoding="utf-8")
             mock_download.return_value = str(sample)
@@ -202,6 +202,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     {
                         "fileName": "sample.txt",
                         "filePath": "http://127.0.0.1:8000/sample.txt",
+                        "enableFullTranslation": False,
                         "country": [],
                         "channel": [],
                         "maturity": [],
@@ -234,3 +235,54 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             self.assertEqual(task["callback_status"], "success")
             self.assertEqual(task["result_payload"]["msg"], "解析成功")
             self.assertEqual(events[-1]["data"]["progress"], 1.0)
+
+    @patch("app.services.llm_analysis_service.run_file_analysis_task")
+    def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):
+        with workspace_tempdir() as tmp:
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "a.txt",
+                        "filePath": "http://127.0.0.1:8000/a.txt",
+                    },
+                    {
+                        "fileName": "b.txt",
+                        "filePath": "http://127.0.0.1:8000/b.txt",
+                    },
+                ],
+            }
+
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
+            task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
+            hub = LLMProgressHub()
+            transitions = []
+
+            def capture_transition(*, task_service, request_payload, **kwargs):
+                current = request_payload["params"][0]["fileName"]
+                status_a = task_service.get_task("file", "a.txt")["status"]
+                status_b = task_service.get_task("file", "b.txt")["status"]
+                transitions.append((current, status_a, status_b))
+                task_service.mark_business_result("file", current, {"ok": True}, status="2", message="完成")
+
+            mock_run_single.side_effect = capture_transition
+
+            from app.services.llm_analysis_service import run_file_analysis_batch_task
+
+            run_file_analysis_batch_task(
+                task_service=task_service,
+                progress_hub=hub,
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="http://127.0.0.1:9000/llm/callback",
+                callback_timeout=5,
+            )
+
+            self.assertEqual(
+                transitions,
+                [
+                    ("a.txt", "1", "0"),
+                    ("b.txt", "2", "1"),
+                ],
+            )

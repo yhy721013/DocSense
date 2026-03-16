@@ -121,8 +121,8 @@ class LLMTaskService:
         assert task is not None
         return task
 
-    def create_file_task(self, file_name: str, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._upsert_task("file", file_name, request_payload, status="1")
+    def create_file_task(self, file_name: str, request_payload: Dict[str, Any], status: str = "1") -> Dict[str, Any]:
+        return self._upsert_task("file", file_name, request_payload, status=status)
 
     def create_report_task(self, report_id: int, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._upsert_task("report", str(report_id), request_payload, status="0")
@@ -140,6 +140,14 @@ class LLMTaskService:
                 (business_type, business_key),
             ).fetchone()
         return self._row_to_task(row) if row else None
+
+    def get_tasks(self, business_type: str, business_keys: list[str]) -> list[Dict[str, Any]]:
+        tasks: list[Dict[str, Any]] = []
+        for business_key in business_keys:
+            task = self.get_task(business_type, business_key)
+            if task is not None:
+                tasks.append(task)
+        return tasks
 
     def mark_business_completed(
         self,

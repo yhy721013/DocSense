@@ -3,6 +3,9 @@
   "params": [
     {
       "fileName": "sample.txt"
+    },
+    {
+      "fileName": "sample-copy.txt"
     }
   ]
 }

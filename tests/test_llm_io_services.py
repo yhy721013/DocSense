@@ -1,16 +1,16 @@
-import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from app.services.llm_callback_service import post_callback_payload
 from app.services.llm_download_service import download_to_temp_file
+from tests import workspace_tempdir
 
 
 class LLMIOServicesTests(unittest.TestCase):
     @patch("app.services.llm_download_service.requests.get")
     def test_download_to_temp_file_saves_content(self, mock_get):
         mock_get.return_value = Mock(ok=True, content=b"demo", headers={})
-        with tempfile.TemporaryDirectory() as tmp:
+        with workspace_tempdir() as tmp:
             path = download_to_temp_file("http://example.test/file.pdf", "demo.pdf", tmp, timeout=10)
             self.assertTrue(path.endswith("demo.pdf"))
 

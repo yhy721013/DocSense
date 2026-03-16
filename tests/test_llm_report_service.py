@@ -1,4 +1,3 @@
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -6,6 +5,7 @@ from unittest.mock import patch
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_report_service import build_report_callback_payload, ensure_report_html
 from app.services.llm_task_service import LLMTaskService
+from tests import workspace_tempdir
 
 
 class LLMReportServiceTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class LLMReportServiceTests(unittest.TestCase):
     @patch("app.services.llm_report_service.prepare_upload_files")
     @patch("app.services.llm_report_service.download_to_temp_file")
     def test_run_report_task_marks_success(self, mock_download, mock_prepare, _mock_rag, _mock_callback):
-        with tempfile.TemporaryDirectory() as tmp:
+        with workspace_tempdir() as tmp:
             sample = Path(tmp) / "sample.txt"
             sample.write_text("sample", encoding="utf-8")
             mock_download.return_value = str(sample)

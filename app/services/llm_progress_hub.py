@@ -26,6 +26,9 @@ class LLMProgressHub:
         if not self._subscribers[key]:
             self._subscribers.pop(key, None)
 
+    def get_latest(self, business_type: str, business_key: str) -> Dict[str, Any] | None:
+        return self._latest.get((business_type, business_key))
+
     def publish(self, business_type: str, business_key: str, payload: Dict[str, Any]) -> None:
         key = (business_type, business_key)
         self._latest[key] = payload

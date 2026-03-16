@@ -1,7 +1,8 @@
 param(
     [string]$WsUrl = "",
     [string]$PayloadPath = "tests/fixtures/llm/check_task_file_request.json",
-    [int]$ReadCount = 5
+    [int]$ReadCount = 5,
+    [switch]$SendQuery
 )
 
 if ([string]::IsNullOrEmpty($WsUrl)) {
@@ -32,6 +33,20 @@ $socket.SendAsync(
     $true,
     $cts.Token
 ).GetAwaiter().GetResult()
+
+if ($SendQuery) {
+    $queryPayload = (Get-Content -Path $PayloadPath -Raw -Encoding utf8 | ConvertFrom-Json)
+    $queryPayload | Add-Member -NotePropertyName action -NotePropertyValue query -Force
+    $queryBody = $queryPayload | ConvertTo-Json -Depth 10 -Compress
+    $queryBytes = [System.Text.Encoding]::UTF8.GetBytes($queryBody)
+    $querySegment = [System.ArraySegment[byte]]::new($queryBytes)
+    $socket.SendAsync(
+        $querySegment,
+        [System.Net.WebSockets.WebSocketMessageType]::Text,
+        $true,
+        $cts.Token
+    ).GetAwaiter().GetResult()
+}
 
 for ($i = 0; $i -lt $ReadCount -and $socket.State -eq [System.Net.WebSockets.WebSocketState]::Open; $i++) {
     $buffer = New-Object byte[] 4096

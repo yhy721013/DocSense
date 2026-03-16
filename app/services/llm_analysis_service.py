@@ -281,7 +281,7 @@ def _extract_title(original_text: str) -> str:
 
 
 def _extract_source(original_text: str) -> str:
-    match = re.search(r"([^】]+?)(\d{4}年\d{1,2}月\d{1,2}日)", original_text)
+    match = re.search(r"【([^】]+?)\d{4}年\d{1,2}月\d{1,2}日", original_text)
     if match:
         return match.group(1).strip()
     return ""
@@ -518,4 +518,35 @@ def run_file_analysis_task(
                 task_service.mark_callback_success("file", file_name)
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
+
+
+def run_file_analysis_batch_task(
+        *,
+        task_service: LLMTaskService,
+        progress_hub: LLMProgressHub,
+        request_payload: Dict[str, Any],
+        download_root: str,
+        callback_url: str,
+        callback_timeout: float,
+) -> None:
+    params_list = request_payload.get("params", [])
+    for index, params in enumerate(params_list):
+        if not isinstance(params, dict):
+            continue
+        file_name = _as_text(params.get("fileName"))
+        if not file_name:
+            continue
+
+        if index > 0:
+            task_service.update_task_progress("file", file_name, progress=0.0, message="准备开始解析", status="1")
+            _publish_progress(progress_hub, file_name, 0.0)
+
+        run_file_analysis_task(
+            task_service=task_service,
+            progress_hub=progress_hub,
+            request_payload={"businessType": "file", "params": [params]},
+            download_root=download_root,
+            callback_url=callback_url,
+            callback_timeout=callback_timeout,
+        )
 

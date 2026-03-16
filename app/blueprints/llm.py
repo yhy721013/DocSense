@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify, request
 from flask_sock import Sock
 
 from config import load_llm_integration_config
-from app.services.llm_analysis_service import run_file_analysis_task
+from app.services.llm_analysis_service import run_file_analysis_batch_task, run_file_analysis_task
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_report_service import run_report_task
 from app.services.llm_task_service import LLMTaskService
@@ -22,12 +22,16 @@ llm_config = load_llm_integration_config()
 progress_hub = LLMProgressHub()
 
 
-def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
     params = payload.get("params")
     if not isinstance(params, list) or not params:
-        return None
-    first = params[0]
-    return first if isinstance(first, dict) else None
+        return []
+    return [item for item in params if isinstance(item, dict)]
+
+
+def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    params = _get_params(payload)
+    return params[0] if params else None
 
 
 def _extract_progress_key(payload: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
@@ -51,35 +55,103 @@ def _extract_progress_key(payload: Dict[str, Any]) -> tuple[Optional[str], Optio
     return business_type, str(report_id)
 
 
+def _parse_progress_command(payload: Dict[str, Any]) -> Dict[str, Any]:
+    action = payload.get("action") or "subscribe"
+    if action not in {"subscribe", "unsubscribe", "query"}:
+        raise ValueError("不支持的action")
+
+    business_type = payload.get("businessType")
+    if business_type not in {"file", "report"}:
+        raise ValueError("businessType无效")
+
+    params_list = _get_params(payload)
+    if not params_list:
+        raise ValueError("params不能为空")
+
+    keys = []
+    for params in params_list:
+        if business_type == "file":
+            file_name = params.get("fileName")
+            if not isinstance(file_name, str) or not file_name.strip():
+                raise ValueError("fileName不能为空")
+            keys.append((business_type, file_name.strip()))
+        else:
+            report_id = params.get("reportId")
+            if report_id is None:
+                raise ValueError("reportId不能为空")
+            keys.append((business_type, str(report_id)))
+
+    return {"action": action, "business_type": business_type, "keys": keys}
+
+
+def _build_progress_snapshot(business_type: str, business_key: str, task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data: Dict[str, Any] = {
+        "fileName": business_key if business_type == "file" else None,
+        "reportId": int(business_key) if business_type == "report" else None,
+        "progress": 0.0,
+    }
+    if task is not None:
+        data["progress"] = task["progress"]
+    else:
+        data["exists"] = False
+
+    if business_type == "file":
+        data.pop("reportId", None)
+    else:
+        data.pop("fileName", None)
+
+    return {"businessType": business_type, "data": data}
+
+
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
     payload = request.get_json(silent=True) or {}
     if payload.get("businessType") != "file":
         return jsonify({"error": "businessType必须为file"}), 400
 
-    params = _get_first_param(payload)
-    if params is None:
+    params_list = _get_params(payload)
+    if not params_list:
         return jsonify({"error": "params不能为空"}), 400
-    file_name = params.get("fileName")
-    if not isinstance(file_name, str) or not file_name.strip():
-        return jsonify({"error": "fileName不能为空"}), 400
-    file_path = params.get("filePath")
-    if not isinstance(file_path, str) or not file_path.strip():
-        return jsonify({"error": "filePath不能为空"}), 400
 
-    task = task_service.create_file_task(file_name=file_name.strip(), request_payload=payload)
-    progress_hub.publish(
-        "file",
-        file_name.strip(),
-        {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
-    )
+    seen_file_names = set()
+    for params in params_list:
+        file_name = params.get("fileName")
+        if not isinstance(file_name, str) or not file_name.strip():
+            return jsonify({"error": "fileName不能为空"}), 400
+        normalized_name = file_name.strip()
+        if normalized_name in seen_file_names:
+            return jsonify({"error": "fileName不能重复"}), 400
+        seen_file_names.add(normalized_name)
+
+        file_path = params.get("filePath")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return jsonify({"error": "filePath不能为空"}), 400
+
+        existing_task = task_service.get_task("file", normalized_name)
+        if existing_task and existing_task["status"] in {"0", "1"}:
+            return jsonify({"error": "任务正在处理中"}), 409
+
+    tasks = []
+    for index, params in enumerate(params_list):
+        file_name = params["fileName"]
+        task = task_service.create_file_task(
+            file_name=file_name.strip(),
+            request_payload={"businessType": "file", "params": [params]},
+            status="1" if index == 0 else "0",
+        )
+        tasks.append(task)
+        progress_hub.publish(
+            "file",
+            file_name.strip(),
+            {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
+        )
 
     worker = threading.Thread(
-        target=run_file_analysis_task,
+        target=run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task,
         kwargs={
             "task_service": task_service,
             "progress_hub": progress_hub,
-            "request_payload": payload,
+            "request_payload": payload if len(tasks) > 1 else {"businessType": "file", "params": [params_list[0]]},
             "download_root": llm_config.download_dir,
             "callback_url": llm_config.callback_url or "",
             "callback_timeout": llm_config.callback_timeout,
@@ -87,7 +159,9 @@ def llm_analysis():
         daemon=True,
     )
     worker.start()
-    return jsonify({"message": "accepted", "businessType": "file", "task": task}), 202
+    if len(tasks) == 1:
+        return jsonify({"message": "accepted", "businessType": "file", "task": tasks[0]}), 202
+    return jsonify({"message": "accepted", "businessType": "file", "tasks": tasks}), 202
 
 
 @llm_bp.post("/llm/generate-report")
@@ -136,81 +210,121 @@ def llm_check_task():
     if business_type not in {"file", "report"}:
         return jsonify({"error": "businessType无效"}), 400
 
-    params = _get_first_param(payload)
-    if params is None:
+    params_list = _get_params(payload)
+    if not params_list:
         return jsonify({"error": "params不能为空"}), 400
 
-    if business_type == "file":
-        business_key = params.get("fileName")
-        if not isinstance(business_key, str) or not business_key.strip():
-            return jsonify({"error": "fileName不能为空"}), 400
-        response_key = "fileName"
-        normalized_key = business_key.strip()
-    else:
-        report_id = params.get("reportId")
-        if report_id is None:
-            return jsonify({"error": "reportId不能为空"}), 400
-        response_key = "reportId"
-        normalized_key = str(report_id)
+    items = []
+    for params in params_list:
+        if business_type == "file":
+            business_key = params.get("fileName")
+            if not isinstance(business_key, str) or not business_key.strip():
+                return jsonify({"error": "fileName不能为空"}), 400
+            response_key = "fileName"
+            normalized_key = business_key.strip()
+            response_value: Any = normalized_key
+        else:
+            report_id = params.get("reportId")
+            if report_id is None:
+                return jsonify({"error": "reportId不能为空"}), 400
+            response_key = "reportId"
+            normalized_key = str(report_id)
+            response_value = int(normalized_key)
 
-    task = task_service.get_task(business_type, normalized_key)
-    if not task:
-        return jsonify({"error": "任务不存在"}), 404
+        task = task_service.get_task(business_type, normalized_key)
+        if not task:
+            if len(params_list) == 1:
+                return jsonify({"error": "任务不存在"}), 404
+            items.append({response_key: response_value, "exists": False, "message": "任务不存在"})
+            continue
 
-    replayed = task_service.replay_callback_if_needed(
-        business_type,
-        normalized_key,
-        callback_url=llm_config.callback_url or "",
-        timeout=llm_config.callback_timeout,
-    )
-    task = task_service.get_task(business_type, normalized_key)
-    assert task is not None
+        replayed = task_service.replay_callback_if_needed(
+            business_type,
+            normalized_key,
+            callback_url=llm_config.callback_url or "",
+            timeout=llm_config.callback_timeout,
+        )
+        task = task_service.get_task(business_type, normalized_key)
+        assert task is not None
 
-    return jsonify(
-        {
-            "businessType": business_type,
-            "data": {
-                response_key: int(normalized_key) if business_type == "report" else normalized_key,
+        items.append(
+            {
+                response_key: response_value,
                 "status": task["status"],
                 "progress": task["progress"],
                 "callbackStatus": task["callback_status"],
-            },
-            "callbackReplayed": replayed,
-        }
-    )
+                "callbackReplayed": replayed,
+            }
+        )
+
+    if len(items) == 1:
+        item = items[0]
+        callback_replayed = bool(item.pop("callbackReplayed", False))
+        return jsonify({"businessType": business_type, "data": item, "callbackReplayed": callback_replayed})
+    return jsonify({"businessType": business_type, "data": items})
 
 
 @sock.route("/llm/progress")
 def llm_progress(ws):
-    raw_message = ws.receive()
-    if raw_message is None:
-        return
-
+    subscriptions: dict[tuple[str, str], Any] = {}
     try:
-        payload = json.loads(raw_message)
-    except json.JSONDecodeError:
-        ws.send(json.dumps({"error": "订阅消息不是合法JSON"}, ensure_ascii=False))
-        return
+        while True:
+            raw_message = ws.receive()
+            if raw_message is None:
+                break
 
-    business_type, business_key = _extract_progress_key(payload)
-    if not business_type or not business_key:
-        ws.send(json.dumps({"error": "订阅参数无效"}, ensure_ascii=False))
-        return
+            try:
+                payload = json.loads(raw_message)
+            except json.JSONDecodeError:
+                ws.send(json.dumps({"type": "error", "message": "订阅消息不是合法JSON"}, ensure_ascii=False))
+                continue
 
-    def _forward(message: Dict[str, Any]) -> None:
-        ws.send(json.dumps(message, ensure_ascii=False))
+            try:
+                command = _parse_progress_command(payload)
+            except ValueError as exc:
+                ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
+                continue
 
-    progress_hub.subscribe(business_type, business_key, _forward)
-    try:
-        current_task = task_service.get_task(business_type, business_key)
-        if current_task is not None:
-            message = {"businessType": business_type, "data": {"progress": current_task["progress"]}}
-            if business_type == "file":
-                message["data"]["fileName"] = business_key
-            else:
-                message["data"]["reportId"] = int(business_key)
-            _forward(message)
-        while ws.receive() is not None:
-            continue
+            action = command["action"]
+            keys = command["keys"]
+
+            if action == "subscribe":
+                for business_type, business_key in keys:
+                    key = (business_type, business_key)
+                    if key in subscriptions:
+                        continue
+
+                    def _forward(message: Dict[str, Any]) -> None:
+                        ws.send(json.dumps(message, ensure_ascii=False))
+
+                    subscriptions[key] = _forward
+                    progress_hub.subscribe(business_type, business_key, _forward)
+
+                    if progress_hub.get_latest(business_type, business_key) is None:
+                        current_task = task_service.get_task(business_type, business_key)
+                        ws.send(json.dumps(_build_progress_snapshot(business_type, business_key, current_task), ensure_ascii=False))
+
+                ws.send(json.dumps({"type": "ack", "action": action, "count": len(keys)}, ensure_ascii=False))
+                continue
+
+            if action == "query":
+                for business_type, business_key in keys:
+                    latest = progress_hub.get_latest(business_type, business_key)
+                    if latest is not None:
+                        ws.send(json.dumps(latest, ensure_ascii=False))
+                        continue
+                    current_task = task_service.get_task(business_type, business_key)
+                    ws.send(json.dumps(_build_progress_snapshot(business_type, business_key, current_task), ensure_ascii=False))
+
+                ws.send(json.dumps({"type": "ack", "action": action, "count": len(keys)}, ensure_ascii=False))
+                continue
+
+            for business_type, business_key in keys:
+                callback = subscriptions.pop((business_type, business_key), None)
+                if callback is not None:
+                    progress_hub.unsubscribe(business_type, business_key, callback)
+
+            ws.send(json.dumps({"type": "ack", "action": action, "count": len(keys)}, ensure_ascii=False))
     finally:
-        progress_hub.unsubscribe(business_type, business_key, _forward)
+        for (business_type, business_key), callback in list(subscriptions.items()):
+            progress_hub.unsubscribe(business_type, business_key, callback)

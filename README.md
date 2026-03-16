@@ -290,6 +290,7 @@ web_ui.py
    - `pwsh -NoLogo -Command "./scripts/test_llm_report.ps1"`
    - `pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1"`
    - `pwsh -NoLogo -Command "./scripts/test_llm_progress.ps1"`
+   - 若需验证 WebSocket 主动查询当前快照：`pwsh -NoLogo -Command "./scripts/test_llm_progress.ps1 -SendQuery"`
 
 仓库内已提供：
 
@@ -330,10 +331,17 @@ static/
 | POST | `/api/chat/setup` | 创建对话工作区（上传文件 + Embedding） | JSON：`file_paths[]` | `{workspace_slug, thread_slug, document_ids, message}` 或错误 |
 | POST | `/api/chat/message` | 发送对话消息 | JSON：`workspace_slug`、`thread_slug`、`message`、`document_ids[]` | `{response}` 或错误 |
 | POST | `/api/chat/upload` | 对话上传（未实现） | - | 501 | 
-| POST | `/llm/analysis` | 甲方文件解析正式接口 | JSON：`businessType=file` + `params[0]` | 受理结果 JSON |
+| POST | `/llm/analysis` | 甲方文件解析正式接口 | JSON：`businessType=file` + `params[]`，支持单文件或多文件；多文件按顺序串行处理 | 单文件返回 `{task}`，多文件返回 `{tasks}` |
 | POST | `/llm/generate-report` | 甲方报告生成正式接口 | JSON：`businessType=report` + `params[0]` | 受理结果 JSON |
-| POST | `/llm/check-task` | 按业务主键查询任务并补发回调 | JSON：`businessType` + `params[0]` | `{businessType, data, callbackReplayed}` |
-| WS | `/llm/progress` | 甲方任务进度推送接口 | 首条消息发送订阅 JSON | 进度 JSON |
+| POST | `/llm/check-task` | 按业务主键查询任务并补发回调 | JSON：`businessType` + `params[]`；单项查询保持单对象返回，批量查询返回 `data[]` | 单项 `{businessType, data, callbackReplayed}`；批量 `{businessType, data[]}` |
+| WS | `/llm/progress` | 甲方任务进度推送接口 | 兼容首条订阅 JSON；也支持 `subscribe`、`query`、`unsubscribe` 动作，单连接可订阅多个任务 | 进度 JSON 与 `ack/error` 控制消息 |
+
+### `/llm/*` 扩展说明
+
+- `/llm/analysis` 在保留单文件兼容的前提下，额外支持 `params` 中传多个文件对象。
+- 多文件请求不会并行解析，而是同一批次内串行处理：前一个文件结束后才开始下一个文件。
+- `/llm/check-task` 允许一次查询多个业务主键。
+- `/llm/progress` 兼容旧的首条订阅消息，也支持在同一 WebSocket 连接内追加订阅、取消订阅和主动查询当前快照。
 
 ## Git Commit 规范
 
