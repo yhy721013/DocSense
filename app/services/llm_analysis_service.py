@@ -18,6 +18,7 @@ from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
 from app.services.llm_translation_service import get_translation_service
+from app.services.knowledge_base.database_service import DatabaseService
 
 DEFAULT_COUNTRY_OPTIONS = [
     {"key": "02", "value": "美国"},
@@ -459,6 +460,7 @@ def _read_original_text(file_path: str) -> str:
 def run_file_analysis_task(
         *,
         task_service: LLMTaskService,
+        kb_service: DatabaseService,
         progress_hub: LLMProgressHub,
         request_payload: Dict[str, Any],
         download_root: str,
@@ -489,6 +491,47 @@ def run_file_analysis_task(
         )
         parsed_result = _parse_model_result(raw_result)
         mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(downloaded_path))
+
+        try:
+            architecture_id = mapped_result.get("architectureId")
+            if architecture_id:
+                workspace_slug = kb_service.get_workspace_slug(architecture_id)
+                if not workspace_slug:
+                    workspace_name = f"architectureId-{architecture_id}"
+                    ws_info = client.create_workspace(workspace_name, user_id=1)
+                    if ws_info and ws_info.get("slug"):
+                        workspace_slug = ws_info["slug"]
+                        kb_service.add_workspace(architecture_id, workspace_slug)
+
+                if workspace_slug:
+                    doc_info = client.upload_document(downloaded_path, user_id=1)
+                    if doc_info:
+                        doc_id = doc_info.get("id") or doc_info.get("docId")
+                        filename = Path(downloaded_path).name
+                        doc_relative_path = (
+                            doc_info.get("location")
+                            or doc_info.get("docpath")
+                            or f"custom-documents/{filename}-{doc_id}.json"
+                        )
+                        
+                        client.wait_for_processing(doc_relative_path)
+                        
+                        metadata = {
+                            "file_name": file_name,
+                            "architecture_id": architecture_id,
+                        }
+                        for k in ["country", "channel", "maturity", "format"]:
+                            if mapped_result.get(k):
+                                metadata[k] = mapped_result[k]
+                                
+                        if not client.update_embeddings(doc_relative_path, workspace_slug, user_id=1, metadata=metadata):
+                            alt_path = f"custom-documents/{doc_id}.json"
+                            client.update_embeddings(alt_path, workspace_slug, user_id=1, metadata=metadata)
+                            
+                        if doc_id:
+                            kb_service.save_document_record(file_name, architecture_id, str(doc_id))
+        except Exception as e:
+            print(f"[KnowledgeBase] Failed to store document to workspace: {e}")
 
         # 【新增】在回调前添加翻译
         task_service.update_task_progress("file", file_name, progress=0.65, message="正在翻译文档", status="1")
@@ -523,6 +566,7 @@ def run_file_analysis_task(
 def run_file_analysis_batch_task(
         *,
         task_service: LLMTaskService,
+        kb_service: DatabaseService,
         progress_hub: LLMProgressHub,
         request_payload: Dict[str, Any],
         download_root: str,
@@ -543,6 +587,7 @@ def run_file_analysis_batch_task(
 
         run_file_analysis_task(
             task_service=task_service,
+            kb_service=kb_service,
             progress_hub=progress_hub,
             request_payload={"businessType": "file", "params": [params]},
             download_root=download_root,

@@ -12,12 +12,14 @@ from app.services.llm_analysis_service import run_file_analysis_batch_task, run_
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_report_service import run_report_task
 from app.services.llm_task_service import LLMTaskService
-from app.settings import LLM_TASK_DB_PATH
+from app.settings import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH
+from app.services.knowledge_base.database_service import DatabaseService
 
 
 llm_bp = Blueprint("llm", __name__)
 sock = Sock()
 task_service = LLMTaskService(str(LLM_TASK_DB_PATH))
+kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
 llm_config = load_llm_integration_config()
 progress_hub = LLMProgressHub()
 
@@ -150,6 +152,7 @@ def llm_analysis():
         target=run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task,
         kwargs={
             "task_service": task_service,
+            "kb_service": kb_service,
             "progress_hub": progress_hub,
             "request_payload": payload if len(tasks) > 1 else {"businessType": "file", "params": [params_list[0]]},
             "download_root": llm_config.download_dir,

@@ -336,6 +336,7 @@ class AnythingLLMClient:
         doc_path: str,
         workspace_slug: str,
         user_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if not doc_path:
             return False
@@ -369,6 +370,18 @@ class AnythingLLMClient:
                 json=pin_payload,
                 timeout=self.config.timeout,
             )
+
+            # 更新文档元数据
+            if metadata:
+                meta_url = f"{self.config.base_url}/document/meta"
+                meta_payload = {"location": cleaned_path, "metadata": metadata}
+                self.session.post(
+                    meta_url,
+                    headers=self._json_headers(user_id),
+                    json=meta_payload,
+                    timeout=self.config.timeout,
+                )
+
             return True
         except Exception:
             return False
