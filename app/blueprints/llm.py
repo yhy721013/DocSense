@@ -12,6 +12,7 @@ from app.services.llm_analysis_service import run_file_analysis_batch_task, run_
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_report_service import run_report_task
 from app.services.llm_task_service import LLMTaskService
+from app.services.llm_weaponry_service import run_weaponry_task
 from app.settings import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH
 from app.services.knowledge_base.database_service import DatabaseService
 
@@ -38,7 +39,7 @@ def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _extract_progress_key(payload: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     business_type = payload.get("businessType")
-    if business_type not in {"file", "report"}:
+    if business_type not in {"file", "report", "weaponry"}:
         return None, None
 
     params = _get_first_param(payload)
@@ -50,6 +51,12 @@ def _extract_progress_key(payload: Dict[str, Any]) -> tuple[Optional[str], Optio
         if not isinstance(file_name, str) or not file_name.strip():
             return None, None
         return business_type, file_name.strip()
+
+    if business_type == "weaponry":
+        architecture_id = params.get("architectureId")
+        if architecture_id is None:
+            return None, None
+        return business_type, str(architecture_id)
 
     report_id = params.get("reportId")
     if report_id is None:
@@ -63,7 +70,7 @@ def _parse_progress_command(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("不支持的action")
 
     business_type = payload.get("businessType")
-    if business_type not in {"file", "report"}:
+    if business_type not in {"file", "report", "weaponry"}:
         raise ValueError("businessType无效")
 
     params_list = _get_params(payload)
@@ -77,6 +84,11 @@ def _parse_progress_command(payload: Dict[str, Any]) -> Dict[str, Any]:
             if not isinstance(file_name, str) or not file_name.strip():
                 raise ValueError("fileName不能为空")
             keys.append((business_type, file_name.strip()))
+        elif business_type == "weaponry":
+            architecture_id = params.get("architectureId")
+            if architecture_id is None:
+                raise ValueError("architectureId不能为空")
+            keys.append((business_type, str(architecture_id)))
         else:
             report_id = params.get("reportId")
             if report_id is None:
@@ -88,19 +100,19 @@ def _parse_progress_command(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_progress_snapshot(business_type: str, business_key: str, task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     data: Dict[str, Any] = {
-        "fileName": business_key if business_type == "file" else None,
-        "reportId": int(business_key) if business_type == "report" else None,
         "progress": 0.0,
     }
+    if business_type == "file":
+        data["fileName"] = business_key
+    elif business_type == "report":
+        data["reportId"] = int(business_key)
+    elif business_type == "weaponry":
+        data["architectureId"] = business_key
+
     if task is not None:
         data["progress"] = task["progress"]
     else:
         data["exists"] = False
-
-    if business_type == "file":
-        data.pop("reportId", None)
-    else:
-        data.pop("fileName", None)
 
     return {"businessType": business_type, "data": data}
 
@@ -206,11 +218,71 @@ def llm_generate_report():
     return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
 
 
+@llm_bp.post("/llm/weaponry")
+def llm_weaponry():
+    payload = request.get_json(silent=True) or {}
+    if payload.get("businessType") != "weaponry":
+        return jsonify({"error": "businessType必须为weaponry"}), 400
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return jsonify({"error": "params不能为空"}), 400
+
+    architecture_id = params.get("architectureId")
+    if architecture_id is None:
+        return jsonify({"error": "architectureId不能为空"}), 400
+
+    field_list = params.get("weaponryTemplateFieldList")
+    if not isinstance(field_list, list) or not field_list:
+        return jsonify({"error": "weaponryTemplateFieldList不能为空"}), 400
+
+    # 校验 analyseData / analyseDataSource 必须为空
+    for field in field_list:
+        if field.get("analyseData") or field.get("analyseDataSource"):
+            return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
+        if field.get("fieldType") == "TABLE":
+            for row in (field.get("tableFieldList") or []):
+                if isinstance(row, list):
+                    for cell in row:
+                        if isinstance(cell, dict) and (cell.get("analyseData") or cell.get("analyseDataSource")):
+                            return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
+
+    architecture_id_str = str(architecture_id)
+    existing_task = task_service.get_task("weaponry", architecture_id_str)
+    if existing_task and existing_task["status"] in {"0", "1"}:
+        return jsonify({"error": "任务正在处理中"}), 409
+
+    task = task_service.create_weaponry_task(
+        architecture_id=architecture_id,
+        request_payload=payload,
+    )
+    progress_hub.publish(
+        "weaponry",
+        architecture_id_str,
+        {"businessType": "weaponry", "data": {"architectureId": architecture_id_str, "progress": 0.0}},
+    )
+
+    worker = threading.Thread(
+        target=run_weaponry_task,
+        kwargs={
+            "task_service": task_service,
+            "kb_service": kb_service,
+            "progress_hub": progress_hub,
+            "request_payload": payload,
+            "callback_url": llm_config.callback_url or "",
+            "callback_timeout": llm_config.callback_timeout,
+        },
+        daemon=True,
+    )
+    worker.start()
+    return jsonify({"message": "accepted", "businessType": "weaponry", "task": task}), 202
+
+
 @llm_bp.post("/llm/check-task")
 def llm_check_task():
     payload = request.get_json(silent=True) or {}
     business_type = payload.get("businessType")
-    if business_type not in {"file", "report"}:
+    if business_type not in {"file", "report", "weaponry"}:
         return jsonify({"error": "businessType无效"}), 400
 
     params_list = _get_params(payload)
@@ -226,6 +298,13 @@ def llm_check_task():
             response_key = "fileName"
             normalized_key = business_key.strip()
             response_value: Any = normalized_key
+        elif business_type == "weaponry":
+            architecture_id = params.get("architectureId")
+            if architecture_id is None:
+                return jsonify({"error": "architectureId不能为空"}), 400
+            response_key = "architectureId"
+            normalized_key = str(architecture_id)
+            response_value = architecture_id
         else:
             report_id = params.get("reportId")
             if report_id is None:

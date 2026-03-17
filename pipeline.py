@@ -105,7 +105,7 @@ def run_anythingllm_rag(
     if not attached_document_ids:
         return None
 
-    return client.send_prompt_to_thread(
+    result = client.send_prompt_to_thread(
         workspace_slug,
         thread_slug,
         prompt,
@@ -113,6 +113,9 @@ def run_anythingllm_rag(
         document_ids=attached_document_ids,
         mode=mode,
     )
+    if result is None:
+        return None
+    return result.get("textResponse")
 
 
 def process_file_with_rag(

@@ -226,7 +226,7 @@ def send_chat_message(workspace_slug: str, thread_slug: str, message: str, docum
         client = AnythingLLMClient(load_anythingllm_config())
         
         # 发送消息，每次都包含document_ids确保基于选定文件回答
-        response = client.send_prompt_to_thread(
+        result = client.send_prompt_to_thread(
             workspace_slug=workspace_slug,
             thread_slug=thread_slug,
             prompt=message,
@@ -235,7 +235,9 @@ def send_chat_message(workspace_slug: str, thread_slug: str, message: str, docum
             mode="chat"
         )
         
-        return response
+        if result is None:
+            return None
+        return result.get("textResponse")
         
     except Exception as exc:
         return f"发送消息失败：{exc}"

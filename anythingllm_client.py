@@ -141,7 +141,13 @@ class AnythingLLMClient:
         user_id: Optional[int] = None,
         document_ids: Optional[List[str]] = None,
         mode: str = "chat",
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
+        """向 thread 发送 prompt 并返回结果。
+
+        Returns:
+            成功时返回 ``{"textResponse": str, "sources": list}``，
+            失败时返回 ``None``。
+        """
         url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/chat"
         payload: Dict[str, Any] = {
             "message": prompt,
@@ -208,6 +214,11 @@ class AnythingLLMClient:
             if not final_event:
                 return None
 
+            # 提取 sources（RAG 溯源证据链）
+            sources = final_event.get("sources", [])
+            if not isinstance(sources, list):
+                sources = []
+
             model_answer = final_event.get("textResponse", final_event)
             if isinstance(model_answer, str):
                 # 清理思维标记与代码块，尽量得到纯 JSON 字符串
@@ -217,14 +228,34 @@ class AnythingLLMClient:
                 if match:
                     cleaned = match.group(1)
                 result = cleaned.strip()
-                return result if result else None
+                if not result:
+                    return None
+                return {"textResponse": result, "sources": sources}
 
             result = json.dumps(model_answer, ensure_ascii=False)
-            if not result or result in {"{}", "null"}:
+            if not result or result in ("{}", "null"):
                 return None
-            return result
+            return {"textResponse": result, "sources": sources}
         except Exception:
             return None
+
+    def delete_thread(
+        self,
+        workspace_slug: str,
+        thread_slug: str,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """删除 workspace 下的指定 thread，保留 workspace 本身。"""
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}"
+        try:
+            resp = self.session.delete(
+                url,
+                headers=self._build_headers(user_id),
+                timeout=self.config.timeout,
+            )
+            return resp.ok
+        except Exception:
+            return False
 
     def upload_document(self, file_path: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.config.base_url}/document/upload"

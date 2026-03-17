@@ -127,6 +127,9 @@ class LLMTaskService:
     def create_report_task(self, report_id: int, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._upsert_task("report", str(report_id), request_payload, status="0")
 
+    def create_weaponry_task(self, architecture_id: int, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._upsert_task("weaponry", str(architecture_id), request_payload, status="1")
+
     def get_task(self, business_type: str, business_key: str) -> Optional[Dict[str, Any]]:
         with self._connection() as conn:
             row = conn.execute(
@@ -239,7 +242,7 @@ class LLMTaskService:
         task = self.get_task(business_type, business_key)
         if not task:
             return False
-        completed_statuses = {"file": {"2", "3"}, "report": {"1", "2"}}
+        completed_statuses = {"file": {"2", "3"}, "report": {"1", "2"}, "weaponry": {"2", "3"}}
         return task["status"] in completed_statuses.get(business_type, set()) and task["callback_status"] != "success"
 
     def replay_callback_if_needed(self, business_type: str, business_key: str, *, callback_url: str, timeout: float) -> bool:

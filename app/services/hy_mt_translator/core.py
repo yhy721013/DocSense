@@ -14,7 +14,7 @@ class HYMTTranslator:
         """
         # 默认使用 ollama 模型
         if model_name is None:
-            self.model_name = "tencent-hy-mt:1.8b-q4"
+            self.model_name = "tencent-hy-mt:1.8b"
         else:
             self.model_name = model_name
 
