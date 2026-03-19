@@ -117,6 +117,58 @@ def _build_progress_snapshot(business_type: str, business_key: str, task: Option
     return {"businessType": business_type, "data": data}
 
 
+def _send_latest_progress(send_message, business_type: str, business_key: str) -> None:
+    latest = progress_hub.get_latest(business_type, business_key)
+    if latest is not None:
+        send_message(latest)
+        return
+
+    current_task = task_service.get_task(business_type, business_key)
+    send_message(_build_progress_snapshot(business_type, business_key, current_task))
+
+
+def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], Any], command: Dict[str, Any], *, emit_ack: bool) -> None:
+    action = command["action"]
+    keys = command["keys"]
+
+    if action == "subscribe":
+        for business_type, business_key in keys:
+            key = (business_type, business_key)
+            if key not in subscriptions:
+                def _forward(message: Dict[str, Any]) -> None:
+                    send_message(message)
+
+                subscriptions[key] = _forward
+                progress_hub.subscribe(business_type, business_key, _forward)
+
+                if progress_hub.get_latest(business_type, business_key) is None:
+                    current_task = task_service.get_task(business_type, business_key)
+                    send_message(_build_progress_snapshot(business_type, business_key, current_task))
+                continue
+
+            _send_latest_progress(send_message, business_type, business_key)
+
+        if emit_ack:
+            send_message({"type": "ack", "action": action, "count": len(keys)})
+        return
+
+    if action == "query":
+        for business_type, business_key in keys:
+            _send_latest_progress(send_message, business_type, business_key)
+
+        if emit_ack:
+            send_message({"type": "ack", "action": action, "count": len(keys)})
+        return
+
+    for business_type, business_key in keys:
+        callback = subscriptions.pop((business_type, business_key), None)
+        if callback is not None:
+            progress_hub.unsubscribe(business_type, business_key, callback)
+
+    if emit_ack:
+        send_message({"type": "ack", "action": action, "count": len(keys)})
+
+
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
     payload = request.get_json(silent=True) or {}
@@ -367,46 +419,15 @@ def llm_progress(ws):
                 ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
                 continue
 
-            action = command["action"]
-            keys = command["keys"]
+            def _send_message(message: Dict[str, Any]) -> None:
+                ws.send(json.dumps(message, ensure_ascii=False))
 
-            if action == "subscribe":
-                for business_type, business_key in keys:
-                    key = (business_type, business_key)
-                    if key in subscriptions:
-                        continue
-
-                    def _forward(message: Dict[str, Any]) -> None:
-                        ws.send(json.dumps(message, ensure_ascii=False))
-
-                    subscriptions[key] = _forward
-                    progress_hub.subscribe(business_type, business_key, _forward)
-
-                    if progress_hub.get_latest(business_type, business_key) is None:
-                        current_task = task_service.get_task(business_type, business_key)
-                        ws.send(json.dumps(_build_progress_snapshot(business_type, business_key, current_task), ensure_ascii=False))
-
-                ws.send(json.dumps({"type": "ack", "action": action, "count": len(keys)}, ensure_ascii=False))
-                continue
-
-            if action == "query":
-                for business_type, business_key in keys:
-                    latest = progress_hub.get_latest(business_type, business_key)
-                    if latest is not None:
-                        ws.send(json.dumps(latest, ensure_ascii=False))
-                        continue
-                    current_task = task_service.get_task(business_type, business_key)
-                    ws.send(json.dumps(_build_progress_snapshot(business_type, business_key, current_task), ensure_ascii=False))
-
-                ws.send(json.dumps({"type": "ack", "action": action, "count": len(keys)}, ensure_ascii=False))
-                continue
-
-            for business_type, business_key in keys:
-                callback = subscriptions.pop((business_type, business_key), None)
-                if callback is not None:
-                    progress_hub.unsubscribe(business_type, business_key, callback)
-
-            ws.send(json.dumps({"type": "ack", "action": action, "count": len(keys)}, ensure_ascii=False))
+            _handle_progress_command(
+                _send_message,
+                subscriptions,
+                command,
+                emit_ack="action" in payload,
+            )
     finally:
         for (business_type, business_key), callback in list(subscriptions.items()):
             progress_hub.unsubscribe(business_type, business_key, callback)

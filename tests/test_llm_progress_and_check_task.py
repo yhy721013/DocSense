@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app
-from app.blueprints.llm import _parse_progress_command
+from app.blueprints import llm as llm_module
+from app.blueprints.llm import _handle_progress_command, _parse_progress_command
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_task_service import LLMTaskService
 from tests import workspace_tempdir
@@ -47,6 +48,37 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
 
         self.assertEqual(command["action"], "query")
         self.assertEqual(command["keys"], [("file", "a.pdf"), ("file", "b.pdf")])
+
+    def test_legacy_progress_message_replays_snapshot_without_ack_when_repeated(self):
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            service.create_file_task(
+                "demo.pdf",
+                {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
+                status="1",
+            )
+            service.update_task_progress("file", "demo.pdf", progress=0.65, message="处理中", status="1")
+            hub = LLMProgressHub()
+            sent_messages = []
+            subscriptions = {}
+            command = _parse_progress_command(
+                {
+                    "businessType": "file",
+                    "params": [{"fileName": "demo.pdf"}],
+                }
+            )
+
+            with patch.object(llm_module, "task_service", service), patch.object(llm_module, "progress_hub", hub):
+                _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
+                _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
+
+        self.assertEqual(
+            sent_messages,
+            [
+                {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
+                {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
+            ],
+        )
 
     @patch("app.services.llm_task_service.post_callback_payload", return_value=True)
     def test_check_task_replays_failed_callback(self, _mock_callback):
