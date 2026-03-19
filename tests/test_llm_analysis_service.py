@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
@@ -187,10 +187,119 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["architectureId"], 10502)
 
+    @patch("app.services.llm_analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
     @patch("app.services.llm_analysis_service.post_callback_payload", return_value=True)
     @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
+    @patch("app.services.llm_analysis_service.normalize_file_for_llm")
     @patch("app.services.llm_analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_marks_success(self, mock_download, _mock_pipeline, _mock_callback):
+    def test_run_file_analysis_task_normalizes_mhtml_before_rag(
+        self,
+        mock_download,
+        mock_normalize,
+        _mock_pipeline,
+        _mock_callback,
+        _mock_enrich,
+    ):
+        with workspace_tempdir() as tmp:
+            sample = Path(tmp) / "sample.mhtml"
+            sample.write_text("mhtml", encoding="utf-8")
+            normalized = Path(tmp) / "sample.mhtml.normalized.md"
+            normalized.write_text("标题\nHello MHTML", encoding="utf-8")
+            mock_download.return_value = str(sample)
+            mock_normalize.return_value = str(normalized)
+
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "sample.mhtml",
+                        "filePath": "http://127.0.0.1:8000/sample.mhtml",
+                        "enableFullTranslation": False,
+                        "country": [],
+                        "channel": [],
+                        "maturity": [],
+                        "format": [],
+                        "architectureList": [],
+                    }
+                ],
+            }
+
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("sample.mhtml", request_payload)
+            hub = LLMProgressHub()
+
+            from app.services.llm_analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                kb_service=Mock(),
+                progress_hub=hub,
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="http://127.0.0.1:9000/llm/callback",
+                callback_timeout=5,
+            )
+
+        mock_normalize.assert_called_once_with(str(sample))
+        self.assertEqual(_mock_pipeline.call_args.kwargs["file_path"], str(normalized))
+
+    @patch("app.services.llm_analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
+    @patch("app.services.llm_analysis_service.post_callback_payload", return_value=True)
+    @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
+    @patch("app.services.llm_analysis_service.normalize_file_for_llm", side_effect=RuntimeError("boom"))
+    @patch("app.services.llm_analysis_service.download_to_temp_file")
+    def test_run_file_analysis_task_falls_back_to_original_file_when_mhtml_normalization_fails(
+        self,
+        mock_download,
+        _mock_normalize,
+        _mock_pipeline,
+        _mock_callback,
+        _mock_enrich,
+    ):
+        with workspace_tempdir() as tmp:
+            sample = Path(tmp) / "sample.mhtml"
+            sample.write_text("mhtml", encoding="utf-8")
+            mock_download.return_value = str(sample)
+
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "sample.mhtml",
+                        "filePath": "http://127.0.0.1:8000/sample.mhtml",
+                        "enableFullTranslation": False,
+                        "country": [],
+                        "channel": [],
+                        "maturity": [],
+                        "format": [],
+                        "architectureList": [],
+                    }
+                ],
+            }
+
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("sample.mhtml", request_payload)
+            hub = LLMProgressHub()
+
+            from app.services.llm_analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                kb_service=Mock(),
+                progress_hub=hub,
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="http://127.0.0.1:9000/llm/callback",
+                callback_timeout=5,
+            )
+
+        self.assertEqual(_mock_pipeline.call_args.kwargs["file_path"], str(sample))
+
+    @patch("app.services.llm_analysis_service.post_callback_payload", return_value=True)
+    @patch("app.services.llm_analysis_service.pipeline_process_file_with_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
+    @patch("app.services.llm_analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
+    @patch("app.services.llm_analysis_service.download_to_temp_file")
+    def test_run_file_analysis_task_marks_success(self, mock_download, _mock_enrich, _mock_pipeline, _mock_callback):
         with workspace_tempdir() as tmp:
             sample = Path(tmp) / "sample.txt"
             sample.write_text("sample", encoding="utf-8")
@@ -222,6 +331,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
             run_file_analysis_task(
                 task_service=task_service,
+                kb_service=Mock(),
                 progress_hub=hub,
                 request_payload=request_payload,
                 download_root=tmp,
@@ -272,6 +382,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
             run_file_analysis_batch_task(
                 task_service=task_service,
+                kb_service=Mock(),
                 progress_hub=hub,
                 request_payload=request_payload,
                 download_root=tmp,

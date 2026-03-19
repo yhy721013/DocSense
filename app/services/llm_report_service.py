@@ -10,6 +10,7 @@ from pipeline import prepare_upload_files, run_anythingllm_rag
 
 from app.services.llm_callback_service import post_callback_payload
 from app.services.llm_download_service import download_to_temp_file
+from app.services.mhtml_normalizer import normalize_file_for_llm
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_prompts import build_report_prompt
 from app.services.llm_task_service import LLMTaskService
@@ -61,7 +62,12 @@ def run_report_task(
         files_to_upload = []
         for index, file_url in enumerate(params.get("filePathList", []), start=1):
             downloaded_path = download_to_temp_file(file_url, f"report-{report_id}-{index}{Path(file_url).suffix}", download_root, timeout=60)
-            files_to_upload.extend(prepare_upload_files(downloaded_path))
+            prepared_source = downloaded_path
+            try:
+                prepared_source = normalize_file_for_llm(downloaded_path)
+            except Exception:
+                prepared_source = downloaded_path
+            files_to_upload.extend(prepare_upload_files(prepared_source))
 
         task_service.update_task_progress("report", str(report_id), progress=0.35, message="正在生成报告")
         _publish_progress(progress_hub, report_id, 0.35)

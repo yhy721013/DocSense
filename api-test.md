@@ -23,6 +23,8 @@
 | businessType | String | 业务类型标识，固定值："file" | 是 |
 | params | Array | 请求参数列表（项目兼容单项与多项；多项时按顺序串行处理） | 是 |
 
+> 项目兼容扩展说明：`/llm/analysis` 支持 `mhtml`/`mht` 文件；服务端下载后会先提取正文文本，再复用现有大模型解析流程。
+
 ### params参数结构
 
 | 字段 | 类型 | 说明 | 示例值 |
@@ -110,6 +112,8 @@
 |------|------|------|------|
 | businessType | String | 业务类型标识，固定值："report" | 是 |
 | params | Array | 请求参数列表（仅使用第一个元素） | 是 |
+
+> 项目兼容扩展说明：`/llm/generate-report` 的 `filePathList` 可包含 `mhtml`/`mht` 文件；服务端下载后会先提取正文文本，再参与报告生成。
 
 ### params参数结构
 

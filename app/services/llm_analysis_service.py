@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -14,11 +15,15 @@ from pipeline import process_file_with_rag as pipeline_process_file_with_rag
 
 from app.services.llm_callback_service import post_callback_payload
 from app.services.llm_download_service import download_to_temp_file
+from app.services.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
 from app.services.llm_translation_service import get_translation_service
 from app.services.knowledge_base.database_service import DatabaseService
+
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_COUNTRY_OPTIONS = [
     {"key": "02", "value": "美国"},
@@ -454,6 +459,8 @@ def _read_original_text(file_path: str) -> str:
     if suffix == ".pdf":
         with fitz.open(path) as doc:
             return "\n".join(page.get_text() for page in doc)
+    if is_mhtml_file(str(path)):
+        return extract_text_from_mhtml(str(path))
     return ""
 
 
@@ -480,17 +487,23 @@ def run_file_analysis_task(
         task_service.update_task_progress("file", file_name, progress=0.35, message="正在执行文档解析")
         _publish_progress(progress_hub, file_name, 0.35)
 
+        llm_file_path = downloaded_path
+        try:
+            llm_file_path = normalize_file_for_llm(downloaded_path)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("mhtml归一化失败，降级使用原文件: %s (%s)", downloaded_path, exc)
+
         client = AnythingLLMClient(load_anythingllm_config())
         raw_result = pipeline_process_file_with_rag(
             client=client,
-            file_path=downloaded_path,
+            file_path=llm_file_path,
             prompt=build_file_analysis_prompt(params),
             workspace_name=f"llm-file-{int(time.time() * 1000)}",
             thread_name=f"analysis-{Path(file_name).stem}",
             user_id=1,
         )
         parsed_result = _parse_model_result(raw_result)
-        mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(downloaded_path))
+        mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(llm_file_path))
 
         try:
             architecture_id = mapped_result.get("architectureId")
@@ -504,10 +517,10 @@ def run_file_analysis_task(
                         kb_service.add_workspace(architecture_id, workspace_slug)
 
                 if workspace_slug:
-                    doc_info = client.upload_document(downloaded_path, user_id=1)
+                    doc_info = client.upload_document(llm_file_path, user_id=1)
                     if doc_info:
                         doc_id = doc_info.get("id") or doc_info.get("docId")
-                        filename = Path(downloaded_path).name
+                        filename = Path(llm_file_path).name
                         doc_relative_path = (
                             doc_info.get("location")
                             or doc_info.get("docpath")
