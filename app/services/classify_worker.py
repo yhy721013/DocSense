@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from rag_with_ocr import process_file_with_rag
 
@@ -184,6 +187,7 @@ def process_single_file_task(
 ) -> None:
     """后台线程：处理单文件分类/抽取任务。"""
     path = Path(file_path)
+    logger.info("开始执行单文件分类任务: task_id=%s, file=%s", task_id, path.name)
     try:
         result = process_file_with_rag(
             file_path=str(path),
@@ -217,8 +221,10 @@ def process_single_file_task(
             result=parsed,
             raw_result=result,
         )
+        logger.info("单文件分类任务完成: task_id=%s", task_id)
 
     except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("单文件分类任务异常: task_id=%s, error=%s", task_id, exc)
         store.update(
             task_id,
             status="error",
@@ -236,6 +242,7 @@ def process_folder_task(
     user_id: int = 1,
 ) -> None:
     """后台线程：批量处理文件夹。"""
+    logger.info("开始执行文件夹分类任务: task_id=%s, file_count=%d", task_id, len(saved_files))
     results: List[Dict[str, Any]] = []
     processed = 0
     total_files = len(saved_files)
@@ -320,6 +327,7 @@ def process_folder_task(
         # 轻微节流，避免 AnythingLLM/embedding 更新峰值
         time.sleep(0.1)
 
+    logger.info("文件夹分类任务完成: task_id=%s", task_id)
     store.update(
         task_id,
         status="completed",

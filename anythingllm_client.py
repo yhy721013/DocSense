@@ -46,7 +46,8 @@ class AnythingLLMClient:
                 return []
             body = resp.json()
             return body.get("workspaces", []) if isinstance(body, dict) else []
-        except Exception:
+        except Exception as e:
+            logger.error("获取工作区列表失败: %s", e)
             return []
 
     def find_workspace_by_name(self, name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -88,10 +89,13 @@ class AnythingLLMClient:
                 timeout=self.config.timeout,
             )
             if not resp.ok:
+                logger.error("创建工作区 %s 失败: %s %s", name, resp.status_code, resp.text)
                 return None
             body = resp.json()
+            logger.info("已创建工作区: %s", name)
             return body.get("workspace") or body
-        except Exception:
+        except Exception as e:
+            logger.error("创建工作区 %s 时出现异常: %s", name, e)
             return None
 
     def ensure_workspace(self, name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -119,10 +123,13 @@ class AnythingLLMClient:
                 timeout=self.config.timeout,
             )
             if not resp.ok:
+                logger.error("在工作区 %s 中创建线程 %s 失败: %s %s", thread_name, workspace_slug, resp.status_code, resp.text)
                 return None
             body = resp.json()
+            logger.info("已在工作区 %s 中创建线程 %s", workspace_slug, thread_name)
             return body.get("thread") or body
-        except Exception:
+        except Exception as e:
+            logger.error("创建线程 %s 时出现异常: %s", thread_name, e)
             return None
 
     @staticmethod
@@ -141,7 +148,13 @@ class AnythingLLMClient:
         user_id: Optional[int] = None,
         document_ids: Optional[List[str]] = None,
         mode: str = "chat",
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
+        """向 thread 发送 prompt 并返回结果。
+
+        Returns:
+            成功时返回 ``{"textResponse": str, "sources": list}``，
+            失败时返回 ``None``。
+        """
         url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/chat"
         payload: Dict[str, Any] = {
             "message": prompt,
@@ -160,6 +173,7 @@ class AnythingLLMClient:
                 stream=True,
             )
             if not resp.ok:
+                logger.error("向线程 %s 发送提示词失败: %s %s", thread_slug, resp.status_code, resp.text)
                 return None
             # 兼容 SSE 流式响应，拼接 textResponseChunk
             final_event: Optional[Dict[str, Any]] = None
@@ -206,7 +220,13 @@ class AnythingLLMClient:
                 resp.close()
 
             if not final_event:
+                logger.warning("线程 %s 的提示词未收到最终事件", thread_slug)
                 return None
+
+            # 提取 sources（RAG 溯源证据链）
+            sources = final_event.get("sources", [])
+            if not isinstance(sources, list):
+                sources = []
 
             model_answer = final_event.get("textResponse", final_event)
             if isinstance(model_answer, str):
@@ -217,14 +237,37 @@ class AnythingLLMClient:
                 if match:
                     cleaned = match.group(1)
                 result = cleaned.strip()
-                return result if result else None
+                if not result:
+                    logger.warning("线程 %s 收到空响应", thread_slug)
+                    return None
+                return {"textResponse": result, "sources": sources}
 
             result = json.dumps(model_answer, ensure_ascii=False)
-            if not result or result in {"{}", "null"}:
+            if not result or result in ("{}", "null"):
+                logger.warning("线程 %s 收到无效的 JSON 响应", thread_slug)
                 return None
-            return result
-        except Exception:
+            return {"textResponse": result, "sources": sources}
+        except Exception as e:
+            logger.error("向线程 %s 发送提示词时出现异常: %s", thread_slug, e)
             return None
+
+    def delete_thread(
+        self,
+        workspace_slug: str,
+        thread_slug: str,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """删除 workspace 下的指定 thread，保留 workspace 本身。"""
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}"
+        try:
+            resp = self.session.delete(
+                url,
+                headers=self._build_headers(user_id),
+                timeout=self.config.timeout,
+            )
+            return resp.ok
+        except Exception:
+            return False
 
     def upload_document(self, file_path: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.config.base_url}/document/upload"
@@ -238,13 +281,17 @@ class AnythingLLMClient:
                     timeout=self.config.timeout,
                 )
             if not resp.ok:
+                logger.error("上传文档 %s 失败: %s %s", file_path, resp.status_code, resp.text)
                 return None
             body = resp.json()
             documents = body.get("documents")
             if isinstance(documents, list) and documents:
+                logger.info("已上传文档: %s", file_path)
                 return documents[0]
+            logger.warning("文档 %s 的上传响应中不包含文档信息", file_path)
             return None
-        except Exception:
+        except Exception as e:
+            logger.error("上传文档 %s 时出现异常: %s", file_path, e)
             return None
 
     def fetch_workspace_document(
@@ -264,6 +311,7 @@ class AnythingLLMClient:
         try:
             resp = self.session.get(url, headers=self._json_headers(user_id), timeout=self.config.timeout)
             if not resp.ok:
+                logger.error("获取工作区 %s 的文档列表失败: %s %s", workspace_slug, resp.status_code, resp.text)
                 return None
             workspace = resp.json().get("workspace")
             if isinstance(workspace, list):
@@ -275,8 +323,11 @@ class AnythingLLMClient:
                 item_docpath = item.get("docpath", "").replace("\\", "/")
                 if item_docpath == target_docpath:
                     return item
+            
+            logger.warning("在工作区 %s 中未找到文档 %s", workspace_slug, target_docpath)
             return None
-        except Exception:
+        except Exception as e:
+            logger.error("获取工作区文档 %s 时出现异常: %s", doc_path, e)
             return None
 
     def wait_for_processing(self, doc_relative_path: str, retries: int = 300, delay: float = 2.0) -> bool:
@@ -336,6 +387,7 @@ class AnythingLLMClient:
         doc_path: str,
         workspace_slug: str,
         user_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if not doc_path:
             return False
@@ -359,16 +411,38 @@ class AnythingLLMClient:
                 timeout=self.config.timeout,
             )
             if not resp.ok:
+                logger.error("更新工作区 %s 中文档 %s 的嵌入失败: %s %s", workspace_slug, cleaned_path, resp.status_code, resp.text)
                 return False
 
+            # Pin the document (best effort)
             pin_url = f"{self.config.base_url}/workspace/{workspace_slug}/update-pin"
             pin_payload = {"docPath": cleaned_path, "pinStatus": True}
-            self.session.post(
-                pin_url,
-                headers=self._json_headers(user_id),
-                json=pin_payload,
-                timeout=self.config.timeout,
-            )
+            try:
+                self.session.post(
+                    pin_url,
+                    headers=self._json_headers(user_id),
+                    json=pin_payload,
+                    timeout=self.config.timeout,
+                )
+            except Exception as e:
+                logger.warning("固定文档 %s 失败: %s", cleaned_path, e)
+
+            # 更新文档元数据
+            if metadata:
+                meta_url = f"{self.config.base_url}/document/meta"
+                meta_payload = {"location": cleaned_path, "metadata": metadata}
+                try:
+                    self.session.post(
+                        meta_url,
+                        headers=self._json_headers(user_id),
+                        json=meta_payload,
+                        timeout=self.config.timeout,
+                    )
+                except Exception as e:
+                    logger.warning("更新文档 %s 的元数据失败: %s", cleaned_path, e)
+
+            logger.info("成功更新工作区 %s 中文档 %s 的嵌入", workspace_slug, cleaned_path)
             return True
-        except Exception:
+        except Exception as e:
+            logger.error("更新文档 %s 的嵌入时出现异常: %s", cleaned_path, e)
             return False

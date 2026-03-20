@@ -14,11 +14,14 @@ from flask import Flask
 
 from app.blueprints.chat import chat_bp
 from app.blueprints.classify import classify_bp
+from app.blueprints.llm import llm_bp, sock
 from app.blueprints.main import main_bp
+from app.logging_config import setup_logging
 from app.settings import MAX_CONTENT_LENGTH
 
 
 def create_app() -> Flask:
+    setup_logging()
     project_root = Path(__file__).resolve().parent.parent
     app = Flask(
         __name__,
@@ -28,6 +31,7 @@ def create_app() -> Flask:
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
     )
+    sock.init_app(app)
 
     # 页面入口
     app.register_blueprint(main_bp)
@@ -35,5 +39,6 @@ def create_app() -> Flask:
     # 功能模块（API + 页面）
     app.register_blueprint(classify_bp)
     app.register_blueprint(chat_bp)
+    app.register_blueprint(llm_bp)
 
     return app

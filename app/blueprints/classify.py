@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -41,6 +44,8 @@ def upload_file():
     file_path = TEMP_UPLOAD_DIR / safe_name
     file_path.parent.mkdir(parents=True, exist_ok=True)
     upload.save(file_path)
+    
+    logger.info("收到单文件分类上传请求: filename=%s, workspace=%s", upload.filename, workspace_name)
 
     task_id = f"task_{timestamp}"
     task_store.set(
@@ -66,6 +71,7 @@ def upload_file():
         daemon=True,
     )
     thread.start()
+    logger.info("已启动后台单文件分类线程: task_id=%s", task_id)
     return jsonify({"task_id": task_id, "message": "文件上传成功"})
 
 
@@ -98,6 +104,8 @@ def upload_folder():
         file_path.parent.mkdir(parents=True, exist_ok=True)
         upload.save(file_path)
         saved_files.append({"path": file_path, "display_name": relative_name})
+    
+    logger.info("收到文件夹分类上传请求: file_count=%d", len(saved_files))
 
     if not saved_files:
         return jsonify({"error": "没有有效文件"}), 400
@@ -132,6 +140,7 @@ def upload_folder():
         daemon=True,
     )
     thread.start()
+    logger.info("已启动后台文件夹分类线程: task_id=%s", task_id)
     return jsonify({"task_id": task_id, "message": f"开始处理文件夹，共 {len(saved_files)} 个文件"})
 
 
@@ -141,6 +150,8 @@ def select_category():
     task_id = payload.get("task_id")
     category = payload.get("category")
     sub_category = payload.get("sub_category") or ""
+    
+    logger.info("收到分类确认请求: task_id=%s, category=%s", task_id, category)
 
     if not task_id:
         return jsonify({"error": "缺少任务ID"}), 400
