@@ -68,7 +68,11 @@ def _build_analyse_data_sources(sources: List[Dict[str, Any]]) -> List[Dict[str,
             pass
         scored.append((score, mapped))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [item for _, item in scored]
+    res = [item for _, item in scored]
+    if not res:
+        # 甲方接口要求：无来源时返回空内容对象
+        return [_map_source_to_analyse_data_source({})]
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +164,7 @@ def _query_input_field(
     filled = dict(field)
     if result is None:
         filled["analyseData"] = ""
-        filled["analyseDataSource"] = []
+        filled["analyseDataSource"] = _build_analyse_data_sources([])
         return filled
 
     text_response = result.get("textResponse", "")
@@ -169,6 +173,7 @@ def _query_input_field(
     # 如果 LLM 回答"未找到"则视为空
     if "未找到" in text_response:
         text_response = ""
+        sources = []
 
     filled["analyseData"] = text_response
     filled["analyseDataSource"] = _build_analyse_data_sources(sources)
@@ -250,7 +255,7 @@ def _query_table_field(
                 cell["analyseDataSource"] = _build_analyse_data_sources(entry["sources"])
             else:
                 cell["analyseData"] = ""
-                cell["analyseDataSource"] = []
+                cell["analyseDataSource"] = _build_analyse_data_sources([])
             row.append(cell)
         assembled_rows.append(row)
 
