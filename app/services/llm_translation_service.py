@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 from app.services.hy_mt_translator import DocumentTranslator, HYMTTranslator
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMTranslationService:
@@ -36,7 +40,7 @@ class LLMTranslationService:
             try:
                 self._progress_callback(progress, message)
             except Exception as e:
-                print(f"[LLMTranslationService] 进度回调失败：{e}")
+                logger.error("进度回调失败: %s", e)
 
     def translate_document(
             self,
@@ -64,6 +68,7 @@ class LLMTranslationService:
             output_html = base_path.parent / f"{base_path.stem}_bilingual.html"
 
             # 【新增】在翻译前通知进度（0% 起点）
+            logger.info("开始翻译文档: %s", file_path)
             self._notify_progress(0.0, "开始翻译文档...")
 
             # 翻译文档（生成 TXT）
@@ -100,12 +105,13 @@ class LLMTranslationService:
                 html_content = Path(bilingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
             # 【新增】完成时通知进度（100%）
+            logger.info("文档翻译完成: %s", file_path)
             self._notify_progress(1.0, "翻译完成")
 
             return translated_text, html_content
 
         except Exception as e:
-            print(f"[LLMTranslationService] 翻译失败：{e}")
+            logger.exception("文档翻译失败: %s, error=%s", file_path, e)
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
@@ -129,7 +135,7 @@ class LLMTranslationService:
         try:
             return self._translator.translate_text(text, target_lang)
         except Exception as e:
-            print(f"[LLMTranslationService] 文本翻译失败：{e}")
+            logger.error("文本翻译检测失败: %s", e)
             return ""
 
 

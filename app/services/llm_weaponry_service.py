@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,8 @@ from app.services.llm_weaponry_prompts import (
     build_input_field_prompt,
     build_table_column_prompt,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +37,7 @@ def _translate_if_needed(text: str) -> str:
         service = get_translation_service()
         return service.translate_text_only(text, target_lang="Chinese")
     except Exception as e:
-        print(f"[Weaponry] 翻译失败: {e}")
+        logger.warning("翻译失败: %s", e)
         return ""
 
 
@@ -314,7 +317,7 @@ def run_weaponry_task(
 
         workspace_slug = kb_service.get_workspace_slug(architecture_id)
         if not workspace_slug:
-            print(f"[Weaponry] architectureId={architecture_id} 无对应 Workspace，标记失败")
+            logger.warning("architectureId=%s 无对应 Workspace，标记失败", architecture_id)
             _fail_task(
                 task_service, progress_hub, architecture_id, architecture_id_str,
                 callback_url, callback_timeout,
@@ -367,6 +370,8 @@ def run_weaponry_task(
         result_fields: List[Dict[str, Any]] = []
         for field in field_list:
             field_type = field.get("fieldType", "INPUT")
+            field_name = field.get("fieldName", "unknown")
+            logger.info("正在处理字段: %s (%s)", field_name, field_type)
 
             if field_type == "TABLE":
                 filled = _query_table_field(
@@ -390,7 +395,9 @@ def run_weaponry_task(
         _publish_progress(progress_hub, architecture_id_str, 0.92)
 
         if not client.delete_thread(workspace_slug, thread_slug, user_id=1):
-            print(f"[Weaponry] 删除 Thread {thread_slug} 失败（不影响结果）")
+            logger.warning("删除 Thread %s 失败（不影响结果）", thread_slug)
+
+        logger.info("武器装备提取任务完成: architectureId=%s", architecture_id)
 
         # ─── 阶段 5：组装回调并发送 ───
         callback_payload = _build_weaponry_callback_payload(
@@ -405,11 +412,13 @@ def run_weaponry_task(
         if callback_url:
             if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
                 task_service.mark_callback_success("weaponry", architecture_id_str)
+                logger.info("回调结果提交成功: architectureId=%s", architecture_id)
             else:
                 task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
+                logger.warning("回调结果提交失败: architectureId=%s", architecture_id)
 
     except Exception as e:
-        print(f"[Weaponry] 任务异常: {e}")
+        logger.exception("武器装备提取任务异常: architectureId=%s, error=%s", architecture_id, e)
         _fail_task(
             task_service, progress_hub, architecture_id, architecture_id_str,
             callback_url, callback_timeout,

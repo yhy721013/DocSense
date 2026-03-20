@@ -16,10 +16,12 @@ from app.blueprints.chat import chat_bp
 from app.blueprints.classify import classify_bp
 from app.blueprints.llm import llm_bp, sock
 from app.blueprints.main import main_bp
+from app.logging_config import setup_logging
 from app.settings import MAX_CONTENT_LENGTH
 
 
 def create_app() -> Flask:
+    setup_logging()
     project_root = Path(__file__).resolve().parent.parent
     app = Flask(
         __name__,

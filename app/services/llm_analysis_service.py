@@ -478,6 +478,8 @@ def run_file_analysis_task(
     file_name = _as_text(params.get("fileName"))
     file_path = _as_text(params.get("filePath"))
 
+    logger.info("开始执行文件分析任务: file_name=%s", file_name)
+
     try:
         task_service.update_task_progress("file", file_name, progress=0.15, message="正在下载文件", status="1")
         _publish_progress(progress_hub, file_name, 0.15)
@@ -544,7 +546,7 @@ def run_file_analysis_task(
                         if doc_id:
                             kb_service.save_document_record(file_name, architecture_id, str(doc_id))
         except Exception as e:
-            print(f"[KnowledgeBase] Failed to store document to workspace: {e}")
+            logger.error("知识库尝试存入文件失败: %s", e)
 
         # 【新增】在回调前添加翻译
         task_service.update_task_progress("file", file_name, progress=0.65, message="正在翻译文档", status="1")
@@ -563,17 +565,25 @@ def run_file_analysis_task(
         if callback_url:
             if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
                 task_service.mark_callback_success("file", file_name)
+                logger.info("回调结果提交成功: file_name=%s", file_name)
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
-    except Exception:
+                logger.warning("回调结果提交失败: file_name=%s", file_name)
+
+        logger.info("文件分析任务完成: file_name=%s", file_name)
+
+    except Exception as e:
+        logger.exception("文件分析任务执行异常: file_name=%s, error=%s", file_name, e)
         callback_payload = build_file_callback_payload(file_name, {}, status="3")
         task_service.mark_business_result("file", file_name, callback_payload, status="3", message="解析失败")
         _publish_progress(progress_hub, file_name, 1.0)
         if callback_url:
             if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
                 task_service.mark_callback_success("file", file_name)
+                logger.info("失败回调提交成功: file_name=%s", file_name)
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
+                logger.warning("失败回调提交失败: file_name=%s", file_name)
 
 
 def run_file_analysis_batch_task(

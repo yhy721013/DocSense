@@ -4,6 +4,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -12,6 +13,8 @@ from app.services.llm_callback_service import post_callback_payload
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+logger = logging.getLogger(__name__)
 
 
 class LLMTaskService:
@@ -119,6 +122,7 @@ class LLMTaskService:
             )
         task = self.get_task(business_type, business_key)
         assert task is not None
+        logger.info("创建/更新任务: type=%s, key=%s, status=%s", business_type, business_key, status)
         return task
 
     def create_file_task(self, file_name: str, request_payload: Dict[str, Any], status: str = "1") -> Dict[str, Any]:
@@ -186,6 +190,7 @@ class LLMTaskService:
                 """,
                 (status, 1.0, message, self._serialize(result_payload), now, business_type, business_key),
             )
+        logger.info("任务结果已标记: type=%s, key=%s, status=%s", business_type, business_key, status)
 
     def update_task_progress(
         self,
@@ -224,6 +229,7 @@ class LLMTaskService:
                 """,
                 ("failed", error, now, business_type, business_key),
             )
+        logger.warning("回调失败: type=%s, key=%s, error=%s", business_type, business_key, error)
 
     def mark_callback_success(self, business_type: str, business_key: str) -> None:
         now = _utc_now_iso()
@@ -237,6 +243,7 @@ class LLMTaskService:
                 """,
                 ("success", now, business_type, business_key),
             )
+        logger.info("回调成功: type=%s, key=%s", business_type, business_key)
 
     def should_replay_callback(self, business_type: str, business_key: str) -> bool:
         task = self.get_task(business_type, business_key)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, render_template, request
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 chat_bp = Blueprint("chat", __name__)
@@ -31,6 +34,7 @@ def get_chat_files():
         # 调用服务层获取文件列表
         from app.services.chat_service import list_uploaded_files
         
+        logger.info("获取对话文件列表")
         files = list_uploaded_files()
         return jsonify({"files": files})
         
@@ -79,6 +83,8 @@ def chat_message():
         thread_slug = payload.get("thread_slug")
         message = payload.get("message")
         document_ids = payload.get("document_ids", [])
+        
+        logger.info("收到对话消息请求: workspace=%s, thread=%s", workspace_slug, thread_slug)
         
         # 参数验证
         if not workspace_slug:
@@ -129,6 +135,8 @@ def chat_setup():
         # 获取请求数据
         payload = request.get_json(silent=True) or {}
         file_paths = payload.get("file_paths", [])
+        
+        logger.info("收到对话设置请求: file_count=%d", len(file_paths))
         
         if not file_paths:
             return jsonify({"error": "请提供文件路径列表"}), 400

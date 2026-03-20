@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import time
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from app.services.mhtml_normalizer import normalize_file_for_llm
 from app.services.llm_progress_hub import LLMProgressHub
 from app.services.llm_prompts import build_report_prompt
 from app.services.llm_task_service import LLMTaskService
+
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_report_html(content: str) -> str:
@@ -55,6 +59,7 @@ def run_report_task(
     params = request_payload["params"][0]
     report_id = int(params["reportId"])
 
+    logger.info("开始执行报告生成任务: report_id=%s", report_id)
     try:
         task_service.update_task_progress("report", str(report_id), progress=0.15, message="正在下载报告文件", status="0")
         _publish_progress(progress_hub, report_id, 0.15)
@@ -92,14 +97,21 @@ def run_report_task(
         if callback_url:
             if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
                 task_service.mark_callback_success("report", str(report_id))
+                logger.info("回调结果提交成功: report_id=%s", report_id)
             else:
                 task_service.mark_callback_failed("report", str(report_id), "callback failed")
-    except Exception:
+                logger.warning("回调结果提交失败: report_id=%s", report_id)
+        
+        logger.info("报告生成任务完成: report_id=%s", report_id)
+    except Exception as e:
+        logger.exception("报告生成任务执行异常: report_id=%s, error=%s", report_id, e)
         callback_payload = build_report_callback_payload(report_id, "", status="2")
         task_service.mark_business_result("report", str(report_id), callback_payload, status="2", message="报告生成失败")
         _publish_progress(progress_hub, report_id, 1.0)
         if callback_url:
             if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
                 task_service.mark_callback_success("report", str(report_id))
+                logger.info("失败回调提交成功: report_id=%s", report_id)
             else:
                 task_service.mark_callback_failed("report", str(report_id), "callback failed")
+                logger.warning("失败回调提交失败: report_id=%s", report_id)

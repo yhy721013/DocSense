@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import logging
 from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
@@ -23,6 +24,8 @@ task_service = LLMTaskService(str(LLM_TASK_DB_PATH))
 kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
 llm_config = load_llm_integration_config()
 progress_hub = LLMProgressHub()
+
+logger = logging.getLogger(__name__)
 
 
 def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -172,6 +175,7 @@ def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], 
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
     payload = request.get_json(silent=True) or {}
+    logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "file":
         return jsonify({"error": "businessType必须为file"}), 400
 
@@ -226,6 +230,7 @@ def llm_analysis():
         daemon=True,
     )
     worker.start()
+    logger.info("已启动后台文件分析线程: task_count=%d", len(tasks))
     if len(tasks) == 1:
         return jsonify({"message": "accepted", "businessType": "file", "task": tasks[0]}), 202
     return jsonify({"message": "accepted", "businessType": "file", "tasks": tasks}), 202
@@ -234,6 +239,7 @@ def llm_analysis():
 @llm_bp.post("/llm/generate-report")
 def llm_generate_report():
     payload = request.get_json(silent=True) or {}
+    logger.info("收到报告生成请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "report":
         return jsonify({"error": "businessType必须为report"}), 400
 
@@ -267,12 +273,14 @@ def llm_generate_report():
         daemon=True,
     )
     worker.start()
+    logger.info("已启动后台报告生成线程: report_id=%s", report_id)
     return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
 
 
 @llm_bp.post("/llm/weaponry")
 def llm_weaponry():
     payload = request.get_json(silent=True) or {}
+    logger.info("收到武器装备提取请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "weaponry":
         return jsonify({"error": "businessType必须为weaponry"}), 400
 
@@ -327,6 +335,7 @@ def llm_weaponry():
         daemon=True,
     )
     worker.start()
+    logger.info("已启动后台武器装备提取线程: architectureId=%s", architecture_id)
     return jsonify({"message": "accepted", "businessType": "weaponry", "task": task}), 202
 
 

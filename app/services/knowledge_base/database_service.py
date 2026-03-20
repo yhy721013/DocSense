@@ -1,5 +1,8 @@
 import sqlite3
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
 
 class DatabaseService:
     def __init__(self, db_path: str):
@@ -28,6 +31,7 @@ class DatabaseService:
                     )
                 """)
                 conn.commit()
+            logger.info("数据库初始化完成: %s", self.db_path)
 
     # ================= Workspace 表的增删改查 =================
     
@@ -73,6 +77,10 @@ class DatabaseService:
     def delete_document_record(self, file_name: str):
         """当文件需要删除时，从数据库抹掉该记录"""
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute("DELETE FROM documents WHERE file_name = ?", (file_name,))
-                conn.commit()
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute("DELETE FROM documents WHERE file_name = ?", (file_name,))
+                    conn.commit()
+                logger.info("已删除文档记录: %s", file_name)
+            except Exception as e:
+                logger.error("删除文档记录失败 %s: %s", file_name, e)
