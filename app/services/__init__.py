@@ -1,1 +1,1 @@
-"""Service layer for Web UI."""
+"""Service layer for LLM contract interfaces."""

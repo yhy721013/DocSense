@@ -8,7 +8,7 @@
 - `WS /llm/progress`
 - 出站回调 `POST /llm/callback`
 
-不覆盖调试接口 `/api/classify/*`、`/api/chat/*`，也不覆盖现有 Web 页面手工操作。
+仓库已移除 `/api/classify/*`、`/api/chat/*` 及 Web 页面调试能力，本文档仅描述 `/llm/*` 协议联调。
 
 ## 1. 本地开发联调
 

@@ -2,13 +2,15 @@
 
 **日期：** 2026-03-09
 
+> 归档说明（2026-03-21）：本文件记录当时设计上下文。当前仓库已移除调试页面、`/api/classify/*`、`/api/chat/*` 及其前端模块，以下相关描述仅作为历史信息保留。
+
 **目标：** 在保留乙方现有调试页面和接口的前提下，新增一套与甲方 `api-test.md` 完整兼容的正式接入层，支持文件解析、报告生成、任务检查、进度推送和主动回调。
 
 ## 1. 背景与边界
 
 - 本项目最终部署并整合在甲方系统内部。
 - 联调完成后，以甲方现有前后端为唯一正式入口。
-- 乙方仓库现有页面和 `/api/classify/*`、`/api/chat/*` 仅保留为调试能力。
+- （历史）乙方仓库曾保留页面和 `/api/classify/*`、`/api/chat/*` 作为调试能力；当前仓库已移除。
 - 对话功能不接入甲方正式链路。
 - 翻译功能本期不实现，但文件回调中的翻译字段必须保留，当前固定返回空字符串。
 - 所有协议行为以 [api-test.md](/e:/DocSense/api-test.md) 为最高优先级。
@@ -20,7 +22,7 @@
 - 在现有 Flask 项目内新增正式 `llm` 蓝图，提供 `/llm/analysis`、`/llm/generate-report`、`/llm/check-task` 和 `/llm/progress`。
 - 复用现有 OCR、AnythingLLM 上传、Embedding、问答、结果解析能力。
 - 增加任务持久化、文件下载、主动回调、WebSocket 进度推送和报告生成服务。
-- 现有调试页面和分类接口不删除、不重构，只与正式链路分层共存。
+- （历史）当时方案为“调试页面/分类接口与正式链路分层共存”；当前仓库已切换为仅保留正式链路。
 
 选择该方案的原因：
 
@@ -266,12 +268,12 @@
 - [ocr_preprocessor.py](/e:/DocSense/ocr_preprocessor.py)
 - [config.py](/e:/DocSense/config.py)
 
-保留调试用途模块：
+保留调试用途模块（历史）：
 
-- [app/blueprints/classify.py](/e:/DocSense/app/blueprints/classify.py)
-- [app/blueprints/chat.py](/e:/DocSense/app/blueprints/chat.py)
-- `templates/`
-- `static/`
+- （已移除）`app/blueprints/classify.py`
+- （已移除）`app/blueprints/chat.py`
+- （已移除）`templates/`
+- （已移除）`static/`
 
 ## 8. 存储与重复提交策略
 
@@ -363,10 +365,10 @@
 - 回调失败后 `check-task` 补发
 - WebSocket 进度完整推送
 
-### 11.3 兼容验证
+### 11.3 兼容验证（历史）
 
-- 现有调试页面仍可打开
-- 现有 `/api/classify/*` 调试能力不回归
+- （历史目标）调试页面可打开
+- （历史目标）`/api/classify/*` 调试能力不回归
 
 ## 12. 本期实施边界
 
