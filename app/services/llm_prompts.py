@@ -15,7 +15,7 @@ ARCHITECTURE_CLASSIFICATION_RULES = (
     "7. 条令条例：发布机构、编号、版本、规范、条令、条例、制度等内容更偏向该类。\n"
     "8. 必须从领域体系候选中选择一个最可能的节点；如果候选中同时存在上级和下级节点，应优先选择最具体的可匹配节点。\n"
     "9. 不要输出分类名称、候选列表或概率，只输出最终 architectureId。\n"
-    "10. 只有当文档内容与所有候选领域都明显无关时才输出 0。\n"
+    "10. 只有当文档内容与所有除’其他‘之外的候选领域都明显无关时才输出 1。\n"
 )
 
 
@@ -32,7 +32,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "channel": "",
         "maturity": "",
         "format": "",
-        "architectureId": 0,
+        "architectureId": 1,
         "fileDataItem": {
             "fileName": request_params.get("fileName", ""),
             "dataTime": "",
@@ -57,8 +57,8 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "请仅基于文档内容进行字段抽取，并输出严格合法 JSON。\n"
         "不要直接原样返回候选对象、候选数组、key/value 对象或中文键名。\n"
         "country、channel、maturity、format 只能输出候选项中的 value 字符串；"
-        "architectureId 只能输出候选项中的 id 数字。\n"
-        "如果文档证据不足，对应字符串字段输出空字符串，score 输出 0.0。\n"
+        "architectureId 只能输出候选项中的 id 数字。如果不符合一般候选项，则输出’其他‘候选项所对应的 1。\n"
+        "请尽可能抽取所有字段，但如果文档内容不足以支持某些字段的抽取，可以选择不填充这些字段，并将对应字符串字段输出空字符串。\n"
         "documentTranslationOne 和 documentTranslationTwo 当前固定输出空字符串。\n"
         + ARCHITECTURE_CLASSIFICATION_RULES
         + "输出 JSON 必须严格匹配以下结构：\n"
