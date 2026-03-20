@@ -128,7 +128,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("作战指挥：", prompt)
         self.assertIn("组织机构", prompt)
         self.assertIn("必须从领域体系候选中选择一个最可能的节点", prompt)
-        self.assertIn("只有当文档内容与所有候选领域都明显无关时才输出 0", prompt)
+        self.assertIn("只有当文档内容与所有除'其他'项以外的候选领域都明显无关时才输出 1", prompt)
 
     def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
         original_text = (
