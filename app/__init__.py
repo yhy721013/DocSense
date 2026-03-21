@@ -10,7 +10,7 @@ from __future__ import annotations
 from flask import Flask
 
 from app.blueprints.llm import llm_bp, sock
-from app.core.logging_config import setup_logging
+from app.core.logging import setup_logging
 from app.core.settings import MAX_CONTENT_LENGTH
 
 

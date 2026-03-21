@@ -143,7 +143,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add app/services/llm_analysis_service.py tests/test_llm_analysis_service.py
+git add app/services/analysis_service.py tests/test_llm_analysis_service.py
 git commit -m "feat: normalize mhtml for llm analysis"
 ```
 
@@ -196,7 +196,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add app/services/llm_report_service.py tests/test_llm_report_service.py
+git add app/services/report_service.py tests/test_llm_report_service.py
 git commit -m "feat: normalize mhtml for llm report generation"
 ```
 
@@ -243,7 +243,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add app/services/llm_analysis_service.py app/services/llm_report_service.py tests/test_mhtml_normalizer.py tests/test_llm_analysis_service.py tests/test_llm_report_service.py
+git add app/services/analysis_service.py app/services/report_service.py tests/test_mhtml_normalizer.py tests/test_llm_analysis_service.py tests/test_llm_report_service.py
 git commit -m "feat: add mhtml support for llm analysis and report"
 ```
 

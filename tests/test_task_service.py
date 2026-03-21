@@ -1,6 +1,6 @@
 import unittest
 
-from app.services.llm_task_service import LLMTaskService
+from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
 

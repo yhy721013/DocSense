@@ -95,7 +95,7 @@ git commit -m "feat: scaffold llm protocol routes"
 import tempfile
 import unittest
 
-from app.services.llm_task_service import LLMTaskService
+from app.services.llm_service.task_service import LLMTaskService
 
 
 class LLMTaskServiceTests(unittest.TestCase):
@@ -151,7 +151,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_task_service.py app/services/llm_task_service.py app/settings.py app/blueprints/llm.py
+git add tests/test_llm_task_service.py app/services/task_service.py app/settings.py app/blueprints/llm.py
 git commit -m "feat: add sqlite llm task persistence"
 ```
 
@@ -241,7 +241,7 @@ git commit -m "feat: add llm download and callback services"
 ```python
 import unittest
 
-from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
+from app.services.llm_service.analysis_service import build_file_callback_payload, map_analysis_result
 
 
 class LLMAnalysisServiceTests(unittest.TestCase):
@@ -296,7 +296,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_analysis_service.py app/services/llm_analysis_service.py app/services/llm_prompts.py rag_with_ocr.py app/blueprints/llm.py
+git add tests/test_llm_analysis_service.py app/services/analysis_service.py app/services/llm_prompts.py rag_with_ocr.py app/blueprints/llm.py
 git commit -m "feat: add file analysis protocol mapping"
 ```
 
@@ -313,7 +313,7 @@ git commit -m "feat: add file analysis protocol mapping"
 ```python
 import unittest
 
-from app.services.llm_report_service import build_report_callback_payload, ensure_report_html
+from app.services.llm_service.report_service import build_report_callback_payload, ensure_report_html
 
 
 class LLMReportServiceTests(unittest.TestCase):
@@ -364,7 +364,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_report_service.py app/services/llm_report_service.py app/services/llm_prompts.py app/blueprints/llm.py
+git add tests/test_llm_report_service.py app/services/report_service.py app/services/llm_prompts.py app/blueprints/llm.py
 git commit -m "feat: add report generation service"
 ```
 
@@ -385,8 +385,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.core.llm_progress_hub import LLMProgressHub
-from app.services.llm_task_service import LLMTaskService
+from app.core.progress_hub import LLMProgressHub
+from app.services.llm_service.task_service import LLMTaskService
 
 
 class LLMProgressAndCheckTaskTests(unittest.TestCase):
@@ -440,7 +440,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_progress_and_check_task.py app/services/llm_progress_hub.py app/blueprints/llm.py app/services/llm_task_service.py app/services/llm_analysis_service.py app/services/llm_report_service.py
+git add tests/test_llm_progress_and_check_task.py app/services/progress_hub.py app/blueprints/llm.py app/services/task_service.py app/services/analysis_service.py app/services/report_service.py
 git commit -m "feat: add llm progress and callback replay"
 ```
 

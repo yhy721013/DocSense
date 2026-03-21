@@ -24,7 +24,7 @@ def _format_options(title: str, items: Iterable[Any]) -> str:
 
 
 def build_file_analysis_prompt(request_params: dict) -> str:
-    from app.services.llm_analysis_service import build_effective_analysis_ranges
+    from app.services.llm_service.analysis_service import build_effective_analysis_ranges
 
     ranges = build_effective_analysis_ranges(request_params)
     schema = {

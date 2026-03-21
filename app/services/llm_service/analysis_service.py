@@ -16,11 +16,11 @@ from app.pipelines.pipeline import process_file_with_rag as pipeline_process_fil
 from app.clients.callback_client import post_callback_payload
 from app.utils.file_downloader import download_to_temp_file
 from app.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
-from app.core.llm_progress_hub import LLMProgressHub
+from app.core.progress_hub import LLMProgressHub
 from app.core.prompts import build_file_analysis_prompt
-from app.services.llm_task_service import LLMTaskService
-from app.services.llm_translation_service import get_translation_service
-from app.core.database_service import DatabaseService
+from app.services.llm_service.task_service import LLMTaskService
+from app.services.llm_service.translation_service import get_translation_service
+from app.core.database import DatabaseService
 
 
 logger = logging.getLogger(__name__)
