@@ -2,6 +2,8 @@
 
 **日期：** 2026-03-19
 
+> 归档说明（2026-03-21）：本文为历史设计记录。当前仓库已移除前端页面与调试路由，文中“明确不改”的前端模块项仅保留历史背景意义。
+
 **目标：** 仅针对 [api-test.md](/e:/DocSense/api-test.md) 中的 `/llm/analysis` 与 `/llm/generate-report`，新增对 `mhtml`/`mht` 文件的解析支持，并保持现有其他入口与链路不变。
 
 ## 1. 背景与约束
@@ -107,9 +109,9 @@
 
 - `pipeline.py`
 - `web_ui.py`
-- `app/blueprints/classify.py`
-- `app/blueprints/chat.py`
-- Web UI 页面与静态资源
+- （历史条目，当前已移除）`app/blueprints/classify.py`
+- （历史条目，当前已移除）`app/blueprints/chat.py`
+- （历史条目，当前已移除）Web UI 页面与静态资源
 - 翻译子系统的全局格式支持范围
 
 ## 6. 失败降级与错误处理

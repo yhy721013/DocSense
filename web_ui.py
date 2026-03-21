@@ -1,7 +1,7 @@
-"""Web UI entrypoint.
+"""Service entrypoint.
 
 本文件保持为“极薄”入口：仅负责创建 Flask App 并启动服务。
-业务路由与逻辑被拆分到 app/ 目录，便于多人协作开发与后期扩展。
+当前仓库以甲方协议接口为主，业务路由与逻辑位于 app/ 目录。
 """
 
 from __future__ import annotations
