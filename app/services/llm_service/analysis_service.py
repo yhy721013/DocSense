@@ -9,18 +9,18 @@ from typing import Any, Dict, Iterable
 
 import fitz
 
-from anythingllm_client import AnythingLLMClient
-from config import load_anythingllm_config
-from pipeline import process_file_with_rag as pipeline_process_file_with_rag
+from app.services.utils.anythingllm_client import AnythingLLMClient
+from app.services.core.config import load_anythingllm_config
+from app.services.utils.rag_pipeline import process_file_with_rag as pipeline_process_file_with_rag
 
-from app.services.llm_callback_service import post_callback_payload
-from app.services.llm_download_service import download_to_temp_file
-from app.services.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
-from app.services.llm_progress_hub import LLMProgressHub
-from app.services.llm_prompts import build_file_analysis_prompt
-from app.services.llm_task_service import LLMTaskService
-from app.services.llm_translation_service import get_translation_service
-from app.services.knowledge_base.database_service import DatabaseService
+from app.services.utils.callback_client import post_callback_payload
+from app.services.utils.file_downloader import download_to_temp_file
+from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
+from app.services.core.progress_hub import LLMProgressHub
+from app.services.core.prompts import build_file_analysis_prompt
+from app.services.llm_service.task_service import LLMTaskService
+from app.services.llm_service.translation_service import get_translation_service
+from app.services.core.database import DatabaseService
 
 
 logger = logging.getLogger(__name__)

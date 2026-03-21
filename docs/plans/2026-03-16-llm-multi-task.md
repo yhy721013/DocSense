@@ -90,7 +90,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_task_service.py tests/test_llm_routes.py tests/test_llm_progress_and_check_task.py app/services/llm_task_service.py app/blueprints/llm.py
+git add tests/test_llm_task_service.py tests/test_llm_routes.py tests/test_llm_progress_and_check_task.py app/services/task_service.py app/blueprints/llm.py
 git commit -m "feat: add batch llm task acceptance primitives"
 ```
 
@@ -170,7 +170,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add app/blueprints/llm.py app/services/llm_analysis_service.py tests/test_llm_routes.py tests/test_llm_analysis_service.py
+git add app/blueprints/llm.py app/services/analysis_service.py tests/test_llm_routes.py tests/test_llm_analysis_service.py
 git commit -m "feat: support serial multi-file llm analysis"
 ```
 
@@ -245,7 +245,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add app/blueprints/llm.py app/services/llm_task_service.py tests/test_llm_progress_and_check_task.py
+git add app/blueprints/llm.py app/services/task_service.py tests/test_llm_progress_and_check_task.py
 git commit -m "feat: add batch llm check-task responses"
 ```
 
@@ -324,7 +324,7 @@ Expected: PASS。
 **Step 5: Commit**
 
 ```bash
-git add app/blueprints/llm.py app/services/llm_progress_hub.py tests/test_llm_progress_and_check_task.py
+git add app/blueprints/llm.py app/services/progress_hub.py tests/test_llm_progress_and_check_task.py
 git commit -m "feat: support multi-subscription llm progress websocket"
 ```
 

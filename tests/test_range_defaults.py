@@ -1,6 +1,6 @@
 import unittest
 
-from app.services.llm_analysis_service import build_effective_analysis_ranges
+from app.services.llm_service.analysis_service import build_effective_analysis_ranges
 
 
 class LLMRangeDefaultTests(unittest.TestCase):

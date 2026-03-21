@@ -21,7 +21,7 @@
 ```python
 import unittest
 
-from app.services.llm_analysis_service import build_effective_analysis_ranges
+from app.services.llm_service.analysis_service import build_effective_analysis_ranges
 
 
 class LLMRangeDefaultTests(unittest.TestCase):
@@ -72,7 +72,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_range_defaults.py app/services/llm_analysis_service.py
+git add tests/test_llm_range_defaults.py app/services/analysis_service.py
 git commit -m "feat: add default llm analysis range normalization"
 ```
 
@@ -137,7 +137,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_analysis_service.py app/services/llm_prompts.py app/services/llm_analysis_service.py
+git add tests/test_llm_analysis_service.py app/services/llm_prompts.py app/services/analysis_service.py
 git commit -m "fix: constrain llm analysis prompt to effective ranges"
 ```
 
@@ -193,7 +193,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_analysis_service.py app/services/llm_analysis_service.py
+git add tests/test_llm_analysis_service.py app/services/analysis_service.py
 git commit -m "fix: enforce effective range validation in llm analysis mapping"
 ```
 

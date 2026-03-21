@@ -2,10 +2,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.services.llm_progress_hub import LLMProgressHub
-from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
-from app.services.llm_prompts import build_file_analysis_prompt
-from app.services.llm_task_service import LLMTaskService
+from app.services.core import LLMProgressHub
+from app.services.llm_service.analysis_service import build_file_callback_payload, map_analysis_result
+from app.prompts.llm_prompts import build_file_analysis_prompt
+from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
 
@@ -228,7 +228,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             task_service.create_file_task("sample.mhtml", request_payload)
             hub = LLMProgressHub()
 
-            from app.services.llm_analysis_service import run_file_analysis_task
+            from app.services.llm_service.analysis_service import run_file_analysis_task
 
             run_file_analysis_task(
                 task_service=task_service,
@@ -281,7 +281,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             task_service.create_file_task("sample.mhtml", request_payload)
             hub = LLMProgressHub()
 
-            from app.services.llm_analysis_service import run_file_analysis_task
+            from app.services.llm_service.analysis_service import run_file_analysis_task
 
             run_file_analysis_task(
                 task_service=task_service,
@@ -327,7 +327,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             events = []
             hub.subscribe("file", "sample.txt", events.append)
 
-            from app.services.llm_analysis_service import run_file_analysis_task
+            from app.services.llm_service.analysis_service import run_file_analysis_task
 
             run_file_analysis_task(
                 task_service=task_service,
@@ -378,7 +378,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
             mock_run_single.side_effect = capture_transition
 
-            from app.services.llm_analysis_service import run_file_analysis_batch_task
+            from app.services.llm_service.analysis_service import run_file_analysis_batch_task
 
             run_file_analysis_batch_task(
                 task_service=task_service,

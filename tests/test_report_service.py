@@ -2,9 +2,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.services.llm_progress_hub import LLMProgressHub
-from app.services.llm_report_service import build_report_callback_payload, ensure_report_html
-from app.services.llm_task_service import LLMTaskService
+from app.services.core import LLMProgressHub
+from app.services.llm_service.report_service import build_report_callback_payload, ensure_report_html
+from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
 
@@ -59,7 +59,7 @@ class LLMReportServiceTests(unittest.TestCase):
             task_service.create_report_task(132, request_payload)
             hub = LLMProgressHub()
 
-            from app.services.llm_report_service import run_report_task
+            from app.services.llm_service.report_service import run_report_task
 
             run_report_task(
                 task_service=task_service,
@@ -111,7 +111,7 @@ class LLMReportServiceTests(unittest.TestCase):
             task_service.create_report_task(132, request_payload)
             hub = LLMProgressHub()
 
-            from app.services.llm_report_service import run_report_task
+            from app.services.llm_service.report_service import run_report_task
 
             run_report_task(
                 task_service=task_service,
@@ -157,7 +157,7 @@ class LLMReportServiceTests(unittest.TestCase):
             events = []
             hub.subscribe("report", "132", events.append)
 
-            from app.services.llm_report_service import run_report_task
+            from app.services.llm_service.report_service import run_report_task
 
             run_report_task(
                 task_service=task_service,

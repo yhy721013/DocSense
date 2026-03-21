@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app
-from app.services.llm_task_service import LLMTaskService
+from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
 

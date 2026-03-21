@@ -10,8 +10,7 @@ from typing import Union
 
 import fitz
 
-from config import OCRConfig
-from document_utils import is_pdf_file, is_scanned_pdf
+from app.services.core.config import OCRConfig
 
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,7 @@ def prepare_file_for_upload(file_path: str, ocr_config: OCRConfig) -> str:
     if not ocr_config.enabled:
         return str(path)
 
-    if not is_pdf_file(str(path)):
+    if path.suffix.lower() != ".pdf":
         return str(path)
 
     if not is_scanned_pdf(
@@ -135,3 +134,24 @@ def _atomic_write_text(target: Path, content: str) -> None:
     temp_path = target.with_suffix(target.suffix + ".tmp")
     temp_path.write_text(content, encoding="utf-8")
     temp_path.replace(target)
+
+
+def is_scanned_pdf(pdf_path: str, sample_pages: int = 3, text_threshold: int = 50) -> bool:
+    # 通过抽样页文本长度判断是否为扫描件
+    try:
+        with fitz.open(pdf_path) as doc:
+            total_pages = len(doc)
+            pages_to_check = min(sample_pages, total_pages)
+            if pages_to_check <= 0:
+                return True
+
+            total_text_length = 0
+            for page_num in range(pages_to_check):
+                page = doc[page_num]
+                text = page.get_text().strip()
+                total_text_length += len(text)
+
+        avg_text_per_page = total_text_length / pages_to_check
+        return avg_text_per_page < text_threshold
+    except Exception:
+        return True
