@@ -13,7 +13,7 @@ from app.clients.callback_client import post_callback_payload
 from app.core.llm_progress_hub import LLMProgressHub
 from app.services.llm_task_service import LLMTaskService
 from app.services.llm_translation_service import get_translation_service
-from app.prompts.llm_weaponry_prompts import (
+from app.core.prompts import (
     build_input_field_prompt,
     build_table_column_prompt,
 )

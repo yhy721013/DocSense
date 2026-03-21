@@ -13,7 +13,7 @@ from app.clients.callback_client import post_callback_payload
 from app.utils.file_downloader import download_to_temp_file
 from app.utils.mhtml_normalizer import normalize_file_for_llm
 from app.core.llm_progress_hub import LLMProgressHub
-from app.prompts.llm_prompts import build_report_prompt
+from app.core.prompts import build_report_prompt
 from app.services.llm_task_service import LLMTaskService
 
 
