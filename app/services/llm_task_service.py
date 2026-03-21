@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
-from app.services.llm_callback_service import post_callback_payload
+from app.clients.callback_client import post_callback_payload
 
 
 def _utc_now_iso() -> str:

@@ -170,8 +170,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from app.services.llm_callback_service import post_callback_payload
-from app.services.llm_download_service import download_to_temp_file
+from app.clients.callback_client import post_callback_payload
+from app.utils.file_downloader import download_to_temp_file
 
 
 class LLMIOServicesTests(unittest.TestCase):
@@ -223,7 +223,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add tests/test_llm_io_services.py app/services/llm_download_service.py app/services/llm_callback_service.py config.py
+git add tests/test_llm_io_services.py app/services/file_downloader.py app/services/callback_client.py config.py
 git commit -m "feat: add llm download and callback services"
 ```
 
@@ -385,7 +385,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.services.llm_progress_hub import LLMProgressHub
+from app.core.llm_progress_hub import LLMProgressHub
 from app.services.llm_task_service import LLMTaskService
 
 

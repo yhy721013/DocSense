@@ -2,9 +2,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.services.llm_progress_hub import LLMProgressHub
+from app.core.llm_progress_hub import LLMProgressHub
 from app.services.llm_analysis_service import build_file_callback_payload, map_analysis_result
-from app.services.llm_prompts import build_file_analysis_prompt
+from app.prompts.llm_prompts import build_file_analysis_prompt
 from app.services.llm_task_service import LLMTaskService
 from tests import workspace_tempdir
 

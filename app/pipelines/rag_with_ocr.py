@@ -12,9 +12,9 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from anythingllm_client import AnythingLLMClient
-from config import load_anythingllm_config
-from pipeline import process_file_with_rag as pipeline_process_file_with_rag
+from app.clients.anythingllm_client import AnythingLLMClient
+from app.core.config import load_anythingllm_config
+from app.pipelines.pipeline import process_file_with_rag as pipeline_process_file_with_rag
 
 
 PROMPT = (

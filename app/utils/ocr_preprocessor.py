@@ -10,8 +10,8 @@ from typing import Union
 
 import fitz
 
-from config import OCRConfig
-from document_utils import is_pdf_file, is_scanned_pdf
+from app.core.config import OCRConfig
+from app.utils.document_utils import is_pdf_file, is_scanned_pdf
 
 
 logger = logging.getLogger(__name__)

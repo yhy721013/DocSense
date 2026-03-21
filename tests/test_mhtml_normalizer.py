@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from app.services.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_mhtml_file
+from app.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_mhtml_file
 from tests import workspace_tempdir
 
 

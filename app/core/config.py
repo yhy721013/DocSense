@@ -102,9 +102,9 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
     return LLMIntegrationConfig(
         callback_url=_parse_optional_str(os.getenv("DOCSENSE_LLM_CALLBACK_URL")),
         callback_timeout=float(os.getenv("DOCSENSE_LLM_CALLBACK_TIMEOUT", "10").strip() or "10"),
-        task_db_path=os.getenv("DOCSENSE_LLM_TASK_DB", ".runtime/llm_tasks.sqlite3").strip()
+        task_db_path=os.getenv("DOCSENSE_LLM_TASK_DB", "../../.runtime/llm_tasks.sqlite3").strip()
         or ".runtime/llm_tasks.sqlite3",
         download_timeout=float(os.getenv("DOCSENSE_LLM_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
-        download_dir=os.getenv("DOCSENSE_LLM_DOWNLOAD_DIR", ".runtime/llm_downloads").strip()
+        download_dir=os.getenv("DOCSENSE_LLM_DOWNLOAD_DIR", "../../.runtime/llm_downloads").strip()
         or ".runtime/llm_downloads",
     )

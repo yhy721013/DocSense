@@ -5,15 +5,15 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from anythingllm_client import AnythingLLMClient
-from config import load_anythingllm_config
+from app.clients.anythingllm_client import AnythingLLMClient
+from app.core.config import load_anythingllm_config
 
-from app.services.knowledge_base.database_service import DatabaseService
-from app.services.llm_callback_service import post_callback_payload
-from app.services.llm_progress_hub import LLMProgressHub
+from app.core.database_service import DatabaseService
+from app.clients.callback_client import post_callback_payload
+from app.core.llm_progress_hub import LLMProgressHub
 from app.services.llm_task_service import LLMTaskService
 from app.services.llm_translation_service import get_translation_service
-from app.services.llm_weaponry_prompts import (
+from app.prompts.llm_weaponry_prompts import (
     build_input_field_prompt,
     build_table_column_prompt,
 )

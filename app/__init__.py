@@ -10,8 +10,8 @@ from __future__ import annotations
 from flask import Flask
 
 from app.blueprints.llm import llm_bp, sock
-from app.logging_config import setup_logging
-from app.settings import MAX_CONTENT_LENGTH
+from app.core.logging_config import setup_logging
+from app.core.settings import MAX_CONTENT_LENGTH
 
 
 def create_app() -> Flask:
