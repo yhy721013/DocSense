@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from app.core.config import AnythingLLMConfig
+from app.services.core.config import AnythingLLMConfig
 
 
 logger = logging.getLogger(__name__)

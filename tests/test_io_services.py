@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from app.clients.callback_client import post_callback_payload
-from app.utils.file_downloader import download_to_temp_file
+from app.services.utils import post_callback_payload
+from app.services.utils.file_downloader import download_to_temp_file
 from tests import workspace_tempdir
 
 

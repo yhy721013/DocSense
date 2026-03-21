@@ -5,15 +5,15 @@ import logging
 import time
 from pathlib import Path
 
-from app.clients.anythingllm_client import AnythingLLMClient
-from app.core.config import load_anythingllm_config
-from app.pipelines.pipeline import prepare_upload_files, run_anythingllm_rag
+from app.services.utils.anythingllm_client import AnythingLLMClient
+from app.services.core.config import load_anythingllm_config
+from app.services.utils.rag_pipeline import prepare_upload_files, run_anythingllm_rag
 
-from app.clients.callback_client import post_callback_payload
-from app.utils.file_downloader import download_to_temp_file
-from app.utils.mhtml_normalizer import normalize_file_for_llm
-from app.core.progress_hub import LLMProgressHub
-from app.core.prompts import build_report_prompt
+from app.services.utils.callback_client import post_callback_payload
+from app.services.utils.file_downloader import download_to_temp_file
+from app.services.utils.mhtml_normalizer import normalize_file_for_llm
+from app.services.core.progress_hub import LLMProgressHub
+from app.services.core.prompts import build_report_prompt
 from app.services.llm_service.task_service import LLMTaskService
 
 

@@ -5,9 +5,9 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from app.clients.anythingllm_client import AnythingLLMClient
-from app.core.config import load_ocr_config
-from app.utils.ocr_preprocessor import prepare_file_for_upload
+from app.services.utils.anythingllm_client import AnythingLLMClient
+from app.services.core.config import load_ocr_config
+from app.services.utils.ocr_preprocessor import prepare_file_for_upload
 
 
 OCR_CONFIG = load_ocr_config()

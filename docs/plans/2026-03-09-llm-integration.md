@@ -170,8 +170,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from app.clients.callback_client import post_callback_payload
-from app.utils.file_downloader import download_to_temp_file
+from app.services.utils import post_callback_payload
+from app.services.utils.file_downloader import download_to_temp_file
 
 
 class LLMIOServicesTests(unittest.TestCase):
@@ -385,7 +385,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.core.progress_hub import LLMProgressHub
+from app.services.core import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 
 

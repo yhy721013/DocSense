@@ -4,7 +4,7 @@ from unittest.mock import patch
 from app import create_app
 from app.blueprints import llm as llm_module
 from app.blueprints.llm import _handle_progress_command, _parse_progress_command
-from app.core.progress_hub import LLMProgressHub
+from app.services.core import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
