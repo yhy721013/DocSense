@@ -10,11 +10,11 @@ from flask_sock import Sock
 
 from app.services.core.config import load_llm_integration_config
 from app.services.llm_service.analysis_service import run_file_analysis_batch_task, run_file_analysis_task
-from app.services.core import LLMProgressHub
+from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.weaponry_service import run_weaponry_task
-from app.services.core import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH
+from app.services.core.settings import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH
 from app.services.core.database import DatabaseService
 
 

@@ -11,7 +11,7 @@ from flask import Flask
 
 from app.blueprints.llm import llm_bp, sock
 from app.services.core.logging import setup_logging
-from app.services.core import MAX_CONTENT_LENGTH
+from app.services.core.settings import MAX_CONTENT_LENGTH
 
 
 def create_app() -> Flask:

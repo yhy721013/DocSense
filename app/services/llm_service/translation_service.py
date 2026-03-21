@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from app.services.hy_mt_translator import DocumentTranslator, HYMTTranslator
+from app.services.translator import DocumentTranslator, HYMTTranslator
 
 
 logger = logging.getLogger(__name__)
