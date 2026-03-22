@@ -224,21 +224,21 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.mhtml", request_payload)
-            hub = LLMProgressHub()
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_file_task("sample.mhtml", request_payload)
+                hub = LLMProgressHub()
 
-            from app.services.llm_service.analysis_service import run_file_analysis_task
+                from app.services.llm_service.analysis_service import run_file_analysis_task
 
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_file_analysis_task(
+                    task_service=task_service,
+                    kb_service=Mock(),
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
         mock_normalize.assert_called_once_with(str(sample))
         self.assertEqual(_mock_pipeline.call_args.kwargs["file_path"], str(normalized))
@@ -277,21 +277,21 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.mhtml", request_payload)
-            hub = LLMProgressHub()
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_file_task("sample.mhtml", request_payload)
+                hub = LLMProgressHub()
 
-            from app.services.llm_service.analysis_service import run_file_analysis_task
+                from app.services.llm_service.analysis_service import run_file_analysis_task
 
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_file_analysis_task(
+                    task_service=task_service,
+                    kb_service=Mock(),
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
         self.assertEqual(_mock_pipeline.call_args.kwargs["file_path"], str(sample))
 
@@ -321,30 +321,30 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.txt", request_payload)
-            hub = LLMProgressHub()
-            events = []
-            hub.subscribe("file", "sample.txt", events.append)
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_file_task("sample.txt", request_payload)
+                hub = LLMProgressHub()
+                events = []
+                hub.subscribe("file", "sample.txt", events.append)
 
-            from app.services.llm_service.analysis_service import run_file_analysis_task
+                from app.services.llm_service.analysis_service import run_file_analysis_task
 
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_file_analysis_task(
+                    task_service=task_service,
+                    kb_service=Mock(),
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
-            task = task_service.get_task("file", "sample.txt")
-            self.assertIsNotNone(task)
-            self.assertEqual(task["status"], "2")
-            self.assertEqual(task["callback_status"], "success")
-            self.assertEqual(task["result_payload"]["msg"], "解析成功")
-            self.assertEqual(events[-1]["data"]["progress"], 1.0)
+                task = task_service.get_task("file", "sample.txt")
+                self.assertIsNotNone(task)
+                self.assertEqual(task["status"], "2")
+                self.assertEqual(task["callback_status"], "success")
+                self.assertEqual(task["result_payload"]["msg"], "解析成功")
+                self.assertEqual(events[-1]["data"]["progress"], 1.0)
 
     @patch("app.services.llm_service.analysis_service.run_file_analysis_task")
     def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):
@@ -363,32 +363,32 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
-            task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
-            hub = LLMProgressHub()
-            transitions = []
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
+                task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
+                hub = LLMProgressHub()
+                transitions = []
 
-            def capture_transition(*, task_service, request_payload, **kwargs):
-                current = request_payload["params"][0]["fileName"]
-                status_a = task_service.get_task("file", "a.txt")["status"]
-                status_b = task_service.get_task("file", "b.txt")["status"]
-                transitions.append((current, status_a, status_b))
-                task_service.mark_business_result("file", current, {"ok": True}, status="2", message="完成")
+                def capture_transition(*, task_service, request_payload, **kwargs):
+                    current = request_payload["params"][0]["fileName"]
+                    status_a = task_service.get_task("file", "a.txt")["status"]
+                    status_b = task_service.get_task("file", "b.txt")["status"]
+                    transitions.append((current, status_a, status_b))
+                    task_service.mark_business_result("file", current, {"ok": True}, status="2", message="完成")
 
-            mock_run_single.side_effect = capture_transition
+                mock_run_single.side_effect = capture_transition
 
-            from app.services.llm_service.analysis_service import run_file_analysis_batch_task
+                from app.services.llm_service.analysis_service import run_file_analysis_batch_task
 
-            run_file_analysis_batch_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_file_analysis_batch_task(
+                    task_service=task_service,
+                    kb_service=Mock(),
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
             self.assertEqual(
                 transitions,

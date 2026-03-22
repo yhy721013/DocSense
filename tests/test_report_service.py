@@ -55,20 +55,20 @@ class LLMReportServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_report_task(132, request_payload)
-            hub = LLMProgressHub()
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_report_task(132, request_payload)
+                hub = LLMProgressHub()
 
-            from app.services.llm_service.report_service import run_report_task
+                from app.services.llm_service.report_service import run_report_task
 
-            run_report_task(
-                task_service=task_service,
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_report_task(
+                    task_service=task_service,
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
         mock_normalize.assert_called_once_with(str(sample))
         mock_prepare.assert_called_once_with(str(normalized))
@@ -107,20 +107,20 @@ class LLMReportServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_report_task(132, request_payload)
-            hub = LLMProgressHub()
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_report_task(132, request_payload)
+                hub = LLMProgressHub()
 
-            from app.services.llm_service.report_service import run_report_task
+                from app.services.llm_service.report_service import run_report_task
 
-            run_report_task(
-                task_service=task_service,
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_report_task(
+                    task_service=task_service,
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
         mock_prepare.assert_called_once_with(str(sample))
 
@@ -151,26 +151,26 @@ class LLMReportServiceTests(unittest.TestCase):
                 ],
             }
 
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_report_task(132, request_payload)
-            hub = LLMProgressHub()
-            events = []
-            hub.subscribe("report", "132", events.append)
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as task_service:
+                task_service.create_report_task(132, request_payload)
+                hub = LLMProgressHub()
+                events = []
+                hub.subscribe("report", "132", events.append)
 
-            from app.services.llm_service.report_service import run_report_task
+                from app.services.llm_service.report_service import run_report_task
 
-            run_report_task(
-                task_service=task_service,
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
+                run_report_task(
+                    task_service=task_service,
+                    progress_hub=hub,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
 
-            task = task_service.get_task("report", "132")
-            self.assertIsNotNone(task)
-            self.assertEqual(task["status"], "1")
-            self.assertEqual(task["callback_status"], "success")
-            self.assertEqual(task["result_payload"]["msg"], "生成成功")
-            self.assertEqual(events[-1]["data"]["progress"], 1.0)
+                task = task_service.get_task("report", "132")
+                self.assertIsNotNone(task)
+                self.assertEqual(task["status"], "1")
+                self.assertEqual(task["callback_status"], "success")
+                self.assertEqual(task["result_payload"]["msg"], "生成成功")
+                self.assertEqual(events[-1]["data"]["progress"], 1.0)

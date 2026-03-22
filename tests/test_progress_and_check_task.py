@@ -51,26 +51,26 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
 
     def test_legacy_progress_message_replays_snapshot_without_ack_when_repeated(self):
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task(
-                "demo.pdf",
-                {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
-                status="1",
-            )
-            service.update_task_progress("file", "demo.pdf", progress=0.65, message="处理中", status="1")
-            hub = LLMProgressHub()
-            sent_messages = []
-            subscriptions = {}
-            command = _parse_progress_command(
-                {
-                    "businessType": "file",
-                    "params": [{"fileName": "demo.pdf"}],
-                }
-            )
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as service:
+                service.create_file_task(
+                    "demo.pdf",
+                    {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
+                    status="1",
+                )
+                service.update_task_progress("file", "demo.pdf", progress=0.65, message="处理中", status="1")
+                hub = LLMProgressHub()
+                sent_messages = []
+                subscriptions = {}
+                command = _parse_progress_command(
+                    {
+                        "businessType": "file",
+                        "params": [{"fileName": "demo.pdf"}],
+                    }
+                )
 
-            with patch.object(llm_module, "task_service", service), patch.object(llm_module, "progress_hub", hub):
-                _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
-                _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
+                with patch.object(llm_module, "task_service", service), patch.object(llm_module, "progress_hub", hub):
+                    _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
+                    _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
 
         self.assertEqual(
             sent_messages,
@@ -83,30 +83,30 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
     @patch("app.services.llm_service.task_service.post_callback_payload", return_value=True)
     def test_check_task_replays_failed_callback(self, _mock_callback):
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("demo.pdf", {"businessType": "file"})
-            service.mark_business_completed("file", "demo.pdf", {"fileName": "demo.pdf"}, status="2")
-            service.mark_callback_failed("file", "demo.pdf", "timeout")
-            replayed = service.replay_callback_if_needed("file", "demo.pdf", callback_url="http://callback.test/llm/callback", timeout=5)
-            self.assertTrue(replayed)
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as service:
+                service.create_file_task("demo.pdf", {"businessType": "file"})
+                service.mark_business_completed("file", "demo.pdf", {"fileName": "demo.pdf"}, status="2")
+                service.mark_callback_failed("file", "demo.pdf", "timeout")
+                replayed = service.replay_callback_if_needed("file", "demo.pdf", callback_url="http://callback.test/llm/callback", timeout=5)
+                self.assertTrue(replayed)
 
     def test_batch_check_task_returns_data_array(self):
         app = create_app()
         client = app.test_client()
 
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
-            service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
+            with LLMTaskService(db_path=f"{tmp}/tasks.sqlite3") as service:
+                service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
+                service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
 
-            with patch("app.blueprints.llm.task_service", service):
-                response = client.post(
-                    "/llm/check-task",
-                    json={
-                        "businessType": "file",
-                        "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
-                    },
-                )
+                with patch("app.blueprints.llm.task_service", service):
+                    response = client.post(
+                        "/llm/check-task",
+                        json={
+                            "businessType": "file",
+                            "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
+                        },
+                    )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
