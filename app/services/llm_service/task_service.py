@@ -20,8 +20,21 @@ logger = logging.getLogger(__name__)
 class LLMTaskService:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._conn: Optional[sqlite3.Connection] = None
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
+    def __enter__(self):
+        self._conn = self._connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def close(self):
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -30,12 +43,16 @@ class LLMTaskService:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        conn = self._connect()
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        if self._conn is not None:
+            yield self._conn
+            # Do NOT close self._conn here, __exit__ or close() will handle it
+        else:
+            conn = self._connect()
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
 
     def _init_db(self) -> None:
         with self._connection() as conn:
