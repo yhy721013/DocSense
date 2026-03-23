@@ -2,6 +2,110 @@ import re
 from typing import Optional
 
 
+def build_qwen_prompt(source_text: str, target_lang: str = "Chinese") -> str:
+    """
+    为 qwen3.5:4b 优化的提示词。
+    特点：
+    1. 明确指令，减少模型困惑
+    2. 强调只输出翻译
+    3. 利用 4b模型的强理解能力
+    """
+    # 【关键修复】使用英文指令格式，与清理函数保持一致
+    prompt = (
+        f"Translate the following English text to {target_lang}.\n"
+        f"IMPORTANT REQUIREMENTS:\n"
+        f"1. Output ONLY the Chinese translation\n"
+        f"2. DO NOT repeat the original English text\n"
+        f"3. You MUST translate EVERY paragraph, including:\n"
+        f"   - Short paragraphs (even single sentences)\n"
+        f"   - URLs and links (keep URLs as-is, but translate surrounding text)\n"
+        f"   - Titles and headings\n"
+        f"4. Keep the EXACT same paragraph structure (use '\\n\\n' to separate paragraphs)\n"
+        f"5. The number of output paragraphs MUST equal the number of input paragraphs\n"
+        f"6. Do not add any explanations, notes, or comments\n"
+        f"\n"
+        f"Original English Text:\n"
+        f"{'=' * 50}\n"
+        f"{source_text}\n"
+        f"{'=' * 50}\n"
+        f"\n"
+        f"Chinese Translation (output only the translation):"
+    )
+    return prompt
+
+
+def qwen_clean_output(output_text: str, prompt: str) -> str:
+    """
+    针对 qwen3.5:4b 的清理函数。
+    【关键修复】修复原文提取逻辑和检测条件
+    """
+    if not output_text:
+        return ""
+
+    # 1. 去除首尾空白
+    output_text = output_text.strip()
+
+    # 【新增】2. 检测是否包含 token IDs 特征（数字数组）
+    # 如果输出看起来像 token IDs（大量数字），说明模型调用失败
+    if re.match(r'^[\d\s,\[\]]+$', output_text):
+        print(f"[警告] 检测到输出为 token IDs 数组，非正常文本")
+        return ""
+
+    # 【关键修复】3. 检测是否完全是原文（如果是，说明模型没翻译）
+    # 提取 prompt 中的原文部分
+    original_marker = "Original English Text:\n"
+    if original_marker in prompt:
+        # 正确提取原文（使用 '=' 作为分隔符）
+        try:
+            after_marker = prompt.split(original_marker)[1]
+            original_text = after_marker.split("=" * 50)[0].strip()
+
+            # 如果输出和原文几乎一样（>90% 相似），说明模型没翻译
+            if len(original_text) > 10 and len(output_text) > 10:
+                similarity = len(set(original_text) & set(output_text)) / max(len(original_text), len(output_text))
+                if similarity > 0.9:
+                    print(f"[警告] 检测到模型返回原文，未进行翻译")
+                    return ""  # 返回空，触发重试
+        except Exception as e:
+            print(f"[清理函数警告] 无法提取原文：{e}")
+            # 继续执行，不阻断流程
+
+    # 4. 移除可能的引导词残留
+    patterns_to_remove = [
+        r"^(翻译结果 | Translation|译文):?\s*",
+        r"^Original English Text:.*?(?=\n)",  # 移除可能的原文残留
+    ]
+    for pattern in patterns_to_remove:
+        output_text = re.sub(pattern, "", output_text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 5. 简单去重（防止极端情况）
+    lines = output_text.split('\n')
+    unique_lines = []
+    prev_line = None
+    repeat_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == prev_line:
+            repeat_count += 1
+            if repeat_count > 2:
+                continue
+        else:
+            repeat_count = 0
+            prev_line = stripped
+        unique_lines.append(line)
+
+    output_text = '\n'.join(unique_lines).strip()
+
+    # 6. 最终检查：如果结果仍然包含大量英文，可能是失败的
+    english_ratio = len(re.findall(r'[A-Za-z]', output_text)) / max(len(output_text), 1)
+    if english_ratio > 0.8:
+        print(f"[警告] 翻译结果中英文占比过高 ({english_ratio:.1%})，可能是失败")
+        return ""
+
+    return output_text
+
+
 def build_prompt(source_text: str, target_lang: str = "Chinese") -> str:
     """
     构建针对 tencent-hy-mt:1.8b 优化的提示词。

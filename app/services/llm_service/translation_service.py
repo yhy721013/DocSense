@@ -23,7 +23,7 @@ class LLMTranslationService:
     def _ensure_translator(self) -> None:
         """确保翻译器已初始化（懒加载）"""
         if self._translator is None:
-            self._translator = HYMTTranslator()
+            self._translator = HYMTTranslator(model_name="tencent-hy-mt:1.8b-q4")
             self._document_translator = DocumentTranslator(self._translator)
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:
@@ -47,7 +47,7 @@ class LLMTranslationService:
             file_path: str,
             target_lang: str = "Chinese",
             translate_all: int = 0,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str] | tuple[str, str]:
         """
         翻译文档并返回双语结果
 
@@ -65,61 +65,54 @@ class LLMTranslationService:
             # 生成输出路径
             base_path = Path(file_path)
             output_txt = base_path.parent / f"{base_path.stem}_translated.txt"
-            output_html = base_path.parent / f"{base_path.stem}_bilingual.html"
-
-            # 【新增】在翻译前通知进度（0% 起点）
-            logger.info("开始翻译文档: %s", file_path)
-            self._notify_progress(0.0, "开始翻译文档...")
+            output_bilingual_html = base_path.parent / f"{base_path.stem}"/"_bilingual_html"
+            output_monolingual_html = base_path.parent / f"{base_path.stem}"/"_monolingual_html"
 
             # 翻译文档（生成 TXT）
-            translated_txt_path = self._document_translator.process_file(
-                file_path=str(file_path),
-                output_path=str(output_txt),
-                target_lang=target_lang,
-                translate_all=translate_all,
-            )
-
-            # 【新增】读取翻译后的文本时通知进度（50%）
-            self._notify_progress(0.5, "正在读取翻译结果...")
-
-            # 读取翻译后的文本
-            translated_text = ""
-            if os.path.exists(translated_txt_path):
-                translated_text = Path(translated_txt_path).read_text(encoding="utf-8", errors="ignore")
+            # translated_txt_path = self._document_translator.process_file(
+            #     file_path=str(file_path),
+            #     output_path=str(output_txt),
+            #     target_lang=target_lang,
+            #     translate_all=translate_all,
+            # )
+            #
+            # # 读取翻译后的文本
+            # translated_text = ""
+            # if os.path.exists(translated_txt_path):
+            #     translated_text = Path(translated_txt_path).read_text(encoding="utf-8", errors="ignore")
 
             # 生成双语 HTML
             bilingual_html_path = self._document_translator.convert_to_html(
                 file_path=str(file_path),
-                output_dir=str(base_path.parent),
+                output_dir=str(output_bilingual_html),
                 target_lang=target_lang,
                 show_bilingual=True,
                 translate_all=translate_all,
             )
-
-            # 【新增】读取 HTML 内容时通知进度（80%）
-            self._notify_progress(0.8, "正在生成双语对照 HTML...")
-
             # 读取 HTML 内容
-            html_content = ""
+            bilingual_html_content = ""
             if os.path.exists(bilingual_html_path):
-                html_content = Path(bilingual_html_path).read_text(encoding="utf-8", errors="ignore")
+                bilingual_html_content = Path(bilingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
-            # 【新增】完成时通知进度（100%）
-            logger.info("文档翻译完成: %s", file_path)
-            self._notify_progress(1.0, "翻译完成")
+            # 生成单语 HTML
+            monolingual_html_path = self._document_translator.convert_to_html(
+                file_path=str(file_path),
+                output_dir=str(output_monolingual_html),
+                target_lang=target_lang,
+                show_bilingual=False,
+                translate_all=translate_all,
+            )
+            monolingual_html_content = ""
+            if os.path.exists(monolingual_html_path):
+                monolingual_html_content = Path(monolingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
-            return translated_text, html_content
-
+            return bilingual_html_content, monolingual_html_content
         except Exception as e:
             logger.exception("文档翻译失败: %s, error=%s", file_path, e)
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
-    def translate_text_only(
-            self,
-            text: str,
-            target_lang: str = "Chinese",
-    ) -> str:
+    def translate_text_only(self, text: str, target_lang: str = "Chinese") -> str:
         """
         仅翻译纯文本（适用于短文本或摘要）
 
@@ -133,9 +126,11 @@ class LLMTranslationService:
             return ""
 
         try:
-            return self._translator.translate_text(text, target_lang)
+            translated = self._translator.translate_text(text, target_lang)
+            # 返回HTML格式
+            return f'<div class="translated-text">{self._escape_html(translated)}</div>'
         except Exception as e:
-            logger.error("文本翻译检测失败: %s", e)
+            logger.error("文本翻译失败: %s", e)
             return ""
 
 

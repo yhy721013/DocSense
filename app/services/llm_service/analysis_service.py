@@ -394,26 +394,22 @@ def enrich_with_translations(
             # 设置进度回调
             translation_service.set_progress_callback(translation_progress_callback)
 
-            translated_text, bilingual_html = translation_service.translate_document(
+            bilingual_html_content, monolingual_html_content = translation_service.translate_document(
                 file_path=file_path,
                 target_lang="Chinese",
                 translate_all=0,
             )
 
-            if translated_text:
-                mapped_result["fileDataItem"]["documentTranslationOne"] = translated_text
-                mapped_result["fileDataItem"]["documentTranslationTwo"] = bilingual_html or translated_text
-            else:
-                # 翻译失败时，尝试只翻译摘要
-                if summary:
-                    translated_summary = translation_service.translate_text_only(summary)
-                    mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
+            mapped_result["fileDataItem"]["documentTranslationOne"] = monolingual_html_content
+            mapped_result["fileDataItem"]["documentTranslationTwo"] = bilingual_html_content
+
         else:
             # 快速模式：只翻译摘要
             if summary:
                 print(f"[LLMAnalysis] 翻译摘要：{summary[:50]}...")
                 translated_summary = translation_service.translate_text_only(summary)
                 mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
+                mapped_result["fileDataItem"]["documentTranslationTwo"] = summary+"\n"+translated_summary
 
         return mapped_result
 
