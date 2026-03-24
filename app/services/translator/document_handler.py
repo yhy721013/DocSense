@@ -27,7 +27,7 @@ class DocumentTranslator:
             translate_all: int = 0
     ) -> str:
         """
-        根据文件后缀自动选择处理方式
+        根据文件后缀自动选择处理方式，均生成txt双语翻译文本
         :param file_path: 输入文件路径
         :param output_path: 输出文件路径（可选）
         :param target_lang: 目标语言
