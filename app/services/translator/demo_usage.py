@@ -1,4 +1,4 @@
-from hy_mt_translator import HYMTTranslator, DocumentTranslator
+from app.services.translator import HYMTTranslator, DocumentTranslator
 
 # 1. 初始化模型
 translator = HYMTTranslator()
@@ -8,14 +8,15 @@ doc_translator = DocumentTranslator(translator)
 
 # 3. 测试不同文件格式转换为 HTML
 test_files = [
-    ("./test/20250919凯瑟琳·萨顿被任命为美国防部网络政策负责人.docx", "Word 文件"),
-    ("./test/关岛阿普拉海军基地.docx", "Word 文件"),
-    ("./test/test_english.txt", "TXT 文件"),
-    ("./test/JFS_5701-JFS_-06-Mar-2024.pdf", "PDF 文件"),
-    ("./test/测试.pdf", "PDF 文件"),
+    # ("./test/20250919凯瑟琳·萨顿被任命为美国防部网络政策负责人.docx", "Word 文件"),
+    # ("./test/关岛阿普拉海军基地.docx", "Word 文件"),
+    # ("./test/test_english.txt", "TXT 文件"),
+    # ("./test/JFS_5701-JFS_-06-Mar-2024.pdf", "PDF 文件"),
+    # ("./test/测试.pdf", "PDF 文件"),
+    ("./tests/fixtures/files/sample.txt", "TXT 文件"),
 ]
 
-output_folder = "./output"
+output_folder = "."
 
 # 设置翻译段落（文本块）限制（0 表示翻译全文）
 translate_all = 100  # 设置为 100 表示只翻译前100个段落，通常1页包括3~5个段落

@@ -1,5 +1,4 @@
 import re
-from typing import Optional
 
 
 def build_qwen_prompt(source_text: str, target_lang: str = "Chinese") -> str:

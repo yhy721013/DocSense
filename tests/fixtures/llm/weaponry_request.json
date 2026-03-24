@@ -1,0 +1,39 @@
+{
+    "businessType": "weaponry",
+    "params": {
+        "architectureId": 10502,
+        "weaponryTemplateFieldList": [
+            {
+                "fieldDescription": "建筑物的名称，通常在文档开头或标题中提及",
+                "fieldName": "建筑物名称",
+                "fieldType": "INPUT",
+                "templateClassifyId": 1001
+            },
+            {
+                "fieldDescription": "建筑物的建造年份",
+                "fieldName": "建造年份",
+                "fieldType": "INPUT",
+                "templateClassifyId": 1002
+            },
+            {
+                "fieldName": "具体参数表格",
+                "fieldType": "TABLE",
+                "templateClassifyId": 1003,
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldDescription": "参数项目的名称",
+                            "fieldName": "参数名",
+                            "fieldType": "INPUT"
+                        },
+                        {
+                            "fieldDescription": "对应参数的具体数值",
+                            "fieldName": "数值",
+                            "fieldType": "INPUT"
+                        }
+                    ]
+                ]
+            }
+        ]
+    }
+}
