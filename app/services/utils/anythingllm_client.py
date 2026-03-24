@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -374,13 +375,30 @@ class AnythingLLMClient:
         if configured_root:
             return configured_root
 
+        candidates: List[str] = []
+
         if os.name == "nt":
             appdata = os.getenv("APPDATA", "").strip()
-            if not appdata:
-                return None
-            return os.path.join(appdata, "anythingllm-desktop", "storage")
+            if appdata:
+                candidates.append(os.path.join(appdata, "anythingllm-desktop", "storage"))
+        elif sys.platform == "darwin":
+            candidates.append(os.path.expanduser("~/Library/Application Support/anythingllm-desktop/storage"))
+        else:
+            xdg_config_home = os.getenv("XDG_CONFIG_HOME", "").strip()
+            if xdg_config_home:
+                candidates.append(os.path.join(xdg_config_home, "anythingllm-desktop", "storage"))
+            candidates.append(os.path.expanduser("~/.config/anythingllm-desktop/storage"))
 
-        return os.path.expanduser("~/.anythingllm/storage")
+        candidates.append(os.path.expanduser("~/.anythingllm/storage"))
+
+        for candidate in candidates:
+            if candidate and os.path.isdir(candidate):
+                return candidate
+
+        for candidate in candidates:
+            if candidate:
+                return candidate
+        return None
 
     def update_embeddings(
         self,
