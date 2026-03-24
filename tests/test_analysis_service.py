@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 from app.services.core import LLMProgressHub
 from app.services.llm_service.analysis_service import build_file_callback_payload, map_analysis_result
-from app.prompts.llm_prompts import build_file_analysis_prompt
+from app.services.core.prompts import build_file_analysis_prompt
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
