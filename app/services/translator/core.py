@@ -12,7 +12,7 @@ class HYMTTranslator:
         """
         # 默认使用 qwen3.5:4b 模型（更高效，幻觉更小）
         if model_name is None:
-            self.model_name = "qwen3:4b-instruct-2507-q4_K_M"
+            self.model_name = "Qwen3-4B-Instruct-2507-Q4_K_M"
             self.use_qwen = True
         elif model_name == "tencent-hy-mt:1.8b-q4":
             self.model_name = model_name
