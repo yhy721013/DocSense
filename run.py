@@ -1,6 +1,6 @@
 """Service entrypoint.
 
-本文件保持为“极薄”入口：仅负责创建 Flask App 并启动服务。
+本文件保持为"极薄"入口：仅负责创建 Flask App 并启动服务。
 当前仓库以甲方协议接口为主，业务路由与逻辑位于 app/ 目录。
 """
 
@@ -20,7 +20,23 @@ def main() -> None:
     host = os.environ.get("WEB_UI_HOST", "127.0.0.1")
     port = int(os.environ.get("WEB_UI_PORT", 5001))
     debug = os.environ.get("WEB_UI_DEBUG", "true").lower() in ("true", "1", "yes")
-    app.run(host=host, port=port, debug=debug)
+
+    # 【新增】根据环境变量选择是否使用 waitress 生产模式
+    use_waitress = os.environ.get("USE_WAITRESS", "true").lower() in ("true", "1", "yes")
+
+    if use_waitress:
+        # 生产模式：使用 waitress（Windows 兼容，支持长时间任务）
+        try:
+            from waitress import serve
+            print(f"Starting production server with Waitress on {host}:{port}")
+            serve(app, host=host, port=port, threads=8, connection_limit=20)
+        except ImportError:
+            print("Warning: waitress not installed, falling back to Flask development server")
+            app.run(host=host, port=port, debug=debug, threaded=True)
+    else:
+        # 开发模式：使用 Flask 内置服务器
+        print(f"Starting development server on {host}:{port} (debug={debug})")
+        app.run(host=host, port=port, debug=debug, threaded=True)
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ class LLMTranslationService:
     def _ensure_translator(self) -> None:
         """确保翻译器已初始化（懒加载）"""
         if self._translator is None:
-            self._translator = HYMTTranslator(model_name="tencent-hy-mt:1.8b-q4")
+            self._translator = HYMTTranslator(model_name="qwen3:4b-instruct-2507-q4_K_M")
             self._document_translator = DocumentTranslator(self._translator)
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:

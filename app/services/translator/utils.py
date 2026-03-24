@@ -8,28 +8,36 @@ def build_qwen_prompt(source_text: str, target_lang: str = "Chinese") -> str:
     特点：
     1. 明确指令，减少模型困惑
     2. 强调只输出翻译
-    3. 利用 4b模型的强理解能力
+    3. 利用 4b 模型的强理解能力
+    4. 【增强】特别强调 URL 的处理
     """
     # 【关键修复】使用英文指令格式，与清理函数保持一致
+    # 【增强】更强调段落数量必须严格匹配，特别强调 URL 处理
     prompt = (
         f"Translate the following English text to {target_lang}.\n"
-        f"IMPORTANT REQUIREMENTS:\n"
+        f"CRITICAL REQUIREMENTS:\n"
         f"1. Output ONLY the Chinese translation\n"
         f"2. DO NOT repeat the original English text\n"
         f"3. You MUST translate EVERY paragraph, including:\n"
         f"   - Short paragraphs (even single sentences)\n"
-        f"   - URLs and links (keep URLs as-is, but translate surrounding text)\n"
+        f"   - URLs and links (IMPORTANT: Keep URLs EXACTLY as-is, do NOT translate or remove them)\n"
         f"   - Titles and headings\n"
         f"4. Keep the EXACT same paragraph structure (use '\\n\\n' to separate paragraphs)\n"
-        f"5. The number of output paragraphs MUST equal the number of input paragraphs\n"
-        f"6. Do not add any explanations, notes, or comments\n"
+        f"5. The number of output paragraphs MUST EXACTLY equal the number of input paragraphs\n"
+        f"6. IMPORTANT: Count the input paragraphs before translating and ensure your output has the SAME count\n"
+        f"7. Do not add any explanations, notes, or comments\n"
+        f"8. SPECIAL RULE FOR URLs: If a paragraph contains ONLY a URL (http:// or https://), output the SAME URL in that position\n"
+        f"9. DO NOT copy decorative separators from the original text (such as '=====', '-----', '*****')\n"
+        f"\n"
+        f"Input Paragraph Count: {source_text.count(chr(10)+chr(10)) + 1}\n"
+        f"Expected Output Paragraph Count: {source_text.count(chr(10)+chr(10)) + 1}\n"
         f"\n"
         f"Original English Text:\n"
         f"{'=' * 50}\n"
         f"{source_text}\n"
         f"{'=' * 50}\n"
         f"\n"
-        f"Chinese Translation (output only the translation):"
+        f"Chinese Translation (output only the translation, MUST have {source_text.count(chr(10)+chr(10)) + 1} paragraphs, KEEP URLs unchanged):"
     )
     return prompt
 
@@ -37,7 +45,7 @@ def build_qwen_prompt(source_text: str, target_lang: str = "Chinese") -> str:
 def qwen_clean_output(output_text: str, prompt: str) -> str:
     """
     针对 qwen3.5:4b 的清理函数。
-    【关键修复】修复原文提取逻辑和检测条件
+    【关键修复】修复原文提取逻辑和检测条件，保护 URL 等特殊内容
     """
     if not output_text:
         return ""
@@ -51,24 +59,27 @@ def qwen_clean_output(output_text: str, prompt: str) -> str:
         print(f"[警告] 检测到输出为 token IDs 数组，非正常文本")
         return ""
 
-    # 【关键修复】3. 检测是否完全是原文（如果是，说明模型没翻译）
-    # 提取 prompt 中的原文部分
-    original_marker = "Original English Text:\n"
-    if original_marker in prompt:
-        # 正确提取原文（使用 '=' 作为分隔符）
-        try:
-            after_marker = prompt.split(original_marker)[1]
-            original_text = after_marker.split("=" * 50)[0].strip()
-
-            # 如果输出和原文几乎一样（>90% 相似），说明模型没翻译
-            if len(original_text) > 10 and len(output_text) > 10:
-                similarity = len(set(original_text) & set(output_text)) / max(len(original_text), len(output_text))
-                if similarity > 0.9:
-                    print(f"[警告] 检测到模型返回原文，未进行翻译")
-                    return ""  # 返回空，触发重试
-        except Exception as e:
-            print(f"[清理函数警告] 无法提取原文：{e}")
-            # 继续执行，不阻断流程
+    # 【增强】3. 移除装饰性分隔符（===、---、***等）
+    # 这些分隔符通常出现在原文中，模型会模仿，但译文中不需要
+    # 【修复】调整清理顺序：先清理段落内部，再清理行首行尾
+    # 【新增】第一步：清理段落内部的分隔符（如 "中文\n=====" 或 "中文\n\n====="）
+    output_text = re.sub(r'([^\n])\n+[=]{3,}', r'\1', output_text)  # 中文 + 1 或多个 \n + ===
+    output_text = re.sub(r'([^\n])\n+[-]{3,}', r'\1', output_text)  # 中文 + 1 或多个 \n + ---
+    output_text = re.sub(r'([^\n])\n+\*{3,}', r'\1', output_text)  # 中文 + 1 或多个 \n + ***
+    # 第二步：清理行首的分隔符（单独成行的 ===）
+    output_text = re.sub(r'^[=]{3,}\n*', '', output_text, flags=re.MULTILINE)  # 行首的 ===
+    output_text = re.sub(r'^[-]{3,}\n*', '', output_text, flags=re.MULTILINE)  # 行首的 ---
+    output_text = re.sub(r'^\*{3,}\n*', '', output_text, flags=re.MULTILINE)  # 行首的 ***
+    # 第三步：清理行尾的分隔符（包括 \n\n=== 或 \n===）
+    output_text = re.sub(r'\n+[=]{3,}$', '', output_text, flags=re.MULTILINE)  # 行尾的 ===
+    output_text = re.sub(r'\n+[-]{3,}$', '', output_text, flags=re.MULTILINE)  # 行尾的 ---
+    output_text = re.sub(r'\n+\*{3,}$', '', output_text, flags=re.MULTILINE)  # 行尾的 ***
+    # 第四步：清理中间单独成行的分隔符（=== 两边都有换行）
+    output_text = re.sub(r'\n+[=]{3,}\n+', '\n', output_text)  # 中间的 ===
+    output_text = re.sub(r'\n+[-]{3,}\n+', '\n', output_text)  # 中间的 ---
+    output_text = re.sub(r'\n+\*{3,}\n+', '\n', output_text)  # 中间的 ***
+    # 第五步：清理连续的空行（由于移除分隔符导致的）
+    output_text = re.sub(r'\n{3,}', '\n\n', output_text)
 
     # 4. 移除可能的引导词残留
     patterns_to_remove = [
@@ -96,12 +107,6 @@ def qwen_clean_output(output_text: str, prompt: str) -> str:
         unique_lines.append(line)
 
     output_text = '\n'.join(unique_lines).strip()
-
-    # 6. 最终检查：如果结果仍然包含大量英文，可能是失败的
-    english_ratio = len(re.findall(r'[A-Za-z]', output_text)) / max(len(output_text), 1)
-    if english_ratio > 0.8:
-        print(f"[警告] 翻译结果中英文占比过高 ({english_ratio:.1%})，可能是失败")
-        return ""
 
     return output_text
 

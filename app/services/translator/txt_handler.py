@@ -324,7 +324,6 @@ class TXTHandler:
                 paragraph_html = (
                     f'<div class="paragraph">'
                     f'<div class="original-text">{self._escape_html(orig)}</div>'
-                    f'<div class="translated-text">{self._escape_html(orig)}</div>'
                     f'</div>'
                 )
                 html_content.append(paragraph_html)

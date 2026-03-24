@@ -86,7 +86,6 @@ class DocxHandler:
                 text_html = f"""
                 <div class="cell-text">
                     <div class="original-text">{cell_text}</div>
-                    <div class="translated-text">{cell_text}</div>
                 </div>
                 """
                 content_parts.append(text_html)
@@ -713,10 +712,14 @@ class DocxHandler:
         if not preserve_styles:
             style_type = 'p'
 
-        content = ""
-        if original:
-            content += f'<span class="original-text">{original}</span><br/>'
-        content += f'<span class="translated-text">{translated}</span>'
+        # 【关键修复】如果原文和译文相同（如中文段落），只输出一行，避免重复
+        if original == translated:
+            content = f'<span class="original-text">{original}</span>'
+        else:
+            content = ""
+            if original:
+                content += f'<span class="original-text">{original}</span><br/>'
+            content += f'<span class="translated-text">{translated}</span>'
 
         if style_type == 'h1':
             return f'<h1>{content}</h1>'

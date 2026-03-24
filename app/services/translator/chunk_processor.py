@@ -156,10 +156,22 @@ class ChunkProcessor:
         # 清理每个段落
         cleaned_paragraphs = [p.strip() for p in raw_paragraphs if p.strip()]
 
-        # 如果段落数量不匹配，进行适配
+        # 【核心修复】如果段落数量不匹配，优先检查是否是模型输出格式问题
         if len(cleaned_paragraphs) != original_paragraph_count:
             print(f"[警告] 段落数量不匹配：期望 {original_paragraph_count}, 实际 {len(cleaned_paragraphs)}")
-            # 尝试智能调整
+
+            # 【新增】尝试重新解析：有些模型会用单换行分隔段落
+            if len(cleaned_paragraphs) < original_paragraph_count:
+                # 尝试用单换行符重新分割
+                raw_paragraphs_alt = re.split(r'\n+', cleaned_text.strip())
+                cleaned_paragraphs_alt = [p.strip() for p in raw_paragraphs_alt if p.strip()]
+
+                # 如果这样能获得更多段落，使用新的分割结果
+                if len(cleaned_paragraphs_alt) > len(cleaned_paragraphs):
+                    print(f"[信息] 使用单换行符重新分割，获得 {len(cleaned_paragraphs_alt)} 个段落")
+                    cleaned_paragraphs = cleaned_paragraphs_alt
+
+            # 智能调整段落数量
             cleaned_paragraphs = self._adapt_paragraph_count(
                 cleaned_paragraphs,
                 original_paragraph_count
@@ -218,29 +230,21 @@ class ChunkProcessor:
                 i += merge_count
             return adapted[:target_count]
 
-        # 如果段落太少，尝试拆分长段落或在末尾补充空段落
+        # 如果段落太少，尝试拆分长段落或在短段落后补充空段落
         elif current_count < target_count:
             adapted = []
             deficit = target_count - current_count
 
             for idx, para in enumerate(paragraphs):
-                # 【优化】降低拆分阈值，更容易拆分
-                if len(para) > 100 and deficit > 0:
-                    # 尝试在句号处拆分
-                    sentences = re.split(r'([.!?.])', para)
-                    mid = len(sentences) // 2
-                    if mid > 0 and mid < len(sentences):
-                        part1 = "".join(sentences[:mid + 1]).strip()
-                        part2 = "".join(sentences[mid + 1:]).strip()
-                        if part1 and part2:
-                            adapted.append(part1)
-                            adapted.append(part2)
-                            deficit -= 1
-                            continue
-
                 adapted.append(para)
 
-            # 【新增】如果仍然不足，在末尾添加占位符（表示这些段落模型未翻译）
+                # 【核心修复】在当前段落后检查是否需要补充占位符
+                # 如果当前段落很短（<10 字）且还缺少段落，则在后面补充
+                if len(para.strip()) < 10 and deficit > 0:
+                    adapted.append("[模型未翻译此段落]")
+                    deficit -= 1
+
+            # 【兜底】如果遍历完所有段落后仍然不足，在末尾补充
             while len(adapted) < target_count:
                 adapted.append("[模型未翻译此段落]")
 
