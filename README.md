@@ -196,6 +196,37 @@ pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1"
 pwsh -NoLogo -Command "./scripts/test_llm_progress.ps1"
 ```
 
+本地联调脚本（macOS / zsh）：
+
+```bash
+zsh scripts/start_test_file_server.sh
+python scripts/mock_callback_server.py
+zsh scripts/test_llm_analysis.sh
+zsh scripts/test_llm_report.sh
+zsh scripts/test_llm_check_task.sh
+zsh scripts/test_llm_progress.sh
+```
+
+脚本默认行为：
+
+- 自动读取仓库根目录 `.env`，不存在时回退 `.env.example`
+- `test_llm_analysis.sh` 默认请求 `POST /llm/analysis`
+- `test_llm_report.sh` 默认请求 `POST /llm/generate-report`
+- `test_llm_check_task.sh` 默认请求 `POST /llm/check-task`
+- `test_llm_progress.sh` 默认连接 `WS /llm/progress`
+
+可选参数示例：
+
+```bash
+zsh scripts/start_test_file_server.sh 8000 tests/fixtures/files
+zsh scripts/test_llm_analysis.sh http://127.0.0.1:5001 tests/fixtures/llm/analysis_request.json
+zsh scripts/test_llm_report.sh http://127.0.0.1:5001 tests/fixtures/llm/report_request.json
+zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/check_task_file_request.json
+zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
+```
+
+Windows 与 macOS 可按各自环境选择对应脚本。
+
 单元测试（仓库默认 `unittest`）：
 
 ```bash

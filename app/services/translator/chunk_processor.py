@@ -17,6 +17,7 @@ class ChunkProcessor:
     MODEL_CONTEXT_LIMITS = {
         "qwen3.5:4b": 256000,  # 256k
         "qwen3.5:4b-instruct": 256000,
+        "qwen3.5:4b-q4_K_M": 256000,
         "tencent-hy-mt:1.8b-q4": 8192,  # 8k
         "default": 32000,  # 默认 32k
     }
