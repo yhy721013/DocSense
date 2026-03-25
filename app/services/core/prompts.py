@@ -48,7 +48,6 @@ def build_file_analysis_prompt(request_params: dict) -> str:
             "relatedTechnology": "",
             "equipmentModel": "",
             "documentOverview": "",
-            "originalText": "",
             "documentTranslationOne": "",
             "documentTranslationTwo": "",
         },
