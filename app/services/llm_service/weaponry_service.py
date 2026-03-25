@@ -26,13 +26,11 @@ logger = logging.getLogger(__name__)
 # 语言检测 & 翻译
 # ---------------------------------------------------------------------------
 
-def _has_cjk(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", text))
 
 
 def _translate_if_needed(text: str) -> str:
-    """若文本不含中文字符，则调用翻译服务翻译为中文。"""
-    if not text or _has_cjk(text):
+    """对于所有文本，调用翻译服务翻译为中文。"""
+    if not text:
         return ""
     try:
         service = get_translation_service()

@@ -135,6 +135,16 @@ class LLMTranslationService:
             return ""
 
 
+    def _escape_html(self, text: str) -> str:
+        """转义 HTML 特殊字符"""
+        text = text.replace('&', '&amp;')
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
+        text = text.replace('"', '&quot;')
+        text = text.replace("'", '&#39;')
+        return text
+
+
 # 全局单例（可选）
 _translation_service_instance: Optional[LLMTranslationService] = None
 
