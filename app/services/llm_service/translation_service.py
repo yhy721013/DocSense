@@ -47,6 +47,7 @@ class LLMTranslationService:
             file_path: str,
             target_lang: str = "Chinese",
             translate_all: int = 0,
+            fast_translate: bool = True,
     ) -> tuple[str, str] | tuple[str, str]:
         """
         翻译文档并返回双语结果
@@ -54,6 +55,7 @@ class LLMTranslationService:
         :param file_path: 待翻译文件路径
         :param target_lang: 目标语言
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页/段落
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: (翻译后文本，双语对照 HTML)
         """
         self._ensure_translator()
@@ -88,6 +90,7 @@ class LLMTranslationService:
                 target_lang=target_lang,
                 show_bilingual=True,
                 translate_all=translate_all,
+                fast_translate=fast_translate,
             )
             # 读取 HTML 内容
             bilingual_html_content = ""
@@ -101,6 +104,7 @@ class LLMTranslationService:
                 target_lang=target_lang,
                 show_bilingual=False,
                 translate_all=translate_all,
+                fast_translate=fast_translate,
             )
             monolingual_html_content = ""
             if os.path.exists(monolingual_html_path):

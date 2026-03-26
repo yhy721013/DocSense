@@ -52,18 +52,27 @@ class HYMTTranslator:
 
         self.progress_tracker = ProgressTracker()
 
+        # Argostranslate 缓存（避免重复加载）
+        self._argo_translators = {}
+        self._auto_install_argos_packages()
+
     def translate_text(self, text: str, target_lang: str = "Chinese", progress_callback=None,
-                       max_retries: int = 2) -> str:
+                       max_retries: int = 2, fast_translate: bool = False) -> str:
         """
         翻译单段文本，增加重试机制以应对模型幻觉或不稳定。
         :param text: 待翻译文本
         :param target_lang: 目标语言
         :param progress_callback: 进度回调函数
         :param max_retries: 最大重试次数
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 翻译后的文本
         """
         if not text.strip():
             return ""
+
+        # 启用快速翻译模式
+        if fast_translate:
+            return self._translate_with_argos(text, target_lang)
 
         original_text = text
         attempt = 0
@@ -149,6 +158,128 @@ class HYMTTranslator:
 
         return translated
 
+    def _translate_with_argos(self, text: str, target_lang: str) -> str:
+        """
+        使用 argostranslate 进行快速翻译
+        :param text: 待翻译文本
+        :param target_lang: 目标语言
+        :return: 翻译后的文本
+        """
+        try:
+            from argostranslate import package, translate
+
+            # 检测源语言（简单判断：如果包含中文字符则为中文）
+            from_lang_code = "zh" if any('\u4e00' <= c <= '\u9fff' for c in text) else "en"
+
+            # 目标语言映射
+            lang_map = {
+                "chinese": "zh",
+                "english": "en",
+                "french": "fr",
+                "german": "de",
+                "spanish": "es",
+                "japanese": "ja",
+                "korean": "ko",
+            }
+            to_lang_code = lang_map.get(target_lang.lower(), "en")
+
+            # 如果源语言和目标语言相同，直接返回
+            if from_lang_code == to_lang_code:
+                return text
+
+            # 【关键修复】使用正确的 API 调用方式
+            # 1. 获取已安装的语言列表
+            installed_languages = translate.get_installed_languages()
+
+            # 2. 找到源语言和目标语言对象
+            from_lang_obj = next((lang for lang in installed_languages if lang.code == from_lang_code), None)
+            to_lang_obj = next((lang for lang in installed_languages if lang.code == to_lang_code), None)
+
+            # 3. 检查是否找到对应的语言
+            if not from_lang_obj:
+                print(f"  [警告] 未找到源语言 {from_lang_code} 的翻译包")
+                return self.translate_text(text, target_lang, fast_translate=False)
+
+            if not to_lang_obj:
+                print(f"  [警告] 未找到目标语言 {to_lang_code} 的翻译包")
+                return self.translate_text(text, target_lang, fast_translate=False)
+
+            # 4. 获取翻译器对象
+            translation = from_lang_obj.get_translation(to_lang_obj)
+
+            if not translation:
+                print(f"  [警告] 无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
+                return self.translate_text(text, target_lang, fast_translate=False)
+
+            # 5. 执行翻译
+            translated = translation.translate(text)
+
+            # 6. 检查翻译结果
+            if not translated:
+                print(f"  [警告] ArgoTranslate 返回空结果")
+                return self.translate_text(text, target_lang, fast_translate=False)
+
+            return translated
+
+        except ImportError as ie:
+            print(f"  [警告] argostranslate 未安装：{ie}，回退到大模型翻译")
+            #return self.translate_text(text, target_lang, fast_translate=False)
+        except AttributeError as ae:
+            print(f"  [错误] ArgoTranslate API 调用失败：{ae}")
+            #print(f"  [回退] 使用大模型翻译")
+            #return self.translate_text(text, target_lang, fast_translate=False)
+        except Exception as e:
+            print(f"  [错误] ArgoTranslate 翻译失败：{e}")
+            #print(f"  [回退] 使用大模型翻译")
+            #return self.translate_text(text, target_lang, fast_translate=False)
+
     def get_progress_tracker(self) -> ProgressTracker:
         """获取进度追踪器"""
         return self.progress_tracker
+
+    def _auto_install_argos_packages(self) -> None:
+        """
+        自动下载并安装常用的 argostranslate 翻译包
+        """
+        try:
+            from argostranslate import package
+
+            print("\n[ArgoTranslate] 检查并安装翻译包...")
+
+            # 获取可用包
+            available_packages = package.get_available_packages()
+
+            # 需要安装的语言对
+            language_pairs = [
+                ("zh", "en", "中文→英文"),
+                ("en", "zh", "英文→中文"),
+            ]
+
+            for from_code, to_code, desc in language_pairs:
+                # 查找对应的包
+                package_to_install = next(
+                    filter(lambda x: x.from_code == from_code and x.to_code == to_code, available_packages),
+                    None
+                )
+
+                if package_to_install:
+                    try:
+                        # 下载并安装
+                        package_path = package_to_install.download()
+                        package.install_from_path(package_path)
+                        print(f"  ✓ {desc} 翻译包安装完成")
+                    except Exception as e:
+                        print(f"  ✗ {desc} 翻译包安装失败：{e}")
+                else:
+                    print(f"  ! {desc} 翻译包不可用，尝试从本地加载...")
+
+            # 验证已安装的语言
+            from argostranslate import translate
+            installed_languages = translate.get_installed_languages()
+            print(f"\n[ArgoTranslate] 已安装的语言：{[str(lang) for lang in installed_languages]}")
+            print("[ArgoTranslate] 翻译包检查完成\n")
+
+        except ImportError:
+            print("[ArgoTranslate] argostranslate 未安装，跳过自动安装")
+        except Exception as e:
+            print(f"[ArgoTranslate] 自动安装翻译包失败：{e}，不影响大模型翻译功能")
