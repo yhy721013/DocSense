@@ -4,7 +4,7 @@ from unittest.mock import patch
 from app import create_app
 from app.blueprints import llm as llm_module
 from app.blueprints.llm import _handle_progress_command, _parse_progress_command
-from app.services.core import LLMProgressHub
+from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
@@ -80,7 +80,7 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
             ],
         )
 
-    @patch("app.services.llm_task_service.post_callback_payload", return_value=True)
+    @patch("app.services.llm_service.task_service.post_callback_payload", return_value=True)
     def test_check_task_replays_failed_callback(self, _mock_callback):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")

@@ -5,8 +5,7 @@
 2. 保持段落结构映射
 3. 最大化翻译效率
 """
-import math
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import re
 
 

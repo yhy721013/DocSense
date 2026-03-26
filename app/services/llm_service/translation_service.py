@@ -23,7 +23,8 @@ class LLMTranslationService:
     def _ensure_translator(self) -> None:
         """确保翻译器已初始化（懒加载）"""
         if self._translator is None:
-            self._translator = HYMTTranslator(model_name="qwen3:4b-instruct-2507-q4_K_M")
+            model_name = os.getenv("DOCSENSE_TRANSLATION_MODEL", "Qwen3-4B-Instruct-2507-Q4_K_M")
+            self._translator = HYMTTranslator(model_name=model_name)
             self._document_translator = DocumentTranslator(self._translator)
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:
@@ -136,6 +137,16 @@ class LLMTranslationService:
         except Exception as e:
             logger.error("文本翻译失败: %s", e)
             return ""
+
+
+    def _escape_html(self, text: str) -> str:
+        """转义 HTML 特殊字符"""
+        text = text.replace('&', '&amp;')
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
+        text = text.replace('"', '&quot;')
+        text = text.replace("'", '&#39;')
+        return text
 
 
 # 全局单例（可选）

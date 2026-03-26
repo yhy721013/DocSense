@@ -444,7 +444,32 @@ def _parse_model_result(raw_result: Any) -> Dict[str, Any]:
         text = raw_result.strip()
         if not text:
             return {}
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            # 尝试从文本中提取 JSON 块
+            # 优先查找完整的 { ... }
+            match = re.search(r"(\{[\s\S]*\})", text)
+            if not match:
+                # 如果没有完整的 {}，且文本包含 {，则尝试从第一个 { 提取到末尾（可能是截断）
+                match = re.search(r"(\{[\s\S]*)", text)
+            
+            if match:
+                extracted = match.group(1)
+                try:
+                    return json.loads(extracted)
+                except json.JSONDecodeError:
+                    # 如果还是失败，尝试通过补全右括号来处理截断问题
+                    # 即使原本有 }，补齐额外的 } 也可能让部分被解析
+                    for _ in range(5):
+                        extracted += "}"
+                        try:
+                            return json.loads(extracted)
+                        except json.JSONDecodeError:
+                            continue
+            
+            logger.error("解析模型结果 JSON 失败: %s. 原始文本: %s", e, text)
+            return {}
     return {}
 
 

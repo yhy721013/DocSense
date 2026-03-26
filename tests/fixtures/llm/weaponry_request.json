@@ -1,0 +1,33 @@
+{
+    "businessType": "weaponry",
+    "params": {
+        "architectureId": 10502,
+        "weaponryTemplateFieldList": [
+            {
+                "fieldDescription": "文档中提到的新任职位的正式负责人姓名",
+                "fieldName": "任职人员姓名",
+                "fieldType": "INPUT",
+                "templateClassifyId": 1001
+            },
+            {
+                "fieldName": "过往任职经历列表",
+                "fieldType": "TABLE",
+                "templateClassifyId": 1003,
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldDescription": "过往担任的职务名称",
+                            "fieldName": "职位名称",
+                            "fieldType": "INPUT"
+                        },
+                        {
+                            "fieldDescription": "该职务所属的部门或单位",
+                            "fieldName": "所属部门/单位",
+                            "fieldType": "INPUT"
+                        }
+                    ]
+                ]
+            }
+        ]
+    }
+}

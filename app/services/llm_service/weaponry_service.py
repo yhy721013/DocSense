@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
@@ -25,13 +26,11 @@ logger = logging.getLogger(__name__)
 # 语言检测 & 翻译
 # ---------------------------------------------------------------------------
 
-def _has_cjk(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", text))
 
 
 def _translate_if_needed(text: str) -> str:
-    """若文本不含中文字符，则调用翻译服务翻译为中文。"""
-    if not text or _has_cjk(text):
+    """对于所有文本，调用翻译服务翻译为中文。"""
+    if not text:
         return ""
     try:
         service = get_translation_service()
@@ -45,25 +44,34 @@ def _translate_if_needed(text: str) -> str:
 # source 映射
 # ---------------------------------------------------------------------------
 
-def _map_source_to_analyse_data_source(source: Dict[str, Any]) -> Dict[str, Any]:
-    """将 AnythingLLM 的 source 对象映射为甲方 analyseDataSource 格式。"""
-    content = source.get("text", "")
-    title = source.get("title", "")
+def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: str = "") -> Dict[str, Any]:
+    """将 AnythingLLM 的 source 对象映射为甲方 analyseDataSource 格式。
+
+    每条记录以检索来源片段为单位组织：
+    - content: LLM 解析出的内容（text_response）
+    - source: 检索片段的原文文本（不同来源片段可能不一样）
+    - time: 得到解析结果的时间
+    - translate: 对原文片段的翻译
+    """
+    chunk_text = source.get("text", "")
     return {
-        "content": content,
-        "source": title,
-        "time": "",
-        "translate": _translate_if_needed(content),
+        "content": text_response,
+        "source": chunk_text,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "translate": _translate_if_needed(chunk_text),
     }
 
 
-def _build_analyse_data_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """将 sources 列表转换为 analyseDataSource 列表并按 score 降序排列。"""
+def _build_analyse_data_sources(sources: List[Dict[str, Any]], text_response: str = "") -> List[Dict[str, Any]]:
+    """将 sources 列表转换为 analyseDataSource 列表并按 score 降序排列。
+
+    每个检索到的相关来源片段都作为一条独立记录。
+    """
     scored = []
     for src in sources:
         if not isinstance(src, dict):
             continue
-        mapped = _map_source_to_analyse_data_source(src)
+        mapped = _map_source_to_analyse_data_source(src, text_response=text_response)
         score = 0.0
         try:
             score = float(src.get("score", 0))
@@ -74,7 +82,7 @@ def _build_analyse_data_sources(sources: List[Dict[str, Any]]) -> List[Dict[str,
     res = [item for _, item in scored]
     if not res:
         # 甲方接口要求：无来源时返回空内容对象
-        return [_map_source_to_analyse_data_source({})]
+        return [_map_source_to_analyse_data_source({}, text_response=text_response)]
     return res
 
 
@@ -167,7 +175,7 @@ def _query_input_field(
     filled = dict(field)
     if result is None:
         filled["analyseData"] = ""
-        filled["analyseDataSource"] = _build_analyse_data_sources([])
+        filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
 
     text_response = result.get("textResponse", "")
@@ -179,7 +187,7 @@ def _query_input_field(
         sources = []
 
     filled["analyseData"] = text_response
-    filled["analyseDataSource"] = _build_analyse_data_sources(sources)
+    filled["analyseDataSource"] = _build_analyse_data_sources(sources, text_response=text_response)
     return filled
 
 
@@ -255,10 +263,10 @@ def _query_table_field(
             if row_idx < len(col_entries):
                 entry = col_entries[row_idx]
                 cell["analyseData"] = entry["value"]
-                cell["analyseDataSource"] = _build_analyse_data_sources(entry["sources"])
+                cell["analyseDataSource"] = _build_analyse_data_sources(entry["sources"], text_response=entry["value"])
             else:
                 cell["analyseData"] = ""
-                cell["analyseDataSource"] = _build_analyse_data_sources([])
+                cell["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
             row.append(cell)
         assembled_rows.append(row)
 

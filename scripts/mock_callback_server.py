@@ -26,14 +26,16 @@ class CallbackHandler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(length)
         text = raw_body.decode("utf-8", errors="replace")
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        target = self.output_dir / "last_callback.json"
-        target.write_text(text, encoding="utf-8")
-
         try:
             parsed = json.loads(text)
+            content_to_write = json.dumps(parsed, ensure_ascii=False, indent=2)
         except json.JSONDecodeError:
             parsed = {"raw": text}
+            content_to_write = text
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        target = self.output_dir / "last_callback.json"
+        target.write_text(content_to_write, encoding="utf-8")
 
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
         self.send_response(200)

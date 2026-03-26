@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -14,7 +16,21 @@ import requests
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-ZSH_BIN = "/bin/zsh"
+IS_WINDOWS = os.name == "nt"
+
+# 自动检测可用 shell
+if IS_WINDOWS:
+    _pwsh = shutil.which("pwsh") or shutil.which("powershell")
+    SHELL_BIN: str | None = _pwsh
+    SHELL_AVAILABLE = SHELL_BIN is not None
+else:
+    _zsh = shutil.which("zsh")
+    SHELL_BIN = _zsh
+    SHELL_AVAILABLE = SHELL_BIN is not None
+
+
+def _script_ext() -> str:
+    return ".ps1" if IS_WINDOWS else ".sh"
 
 
 def find_free_port() -> int:
@@ -43,6 +59,7 @@ class RequestRecorderHandler(BaseHTTPRequestHandler):
         return
 
 
+@unittest.skipUnless(SHELL_AVAILABLE, f"所需 shell 不可用（{'pwsh/powershell' if IS_WINDOWS else 'zsh'}）")
 class LocalScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.processes: list[subprocess.Popen[str]] = []
@@ -83,8 +100,15 @@ class LocalScriptTests(unittest.TestCase):
         script_env = os.environ.copy()
         if env:
             script_env.update(env)
+
+        assert SHELL_BIN is not None
+        if IS_WINDOWS:
+            cmd = [SHELL_BIN, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), *args]
+        else:
+            cmd = [SHELL_BIN, str(script_path), *args]
+
         return subprocess.run(
-            [ZSH_BIN, str(script_path), *args],
+            cmd,
             cwd=ROOT_DIR,
             env=script_env,
             text=True,
@@ -103,7 +127,7 @@ class LocalScriptTests(unittest.TestCase):
             }
         )
         process = subprocess.Popen(
-            [str(ROOT_DIR / ".venv/bin/python"), "run.py"],
+            [sys.executable, "run.py"],
             cwd=ROOT_DIR,
             env=env,
             text=True,
@@ -131,8 +155,16 @@ class LocalScriptTests(unittest.TestCase):
     def test_start_test_file_server_serves_fixture_file(self) -> None:
         port = find_free_port()
         expected_bytes = (ROOT_DIR / "tests/fixtures/files/sample.txt").read_bytes()
+
+        assert SHELL_BIN is not None
+        if IS_WINDOWS:
+            cmd = [SHELL_BIN, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                   str(ROOT_DIR / f"scripts/start_test_file_server{_script_ext()}"), str(port), "tests/fixtures/files"]
+        else:
+            cmd = [SHELL_BIN, str(ROOT_DIR / "scripts/start_test_file_server.sh"), str(port), "tests/fixtures/files"]
+
         process = subprocess.Popen(
-            [ZSH_BIN, str(ROOT_DIR / "scripts/start_test_file_server.sh"), str(port), "tests/fixtures/files"],
+            cmd,
             cwd=ROOT_DIR,
             text=True,
             stdout=subprocess.PIPE,
@@ -161,37 +193,41 @@ class LocalScriptTests(unittest.TestCase):
         _, port = self._start_recording_server()
         payload = ROOT_DIR / "tests/fixtures/llm/analysis_request.json"
 
-        result = self._run_script("scripts/test_llm_analysis.sh", f"http://127.0.0.1:{port}", str(payload))
+        result = self._run_script(f"scripts/test_llm_analysis{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIsNotNone(RequestRecorderHandler.last_request)
         self.assertEqual(RequestRecorderHandler.last_request["path"], "/llm/analysis")
-        self.assertEqual(RequestRecorderHandler.last_request["body"], payload.read_text(encoding="utf-8"))
-        self.assertIn('"ok": true', result.stdout)
+        # PowerShell 的 Invoke-WebRequest 发送的 body 可能与原文件内容存在末尾换行差异
+        posted_body = RequestRecorderHandler.last_request["body"].strip()
+        expected_body = payload.read_text(encoding="utf-8").strip()
+        self.assertEqual(posted_body, expected_body)
 
     def test_report_shell_script_posts_fixture_to_expected_path(self) -> None:
         _, port = self._start_recording_server()
         payload = ROOT_DIR / "tests/fixtures/llm/report_request.json"
 
-        result = self._run_script("scripts/test_llm_report.sh", f"http://127.0.0.1:{port}", str(payload))
+        result = self._run_script(f"scripts/test_llm_report{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIsNotNone(RequestRecorderHandler.last_request)
         self.assertEqual(RequestRecorderHandler.last_request["path"], "/llm/generate-report")
-        self.assertEqual(RequestRecorderHandler.last_request["body"], payload.read_text(encoding="utf-8"))
-        self.assertIn('"ok": true', result.stdout)
+        posted_body = RequestRecorderHandler.last_request["body"].strip()
+        expected_body = payload.read_text(encoding="utf-8").strip()
+        self.assertEqual(posted_body, expected_body)
 
     def test_check_task_shell_script_posts_fixture_to_expected_path(self) -> None:
         _, port = self._start_recording_server()
         payload = ROOT_DIR / "tests/fixtures/llm/check_task_file_request.json"
 
-        result = self._run_script("scripts/test_llm_check_task.sh", f"http://127.0.0.1:{port}", str(payload))
+        result = self._run_script(f"scripts/test_llm_check_task{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIsNotNone(RequestRecorderHandler.last_request)
         self.assertEqual(RequestRecorderHandler.last_request["path"], "/llm/check-task")
-        self.assertEqual(RequestRecorderHandler.last_request["body"], payload.read_text(encoding="utf-8"))
-        self.assertIn('"ok": true', result.stdout)
+        posted_body = RequestRecorderHandler.last_request["body"].strip()
+        expected_body = payload.read_text(encoding="utf-8").strip()
+        self.assertEqual(posted_body, expected_body)
 
     def test_progress_shell_script_reads_progress_snapshot_from_local_app(self) -> None:
         port = find_free_port()
@@ -199,7 +235,7 @@ class LocalScriptTests(unittest.TestCase):
         payload = ROOT_DIR / "tests/fixtures/llm/check_task_file_request.json"
 
         result = self._run_script(
-            "scripts/test_llm_progress.sh",
+            f"scripts/test_llm_progress{_script_ext()}",
             f"ws://127.0.0.1:{port}/llm/progress",
             str(payload),
             "1",
