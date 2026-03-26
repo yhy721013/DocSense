@@ -60,13 +60,25 @@ class TXTHandler:
         paras_to_process = len(paragraphs) if translate_all == 0 else min(translate_all, len(paragraphs))
         tracker.set_file_info(os.path.basename(input_path), paras_to_process, "paragraph")
 
-        # 【新增】批量翻译逻辑
-        translated_paragraphs = self._batch_translate_paragraphs(
-            paragraphs[:paras_to_process],
-            target_lang,
-            tracker,
-            fast_translate=fast_translate
-        )
+        # 【关键修改】根据是否启用快速翻译选择翻译策略
+        if fast_translate:
+            # 快速翻译模式：逐段翻译
+            print(f"\n[TXT 处理] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
+            translated_paragraphs = self._translate_paragraphs_one_by_one(
+                paragraphs[:paras_to_process],
+                target_lang,
+                tracker,
+                fast_translate=True
+            )
+        else:
+            # 大模型翻译模式：批量翻译
+            print(f"\n[TXT 处理] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
+            translated_paragraphs = self._batch_translate_paragraphs(
+                paragraphs[:paras_to_process],
+                target_lang,
+                tracker,
+                fast_translate=False
+            )
 
         # 未翻译的段落保持原样
         final_paragraphs = translated_paragraphs + paragraphs[paras_to_process:]
@@ -84,19 +96,65 @@ class TXTHandler:
         print(f"\nTXT saved to: {output_path}")
         return output_path
 
+    def _translate_paragraphs_one_by_one(
+            self,
+            paragraphs: list,
+            target_lang: str,
+            tracker,
+            fast_translate: bool = True,
+    ) -> list:
+        """
+        逐段翻译段落（用于快速翻译模式）
+        :param paragraphs: 段落列表
+        :param target_lang: 目标语言
+        :param tracker: 进度追踪器
+        :param fast_translate: 是否启用快速翻译
+        :return: 翻译后的段落列表
+        """
+        if not paragraphs:
+            return []
+
+        translated_paragraphs = []
+
+        for idx, para in enumerate(paragraphs):
+            if not para.strip():
+                translated_paragraphs.append("")
+                print(f"  [空段落] 段落 {idx + 1}")
+            elif self._is_chinese_text(para):
+                print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                translated_paragraphs.append(para)
+            else:
+                try:
+                    translated_para = self.translator.translate_text(
+                        para,
+                        target_lang,
+                        fast_translate=fast_translate
+                    )
+                    translated_paragraphs.append(translated_para)
+                    print(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
+                    tracker.update_paragraph(idx + 1)
+                except Exception as e:
+                    fallback_text = f"[翻译失败：{str(e)}]"
+                    translated_paragraphs.append(fallback_text)
+                    print(f"  ✗ 段落 {idx + 1}: {fallback_text}")
+                    tracker.update_paragraph(idx + 1)
+
+        print("\n")  # 换行
+        return translated_paragraphs
+
     def _batch_translate_paragraphs(
             self,
             paragraphs: list,
             target_lang: str,
             tracker,
-            fast_translate: bool = True
+            fast_translate: bool = False,
     ) -> list:
         """
-        批量翻译段落（利用大模型上下文窗口）
+        批量翻译段落（利用大模型上下文窗口，仅用于大模型翻译模式）
         :param paragraphs: 段落列表
         :param target_lang: 目标语言
         :param tracker: 进度追踪器
-        :param fast_translate: 是否启用快速翻译
+        :param fast_translate: 是否启用快速翻译（此参数在批量翻译中不使用）
         :return: 翻译后的段落列表
         """
         if not paragraphs:
@@ -137,19 +195,12 @@ class TXTHandler:
                   flush=True)
 
             try:
-                # 【新增】打印调试信息
-                # print(f"\n  [调试] 批次 {chunk_idx + 1} 包含 {len(chunk['paragraph_indices'])} 段")
-                # print(f"  [调试] 原文前 300 字：{chunk['text'][:300]}...")
-
                 # 调用翻译（一次性翻译整个 chunk）
                 translated_chunk_text = self.translator.translate_text(
                     chunk["text"],
                     target_lang,
-                    fast_translate=fast_translate,
+                    fast_translate=False,  # 批量翻译只在大模型模式下使用
                 )
-
-                # 【新增】打印翻译结果
-                # print(f"  [调试] 译文前 300 字：{translated_chunk_text[:300]}...")
 
                 # 解析翻译结果，还原为段落列表
                 translated_paras = self.chunk_processor.parse_translated_chunks(
@@ -179,40 +230,27 @@ class TXTHandler:
             except Exception as e:
                 print(f"\n[错误] 批次 {chunk_idx + 1} 翻译失败：{e}")
                 # 失败回退：逐段翻译
-                # 【关键修复】将翻译结果精确映射回原位置
                 for para_local_idx, global_para_idx in enumerate(chunk["paragraph_indices"]):
-                    # global_para_idx 是在 translation_needed 列表中的索引
-                    # 需要找到它在 processed_paragraphs 中的真实位置
                     original_idx, _ = translation_needed[global_para_idx]
 
-                    if para_local_idx < len(translated_paras):
-                        translated_para = translated_paras[para_local_idx]
-
-                        # 【新增】检查翻译结果是否包含失败标记
-                        if "[翻译失败" in translated_para or "[部分翻译失败" in translated_para:
-                            print(f"  ✗ 段落 {original_idx + 1}: {translated_para}")
-                            processed_paragraphs[original_idx] = translated_para
-                        else:
-                            processed_paragraphs[original_idx] = translated_para
-                            print(f"  ✓ 段落 {original_idx + 1}: {len(translated_para)} 字")
-                    else:
-                        # 段落数量确实不匹配时的容错
-                        fallback_text = f"[部分翻译失败：期望{len(chunk['paragraph_indices'])}段，实际{len(translated_paras)}段]"
+                    try:
+                        translated_para = self.translator.translate_text(
+                            translation_needed[global_para_idx][1],
+                            target_lang,
+                            fast_translate=False
+                        )
+                        processed_paragraphs[original_idx] = translated_para
+                        print(f"  ✓ 段落 {original_idx + 1} (回退): {len(translated_para)} 字")
+                    except Exception as e2:
+                        fallback_text = f"[翻译失败：{str(e2)}]"
                         processed_paragraphs[original_idx] = fallback_text
-                        print(f"  ✗ 段落 {original_idx + 1}: {fallback_text}")
+                        print(f"  ✗ 段落 {original_idx + 1} (回退): {fallback_text}")
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
         print("\n")  # 换行
         return processed_paragraphs
-
-    def _create_progress_bar(self, percentage: float, width: int = 30) -> str:
-        """创建进度条字符串"""
-        percentage = max(0, min(100, percentage))
-        filled_length = int(width * percentage / 100)
-        bar = '█' * filled_length + '░' * (width - filled_length)
-        return bar
 
     def convert_to_html(
             self,
@@ -244,7 +282,8 @@ class TXTHandler:
 
         tracker = self.translator.get_progress_tracker()
         valid_paragraphs = [p for p in paragraphs if p.strip()]
-        paras_to_process = len(valid_paragraphs) if translate_all == 0 else min(translate_all, len(valid_paragraphs))
+        paras_to_process = len(valid_paragraphs) if translate_all == 0 else min(translate_all,
+                                                                                    len(valid_paragraphs))
         tracker.set_file_info(os.path.basename(input_path), paras_to_process, "paragraph")
 
         html_content = []
@@ -294,14 +333,25 @@ class TXTHandler:
         """
         html_content.append(html_header)
 
-        # 【新增】批量翻译逻辑
-        print(f"\n[HTML 转换] 开始批量翻译...")
-        translated_paragraphs = self._batch_translate_paragraphs(
-            paragraphs[:paras_to_process],
-            target_lang,
-            tracker,
-            fast_translate=fast_translate
-        )
+        # 【关键修改】根据是否启用快速翻译选择翻译策略
+        if fast_translate:
+            # 快速翻译模式：逐段翻译
+            print(f"\n[HTML 转换] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
+            translated_paragraphs = self._translate_paragraphs_one_by_one(
+                paragraphs[:paras_to_process],
+                target_lang,
+                tracker,
+                fast_translate=True
+            )
+        else:
+            # 大模型翻译模式：批量翻译
+            print(f"\n[HTML 转换] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
+            translated_paragraphs = self._batch_translate_paragraphs(
+                paragraphs[:paras_to_process],
+                target_lang,
+                tracker,
+                fast_translate=False
+            )
 
         # 未翻译的段落保持原样
         final_paragraphs = translated_paragraphs + paragraphs[paras_to_process:]
@@ -376,6 +426,14 @@ class TXTHandler:
         tracker.mark_completed()
         print(f"翻译后的 HTML 已保存至：{output_path}")
         return output_path
+
+
+    def _create_progress_bar(self, percentage: float, width: int = 30) -> str:
+        """创建进度条字符串"""
+        percentage = max(0, min(100, percentage))
+        filled_length = int(width * percentage / 100)
+        bar = '█' * filled_length + '░' * (width - filled_length)
+        return bar
 
     def _create_progress_bar(self, percentage: float, width: int = 30) -> str:
         """

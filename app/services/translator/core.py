@@ -221,15 +221,14 @@ class HYMTTranslator:
 
         except ImportError as ie:
             print(f"  [警告] argostranslate 未安装：{ie}，回退到大模型翻译")
-            #return self.translate_text(text, target_lang, fast_translate=False)
+            return self.translate_text(text, target_lang, fast_translate=False)
         except AttributeError as ae:
             print(f"  [错误] ArgoTranslate API 调用失败：{ae}")
-            #print(f"  [回退] 使用大模型翻译")
-            #return self.translate_text(text, target_lang, fast_translate=False)
+            return self.translate_text(text, target_lang, fast_translate=False)
         except Exception as e:
             print(f"  [错误] ArgoTranslate 翻译失败：{e}")
-            #print(f"  [回退] 使用大模型翻译")
-            #return self.translate_text(text, target_lang, fast_translate=False)
+            return self.translate_text(text, target_lang, fast_translate=False)
+
 
     def get_progress_tracker(self) -> ProgressTracker:
         """获取进度追踪器"""
@@ -240,12 +239,17 @@ class HYMTTranslator:
         自动下载并安装常用的 argostranslate 翻译包
         """
         try:
-            from argostranslate import package
+            from argostranslate import package, translate
+            import argostranslate.settings
 
             print("\n[ArgoTranslate] 检查并安装翻译包...")
 
-            # 获取可用包
-            available_packages = package.get_available_packages()
+            # 【关键修复】先设置为离线模式
+            argostranslate.settings.use_online = False
+
+            # 【新增】检查已安装的语言，避免重复下载
+            installed_languages = translate.get_installed_languages()
+            print(f"[ArgoTranslate] 当前已安装的语言：{[str(lang) for lang in installed_languages]}")
 
             # 需要安装的语言对
             language_pairs = [
@@ -254,25 +258,40 @@ class HYMTTranslator:
             ]
 
             for from_code, to_code, desc in language_pairs:
-                # 查找对应的包
-                package_to_install = next(
-                    filter(lambda x: x.from_code == from_code and x.to_code == to_code, available_packages),
-                    None
-                )
+                # 检查是否已安装
+                from_lang_obj = next((lang for lang in installed_languages if lang.code == from_code), None)
+                to_lang_obj = next((lang for lang in installed_languages if lang.code == to_code), None)
 
-                if package_to_install:
-                    try:
-                        # 下载并安装
+                if from_lang_obj and to_lang_obj:
+                    # 检查是否已有翻译路径
+                    translation = from_lang_obj.get_translation(to_lang_obj)
+                    if translation:
+                        print(f"  ✓ {desc} 翻译包已存在，跳过下载")
+                        continue
+                    else:
+                        print(f"   {desc} 翻译包未完全安装")
+                else:
+                    print(f"   {desc} 翻译包未安装")
+
+                # 只有在未安装时才尝试下载
+                try:
+                    # 尝试从本地缓存加载（如果之前下载过）
+                    available_packages = package.get_available_packages()
+                    package_to_install = next(
+                        filter(lambda x: x.from_code == from_code and x.to_code == to_code, available_packages),
+                        None
+                    )
+
+                    if package_to_install:
                         package_path = package_to_install.download()
                         package.install_from_path(package_path)
                         print(f"  ✓ {desc} 翻译包安装完成")
-                    except Exception as e:
-                        print(f"  ✗ {desc} 翻译包安装失败：{e}")
-                else:
-                    print(f"  ! {desc} 翻译包不可用，尝试从本地加载...")
+                    else:
+                        print(f"  ! {desc} 翻译包不可用")
+                except Exception as e:
+                    print(f"  ✗ {desc} 翻译包安装失败：{e}")
 
             # 验证已安装的语言
-            from argostranslate import translate
             installed_languages = translate.get_installed_languages()
             print(f"\n[ArgoTranslate] 已安装的语言：{[str(lang) for lang in installed_languages]}")
             print("[ArgoTranslate] 翻译包检查完成\n")
@@ -280,4 +299,4 @@ class HYMTTranslator:
         except ImportError:
             print("[ArgoTranslate] argostranslate 未安装，跳过自动安装")
         except Exception as e:
-            print(f"[ArgoTranslate] 自动安装翻译包失败：{e}，不影响大模型翻译功能")
+            print(f"[ArgoTranslate] 自动安装翻译包失败：{e}，无法使用 ArgoTranslate 快速翻译")
