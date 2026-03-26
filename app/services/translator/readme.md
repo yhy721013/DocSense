@@ -1,3 +1,49 @@
+# 使用快速翻译模式的说明
+
+## 1、pip安装必要翻译库
+
+    pip install argostranslate
+
+## 2、下载翻译包（翻译包是独立于翻译库的，无法使用pip下载）
+
+    在联网状态下，运行一次run.py的测试（目前已经是默认快速翻译模式），会自动下载翻译包。
+
+我这个代码里面实现了自动检测本地是否存在翻译包，第一次使用的时候会自动下载翻译包，不过下载需要翻墙
+
+默认下载到C:\Users\xxx\.local\share\argos-translate\packages
+里面可以看到translate-en_zh-1_9和translate-zh_en-1_9两个文件夹
+
+## 3、(重要！没有这个步骤无法完成离线翻译)
+
+找到pip 安装之后包所在的位置，例如conda中包的位置为：D:\ProgramData\anaconda3\envs\anythingllm\Lib\site-packages\argostranslate
+
+在包里面打开sbd.py，在第154行之后再加入一行，结果如下：
+
+    def lazy_pipeline(self):
+        if self.stanza_pipeline is None:
+            self.stanza_pipeline = stanza.Pipeline(
+                lang=self.stanza_lang_code,
+                dir=str(self.pkg.package_path / "stanza"),
+                processors="tokenize",
+                use_gpu=settings.device == "cuda",
+                logging_level="WARNING",
+                download_method=None,
+            )
+
+这会告诉 Stanza：“不要尝试下载任何东西，只管去本地找”。
+
+如果没有这个步骤，那么在翻译的时候会出现如下错误：
+
+    [INFO] ('Splitting sentences using SBD Model: (en) StanzaSentencizer',)
+      [错误] ArgoTranslate 翻译失败：HTTPSConnectionPool(host='raw.githubusercontent.com', port=443): Max retries exceeded with url: /stanfordnlp/stanza-resources/main/resources_1.10.0.json (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1017)')))”
+
+## 4、然后就可以运行离线快速翻译了
+
+
+
+
+
+
 # 使用ollama加载模型的说明
 
 ## 下载GGUF格式
