@@ -116,7 +116,8 @@ class PDFHandler:
             input_path: str,
             output_path: Optional[str] = None,
             target_lang: str = "Chinese",
-            translate_all: int = 0
+            translate_all: int = 0,
+            fast_translate: bool = True,
     ) -> str:
         """
         处理 PDF 文档翻译（保留位置信息）
@@ -124,6 +125,7 @@ class PDFHandler:
         :param output_path: 输出文件路径（可选）
         :param target_lang: 目标语言
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 输出文件路径
         """
         if not output_path:
@@ -150,7 +152,7 @@ class PDFHandler:
                 continue
 
             orig_text = block['text']
-            translated = self.translator.translate_text(orig_text, target_lang)
+            translated = self.translator.translate_text(orig_text, target_lang,fast_translate=fast_translate)
 
             style = ParagraphStyle(
                 'Body',
@@ -178,7 +180,8 @@ class PDFHandler:
             output_dir: str,
             target_lang: str = "Chinese",
             show_bilingual: bool = True,
-            translate_all: int = 0
+            translate_all: int = 0,
+            fast_translate: bool = True,
     ) -> str:
         """
         将 PDF 转换为 HTML 并翻译（中英对照）
@@ -188,6 +191,7 @@ class PDFHandler:
         :param target_lang: 目标语言
         :param show_bilingual: 是否显示中英对照
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 输出的 HTML 文件路径
         """
         os.makedirs(output_dir, exist_ok=True)
@@ -225,7 +229,8 @@ class PDFHandler:
                 output_dir=output_dir,
                 target_lang=target_lang,
                 show_bilingual=show_bilingual,
-                translate_all=translate_all * 5 if translate_all > 0 else 0
+                translate_all=translate_all * 5 if translate_all > 0 else 0,
+                fast_translate=fast_translate,
             )
 
             print(f"\n{'=' * 50}")

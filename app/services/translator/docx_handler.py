@@ -187,7 +187,8 @@ class DocxHandler:
             target_lang: str = "Chinese",
             show_bilingual: bool = True,
             translate_all: int = 0,
-            preserve_original_styles: bool = True
+            preserve_original_styles: bool = True,
+            fast_translate: bool = True
     ) -> str:
         """
         将 Word 文档转换为 HTML 并翻译（支持：原顺序 + 合并单元格 + 嵌套表格）
@@ -225,7 +226,7 @@ class DocxHandler:
         # 【关键修改】根据文档复杂度选择翻译策略
         translated_results = None
 
-        if use_batch_translation:
+        if use_batch_translation and not fast_translate:
             # 【批量翻译模式】提前批量翻译所有段落
             if translate_all == 0:
                 paras_to_process = sum(1 for elem_type, _ in all_elements if elem_type == "paragraph")
@@ -254,7 +255,10 @@ class DocxHandler:
                 )
         else:
             # 【逐段翻译模式】不提前翻译，在处理时逐段翻译
-            print(f"\n[DOCX 转换] 检测到复杂表格，使用逐段翻译模式以保证质量...")
+            if fast_translate:
+                print(f"\n[DOCX 转换] 使用快速翻译模式（ArgoTranslate）...")
+            else:
+                print(f"\n[DOCX 转换] 检测到复杂表格，使用逐段翻译模式以保证质量...")
             print(f"[总体进度] 文档共 {elements_to_process} 个元素（段落 + 表格 + 图片），开始处理...\n")
 
         # 重置段落索引，用于从批量翻译结果中获取
@@ -271,7 +275,7 @@ class DocxHandler:
             if elem_type == "paragraph":
                 para = elem_data
                 # 从批量翻译结果中获取译文（如果使用了批量翻译）
-                if use_batch_translation and translated_results and para_result_idx < len(translated_results):
+                if use_batch_translation and translated_results and para_result_idx < len(translated_results) and not fast_translate:
                     orig, trans, style = translated_results[para_result_idx]
 
                     # 根据 show_bilingual 生成 HTML
@@ -305,7 +309,7 @@ class DocxHandler:
                     else:
                         # 需要翻译的段落
                         try:
-                            translated = self.translator.translate_text(text, target_lang)
+                            translated = self.translator.translate_text(text, target_lang,fast_translate=fast_translate)
                             para_style = self._get_paragraph_style_type(para)
 
                             if show_bilingual:
@@ -387,7 +391,8 @@ class DocxHandler:
             input_path: str,
             output_path: Optional[str] = None,
             target_lang: str = "Chinese",
-            translate_all: int = 0
+            translate_all: int = 0,
+            fast_translate: bool = True,
     ) -> str:
         """
         处理 DOCX 文档翻译（智能选择批量/逐段翻译）
@@ -395,6 +400,7 @@ class DocxHandler:
         :param output_path: 输出文件路径（可选）
         :param target_lang: 目标语言
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 个段落
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 输出文件路径
         """
         if not output_path:
@@ -421,7 +427,7 @@ class DocxHandler:
         tracker.set_file_info(os.path.basename(input_path), paras_to_process, "paragraph")
 
         # 【关键修改】根据文档复杂度选择翻译策略
-        if use_batch_translation:
+        if use_batch_translation and not fast_translate:
             # 批量翻译模式
             print(f"\n[DOCX 处理] 使用批量翻译模式，共 {len(paragraphs[:paras_to_process])} 个段落...")
             translated_results = self._batch_translate_paragraphs(
@@ -431,7 +437,10 @@ class DocxHandler:
             )
         else:
             # 逐段翻译模式
-            print(f"\n[DOCX 处理] 检测到复杂表格，使用逐段翻译模式...")
+            if fast_translate:
+                print(f"\n[DOCX 处理] 使用快速翻译模式（ArgoTranslate）...")
+            else:
+                print(f"\n[DOCX 处理] 检测到复杂表格，使用逐段翻译模式...")
             translated_results = []
             for idx, (text, style) in enumerate(paragraphs[:paras_to_process]):
                 if not text.strip():
@@ -441,7 +450,7 @@ class DocxHandler:
                     translated_results.append((text, text, style))
                 else:
                     try:
-                        translated_para = self.translator.translate_text(text, target_lang)
+                        translated_para = self.translator.translate_text(text, target_lang,fast_translate=fast_translate)
                         translated_results.append((text, translated_para, style))
                         print(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
                         tracker.update_paragraph(idx + 1)
@@ -503,7 +512,7 @@ class DocxHandler:
 
         return new_elements
 
-    def _process_single_paragraph_to_html(self, para, target_lang, show_bilingual, preserve_styles):
+    def _process_single_paragraph_to_html(self, para, target_lang, show_bilingual, preserve_styles, fast_translate: bool = True):
         """处理单个段落转 HTML（复用原有逻辑）"""
         text = para.text.strip()
         if not text:
@@ -518,10 +527,10 @@ class DocxHandler:
             return self._generate_paragraph_html(text, text, para_style, preserve_styles)
 
         if show_bilingual:
-            translated = self.translator.translate_text(text, target_lang)
+            translated = self.translator.translate_text(text, target_lang,fast_translate=fast_translate)
             return self._generate_paragraph_html(text, translated, para_style, preserve_styles)
         else:
-            translated = self.translator.translate_text(text, target_lang)
+            translated = self.translator.translate_text(text, target_lang,fast_translate=fast_translate)
             return self._generate_paragraph_html("", translated, para_style, preserve_styles)
 
     def _batch_translate_paragraphs(

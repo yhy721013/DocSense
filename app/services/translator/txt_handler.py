@@ -31,7 +31,8 @@ class TXTHandler:
             input_path: str,
             output_path: Optional[str] = None,
             target_lang: str = "Chinese",
-            translate_all: int = 0
+            translate_all: int = 0,
+            fast_translate: bool = True,
     ) -> str:
         """
         处理文本文件翻译（批量翻译优化版）
@@ -39,6 +40,7 @@ class TXTHandler:
         :param output_path: 输出文件路径（可选）
         :param target_lang: 目标语言
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 个段落
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 输出文件路径
         """
         if not output_path:
@@ -62,7 +64,8 @@ class TXTHandler:
         translated_paragraphs = self._batch_translate_paragraphs(
             paragraphs[:paras_to_process],
             target_lang,
-            tracker
+            tracker,
+            fast_translate=fast_translate
         )
 
         # 未翻译的段落保持原样
@@ -85,13 +88,15 @@ class TXTHandler:
             self,
             paragraphs: list,
             target_lang: str,
-            tracker
+            tracker,
+            fast_translate: bool = True
     ) -> list:
         """
         批量翻译段落（利用大模型上下文窗口）
         :param paragraphs: 段落列表
         :param target_lang: 目标语言
         :param tracker: 进度追踪器
+        :param fast_translate: 是否启用快速翻译
         :return: 翻译后的段落列表
         """
         if not paragraphs:
@@ -139,7 +144,8 @@ class TXTHandler:
                 # 调用翻译（一次性翻译整个 chunk）
                 translated_chunk_text = self.translator.translate_text(
                     chunk["text"],
-                    target_lang
+                    target_lang,
+                    fast_translate=fast_translate,
                 )
 
                 # 【新增】打印翻译结果
@@ -214,7 +220,8 @@ class TXTHandler:
             output_dir: str,
             target_lang: str = "Chinese",
             show_bilingual: bool = True,
-            translate_all: int = 0
+            translate_all: int = 0,
+            fast_translate: bool = True,
     ) -> str:
         """
         将 TXT 文件转换为 HTML 并翻译（批量翻译优化版）
@@ -223,6 +230,7 @@ class TXTHandler:
         :param target_lang: 目标语言
         :param show_bilingual: 是否显示中英对照
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 个段落
+        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 输出的 HTML 文件路径
         """
         os.makedirs(output_dir, exist_ok=True)
@@ -291,7 +299,8 @@ class TXTHandler:
         translated_paragraphs = self._batch_translate_paragraphs(
             paragraphs[:paras_to_process],
             target_lang,
-            tracker
+            tracker,
+            fast_translate=fast_translate
         )
 
         # 未翻译的段落保持原样
