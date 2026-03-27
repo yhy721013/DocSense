@@ -8,7 +8,7 @@ from pathlib import Path
 
 # 在文件开头加载 .env
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 class CallbackHandler(BaseHTTPRequestHandler):
     output_dir = Path(".runtime/mock_callback")

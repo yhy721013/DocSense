@@ -10,7 +10,7 @@ import os
 
 # 在导入 app 之前加载 .env
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from app import create_app
 

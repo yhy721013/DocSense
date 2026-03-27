@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-load_dotenv()  # 加载 .env 文件到环境变量
+load_dotenv(override=True)  # 加载 .env 文件到环境变量
 
 # AnythingLLM 默认连接配置，可通过环境变量覆盖
 DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1"
