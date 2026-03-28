@@ -95,11 +95,11 @@ pwsh -NoLogo -Command "python scripts/mock_callback_server.py"
 #### 窗口 3：配置环境变量并启动应用
 
 ```powershell
-$env:DOCSENSE_LLM_CALLBACK_URL='http://127.0.0.1:9000/llm/callback'
+$env:CALLBACK_URL='http://127.0.0.1:9000/llm/callback'
 $env:ANYTHINGLLM_BASE_URL='http://localhost:3001/api/v1'
 $env:ANYTHINGLLM_API_KEY='你的APIKey'
 $env:ANYTHINGLLM_TIMEOUT='120'
-python web_ui.py
+python run.py
 ```
 
 预期结果：
@@ -109,7 +109,7 @@ python web_ui.py
 
 说明：
 
-- `DOCSENSE_LLM_CALLBACK_URL` 必须在启动 `web_ui.py` 的同一个终端里设置
+- `CALLBACK_URL` 必须在启动 `run.py` 的同一个终端里设置
 - 如果没有这个变量，任务可能成功，但不会产生本地回调文件
 
 #### 窗口 4：执行测试命令
@@ -524,7 +524,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5001/llm/analysis" -Method Post -Conten
 优先检查：
 
 - 是否先启动了 [mock_callback_server.py](/e:/DocSense/scripts/mock_callback_server.py)
-- 启动应用的终端里是否设置了 `DOCSENSE_LLM_CALLBACK_URL`
+- 启动应用的终端里是否设置了 `CALLBACK_URL`
 - 回调地址是否为 `http://127.0.0.1:9000/llm/callback`
 
 #### 进度到了 `1.0` 但没有回调文件
@@ -578,7 +578,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5001/llm/analysis" -Method Post -Conten
 联调前至少确认这些条件：
 
 - 本模块已部署到甲方系统内，且 `/llm/*` 路由可访问
-- `DOCSENSE_LLM_CALLBACK_URL` 已改为甲方真实回调地址
+- `CALLBACK_URL` 已改为甲方真实回调地址
 - AnythingLLM 与本模块网络互通
 - 甲方回调接收端已具备日志或落库能力
 - 甲方系统可以提供真实或可替代的下载地址
@@ -779,7 +779,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5001/llm/analysis" -Method Post -Conten
 
 优先检查：
 
-- `DOCSENSE_LLM_CALLBACK_URL` 是否已指向甲方真实地址
+- `CALLBACK_URL` 是否已指向甲方真实地址
 - 甲方回调地址是否可从部署环境访问
 - 甲方回调端是否有鉴权、白名单或网关限制
 

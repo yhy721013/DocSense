@@ -9,7 +9,7 @@ DocSense 当前为纯后端接口服务，聚焦甲方协议定义的 LLM 任务
 - 武器装备知识谱系解析：`POST /llm/weaponry`
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
-- 结果回调：服务端主动 `POST` 到 `DOCSENSE_LLM_CALLBACK_URL`
+- 结果回调：服务端主动 `POST` 到 `CALLBACK_URL`
 
 ## 2. 分层架构与调用关系
 
@@ -162,10 +162,10 @@ pip install -r requirements-offline.txt
 常用：
 
 - `ANYTHINGLLM_BASE_URL`（默认 `http://localhost:3001/api/v1`）
-- `DOCSENSE_LLM_CALLBACK_URL`（不配置则不主动回调外部系统）
-- `WEB_UI_HOST`（默认 `127.0.0.1`）
-- `WEB_UI_PORT`（默认 `5001`）
-- `WEB_UI_DEBUG`（默认 `true`）
+- `CALLBACK_URL`（不配置则不主动回调外部系统）
+- `APP_HOST`（默认 `127.0.0.1`）
+- `APP_PORT`（默认 `5001`）
+- `APP_DEBUG`（默认 `true`）
 
 3. 启动服务
 
@@ -177,11 +177,9 @@ python run.py
 
 ## 7. 运行时路径与持久化
 
-- 上传目录：`uploads/`（`DOCSENSE_FILE_STORE_DIR`）
-- 临时上传目录：`.runtime/inbox`（`DOCSENSE_TEMP_UPLOAD_DIR`）
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
-- 下载缓存目录：`DOCSENSE_LLM_DOWNLOAD_DIR`（用于任务下载源文件）
+- 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
 
 ## 8. 本地联调与测试
 
