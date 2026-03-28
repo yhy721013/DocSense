@@ -1,6 +1,6 @@
 import requests
 import time
-from .utils import build_prompt, clean_output, ProgressTracker,build_qwen_prompt,qwen_clean_output
+from .utils import build_prompt, clean_output, ProgressTracker
 
 
 class HYMTTranslator:
@@ -13,21 +13,8 @@ class HYMTTranslator:
         # 默认使用 qwen3.5:4b 模型（更高效，幻觉更小）
         if model_name is None:
             self.model_name = "Qwen3-4B-Instruct-2507-Q4_K_M"
-            self.use_qwen = True
-        elif model_name == "tencent-hy-mt:1.8b-q4":
-            self.model_name = model_name
-            self.use_qwen = False
         else:
             self.model_name = model_name
-            self.use_qwen = True
-
-        # 根据模型选择对应的处理函数
-        if self.use_qwen:
-            self._build_prompt = build_qwen_prompt
-            self._clean_output = qwen_clean_output
-        else:
-            self._build_prompt = build_prompt
-            self._clean_output = clean_output
 
         # ollama API 地址
         self.ollama_api_url = "http://localhost:11434/api/generate"
@@ -55,7 +42,7 @@ class HYMTTranslator:
         self._auto_install_argos_packages()
 
     def translate_text(self, text: str, target_lang: str = "Chinese", progress_callback=None,
-                       max_retries: int = 2, fast_translate: bool = False) -> str:
+                       max_retries: int = 2, fast_translate: bool = False, model_name: str = None) -> str:
         """
         翻译单段文本，增加重试机制以应对模型幻觉或不稳定。
         :param text: 待翻译文本
@@ -63,6 +50,7 @@ class HYMTTranslator:
         :param progress_callback: 进度回调函数
         :param max_retries: 最大重试次数
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
+        :param model_name: 覆盖默认的模型名称，如果传 None 则使用初始化时的 self.model_name
         :return: 翻译后的文本
         """
         if not text.strip():
@@ -75,14 +63,17 @@ class HYMTTranslator:
         original_text = text
         attempt = 0
 
+        actual_model_name = model_name if model_name is not None else self.model_name
+
         while attempt <= max_retries:
             try:
-                prompt = self._build_prompt(text, target_lang)
+                # 统一使用强大的增强型 Prompt 和清洗逻辑
+                prompt = build_prompt(text, target_lang)
 
                 # 构建 ollama 请求
                 # 针对小模型，适当降低 temperature 以减少随机性，减少稳定性
                 payload = {
-                    "model": self.model_name,
+                    "model": actual_model_name,
                     "prompt": prompt,
                     "stream": False,
                     "options": {
@@ -123,7 +114,7 @@ class HYMTTranslator:
                     raise RuntimeError(f"Ollama API 返回空响应，完整响应：{result}")
 
                 # 清理输出 (包含去重、去幻觉逻辑)
-                translated = self._clean_output(translated, prompt)
+                translated = clean_output(translated, prompt)
 
                 # 【关键检查】如果清理后结果为空或包含明显的失败标记，且还有重试机会，则重试
                 if not translated or "[内容过滤" in translated or "[警告" in translated:
