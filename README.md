@@ -163,7 +163,7 @@ pip install -r requirements-offline.txt
 
 - `ANYTHINGLLM_BASE_URL`（默认 `http://localhost:3001/api/v1`）
 - `CALLBACK_URL`（不配置则不主动回调外部系统）
-- `APP_HOST`（默认 `127.0.0.1`）
+- `APP_HOST`（默认 `0.0.0.0`）
 - `APP_PORT`（默认 `5001`）
 - `APP_DEBUG`（默认 `true`）
 
@@ -173,7 +173,7 @@ pip install -r requirements-offline.txt
 python run.py
 ```
 
-默认监听：`http://127.0.0.1:5001`
+默认监听：`http://0.0.0.0:5001`
 
 ## 7. 运行时路径与持久化
 

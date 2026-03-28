@@ -105,7 +105,7 @@ python run.py
 预期结果：
 
 - 应用启动成功
-- 默认地址可访问 `http://127.0.0.1:5001`
+- 默认地址可访问 `http://0.0.0.0:5001`
 
 说明：
 
@@ -491,7 +491,7 @@ $body = @{
   )
 } | ConvertTo-Json -Depth 10
 
-Invoke-RestMethod -Uri "http://127.0.0.1:5001/llm/analysis" -Method Post -ContentType "application/json; charset=utf-8" -Body $body
+Invoke-RestMethod -Uri "http://0.0.0.0:5001/llm/analysis" -Method Post -ContentType "application/json; charset=utf-8" -Body $body
 ```
 
 预期结果：

@@ -7,9 +7,6 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv(override=True)  # 加载 .env 文件到环境变量
 
-# AnythingLLM 默认连接配置，可通过环境变量覆盖
-DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1"
-
 
 @dataclass(frozen=True)
 class AnythingLLMConfig:
@@ -79,8 +76,8 @@ def _parse_int(raw_value: Optional[str], default: int, *, min_value: int = 0) ->
 
 def load_anythingllm_config() -> AnythingLLMConfig:
     return AnythingLLMConfig(
-        base_url=os.getenv("ANYTHINGLLM_BASE_URL", DEFAULT_API_BASE_URL),
-        api_key=os.getenv("ANYTHINGLLM_API_KEY"),
+        base_url=os.getenv("ANYTHINGLLM_BASE_URL").strip(),
+        api_key=os.getenv("ANYTHINGLLM_API_KEY").strip(),
         timeout=_parse_timeout(os.getenv("ANYTHINGLLM_TIMEOUT")),
         storage_root=_parse_optional_str(os.getenv("ANYTHINGLLM_STORAGE_ROOT")),
     )

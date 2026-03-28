@@ -491,7 +491,7 @@ Expected: FAIL because the fixtures do not exist.
 ```powershell
 # scripts/test_llm_analysis.ps1
 param(
-  [string]$BaseUrl = "http://127.0.0.1:5001",
+  [string]$BaseUrl = "http://0.0.0.0:5001",
   [string]$PayloadPath = "tests/fixtures/llm/analysis_request.json"
 )
 

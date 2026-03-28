@@ -17,7 +17,7 @@ from app import create_app
 
 def main() -> None:
     app = create_app()
-    host = os.environ.get("APP_HOST", "127.0.0.1")
+    host = os.environ.get("APP_HOST")
     port = int(os.environ.get("APP_PORT", 5001))
     debug = os.environ.get("APP_DEBUG", "true").lower() in ("true", "1", "yes")
 
