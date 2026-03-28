@@ -14,7 +14,7 @@ if ([string]::IsNullOrEmpty($WsUrl)) {
         }
     }
     $hostAddr = $env:APP_HOST
-    $port = if ($env:APP_PORT) { $env:APP_PORT } else { "5001" }
+    $port = $env:APP_PORT
     $WsUrl = "ws://${hostAddr}:${port}/llm/progress"
 }
 

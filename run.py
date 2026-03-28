@@ -17,9 +17,9 @@ from app import create_app
 
 def main() -> None:
     app = create_app()
-    host = os.environ.get("APP_HOST")
-    port = int(os.environ.get("APP_PORT", 5001))
-    debug = os.environ.get("APP_DEBUG", "true").lower() in ("true", "1", "yes")
+    host = os.environ.get("APP_HOST").strip()
+    port = int(os.environ.get("APP_PORT").strip())
+    debug = os.environ.get("APP_DEBUG").strip().lower() in ("true", "1", "yes")
 
     # 【新增】根据环境变量选择是否使用 waitress 生产模式
     use_waitress = os.environ.get("USE_WAITRESS", "true").lower() in ("true", "1", "yes")

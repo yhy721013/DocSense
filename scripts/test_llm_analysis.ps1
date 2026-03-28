@@ -12,7 +12,7 @@ if ([string]::IsNullOrEmpty($BaseUrl)) {
         }
     }
     $hostAddr = $env:APP_HOST
-    $port = if ($env:APP_PORT) { $env:APP_PORT } else { "5001" }
+    $port = $env:APP_PORT
     $BaseUrl = "http://${hostAddr}:${port}"
 }
 
