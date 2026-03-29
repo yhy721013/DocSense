@@ -44,7 +44,7 @@ class HYMTTranslator:
     def translate_text(self, text: str, target_lang: str = "Chinese", progress_callback=None,
                        max_retries: int = 2, fast_translate: bool = False, model_name: str = None) -> str:
         """
-        翻译单段文本，增加重试机制以应对模型幻觉或不稳定。
+        翻译单段文本，作为选择大模型翻译或快速翻译的路由入口。
         :param text: 待翻译文本
         :param target_lang: 目标语言
         :param progress_callback: 进度回调函数
@@ -60,6 +60,20 @@ class HYMTTranslator:
         if fast_translate:
             return self._translate_with_argos(text, target_lang)
 
+        # 大模型翻译模式
+        return self._translate_with_llm(
+            text=text,
+            target_lang=target_lang,
+            progress_callback=progress_callback,
+            max_retries=max_retries,
+            model_name=model_name
+        )
+
+    def _translate_with_llm(self, text: str, target_lang: str = "Chinese", progress_callback=None,
+                            max_retries: int = 2, model_name: str = None) -> str:
+        """
+        使用大模型进行单段文本翻译，增加重试机制以应对模型幻觉或不稳定。
+        """
         original_text = text
         attempt = 0
 
