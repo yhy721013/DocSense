@@ -61,7 +61,7 @@ class AnythingLLMClient:
         url = f"{self.config.base_url}/workspace/new"
         payload = {
             "name": name,
-            "similarityThreshold": 0.75,
+            "similarityThreshold": 0.25,
             "openAiTemp": 0.1,
             "openAiHistory": 1,
             "openAiPrompt": (
