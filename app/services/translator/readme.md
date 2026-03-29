@@ -119,7 +119,7 @@ https://huggingface.co/Tencent-HunYuan/HY-MT1.5-1.8B-GGUF
 ```python
 from hy_mt_translator import HYMTTranslator, DocumentTranslator
 
-# 步骤 1: 初始化翻译模型
+# 步骤 1: 初始化翻译模型（可不传参数使用默认小模型，或传入默认的特定大模型名称）
 translator = HYMTTranslator()
 
 # 步骤 2: 创建文档翻译器
@@ -131,7 +131,9 @@ result_path = doc_translator.convert_to_html(
     output_dir="./output", # 存放 HTML 和 对应images文件夹 的目录
     target_lang="Chinese", # 目标语言
     show_bilingual=True,  # True=中英对照，False=仅译文
-    translate_all= N  # 翻译前 N 段或翻译全文(N=0时翻译全文)
+    translate_all= 0,  # 翻译前 N 段或翻译全文(N=0时翻译全文)
+    # [支持高级传参] model_name="tencent-hy-mt:1.8b-q4", # 允许在翻译时覆盖并临时指定大模型
+    # [支持高级传参] fast_translate=True # 允许在翻译时覆盖使用 argos-translate 进行极速本地翻译
 )
 ```
 

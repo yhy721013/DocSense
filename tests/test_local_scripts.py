@@ -121,9 +121,9 @@ class LocalScriptTests(unittest.TestCase):
         env = os.environ.copy()
         env.update(
             {
-                "WEB_UI_HOST": "127.0.0.1",
-                "WEB_UI_PORT": str(port),
-                "WEB_UI_DEBUG": "false",
+                "APP_HOST": "127.0.0.1",
+                "APP_PORT": str(port),
+                "APP_DEBUG": "false",
             }
         )
         process = subprocess.Popen(

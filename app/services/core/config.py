@@ -5,10 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-load_dotenv()  # 加载 .env 文件到环境变量
-
-# AnythingLLM 默认连接配置，可通过环境变量覆盖
-DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1"
+load_dotenv(override=True)  # 加载 .env 文件到环境变量
 
 
 @dataclass(frozen=True)
@@ -79,8 +76,8 @@ def _parse_int(raw_value: Optional[str], default: int, *, min_value: int = 0) ->
 
 def load_anythingllm_config() -> AnythingLLMConfig:
     return AnythingLLMConfig(
-        base_url=os.getenv("ANYTHINGLLM_BASE_URL", DEFAULT_API_BASE_URL),
-        api_key=os.getenv("ANYTHINGLLM_API_KEY"),
+        base_url=os.getenv("ANYTHINGLLM_BASE_URL").strip(),
+        api_key=os.getenv("ANYTHINGLLM_API_KEY").strip(),
         timeout=_parse_timeout(os.getenv("ANYTHINGLLM_TIMEOUT")),
         storage_root=_parse_optional_str(os.getenv("ANYTHINGLLM_STORAGE_ROOT")),
     )
@@ -100,11 +97,11 @@ def load_ocr_config() -> OCRConfig:
 
 def load_llm_integration_config() -> LLMIntegrationConfig:
     return LLMIntegrationConfig(
-        callback_url=_parse_optional_str(os.getenv("DOCSENSE_LLM_CALLBACK_URL")),
-        callback_timeout=float(os.getenv("DOCSENSE_LLM_CALLBACK_TIMEOUT", "10").strip() or "10"),
+        callback_url=_parse_optional_str(os.getenv("CALLBACK_URL")),
+        callback_timeout=float(os.getenv("CALLBACK_TIMEOUT", "10").strip() or "10"),
         task_db_path=os.getenv("DOCSENSE_LLM_TASK_DB", "../../../.runtime/llm_tasks.sqlite3").strip()
         or ".runtime/llm_tasks.sqlite3",
-        download_timeout=float(os.getenv("DOCSENSE_LLM_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
-        download_dir=os.getenv("DOCSENSE_LLM_DOWNLOAD_DIR", "../../../.runtime/llm_downloads").strip()
+        download_timeout=float(os.getenv("FILE_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
+        download_dir=os.getenv("FILE_DOWNLOAD_DIR", "../../../.runtime/llm_downloads").strip()
         or ".runtime/llm_downloads",
     )
