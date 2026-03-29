@@ -2,11 +2,19 @@
   "businessType": "file",
   "params": [
     {
-      "fileName": "sample.txt",
-      "filePath": "http://127.0.0.1:8000/sample.txt"
+      "fileName": "地雷.pdf",
+      "filePath": "http://127.0.0.1:8000/地雷.pdf"
     },
     {
-      "fileName": "sample-copy.txt",
+      "fileName": "潜艇.pdf",
+      "filePath": "http://127.0.0.1:8000/潜艇.pdf"
+    },
+    {
+      "fileName": "凯瑟琳.docx",
+      "filePath": "http://127.0.0.1:8000/凯瑟琳.docx"
+    },
+    {
+      "fileName": "sample.txt",
       "filePath": "http://127.0.0.1:8000/sample.txt"
     }
   ]

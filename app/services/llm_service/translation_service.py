@@ -48,6 +48,7 @@ class LLMTranslationService:
             target_lang: str = "Chinese",
             translate_all: int = 0,
             fast_translate: bool = True,
+            use_minerU: bool = True
     ) -> tuple[str, str] | tuple[str, str]:
         """
         翻译文档并返回双语结果
@@ -91,6 +92,7 @@ class LLMTranslationService:
                 show_bilingual=True,
                 translate_all=translate_all,
                 fast_translate=fast_translate,
+                use_minerU= use_minerU
             )
             # 读取 HTML 内容
             bilingual_html_content = ""
@@ -105,6 +107,7 @@ class LLMTranslationService:
                 show_bilingual=False,
                 translate_all=translate_all,
                 fast_translate=fast_translate,
+                use_minerU= use_minerU
             )
             monolingual_html_content = ""
             if os.path.exists(monolingual_html_path):
