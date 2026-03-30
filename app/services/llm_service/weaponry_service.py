@@ -33,7 +33,7 @@ def _translate_if_needed(text: str) -> str:
         return ""
     try:
         service = get_translation_service()
-        return service.translate_text_only(text, target_lang="Chinese")
+        return service.translate_text_only(text, target_lang="Chinese", fast_translate=True, as_html=False)
     except Exception as e:
         logger.warning("翻译失败: %s", e)
         return ""
