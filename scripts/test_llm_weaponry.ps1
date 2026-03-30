@@ -1,6 +1,6 @@
 param(
     [string]$BaseUrl = "",
-    [string]$PayloadPath = "tests/fixtures/llm/check_task_file_request.json"
+    [string]$PayloadPath = "tests/fixtures/llm/weaponry_request.json"
 )
 
 if ([string]::IsNullOrEmpty($BaseUrl)) {
@@ -17,4 +17,4 @@ if ([string]::IsNullOrEmpty($BaseUrl)) {
 }
 
 $body = Get-Content -Path $PayloadPath -Raw -Encoding utf8
-Invoke-WebRequest -Uri "$BaseUrl/llm/check-task" -Method Post -ContentType "application/json; charset=utf-8" -Body $body
+Invoke-WebRequest -Uri "$BaseUrl/llm/weaponry" -Method Post -ContentType "application/json; charset=utf-8" -Body $body

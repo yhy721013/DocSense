@@ -1,6 +1,5 @@
 import os
 import re
-import fitz  # PyMuPDF
 import pdfplumber
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle

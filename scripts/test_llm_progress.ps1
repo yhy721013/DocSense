@@ -13,8 +13,8 @@ if ([string]::IsNullOrEmpty($WsUrl)) {
             [Environment]::SetEnvironmentVariable($Matches[1].Trim(), $Matches[2].Trim(), "Process")
         }
     }
-    $hostAddr = if ($env:WEB_UI_HOST) { $env:WEB_UI_HOST } else { "127.0.0.1" }
-    $port = if ($env:WEB_UI_PORT) { $env:WEB_UI_PORT } else { "5001" }
+    $hostAddr = $env:APP_HOST
+    $port = $env:APP_PORT
     $WsUrl = "ws://${hostAddr}:${port}/llm/progress"
 }
 

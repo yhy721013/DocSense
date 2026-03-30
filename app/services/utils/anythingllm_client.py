@@ -61,7 +61,7 @@ class AnythingLLMClient:
         url = f"{self.config.base_url}/workspace/new"
         payload = {
             "name": name,
-            "similarityThreshold": 0.75,
+            "similarityThreshold": 0.25,
             "openAiTemp": 0.1,
             "openAiHistory": 1,
             "openAiPrompt": (
@@ -234,9 +234,17 @@ class AnythingLLMClient:
                 # 清理思维标记与代码块，尽量得到纯 JSON 字符串
                 cleaned = model_answer.split("</think>")[-1] if "</think>" in model_answer else model_answer
                 cleaned = cleaned.replace("<think>", "")
+                
+                # 尝试匹配闭合的代码块
                 match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
                 if match:
                     cleaned = match.group(1)
+                else:
+                    # 如果没有闭合，尝试匹配未闭合的代码块（例如被截断的情况）
+                    match = re.search(r"```(?:json)?\s*([\s\S]*)", cleaned, flags=re.IGNORECASE)
+                    if match:
+                        cleaned = match.group(1)
+                
                 result = cleaned.strip()
                 if not result:
                     logger.warning("线程 %s 收到空响应", thread_slug)

@@ -41,11 +41,11 @@ load_env_file() {
 }
 
 default_base_url() {
-  echo "http://${WEB_UI_HOST:-127.0.0.1}:${WEB_UI_PORT:-5001}"
+  echo "http://${APP_HOST}:${APP_PORT}"
 }
 
 default_ws_url() {
-  echo "ws://${WEB_UI_HOST:-127.0.0.1}:${WEB_UI_PORT:-5001}/llm/progress"
+  echo "ws://${APP_HOST}:${APP_PORT}/llm/progress"
 }
 
 require_file() {

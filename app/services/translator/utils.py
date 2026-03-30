@@ -1,95 +1,100 @@
 import re
-from typing import Optional
 
 
-def build_qwen_prompt(source_text: str, target_lang: str = "Chinese") -> str:
+def build_prompt(source_text: str, target_lang: str = "Chinese") -> str:
     """
-    为 qwen3.5:4b 优化的提示词。
-    特点：
-    1. 明确指令，减少模型困惑
-    2. 强调只输出翻译
-    3. 利用 4b 模型的强理解能力
-    4. 【增强】特别强调 URL 的处理
+    通用大模型优化提示词。
+    结合了对复杂排版（段落数量、URL匹配）的控制，以及对专业术语、防幻觉的强化指令。
     """
-    # 【关键修复】使用英文指令格式，与清理函数保持一致
-    # 【增强】更强调段落数量必须严格匹配，特别强调 URL 处理
     prompt = (
-        f"Translate the following English text to {target_lang}.\n"
+        f"You are a professional military and technical document translator.\n"
+        f"Translate the following English text to {target_lang}.\n\n"
         f"CRITICAL REQUIREMENTS:\n"
-        f"1. Output ONLY the Chinese translation\n"
-        f"2. DO NOT repeat the original English text\n"
-        f"3. You MUST translate EVERY paragraph, including:\n"
-        f"   - Short paragraphs (even single sentences)\n"
-        f"   - URLs and links (IMPORTANT: Keep URLs EXACTLY as-is, do NOT translate or remove them)\n"
-        f"   - Titles and headings\n"
-        f"4. Keep the EXACT same paragraph structure (use '\\n\\n' to separate paragraphs)\n"
-        f"5. The number of output paragraphs MUST EXACTLY equal the number of input paragraphs\n"
-        f"6. IMPORTANT: Count the input paragraphs before translating and ensure your output has the SAME count\n"
-        f"7. Do not add any explanations, notes, or comments\n"
-        f"8. SPECIAL RULE FOR URLs: If a paragraph contains ONLY a URL (http:// or https://), output the SAME URL in that position\n"
-        f"9. DO NOT copy decorative separators from the original text (such as '=====', '-----', '*****')\n"
+        f"1. Output ONLY the translation (no explanations, no 'Here is the translation').\n"
+        f"2. Maintain accurate terminology (e.g., 'Class' for ships is '级').\n"
+        f"3. Do NOT add content not present in the source (e.g., 'Apple ID', passwords, disclaimers).\n"
+        f"4. DO NOT repeat the original English text or duplicate your own paragraphs.\n"
+        f"5. You MUST translate EVERY paragraph, including short paragraphs and titles.\n"
+        f"6. Keep URLs EXACTLY as-is (do NOT translate or remove them). If a paragraph is ONLY a URL, output that same URL.\n"
+        f"7. Keep the EXACT same paragraph structure (use '\\n\\n' to separate paragraphs).\n"
+        f"8. IMPORTANT: Your output MUST have EXACTLY the same number of paragraphs as the input.\n"
+        f"9. Do NOT copy decorative separators from the original text (such as '=====', '-----', '*****').\n"
         f"\n"
         f"Input Paragraph Count: {source_text.count(chr(10)+chr(10)) + 1}\n"
         f"Expected Output Paragraph Count: {source_text.count(chr(10)+chr(10)) + 1}\n"
         f"\n"
-        f"Original English Text:\n"
+        f"Source Text:\n"
         f"{'=' * 50}\n"
         f"{source_text}\n"
         f"{'=' * 50}\n"
         f"\n"
-        f"Chinese Translation (output only the translation, MUST have {source_text.count(chr(10)+chr(10)) + 1} paragraphs, KEEP URLs unchanged):"
+        f"Translation (output only the translation, MUST have {source_text.count(chr(10)+chr(10)) + 1} paragraphs, KEEP URLs unchanged):"
     )
     return prompt
 
 
-def qwen_clean_output(output_text: str, prompt: str) -> str:
+def clean_output(output_text: str, prompt: str) -> str:
     """
-    针对 qwen3.5:4b 的清理函数。
-    【关键修复】修复原文提取逻辑和检测条件，保护 URL 等特殊内容
+    通用的大模型输出清理流水线。
+    包含了 token IDs 防护、复杂分隔符清理、固定词去除、防幻觉和无限生成截断。
     """
     if not output_text:
         return ""
 
-    # 1. 去除首尾空白
     output_text = output_text.strip()
 
-    # 【新增】2. 检测是否包含 token IDs 特征（数字数组）
-    # 如果输出看起来像 token IDs（大量数字），说明模型调用失败
+    # 1. 检测 token IDs 特征
     if re.match(r'^[\d\s,\[\]]+$', output_text):
         print(f"[警告] 检测到输出为 token IDs 数组，非正常文本")
         return ""
 
-    # 【增强】3. 移除装饰性分隔符（===、---、***等）
-    # 这些分隔符通常出现在原文中，模型会模仿，但译文中不需要
-    # 【修复】调整清理顺序：先清理段落内部，再清理行首行尾
-    # 【新增】第一步：清理段落内部的分隔符（如 "中文\n=====" 或 "中文\n\n====="）
-    output_text = re.sub(r'([^\n])\n+[=]{3,}', r'\1', output_text)  # 中文 + 1 或多个 \n + ===
-    output_text = re.sub(r'([^\n])\n+[-]{3,}', r'\1', output_text)  # 中文 + 1 或多个 \n + ---
-    output_text = re.sub(r'([^\n])\n+\*{3,}', r'\1', output_text)  # 中文 + 1 或多个 \n + ***
-    # 第二步：清理行首的分隔符（单独成行的 ===）
-    output_text = re.sub(r'^[=]{3,}\n*', '', output_text, flags=re.MULTILINE)  # 行首的 ===
-    output_text = re.sub(r'^[-]{3,}\n*', '', output_text, flags=re.MULTILINE)  # 行首的 ---
-    output_text = re.sub(r'^\*{3,}\n*', '', output_text, flags=re.MULTILINE)  # 行首的 ***
-    # 第三步：清理行尾的分隔符（包括 \n\n=== 或 \n===）
-    output_text = re.sub(r'\n+[=]{3,}$', '', output_text, flags=re.MULTILINE)  # 行尾的 ===
-    output_text = re.sub(r'\n+[-]{3,}$', '', output_text, flags=re.MULTILINE)  # 行尾的 ---
-    output_text = re.sub(r'\n+\*{3,}$', '', output_text, flags=re.MULTILINE)  # 行尾的 ***
-    # 第四步：清理中间单独成行的分隔符（=== 两边都有换行）
-    output_text = re.sub(r'\n+[=]{3,}\n+', '\n', output_text)  # 中间的 ===
-    output_text = re.sub(r'\n+[-]{3,}\n+', '\n', output_text)  # 中间的 ---
-    output_text = re.sub(r'\n+\*{3,}\n+', '\n', output_text)  # 中间的 ***
-    # 第五步：清理连续的空行（由于移除分隔符导致的）
+    # 2. 去除Prompt残留
+    if prompt in output_text:
+        output_text = output_text.split(prompt)[-1]
+
+    # 3. 移除装饰性分隔符（先内部后首尾）
+    output_text = re.sub(r'([^\n])\n+[=]{3,}', r'\1', output_text)
+    output_text = re.sub(r'([^\n])\n+[-]{3,}', r'\1', output_text)
+    output_text = re.sub(r'([^\n])\n+\*{3,}', r'\1', output_text)
+    
+    output_text = re.sub(r'^[=]{3,}\n*', '', output_text, flags=re.MULTILINE)
+    output_text = re.sub(r'^[-]{3,}\n*', '', output_text, flags=re.MULTILINE)
+    output_text = re.sub(r'^\*{3,}\n*', '', output_text, flags=re.MULTILINE)
+    
+    output_text = re.sub(r'\n+[=]{3,}$', '', output_text, flags=re.MULTILINE)
+    output_text = re.sub(r'\n+[-]{3,}$', '', output_text, flags=re.MULTILINE)
+    output_text = re.sub(r'\n+\*{3,}$', '', output_text, flags=re.MULTILINE)
+    
+    output_text = re.sub(r'\n+[=]{3,}\n*', '\n', output_text)
+    output_text = re.sub(r'\n+[-]{3,}\n*', '\n', output_text)
+    output_text = re.sub(r'\n+\*{3,}\n*', '\n', output_text)
+    
     output_text = re.sub(r'\n{3,}', '\n\n', output_text)
 
-    # 4. 移除可能的引导词残留
+    # 4. 去除多余的引导词
     patterns_to_remove = [
-        r"^(翻译结果 | Translation|译文):?\s*",
-        r"^Original English Text:.*?(?=\n)",  # 移除可能的原文残留
+        r"^(翻译结果|Translation|翻译如下|以下是翻译|译文):?\s*",
+        r"^Original English Text:.*?(?=\n)",
+        r"将以下文本翻译为 [\u4e2d\u82f1\u6587ZhongEnglish]+，？注意只需要输出翻译后的结果，？不要额外解释 [:：]?\s*",
+        r"Translate the following segment into [\w\s]+,?\s*without additional explanation\.?\s*",
     ]
     for pattern in patterns_to_remove:
         output_text = re.sub(pattern, "", output_text, flags=re.IGNORECASE | re.DOTALL)
 
-    # 5. 简单去重（防止极端情况）
+    # 5. 检测并移除已知幻觉关键词
+    hallucination_keywords = ["Apple ID", "password", "generated based on the provided"]
+    if any(keyword in output_text for keyword in hallucination_keywords):
+        lines = output_text.split('\n')
+        clean_lines = []
+        for line in lines:
+            if not any(keyword in line for keyword in hallucination_keywords):
+                clean_lines.append(line)
+        output_text = '\n'.join(clean_lines)
+
+        if not output_text.strip():
+            return "[内容过滤：检测到模型幻觉]"
+
+    # 6. 去重处理 (防止相同段落连续出现)
     lines = output_text.split('\n')
     unique_lines = []
     prev_line = None
@@ -108,126 +113,16 @@ def qwen_clean_output(output_text: str, prompt: str) -> str:
 
     output_text = '\n'.join(unique_lines).strip()
 
-    return output_text
-
-
-def build_prompt(source_text: str, target_lang: str = "Chinese") -> str:
-    """
-    构建针对 tencent-hy-mt:1.8b 优化的提示词。
-    增强点：
-    1. 增加领域上下文（军事/技术），减少术语错误。
-    2. 增加强力的负面约束，防止幻觉（如Apple ID、重复段落）。
-    3. 强制要求纯净输出。
-    """
-    # 简单的语言检测，默认假设源文本为英文，目标为中文
-    is_zh_target = target_lang.lower() in ["chinese", "zh", "中文", "cn"]
-
-    if is_zh_target:
-        system_instruction = (
-            "你是一名专业的军事与技术文档翻译专家。"
-            "请将以下文本翻译成中文。"
-            "要求：\n"
-            "1. 保持专业术语准确（例如：'Class'在舰船语境下译为'级'，'Ohio'译为'俄亥俄级'而非'俄亥俄州'）。\n"
-            "2. 严禁添加原文中不存在的内容（如'Apple ID'、'password'、无关的免责声明）。\n"
-            "3. 严禁重复输出相同的段落或句子。\n"
-            "4. 直接输出翻译结果，不要包含'翻译如下'、'注意'等任何解释性文字。\n"
-            "5. 如果原文是表格数据或乱码，请尽量保持原样或标记为[数据]，不要编造内容。"
-        )
-        prompt = f"{system_instruction}\n\n待翻译文本:\n{source_text}\n\n翻译结果:"
-    else:
-        system_instruction = (
-            "You are a professional military and technical document translator. "
-            f"Translate the following text into {target_lang}. "
-            "Requirements:\n"
-            "1. Maintain accurate terminology.\n"
-            "2. Do NOT add content not present in the source (e.g., 'Apple ID', 'password').\n"
-            "3. Do NOT repeat paragraphs.\n"
-            "4. Output ONLY the translation, no explanations.\n"
-            "5. If the source is garbled data, keep it as is or mark as [Data], do not hallucinate."
-        )
-        prompt = f"{system_instruction}\n\nSource Text:\n{source_text}\n\nTranslation:"
-
-    return prompt
-
-
-def clean_output(output_text: str, prompt: str) -> str:
-    """
-    清理模型输出，针对 tencent-hy-mt:1.8b 的常见问题进行修复。
-    修复点：
-    1. 去除Prompt残留。
-    2. 检测并去除"Apple ID"等已知幻觉内容。
-    3. 检测并去除连续重复段落。
-    4. 截断过长的异常输出。
-    """
-    if not output_text:
-        return ""
-
-    # 1. 去除Prompt残留 (原有逻辑增强)
-    if prompt in output_text:
-        output_text = output_text.split(prompt)[-1]
-
-    # 去除常见的引导词
-    patterns_to_remove = [
-        r"^(翻译结果|Translation|翻译如下|以下是翻译):?\s*",
-        r"将以下文本翻译为 [\u4e2d\u82f1\u6587ZhongEnglish]+，？注意只需要输出翻译后的结果，？不要额外解释 [:：]?\s*",
-        r"Translate the following segment into [\w\s]+,?\s*without additional explanation\.?\s*",
-    ]
-    for pattern in patterns_to_remove:
-        output_text = re.sub(pattern, "", output_text, flags=re.IGNORECASE)
-
-    # 2. 【关键修复】检测并移除已知的幻觉内容 (Apple ID, Password等)
-    # 如果整段都是关于Apple ID的，直接清空，因为原文是军事文档，不可能包含此内容
-    hallucination_keywords = ["Apple ID", "password", "generated based on the provided"]
-    if any(keyword in output_text for keyword in hallucination_keywords):
-        # 检查是否大部分内容都是幻觉
-        lines = output_text.split('\n')
-        clean_lines = []
-        for line in lines:
-            if not any(keyword in line for keyword in hallucination_keywords):
-                clean_lines.append(line)
-        output_text = '\n'.join(clean_lines)
-
-        # 如果清理后为空，说明整段都是幻觉，返回空或原文标记
-        if not output_text.strip():
-            return "[内容过滤：检测到模型幻觉]"
-
-    # 3. 【关键修复】检测连续重复段落
-    # 将文本按行分割，移除连续重复的行
-    lines = output_text.split('\n')
-    unique_lines = []
-    prev_line = None
-    repeat_count = 0
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped == prev_line:
-            repeat_count += 1
-            # 如果同一行重复超过2次，跳过后续重复
-            if repeat_count > 2:
-                continue
-        else:
-            repeat_count = 0
-            prev_line = stripped
-
-        unique_lines.append(line)
-
-    output_text = '\n'.join(unique_lines)
-
-    # 4. 长度异常检测 (防止无限生成)
-    # 如果译文长度超过原文长度的4倍，极大概率是重复幻觉，强制截断到第一个合理的结束点
-    # 这里简单处理：如果太长，只保留前2000字符（可根据实际情况调整）
-    # 注意：需要先获取原文长度，但此函数未传入原文，故仅做绝对长度限制或基于比例的启发式
-    # 此处做一个简单的截断保护，防止单个段落爆炸
+    # 7. 长度异常检测 (截断超长幻觉输出)
     if len(output_text) > 3000:
-        # 尝试在最后一个句号处截断
         last_period = output_text.rfind('。', 0, 2000)
         if last_period != -1:
             output_text = output_text[:last_period + 1] + "\n[警告：输出过长已截断]"
         else:
             output_text = output_text[:2000] + "\n[警告：输出过长已截断]"
 
-    # 5. 去除首尾空白和多余的冒号
-    output_text = output_text.strip().lstrip(':：').strip()
+    # 8. 最后清理多余符号
+    output_text = output_text.lstrip(':：').strip()
 
     return output_text
 

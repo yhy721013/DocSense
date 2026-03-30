@@ -18,6 +18,3 @@ venv/
 
 # 环境变量配置文件 | Environment variables
 .env
-
-# 运行时文件 | Runtime files
-uploads/
