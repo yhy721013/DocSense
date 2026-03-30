@@ -181,7 +181,7 @@ class PDFHandler:
             target_lang: str = "Chinese",
             translate_all: int = 0,
             fast_translate: bool = True,
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         将 PDF 转换为 HTML 并翻译（中英对照）
         新逻辑：PDF -> DOCX -> HTML

@@ -51,7 +51,7 @@ class DocumentTranslator:
         self.translator.get_progress_tracker().reset()
 
         # 如果使用 MinerU 模式
-        if use_minerU:
+        if use_minerU and ext != '.txt':
             print(f"\n{'=' * 60}")
             print(f"使用 MinerU 模式处理：{file_path}")
             print(f"{'=' * 60}")
@@ -114,7 +114,7 @@ class DocumentTranslator:
         self.translator.get_progress_tracker().reset()
 
         # 如果使用 MinerU 模式
-        if use_minerU:
+        if use_minerU and ext != '.txt':
             print(f"\n{'=' * 60}")
             print(f"使用 MinerU 模式处理 HTML 转换：{file_path}")
             print(f"{'=' * 60}")

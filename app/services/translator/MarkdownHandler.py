@@ -6,6 +6,7 @@ from .chunk_processor import ChunkProcessor
 from .MinerUConverter import MinerUConverter
 import markdown
 import shutil
+from pathlib import Path
 
 class MarkdownHandler:
     """Markdown 文档处理器 - 翻译 Markdown 并转为 HTML"""
@@ -42,6 +43,10 @@ class MarkdownHandler:
         print(f"步骤 1: 使用 MinerU 将文档转换为 Markdown")
         print(f"{'=' * 50}")
 
+        # 【关键修改】为每个文件创建独立的输出子目录
+        input_file_name = Path(input_path).stem
+        output_subdir = f"mineru_{input_file_name}"
+
         md_path = self.mineru_converter.convert_to_markdown(
             input_path=input_path,
             use_ocr=use_ocr,
@@ -49,6 +54,7 @@ class MarkdownHandler:
             extract_images=extract_images,
             formula_enable=formula_enable,
             table_enable=table_enable,
+            output_subdir=output_subdir
         )
 
         print(f"MinerU 转换完成，Markdown 文件：{md_path}")
@@ -198,16 +204,18 @@ class MarkdownHandler:
         # 复制一份双语 HTML
         monolingual_html = bilingual_html
 
-        # 移除所有 original-text div，只保留 translated-text
-        # 匹配双语对照的段落结构
-        pattern = r'<div class="paragraph">\s*<div class="original-text">.*?</div>\s*<div class="translated-text">(.*?)</div>\s*</div>'
+        # 移除所有 original-text span/div，只保留 translated-text
+        # 匹配 span 级别的双语结构
+        span_pattern = r'<span class="original-text">.*?</span>\s*<span class="translated-text">(.*?)</span>'
+        span_monolingual_pattern = r'<span class="translated-text">\1</span>'
+        monolingual_html = re.sub(span_pattern, span_monolingual_pattern, monolingual_html, flags=re.DOTALL)
 
-        # 替换为只有译文的段落
-        monolingual_pattern = r'<div class="paragraph"><div class="translated-text">\1</div></div>'
-        monolingual_html = re.sub(pattern, monolingual_pattern, monolingual_html, flags=re.DOTALL)
+        # 匹配 div 级别的双语结构
+        div_pattern = r'<div class="paragraph">\s*<div class="original-text">.*?</div>\s*<div class="translated-text">(.*?)</div>\s*</div>'
+        div_monolingual_pattern = r'<div class="paragraph"><div class="translated-text">\1</div></div>'
+        monolingual_html = re.sub(div_pattern, div_monolingual_pattern, monolingual_html, flags=re.DOTALL)
 
         return monolingual_html
-
 
     def _convert_markdown_to_html_with_translation(
             self,
@@ -279,33 +287,31 @@ class MarkdownHandler:
             tracker
     ) -> str:
         """
-        翻译 HTML 中的文本内容（保留 HTML 标签）
+        翻译 HTML 中的文本内容（保留 HTML 标签）- 生成双语对照
         :param html_content: HTML 内容
         :param target_lang: 目标语言
-        :param show_bilingual: 是否双语对照
+        :param show_bilingual: 是否双语对照（始终为 True）
         :param translate_all: 翻译范围
         :param fast_translate: 是否快速翻译
         :param tracker: 进度追踪器
-        :return: 翻译后的 HTML
+        :return: 翻译后的 HTML（包含双语对照）
         """
-        # 【关键修改】提取 HTML 标签，只翻译纯文本部分
+        # 【关键修改】使用正则表达式提取 HTML 中的文本节点并构建双语对照
 
-        # 使用正则表达式分割 HTML 标签和文本
-        # 匹配 HTML 标签（包括自闭合标签）
+        # 匹配 HTML 标签和文本节点
         tag_pattern = r'<[^>]+>'
 
         # 分割为标签和文本片段
         fragments = re.split(tag_pattern, html_content)
         tags = re.findall(tag_pattern, html_content)
 
-        # 翻译文本片段
+        # 翻译文本片段并构建双语结构
         translated_fragments = []
-        total_frags = len([f for f in fragments if f.strip()])
+        total_frags = len([f for f in fragments if f.strip() and not f.strip().startswith('<')])
         processed = 0
 
         tracker.set_file_info("Markdown HTML", total_frags, "paragraph")
 
-        # 【新增】显示总体进度信息
         print(f"\n[HTML 翻译] 开始翻译 HTML 内容，共 {total_frags} 个文本片段...\n")
 
         for idx, fragment in enumerate(fragments):
@@ -325,25 +331,45 @@ class MarkdownHandler:
 
             # 翻译文本片段
             try:
-                translated = self.translator.translate_text(
-                    fragment.strip(),
-                    target_lang,
-                    fast_translate=fast_translate
-                )
+                original_text = fragment.strip()
 
-                # 替换原文本为翻译后的文本
-                translated_fragments.append(fragment.replace(fragment.strip(), translated))
+                # 检测是否为中文，如果是则不翻译
+                if self._is_chinese_text(original_text):
+                    # 中文文本：只显示原文（因为原文=译文）
+                    bilingual_fragment = f'<span class="original-text">{self._escape_html(original_text)}</span>'
+                    translated_fragments.append(bilingual_fragment)
+                    print(
+                        f"\r[{progress_bar}] {current_progress:.1f}% | 片段 {processed + 1}/{total_frags} [中文跳过]",
+                        end="", flush=True)
+                else:
+                    # 非中文：需要翻译
+                    translated_text = self.translator.translate_text(
+                        original_text,
+                        target_lang,
+                        fast_translate=fast_translate
+                    )
+
+                    # 【关键修改】生成双语对照结构
+                    if show_bilingual:
+                        bilingual_fragment = f'''<span class="original-text">{self._escape_html(original_text)}</span>
+<span class="translated-text">{self._escape_html(translated_text)}</span>'''
+                    else:
+                        bilingual_fragment = f'<span class="translated-text">{self._escape_html(translated_text)}</span>'
+
+                    translated_fragments.append(bilingual_fragment)
+                    print(
+                        f"\r[{progress_bar}] {current_progress:.1f}% | 片段 {processed + 1}/{total_frags} ✓ {len(translated_text)}字",
+                        end="", flush=True)
+
                 processed += 1
                 tracker.update_paragraph(processed)
 
-                # 【新增】显示实时进度
-                print(
-                    f"\r[{progress_bar}] {current_progress:.1f}% | 片段 {processed}/{total_frags} ✓ {len(translated)}字",
-                    end="", flush=True)
-
             except Exception as e:
                 print(f"\n\r  [翻译失败] 片段 {idx}: {e}")
-                translated_fragments.append(fragment)
+                # 失败时保留原文
+                translated_fragments.append(f'<span class="original-text">{self._escape_html(fragment)}</span>')
+                processed += 1
+                tracker.update_paragraph(processed)
 
         # 【新增】换行，避免覆盖最后的进度信息
         print(f"\n[完成] HTML 内容翻译完毕，共处理 {processed} 个片段\n")
@@ -738,6 +764,21 @@ class MarkdownHandler:
                 }
                 .toc ul {
                     list-style: none;
+                }
+
+                /* 【新增】双语翻译样式 */
+                .original-text {
+                    color: #333;
+                    display: block;
+                    margin-bottom: 8px;
+                }
+                .translated-text {
+                    color: #0066cc;
+                    display: block;
+                    font-weight: 500;
+                    border-top: 1px dashed #e0e0e0;
+                    padding-top: 8px;
+                    margin-top: 8px;
                 }
             </style>
         </head>

@@ -42,6 +42,7 @@ class MinerUConverter:
             backend: str = "hybrid-auto-engine",
             api_url: Optional[str] = None,
             server_url: Optional[str] = None,
+            output_subdir: Optional[str] = None
     ) -> str:
         """
         单个文件 / 文件夹 转 Markdown
@@ -54,12 +55,21 @@ class MinerUConverter:
         :param backend: 后端类型
         :param api_url: 远程 API URL（None 则启动本地服务）
         :param server_url: 服务器 URL（仅 http-client 模式需要）
+        :param output_subdir: 输出子目录名（用于区分不同文件的输出）
         :return: 输出的 markdown 文件路径
         """
         input_path = Path(input_path).expanduser().resolve()
 
         if not input_path.exists():
             raise FileNotFoundError(f"Input path does not exist: {input_path}")
+
+        # 【关键修改】如果有指定输出子目录，使用独立的输出目录
+        if output_subdir:
+            current_output_dir = self.output_dir / output_subdir
+        else:
+            current_output_dir = self.output_dir
+
+        current_output_dir.mkdir(parents=True, exist_ok=True)
 
         # 收集输入文件
         input_files = self._collect_input_files(input_path)
@@ -90,8 +100,8 @@ class MinerUConverter:
             form_data=form_data,
             api_url=api_url,
             server_url=server_url,
+            output_dir=current_output_dir
         )
-
         return result_md_path
 
     def _collect_input_files(self, input_path: Path) -> List[Path]:
@@ -156,11 +166,16 @@ class MinerUConverter:
             form_data: dict,
             api_url: Optional[str],
             server_url: Optional[str],
+            output_dir: Optional[Path] = None
     ) -> str:
         """执行实际的文件转换"""
         local_server: Optional[_api_client.LocalAPIServer] = None
         result_zip_path: Optional[Path] = None
         task_label = f"{len(upload_assets)} file(s)"
+
+        # 使用指定的输出目录或默认输出目录
+        if output_dir is None:
+            output_dir = self.output_dir
 
         async def run_async():
             nonlocal local_server, result_zip_path
@@ -219,13 +234,13 @@ class MinerUConverter:
             assert result_zip_path is not None
             try:
                 # 【关键修复】参考 demo_minerU 的实现，不依赖返回值
-                _api_client.safe_extract_zip(result_zip_path, self.output_dir)
-                print(f"Extracted result to: {self.output_dir}")
+                _api_client.safe_extract_zip(result_zip_path, output_dir)
+                print(f"Extracted result to: {output_dir}")
             finally:
                 result_zip_path.unlink(missing_ok=True)
 
-            # 【关键修复】直接返回 self.output_dir，而不是 extracted_path
-            return self.output_dir
+            # 【关键修复】直接返回 output_dir，而不是 extracted_path
+            return output_dir
 
         # 运行异步代码
         result_path = asyncio.run(run_async())
