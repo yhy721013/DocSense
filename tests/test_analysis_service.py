@@ -77,6 +77,61 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["country"], "")
 
+    def test_map_analysis_result_rejects_out_of_range_channel_maturity_format(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "channel": [{"key": "02", "value": "装发"}],
+            "maturity": [{"key": "02", "value": "阶段成果"}],
+            "format": [{"key": "03", "value": "文档类"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "channel": "未知渠道",
+                "maturity": "未知成熟度",
+                "format": "未知格式",
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["channel"], "")
+        self.assertEqual(result["maturity"], "")
+        self.assertEqual(result["format"], "")
+
+    def test_map_analysis_result_matches_options_after_normalization(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "channel": [{"key": "02", "value": "装发"}],
+            "maturity": [{"key": "02", "value": "阶段成果"}],
+            "format": [{"key": "03", "value": "文档类"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "channel": "  装 发  ",
+                "maturity": "０２",
+                "format": " 文档类 ",
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["channel"], "装发")
+        self.assertEqual(result["maturity"], "阶段成果")
+        self.assertEqual(result["format"], "文档类")
+
+    def test_map_analysis_result_falls_back_architecture_to_one_when_not_matched(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [
+                {"id": 105, "name": "作战指挥", "pathName": "作战指挥"},
+                {"id": 10502, "name": "组织机构", "pathName": "作战指挥/组织机构"},
+            ],
+        }
+
+        result = map_analysis_result({"architectureId": 999999}, request_params)
+
+        self.assertEqual(result["architectureId"], 1)
+
     def test_map_analysis_result_uses_default_ranges_when_request_missing(self):
         result = map_analysis_result(
             {"国家": {"value": "美国", "key": "02"}},
@@ -99,7 +154,10 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn('"country"', prompt)
         self.assertIn('"architectureId"', prompt)
         self.assertIn('"fileDataItem"', prompt)
+        self.assertIn('"originalText"', prompt)
         self.assertIn("不要直接原样返回候选对象", prompt)
+        self.assertIn("输出前自检清单", prompt)
+        self.assertIn("无法匹配时输出 1", prompt)
 
     def test_build_file_analysis_prompt_uses_default_ranges_when_missing(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
@@ -116,10 +174,14 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "format": [{"key": "88", "value": "数据库类"}],
             }
         )
-        self.assertIn('"德国"', prompt)
-        self.assertIn('"数据库类"', prompt)
-        self.assertNotIn('"美国"', prompt)
-        self.assertNotIn('"文档类"', prompt)
+        lines = prompt.splitlines()
+        country_options_line = next(line for line in lines if line.startswith("国家候选:"))
+        format_options_line = next(line for line in lines if line.startswith("格式候选:"))
+
+        self.assertIn('"德国"', country_options_line)
+        self.assertNotIn('"美国"', country_options_line)
+        self.assertIn('"数据库类"', format_options_line)
+        self.assertNotIn('"文档类"', format_options_line)
 
     def test_build_file_analysis_prompt_includes_architecture_classification_rules(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
@@ -127,8 +189,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("军事基地：", prompt)
         self.assertIn("作战指挥：", prompt)
         self.assertIn("组织机构", prompt)
-        self.assertIn("必须从领域体系候选中选择一个最可能的节点", prompt)
-        self.assertIn("只有当文档内容与所有除\u2019其他\u2018之外的候选领域都明显无关时才输出 1", prompt)
+        self.assertIn("architectureId 必须来自候选 architectureList 中的 id", prompt)
+        self.assertIn("当文档与所有候选领域都明显无关时，architectureId 输出 1", prompt)
 
     def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
         original_text = (
