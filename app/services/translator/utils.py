@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import re
 
 
@@ -45,7 +47,7 @@ def clean_output(output_text: str, prompt: str) -> str:
 
     # 1. 检测 token IDs 特征
     if re.match(r'^[\d\s,\[\]]+$', output_text):
-        print(f"[警告] 检测到输出为 token IDs 数组，非正常文本")
+        logger.warning(f"[警告] 检测到输出为 token IDs 数组，非正常文本")
         return ""
 
     # 2. 去除Prompt残留
