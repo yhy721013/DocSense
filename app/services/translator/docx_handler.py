@@ -74,7 +74,7 @@ class DocxHandler:
         解析单元格内容（文本 + 嵌套表格）
         :param cell: docx Cell 对象
         :param target_lang: 目标语言
-        :param show_bilingual: 是否显示中英对照
+        :param show_bilingual: 是否显示中英对照（始终为 True）
         :return: 单元格内容的 HTML 字符串
         """
         content_parts = []
@@ -91,7 +91,7 @@ class DocxHandler:
                 </div>
                 """
                 content_parts.append(text_html)
-            elif show_bilingual:
+            elif True:  # 始终生成双语对照
                 translated_text = self.translator.translate_text(cell_text, target_lang)
                 text_html = f"""
                 <div class="cell-text">
@@ -99,10 +99,6 @@ class DocxHandler:
                     <div class="translated-text">{translated_text}</div>
                 </div>
                 """
-                content_parts.append(text_html)
-            else:
-                translated_text = self.translator.translate_text(cell_text, target_lang)
-                text_html = f'<div class="cell-text translated-text">{translated_text}</div>'
                 content_parts.append(text_html)
 
         # 2. 检查并解析单元格内的嵌套表格（核心新增逻辑）
@@ -116,7 +112,7 @@ class DocxHandler:
                 from docx.table import Table
                 nested_table = Table(nested_tbl_elem, cell)
                 # 递归生成嵌套表格的 HTML
-                nested_table_html = self._process_single_table_to_html(nested_table, target_lang, show_bilingual)
+                nested_table_html = self._process_single_table_to_html(nested_table, target_lang, show_bilingual=True)
                 # 添加嵌套表格样式（缩进 + 边框区分）
                 styled_nested_table = f"""
                 <div class="nested-table" style="margin: 10px 0 10px 20px; border: 1px dashed #666; padding: 5px;">
@@ -181,19 +177,18 @@ class DocxHandler:
             'merged_cells': merged_cells
         }
 
-    # 保留原有 convert_to_html/_parse_document_elements/_process_single_paragraph_to_html 等核心方法
     def convert_to_html(
             self,
             input_path: str,
             output_dir: str,
             target_lang: str = "Chinese",
-            show_bilingual: bool = True,
             translate_all: int = 0,
             preserve_original_styles: bool = True,
             fast_translate: bool = True
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         将 Word 文档转换为 HTML 并翻译（支持：原顺序 + 合并单元格 + 嵌套表格）
+        :return: (双语 HTML 路径，单语 HTML 路径)
         """
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"Processing Word to HTML (full flow): {input_path}")
@@ -253,7 +248,7 @@ class DocxHandler:
                 translated_results = self._batch_translate_paragraphs(
                     paragraphs_to_translate,
                     target_lang,
-                    show_bilingual
+                    show_bilingual=True  # 始终生成双语对照
                 )
         else:
             # 【逐段翻译模式】不提前翻译，在处理时逐段翻译
@@ -277,7 +272,8 @@ class DocxHandler:
             if elem_type == "paragraph":
                 para = elem_data
                 # 从批量翻译结果中获取译文（如果使用了批量翻译）
-                if use_batch_translation and translated_results and para_result_idx < len(translated_results) and not fast_translate:
+                if use_batch_translation and translated_results and para_result_idx < len(
+                        translated_results) and not fast_translate:
                     orig, trans, style = translated_results[para_result_idx]
 
                     # 根据 show_bilingual 生成 HTML
@@ -286,10 +282,8 @@ class DocxHandler:
                     elif self._is_chinese_text(orig):
                         # 中文段落不翻译
                         html = self._generate_paragraph_html(orig, orig, style, preserve_original_styles)
-                    elif show_bilingual:
+                    elif True:  # 始终生成双语对照
                         html = self._generate_paragraph_html(orig, trans, style, preserve_original_styles)
-                    else:
-                        html = self._generate_paragraph_html("", trans, style, preserve_original_styles)
 
                     para_result_idx += 1
                 else:
@@ -311,15 +305,13 @@ class DocxHandler:
                     else:
                         # 需要翻译的段落
                         try:
-                            translated = self.translator.translate_text(text, target_lang,fast_translate=fast_translate)
+                            translated = self.translator.translate_text(text, target_lang,
+                                                                        fast_translate=fast_translate)
                             para_style = self._get_paragraph_style_type(para)
 
-                            if show_bilingual:
-                                html = self._generate_paragraph_html(text, translated, para_style,
-                                                                     preserve_original_styles)
-                            else:
-                                html = self._generate_paragraph_html("", translated, para_style,
-                                                                     preserve_original_styles)
+                            # 始终生成双语对照
+                            html = self._generate_paragraph_html(text, translated, para_style,
+                                                                 preserve_original_styles)
 
                             logger.info(
                                 f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✓ {len(translated)}字",
@@ -340,7 +332,7 @@ class DocxHandler:
 
             elif elem_type == "table":
                 table = elem_data
-                html = self._process_single_table_to_html(table, target_lang, show_bilingual)
+                html = self._process_single_table_to_html(table, target_lang, show_bilingual=True)
                 html_content.append(html)
                 logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [表格]",
                       end="", flush=True)
@@ -362,7 +354,7 @@ class DocxHandler:
                 img_html = f'''
                         <div class="document-image">
                             <img src="{self._escape_html(img_rel_path)}" alt="文档图片 {img_idx + 1}" 
-                                 style="max-width: 100%; height: auto; margin: 20px 0;">
+                                style="max-width: 100%; height: auto; margin: 20px 0;">
                         </div>
                         '''
                 html_content.append(img_html)
@@ -378,15 +370,49 @@ class DocxHandler:
         # 闭合 HTML 标签
         html_content.append(self._get_html_footer())
 
-        # 保存 HTML 文件
-        output_path = os.path.join(output_dir, f"{name_without_ext}_translated.html")
+        # 【关键修改】保存双语 HTML 文件
+        bilingual_output_path = os.path.join(output_dir, f"{name_without_ext}_bilingual.html")
 
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(bilingual_output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(html_content))
 
+        # 【新增】从双语 HTML 生成单语 HTML（只保留译文）
+        monolingual_html_content = self._convert_bilingual_to_monolingual("\n".join(html_content))
+        monolingual_output_path = os.path.join(output_dir, f"{name_without_ext}_monolingual.html")
+
+        with open(monolingual_output_path, "w", encoding="utf-8") as f:
+            f.write(monolingual_html_content)
+
         tracker.mark_completed()
-        logger.info(f"翻译后的 HTML（完整样式 + 原顺序 + 合并单元格 + 嵌套表格）已保存至：{output_path}")
-        return output_path
+        print(f"双语 HTML（完整样式 + 原顺序 + 合并单元格 + 嵌套表格）已保存至：{bilingual_output_path}")
+        print(f"单语 HTML 已保存至：{monolingual_output_path}")
+        return bilingual_output_path, monolingual_output_path
+
+    def _convert_bilingual_to_monolingual(self, bilingual_html: str) -> str:
+        """
+        将双语 HTML 转换为单语 HTML（只保留译文）
+        :param bilingual_html: 双语 HTML 内容
+        :return: 单语 HTML 内容
+        """
+        import re
+
+        # 复制一份双语 HTML
+        monolingual_html = bilingual_html
+
+        # 移除所有 original-text div，只保留 translated-text
+        # 匹配双语对照的段落结构
+        pattern = r'<div class="paragraph">\s*<div class="original-text">.*?</div>\s*<div class="translated-text">(.*?)</div>\s*</div>'
+
+        # 替换为只有译文的段落
+        monolingual_pattern = r'<div class="paragraph"><div class="translated-text">\1</div></div>'
+        monolingual_html = re.sub(pattern, monolingual_pattern, monolingual_html, flags=re.DOTALL)
+
+        # 处理表格中的双语对照
+        cell_pattern = r'<div class="cell-text">\s*<div class="original-text">.*?</div>\s*<div class="translated-text">(.*?)</div>\s*</div>'
+        cell_monolingual_pattern = r'<div class="cell-text"><div class="translated-text">\1</div></div>'
+        monolingual_html = re.sub(cell_pattern, cell_monolingual_pattern, monolingual_html, flags=re.DOTALL)
+
+        return monolingual_html
 
     def process(
             self,

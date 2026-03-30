@@ -180,17 +180,15 @@ class PDFHandler:
             input_path: str,
             output_dir: str,
             target_lang: str = "Chinese",
-            show_bilingual: bool = True,
             translate_all: int = 0,
             fast_translate: bool = True,
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         将 PDF 转换为 HTML 并翻译（中英对照）
         新逻辑：PDF -> DOCX -> HTML
         :param input_path: PDF 文件路径
         :param output_dir: 输出目录
         :param target_lang: 目标语言
-        :param show_bilingual: 是否显示中英对照
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: 输出的 HTML 文件路径
@@ -225,20 +223,19 @@ class PDFHandler:
 
             # 注意：translate_all 参数传递给 DOCX  handler
             # 由于 PDF 的 translate_all 是页数，DOCX 是段落数，这里直接传入
-            html_output_path = docx_handler.convert_to_html(
+            bilingual_output_path, monolingual_output_path = docx_handler.convert_to_html(
                 input_path=temp_docx_path,
                 output_dir=output_dir,
                 target_lang=target_lang,
-                show_bilingual=show_bilingual,
                 translate_all=translate_all * 5 if translate_all > 0 else 0,
                 fast_translate=fast_translate,
             )
 
-            logger.info(f"{'=' * 50}")
-            logger.info(f"PDF 转 HTML 完成！最终输出：{html_output_path}")
-            logger.info(f"{'=' * 50}")
+            print(f"\n{'=' * 50}")
+            print(f"PDF 转 HTML 完成！最终输出：{bilingual_output_path, monolingual_output_path}")
+            print(f"{'=' * 50}")
 
-            return html_output_path
+            return bilingual_output_path, monolingual_output_path
 
         except Exception as e:
             logger.info(f"处理 PDF 时出错：{e}")

@@ -49,7 +49,8 @@ class LLMTranslationService:
             target_lang: str = "Chinese",
             translate_all: int = 0,
             fast_translate: bool = True,
-    ) -> tuple[str, str] | tuple[str, str]:
+            use_minerU: bool = True
+    ) -> tuple[str, str]:
         """
         翻译文档并返回双语结果
 
@@ -57,7 +58,7 @@ class LLMTranslationService:
         :param target_lang: 目标语言
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页/段落
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
-        :return: (翻译后文本，双语对照 HTML)
+        :return: (双语 HTML 内容，单语 HTML 内容)
         """
         self._ensure_translator()
 
@@ -67,53 +68,32 @@ class LLMTranslationService:
         try:
             # 生成输出路径
             base_path = Path(file_path)
-            output_txt = base_path.parent / f"{base_path.stem}_translated.txt"
-            output_bilingual_html = base_path.parent / f"{base_path.stem}"/"_bilingual_html"
-            output_monolingual_html = base_path.parent / f"{base_path.stem}"/"_monolingual_html"
+            output_htmls = base_path.parent / f"{base_path.stem}"
+            output_monolingual_html = base_path.parent / f"{base_path.stem}" / "_monolingual_html"
 
-            # 翻译文档（生成 TXT）
-            # translated_txt_path = self._document_translator.process_file(
-            #     file_path=str(file_path),
-            #     output_path=str(output_txt),
-            #     target_lang=target_lang,
-            #     translate_all=translate_all,
-            # )
-            #
-            # # 读取翻译后的文本
-            # translated_text = ""
-            # if os.path.exists(translated_txt_path):
-            #     translated_text = Path(translated_txt_path).read_text(encoding="utf-8", errors="ignore")
-
-            # 生成双语 HTML
-            bilingual_html_path = self._document_translator.convert_to_html(
+            # 翻译文档（生成双语和单语 HTML，只翻译一次）
+            bilingual_html_path, monolingual_html_path = self._document_translator.convert_to_html(
                 file_path=str(file_path),
-                output_dir=str(output_bilingual_html),
+                output_dir=str(output_htmls),
                 target_lang=target_lang,
-                show_bilingual=True,
                 translate_all=translate_all,
                 fast_translate=fast_translate,
+                use_minerU=use_minerU
             )
-            # 读取 HTML 内容
+
+            # 读取双语 HTML 内容
             bilingual_html_content = ""
             if os.path.exists(bilingual_html_path):
                 bilingual_html_content = Path(bilingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
-            # 生成单语 HTML
-            monolingual_html_path = self._document_translator.convert_to_html(
-                file_path=str(file_path),
-                output_dir=str(output_monolingual_html),
-                target_lang=target_lang,
-                show_bilingual=False,
-                translate_all=translate_all,
-                fast_translate=fast_translate,
-            )
+            # 读取单语 HTML 内容
             monolingual_html_content = ""
             if os.path.exists(monolingual_html_path):
                 monolingual_html_content = Path(monolingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
             return bilingual_html_content, monolingual_html_content
         except Exception as e:
-            logger.exception("文档翻译失败: %s, error=%s", file_path, e)
+            logger.exception("文档翻译失败：%s, error=%s", file_path, e)
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 

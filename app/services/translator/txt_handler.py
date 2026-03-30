@@ -259,19 +259,17 @@ class TXTHandler:
             input_path: str,
             output_dir: str,
             target_lang: str = "Chinese",
-            show_bilingual: bool = True,
             translate_all: int = 0,
             fast_translate: bool = True,
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         将 TXT 文件转换为 HTML 并翻译（批量翻译优化版）
         :param input_path: TXT 文件路径
         :param output_dir: 输出目录
         :param target_lang: 目标语言
-        :param show_bilingual: 是否显示中英对照
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 个段落
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
-        :return: 输出的 HTML 文件路径
+        :return: (双语 HTML 路径，单语 HTML 路径)
         """
         os.makedirs(output_dir, exist_ok=True)
 
@@ -285,10 +283,12 @@ class TXTHandler:
         tracker = self.translator.get_progress_tracker()
         valid_paragraphs = [p for p in paragraphs if p.strip()]
         paras_to_process = len(valid_paragraphs) if translate_all == 0 else min(translate_all,
-                                                                                    len(valid_paragraphs))
+                                                                                len(valid_paragraphs))
         tracker.set_file_info(os.path.basename(input_path), paras_to_process, "paragraph")
 
-        html_content = []
+        # 【关键修改】同时生成双语和单语 HTML 内容
+        bilingual_html_content = []
+        monolingual_html_content = []
 
         html_header = """
         <!DOCTYPE html>
@@ -333,7 +333,51 @@ class TXTHandler:
         <body>
             <div class="document-container">
         """
-        html_content.append(html_header)
+        bilingual_html_content.append(html_header)
+
+        # 单语 HTML header（隐藏 original-text 样式）
+        monolingual_header = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Text Translated - Monolingual</title>
+            <style>
+                body { 
+                    margin: 0; 
+                    padding: 20px; 
+                    background: #f5f5f5; 
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                }
+                .document-container {
+                    max-width: 800px;
+                    margin: 0 auto;
+                    background: white;
+                    padding: 40px;
+                    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+                    line-height: 1.6;
+                }
+                .paragraph {
+                    margin-bottom: 20px;
+                    padding: 15px;
+                    border-left: 3px solid #e0e0e0;
+                }
+                .translated-text {
+                    color: #0066cc;
+                    font-weight: bold;
+                    padding-top: 10px;
+                    border-top: 1px dashed #e0e0e0;
+                    white-space: pre-wrap;
+                }
+                .original-text {
+                    display: none;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="document-container">
+        """
+        monolingual_html_content.append(monolingual_header)
 
         # 【关键修改】根据是否启用快速翻译选择翻译策略
         if fast_translate:
@@ -382,29 +426,39 @@ class TXTHandler:
             # 检测是否为中文，如果是则跳过翻译
             if self._is_chinese_text(orig):
                 # 中文段落不翻译，原文和译文相同
-                paragraph_html = (
+                # 双语版本
+                paragraph_html_bilingual = (
                     f'<div class="paragraph">'
                     f'<div class="original-text">{self._escape_html(orig)}</div>'
                     f'</div>'
                 )
-                html_content.append(paragraph_html)
-            elif show_bilingual:
-                # 使用批量翻译的结果
-                paragraph_html = (
+                bilingual_html_content.append(paragraph_html_bilingual)
+
+                # 单语版本（只显示原文，因为原文=译文）
+                paragraph_html_monolingual = (
                     f'<div class="paragraph">'
                     f'<div class="original-text">{self._escape_html(orig)}</div>'
-                    f'<div class="translated-text">{self._escape_html(trans)}</div>'
                     f'</div>'
                 )
-                html_content.append(paragraph_html)
+                monolingual_html_content.append(paragraph_html_monolingual)
             else:
-                # 使用批量翻译的结果（单语模式）
-                paragraph_html = (
+                # 需要翻译的段落 - 同时生成双语和单语版本
+                # 双语版本
+                paragraph_html_bilingual = (
+                    f'<div class="paragraph">'
+                    f'<div class="original-text">{self._escape_html(orig)}</div>'
+                    f'<div class="translated-text">{self._escape_html(trans)}</div>'
+                    f'</div>'
+                )
+                bilingual_html_content.append(paragraph_html_bilingual)
+
+                # 单语版本（只显示译文）
+                paragraph_html_monolingual = (
                     f'<div class="paragraph">'
                     f'<div class="translated-text">{self._escape_html(trans)}</div>'
                     f'</div>'
                 )
-                html_content.append(paragraph_html)
+                monolingual_html_content.append(paragraph_html_monolingual)
 
             processed_count += 1
             tracker.update_paragraph(processed_count)
@@ -416,19 +470,26 @@ class TXTHandler:
         </body>
         </html>
         """
-        html_content.append(html_footer)
+        bilingual_html_content.append(html_footer)
+        monolingual_html_content.append(html_footer)
 
         base_name = os.path.basename(input_path)
         name_without_ext = os.path.splitext(base_name)[0]
-        output_path = os.path.join(output_dir, f"{name_without_ext}_translated.html")
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(html_content))
+        # 保存双语 HTML 文件
+        bilingual_output_path = os.path.join(output_dir, f"{name_without_ext}_bilingual.html")
+        with open(bilingual_output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(bilingual_html_content))
+
+        # 保存单语 HTML 文件
+        monolingual_output_path = os.path.join(output_dir, f"{name_without_ext}_monolingual.html")
+        with open(monolingual_output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(monolingual_html_content))
 
         tracker.mark_completed()
-        logger.info(f"翻译后的 HTML 已保存至：{output_path}")
-        return output_path
-
+        print(f"双语 HTML 已保存至：{bilingual_output_path}")
+        print(f"单语 HTML 已保存至：{monolingual_output_path}")
+        return bilingual_output_path, monolingual_output_path
 
     def _create_progress_bar(self, percentage: float, width: int = 30) -> str:
         """创建进度条字符串"""
