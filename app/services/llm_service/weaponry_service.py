@@ -171,6 +171,7 @@ def _query_input_field(
 
     filled = dict(field)
     if result is None:
+        logger.warning("字段 [%s] 检索无返回内容 (result is None)", field_name)
         filled["analyseData"] = ""
         filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
@@ -180,8 +181,14 @@ def _query_input_field(
 
     # 如果 LLM 回答"未找到"则视为空
     if "未找到" in text_response:
+        logger.info("字段 [%s] LLM返回: 未找到相关信息", field_name)
         text_response = ""
         sources = []
+    else:
+        preview_text = text_response.replace('\n', ' ')
+        if len(preview_text) > 40:
+            preview_text = preview_text[:40] + "..."
+        logger.info("字段 [%s] 提取成功: %s (匹配来源: %d 条)", field_name, preview_text, len(sources))
 
     filled["analyseData"] = text_response
     filled["analyseDataSource"] = _build_analyse_data_sources(sources, text_response=text_response)
@@ -210,6 +217,7 @@ def _query_table_field(
         filled["tableFieldList"] = []
         return filled
 
+    logger.info("  -> 开始处理表格 [%s]，模板中包含 %d 行...", field.get("fieldName", "表格"), len(template_rows))
     assembled_rows: List[List[Dict[str, Any]]] = []
 
     for row_defs in template_rows:
@@ -219,6 +227,7 @@ def _query_table_field(
             
         row: List[Dict[str, Any]] = []
         for cell_def in row_defs:
+            logger.info("    -> 开始提取单元格: %s", cell_def.get("fieldName", "unknown"))
             filled_cell = _query_input_field(
                 client, workspace_slug, thread_slug, cell_def, user_id=user_id,
             )
