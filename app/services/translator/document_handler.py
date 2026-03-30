@@ -90,22 +90,20 @@ class DocumentTranslator:
             file_path: str,
             output_dir: str = "./output",
             target_lang: str = "Chinese",
-            show_bilingual: bool = True,
             translate_all: int = 0,
             fast_translate: bool = True,
             use_minerU: bool = True
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         将文档转换为翻译后的 HTML（中英对照）
         支持：PDF, DOCX, TXT
         :param file_path: 文件路径
         :param output_dir: 输出目录
         :param target_lang: 目标语言
-        :param show_bilingual: 是否显示中英对照
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页/段落
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :param use_minerU: 是否使用 MinerU 先转为 Markdown 再翻译
-        :return: 输出的 HTML 文件路径
+        :return: (双语 HTML 路径，单语 HTML 路径)
         """
         os.makedirs(output_dir, exist_ok=True)
 
@@ -131,44 +129,46 @@ class DocumentTranslator:
                 table_enable=True,
             )
 
-            # 2. 将 Markdown 转换为 HTML 并翻译
+            # 2. 将 Markdown 转换为 HTML 并翻译（返回双语和单语两个路径）
             return self.markdown_handler.convert_to_html(
                 markdown_path=markdown_path,
                 output_dir=output_dir,
                 target_lang=target_lang,
-                show_bilingual=show_bilingual,
                 translate_all=translate_all,
                 fast_translate=fast_translate,
             )
 
-        # 原有处理逻辑
+        # 原有处理逻辑 - 也需要修改返回值
         if ext == '.pdf':
-            return self.pdf_handler.convert_to_html_translated(
+            bilingual_path, monolingual_path = self.pdf_handler.convert_to_html_translated(
                 file_path,
                 output_dir,
                 target_lang,
-                show_bilingual,
                 translate_all,
                 fast_translate
             )
+            # PDF 处理器也需要返回双语和单语两个路径
+            return bilingual_path, monolingual_path
         elif ext in ['.docx', '.doc']:
-            return self.docx_handler.convert_to_html(
+            bilingual_path, monolingual_path = self.docx_handler.convert_to_html(
                 file_path,
                 output_dir,
                 target_lang,
-                show_bilingual,
                 translate_all,
                 fast_translate
             )
+            # DOCX 处理器也需要返回双语和单语两个路径
+            return bilingual_path, monolingual_path
         elif ext == '.txt':
-            return self.txt_handler.convert_to_html(
+            bilingual_path, monolingual_path = self.txt_handler.convert_to_html(
                 file_path,
                 output_dir,
                 target_lang,
-                show_bilingual,
                 translate_all,
                 fast_translate
             )
+            # TXT 处理器也需要返回双语和单语两个路径
+            return bilingual_path, monolingual_path
         else:
             raise ValueError(f"不支持的文件格式：{ext}。支持的格式：PDF, DOCX, TXT")
 

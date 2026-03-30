@@ -127,19 +127,17 @@ class MarkdownHandler:
             markdown_path: str,
             output_dir: str,
             target_lang: str = "Chinese",
-            show_bilingual: bool = True,
             translate_all: int = 0,
             fast_translate: bool = True,
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         将 Markdown 转换为 HTML 并翻译（中英对照）
         :param markdown_path: Markdown 文件路径
         :param output_dir: 输出目录
         :param target_lang: 目标语言
-        :param show_bilingual: 是否显示中英对照
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 个段落
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
-        :return: 输出的 HTML 文件路径
+        :return: (双语 HTML 路径，单语 HTML 路径)
         """
         os.makedirs(output_dir, exist_ok=True)
 
@@ -157,30 +155,59 @@ class MarkdownHandler:
 
         tracker = self.translator.get_progress_tracker()
 
-        # 【关键修改】先转换为 HTML，再翻译 HTML 中的文本内容
-        # 这样可以保留 HTML 表格、图片等格式
+        # 【关键修改】只翻译一次，同时生成双语和单语 HTML
         html_content = self._convert_markdown_to_html_with_translation(
             markdown_content=content,
             markdown_dir=markdown_dir,
             output_dir=output_dir,
             target_lang=target_lang,
-            show_bilingual=show_bilingual,
+            show_bilingual=True,  # 始终生成双语版本
             translate_all=translate_all,
             fast_translate=fast_translate,
             tracker=tracker,
         )
 
-        # 保存 HTML 文件
+        # 保存双语 HTML 文件
         base_name = os.path.basename(markdown_path)
         name_without_ext = os.path.splitext(base_name)[0]
-        output_path = os.path.join(output_dir, f"{name_without_ext}_translated.html")
+        bilingual_output_path = os.path.join(output_dir, f"{name_without_ext}_bilingual.html")
 
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(bilingual_output_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 
+        # 【新增】从双语 HTML 生成单语 HTML（只保留译文）
+        monolingual_html_content = self._convert_bilingual_to_monolingual(html_content)
+        monolingual_output_path = os.path.join(output_dir, f"{name_without_ext}_monolingual.html")
+
+        with open(monolingual_output_path, "w", encoding="utf-8") as f:
+            f.write(monolingual_html_content)
+
         tracker.mark_completed()
-        print(f"翻译后的 HTML 已保存至：{output_path}")
-        return output_path
+        print(f"双语 HTML 已保存至：{bilingual_output_path}")
+        print(f"单语 HTML 已保存至：{monolingual_output_path}")
+        return bilingual_output_path, monolingual_output_path
+
+    def _convert_bilingual_to_monolingual(self, bilingual_html: str) -> str:
+        """
+        将双语 HTML 转换为单语 HTML（只保留译文）
+        :param bilingual_html: 双语 HTML 内容
+        :return: 单语 HTML 内容
+        """
+        import re
+
+        # 复制一份双语 HTML
+        monolingual_html = bilingual_html
+
+        # 移除所有 original-text div，只保留 translated-text
+        # 匹配双语对照的段落结构
+        pattern = r'<div class="paragraph">\s*<div class="original-text">.*?</div>\s*<div class="translated-text">(.*?)</div>\s*</div>'
+
+        # 替换为只有译文的段落
+        monolingual_pattern = r'<div class="paragraph"><div class="translated-text">\1</div></div>'
+        monolingual_html = re.sub(pattern, monolingual_pattern, monolingual_html, flags=re.DOTALL)
+
+        return monolingual_html
+
 
     def _convert_markdown_to_html_with_translation(
             self,
