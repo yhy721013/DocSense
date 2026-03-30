@@ -97,12 +97,14 @@ class LLMTranslationService:
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
-    def translate_text_only(self, text: str, target_lang: str = "Chinese") -> str:
+    def translate_text_only(self, text: str, target_lang: str = "Chinese", fast_translate: bool = False, as_html: bool = True) -> str:
         """
         仅翻译纯文本（适用于短文本或摘要）
 
         :param text: 待翻译文本
         :param target_lang: 目标语言
+        :param fast_translate: 是否使用快速翻译
+        :param as_html: 是否返回带 HTML 标记的格式（用于前端页面展示）
         :return: 翻译后的文本
         """
         self._ensure_translator()
@@ -111,9 +113,11 @@ class LLMTranslationService:
             return ""
 
         try:
-            translated = self._translator.translate_text(text, target_lang)
-            # 返回HTML格式
-            return f'<div class="translated-text">{self._escape_html(translated)}</div>'
+            translated = self._translator.translate_text(text, target_lang, fast_translate=fast_translate)
+            if as_html:
+                # 返回HTML格式
+                return f'<div class="translated-text">{self._escape_html(translated)}</div>'
+            return translated
         except Exception as e:
             logger.error("文本翻译失败: %s", e)
             return ""

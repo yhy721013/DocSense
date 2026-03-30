@@ -435,13 +435,13 @@ def enrich_with_translations(
 
         if enable_full_translation:
             # 全文翻译模式：翻译整个文档
-            print(f"[LLMAnalysis] 开始全文翻译：{file_path}")
+            logger.info(f"[LLMAnalysis] 开始全文翻译：{file_path}")
 
             # 【新增】定义进度回调函数，将翻译进度反馈到任务状态
             def translation_progress_callback(progress: float, message: str):
                 # 计算总体进度（翻译占 0.35~0.95 区间，共 0.6 权重）
                 overall_progress = 0.35 + (progress * 0.6)
-                print(f"[LLMAnalysis] 翻译进度：{message} ({overall_progress:.0%})")
+                logger.info(f"[LLMAnalysis] 翻译进度：{message} ({overall_progress:.0%})")
 
             # 设置进度回调
             translation_service.set_progress_callback(translation_progress_callback)
@@ -460,7 +460,7 @@ def enrich_with_translations(
         else:
             # 快速模式：只翻译摘要
             if summary:
-                print(f"[LLMAnalysis] 翻译摘要：{summary[:50]}...")
+                logger.info(f"[LLMAnalysis] 翻译摘要：{summary[:50]}...")
                 translated_summary = translation_service.translate_text_only(summary)
                 mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
                 mapped_result["fileDataItem"]["documentTranslationTwo"] = summary+"\n"+translated_summary
@@ -468,7 +468,7 @@ def enrich_with_translations(
         return mapped_result
 
     except Exception as e:
-        print(f"[LLMAnalysis] 翻译过程中出错：{e}，返回未翻译的结果")
+        logger.info(f"[LLMAnalysis] 翻译过程中出错：{e}，返回未翻译的结果")
         return mapped_result
 
 

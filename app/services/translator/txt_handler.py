@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import os
 import re
 from typing import Optional
@@ -47,7 +49,7 @@ class TXTHandler:
             base, _ = os.path.splitext(input_path)
             output_path = f"{base}_translated.txt"
 
-        print(f"Processing TXT: {input_path}")
+        logger.info(f"Processing TXT: {input_path}")
 
         with open(input_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -63,7 +65,7 @@ class TXTHandler:
         # 【关键修改】根据是否启用快速翻译选择翻译策略
         if fast_translate:
             # 快速翻译模式：逐段翻译
-            print(f"\n[TXT 处理] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
+            logger.info(f"[TXT 处理] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
             translated_paragraphs = self._translate_paragraphs_one_by_one(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -72,7 +74,7 @@ class TXTHandler:
             )
         else:
             # 大模型翻译模式：批量翻译
-            print(f"\n[TXT 处理] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
+            logger.info(f"[TXT 处理] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
             translated_paragraphs = self._batch_translate_paragraphs(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -93,7 +95,7 @@ class TXTHandler:
             f.write("".join(results))
 
         tracker.mark_completed()
-        print(f"\nTXT saved to: {output_path}")
+        logger.info(f"TXT saved to: {output_path}")
         return output_path
 
     def _translate_paragraphs_one_by_one(
@@ -119,9 +121,9 @@ class TXTHandler:
         for idx, para in enumerate(paragraphs):
             if not para.strip():
                 translated_paragraphs.append("")
-                print(f"  [空段落] 段落 {idx + 1}")
+                logger.info(f"  [空段落] 段落 {idx + 1}")
             elif self._is_chinese_text(para):
-                print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                logger.info(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
                 translated_paragraphs.append(para)
             else:
                 try:
@@ -131,15 +133,15 @@ class TXTHandler:
                         fast_translate=fast_translate
                     )
                     translated_paragraphs.append(translated_para)
-                    print(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
+                    logger.info(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
                     tracker.update_paragraph(idx + 1)
                 except Exception as e:
                     fallback_text = f"[翻译失败：{str(e)}]"
                     translated_paragraphs.append(fallback_text)
-                    print(f"  ✗ 段落 {idx + 1}: {fallback_text}")
+                    logger.info(f"  ✗ 段落 {idx + 1}: {fallback_text}")
                     tracker.update_paragraph(idx + 1)
 
-        print("\n")  # 换行
+        logger.info("")  # 换行
         return translated_paragraphs
 
     def _batch_translate_paragraphs(
@@ -168,7 +170,7 @@ class TXTHandler:
             if not para.strip():
                 processed_paragraphs.append("")
             elif self._is_chinese_text(para):
-                print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                logger.info(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
                 processed_paragraphs.append(para)
             else:
                 processed_paragraphs.append(None)  # 占位，稍后填充
@@ -183,7 +185,7 @@ class TXTHandler:
             target_lang
         )
 
-        print(f"\n[批量翻译] 共 {len(translation_needed)} 段需要翻译，分为 {len(chunks)} 个批次")
+        logger.info(f"[批量翻译] 共 {len(translation_needed)} 段需要翻译，分为 {len(chunks)} 个批次")
 
         # 3. 逐批翻译
         translated_idx = 0
@@ -191,7 +193,7 @@ class TXTHandler:
             # 显示进度条
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            print(f"\r[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}", end="",
+            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}",
                   flush=True)
 
             try:
@@ -217,18 +219,18 @@ class TXTHandler:
                     if para_local_idx < len(translated_paras):
                         translated_para = translated_paras[para_local_idx]
                         processed_paragraphs[original_idx] = translated_para
-                        print(f"  ✓ 段落 {original_idx + 1}: {len(translated_para)} 字")
+                        logger.info(f"  ✓ 段落 {original_idx + 1}: {len(translated_para)} 字")
                     else:
                         # 段落数量确实不匹配时的容错
                         fallback_text = f"[部分翻译失败：期望{len(chunk['paragraph_indices'])}段，实际{len(translated_paras)}段]"
                         processed_paragraphs[original_idx] = fallback_text
-                        print(f"  ✗ 段落 {original_idx + 1}: {fallback_text}")
+                        logger.info(f"  ✗ 段落 {original_idx + 1}: {fallback_text}")
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
             except Exception as e:
-                print(f"\n[错误] 批次 {chunk_idx + 1} 翻译失败：{e}")
+                logger.error(f"[错误] 批次 {chunk_idx + 1} 翻译失败：{e}")
                 # 失败回退：逐段翻译
                 for para_local_idx, global_para_idx in enumerate(chunk["paragraph_indices"]):
                     original_idx, _ = translation_needed[global_para_idx]
@@ -240,16 +242,16 @@ class TXTHandler:
                             fast_translate=False
                         )
                         processed_paragraphs[original_idx] = translated_para
-                        print(f"  ✓ 段落 {original_idx + 1} (回退): {len(translated_para)} 字")
+                        logger.info(f"  ✓ 段落 {original_idx + 1} (回退): {len(translated_para)} 字")
                     except Exception as e2:
                         fallback_text = f"[翻译失败：{str(e2)}]"
                         processed_paragraphs[original_idx] = fallback_text
-                        print(f"  ✗ 段落 {original_idx + 1} (回退): {fallback_text}")
+                        logger.info(f"  ✗ 段落 {original_idx + 1} (回退): {fallback_text}")
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
-        print("\n")  # 换行
+        logger.info("")  # 换行
         return processed_paragraphs
 
     def convert_to_html(
@@ -271,7 +273,7 @@ class TXTHandler:
         """
         os.makedirs(output_dir, exist_ok=True)
 
-        print(f"Processing TXT to HTML: {input_path}")
+        logger.info(f"Processing TXT to HTML: {input_path}")
 
         with open(input_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -380,7 +382,7 @@ class TXTHandler:
         # 【关键修改】根据是否启用快速翻译选择翻译策略
         if fast_translate:
             # 快速翻译模式：逐段翻译
-            print(f"\n[HTML 转换] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
+            logger.info(f"[HTML 转换] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
             translated_paragraphs = self._translate_paragraphs_one_by_one(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -389,7 +391,7 @@ class TXTHandler:
             )
         else:
             # 大模型翻译模式：批量翻译
-            print(f"\n[HTML 转换] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
+            logger.info(f"[HTML 转换] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
             translated_paragraphs = self._batch_translate_paragraphs(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -418,7 +420,7 @@ class TXTHandler:
             # 【新增】显示进度条
             current_progress = (processed_count + 1) / total_paras * 100 if total_paras > 0 else 0
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            print(f"\r[{progress_bar}] {current_progress:.1f}% | 段落 {processed_count + 1}/{total_paras}", end="",
+            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 段落 {processed_count + 1}/{total_paras}",
                   flush=True)
 
             # 检测是否为中文，如果是则跳过翻译
@@ -462,8 +464,7 @@ class TXTHandler:
             tracker.update_paragraph(processed_count)
 
         # 【新增】完成提示
-        print("\n")  # 换行，避免进度条覆盖后续输出
-
+        logger.info("")  # 换行，避免进度条覆盖后续输出
         html_footer = """
             </div>
         </body>

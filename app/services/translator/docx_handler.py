@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import os
 from docx import Document
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
@@ -189,7 +191,7 @@ class DocxHandler:
         :return: (双语 HTML 路径，单语 HTML 路径)
         """
         os.makedirs(output_dir, exist_ok=True)
-        print(f"Processing Word to HTML (full flow): {input_path}")
+        logger.info(f"Processing Word to HTML (full flow): {input_path}")
         doc = Document(input_path)
 
         # 【新增】文档复杂度检测
@@ -242,7 +244,7 @@ class DocxHandler:
 
             # 执行批量翻译
             if paragraphs_to_translate:
-                print(f"\n[DOCX 转换] 使用批量翻译模式，共 {len(paragraphs_to_translate)} 个段落...")
+                logger.info(f"[DOCX 转换] 使用批量翻译模式，共 {len(paragraphs_to_translate)} 个段落...")
                 translated_results = self._batch_translate_paragraphs(
                     paragraphs_to_translate,
                     target_lang,
@@ -251,10 +253,10 @@ class DocxHandler:
         else:
             # 【逐段翻译模式】不提前翻译，在处理时逐段翻译
             if fast_translate:
-                print(f"\n[DOCX 转换] 使用快速翻译模式（ArgoTranslate）...")
+                logger.info(f"[DOCX 转换] 使用快速翻译模式（ArgoTranslate）...")
             else:
-                print(f"\n[DOCX 转换] 检测到复杂表格，使用逐段翻译模式以保证质量...")
-            print(f"[总体进度] 文档共 {elements_to_process} 个元素（段落 + 表格 + 图片），开始处理...\n")
+                logger.info(f"[DOCX 转换] 检测到复杂表格，使用逐段翻译模式以保证质量...")
+            logger.info(f"[总体进度] 文档共 {elements_to_process} 个元素（段落 + 表格 + 图片），开始处理...\n")
 
         # 重置段落索引，用于从批量翻译结果中获取
         para_result_idx = 0
@@ -290,14 +292,14 @@ class DocxHandler:
                     text = para.text.strip()
                     if not text:
                         html = '<br/>'
-                        print(
+                        logger.info(
                             f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [空段落]",
                             end="", flush=True)
                     elif self._is_chinese_text(text):
                         # 中文段落不翻译
                         para_style = self._get_paragraph_style_type(para)
                         html = self._generate_paragraph_html(text, text, para_style, preserve_original_styles)
-                        print(
+                        logger.info(
                             f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [中文跳过]",
                             end="", flush=True)
                     else:
@@ -311,7 +313,7 @@ class DocxHandler:
                             html = self._generate_paragraph_html(text, translated, para_style,
                                                                  preserve_original_styles)
 
-                            print(
+                            logger.info(
                                 f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✓ {len(translated)}字",
                                 end="", flush=True)
                         except Exception as e:
@@ -319,7 +321,7 @@ class DocxHandler:
                             para_style = self._get_paragraph_style_type(para)
                             html = self._generate_paragraph_html("", fallback_text, para_style,
                                                                  preserve_original_styles)
-                            print(
+                            logger.info(
                                 f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✗ {fallback_text}",
                                 end="", flush=True)
 
@@ -332,9 +334,8 @@ class DocxHandler:
                 table = elem_data
                 html = self._process_single_table_to_html(table, target_lang, show_bilingual=True)
                 html_content.append(html)
-                print(
-                    f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [表格]",
-                    end="", flush=True)
+                logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [表格]",
+                      end="", flush=True)
                 processed_count += 1
                 tracker.update_paragraph(processed_count)
 
@@ -357,15 +358,14 @@ class DocxHandler:
                         </div>
                         '''
                 html_content.append(img_html)
-                print(
-                    f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [图片]",
-                    end="", flush=True)
+                logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [图片]",
+                      end="", flush=True)
                 img_idx += 1
                 processed_count += 1
                 tracker.update_paragraph(processed_count)
 
         # 换行，避免覆盖最后的进度信息
-        print(f"\n[完成] 文档处理完毕，共处理 {processed_count} 个元素")
+        logger.info(f"[完成] 文档处理完毕，共处理 {processed_count} 个元素")
 
         # 闭合 HTML 标签
         html_content.append(self._get_html_footer())
@@ -435,7 +435,7 @@ class DocxHandler:
             base, ext = os.path.splitext(input_path)
             output_path = f"{base}_translated.txt"
 
-        print(f"Processing DOCX: {input_path}")
+        logger.info(f"Processing DOCX: {input_path}")
         doc = Document(input_path)
 
         # 【新增】文档复杂度检测
@@ -457,7 +457,7 @@ class DocxHandler:
         # 【关键修改】根据文档复杂度选择翻译策略
         if use_batch_translation and not fast_translate:
             # 批量翻译模式
-            print(f"\n[DOCX 处理] 使用批量翻译模式，共 {len(paragraphs[:paras_to_process])} 个段落...")
+            logger.info(f"[DOCX 处理] 使用批量翻译模式，共 {len(paragraphs[:paras_to_process])} 个段落...")
             translated_results = self._batch_translate_paragraphs(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -466,26 +466,26 @@ class DocxHandler:
         else:
             # 逐段翻译模式
             if fast_translate:
-                print(f"\n[DOCX 处理] 使用快速翻译模式（ArgoTranslate）...")
+                logger.info(f"[DOCX 处理] 使用快速翻译模式（ArgoTranslate）...")
             else:
-                print(f"\n[DOCX 处理] 检测到复杂表格，使用逐段翻译模式...")
+                logger.info(f"[DOCX 处理] 检测到复杂表格，使用逐段翻译模式...")
             translated_results = []
             for idx, (text, style) in enumerate(paragraphs[:paras_to_process]):
                 if not text.strip():
                     translated_results.append((text, text, style))
                 elif self._is_chinese_text(text):
-                    print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                    logger.info(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
                     translated_results.append((text, text, style))
                 else:
                     try:
                         translated_para = self.translator.translate_text(text, target_lang,fast_translate=fast_translate)
                         translated_results.append((text, translated_para, style))
-                        print(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
+                        logger.info(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
                         tracker.update_paragraph(idx + 1)
                     except Exception as e:
                         fallback_text = f"[翻译失败：{str(e)}]"
                         translated_results.append((text, fallback_text, style))
-                        print(f"  ✗ 段落 {idx + 1}: {fallback_text}")
+                        logger.info(f"  ✗ 段落 {idx + 1}: {fallback_text}")
                         tracker.update_paragraph(idx + 1)
 
         # 未翻译的段落保持原样
@@ -501,7 +501,7 @@ class DocxHandler:
             f.write("".join(results))
 
         tracker.mark_completed()
-        print(f"TXT saved to: {output_path}")
+        logger.info(f"TXT saved to: {output_path}")
         return output_path
 
 
@@ -585,7 +585,7 @@ class DocxHandler:
             if not text.strip():
                 processed_paragraphs.append((text, text, style))
             elif self._is_chinese_text(text):
-                print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                logger.info(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
                 processed_paragraphs.append((text, text, style))
             else:
                 processed_paragraphs.append(None)  # 占位，稍后填充
@@ -600,7 +600,7 @@ class DocxHandler:
             target_lang
         )
 
-        print(f"\n[批量翻译] 共 {len(translation_needed)} 段需要翻译，分为 {len(chunks)} 个批次")
+        logger.info(f"[批量翻译] 共 {len(translation_needed)} 段需要翻译，分为 {len(chunks)} 个批次")
 
         # 3. 逐批翻译
         translated_idx = 0
@@ -608,7 +608,7 @@ class DocxHandler:
             # 显示进度条
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            print(f"\r[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}", end="",
+            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}",
                   flush=True)
 
             try:
@@ -631,17 +631,17 @@ class DocxHandler:
                     if para_local_idx < len(translated_paras):
                         translated_para = translated_paras[para_local_idx]
                         processed_paragraphs[original_idx] = (original_text, translated_para, style)
-                        print(f"  ✓ 段落 {original_idx + 1}: {len(translated_para)} 字")
+                        logger.info(f"  ✓ 段落 {original_idx + 1}: {len(translated_para)} 字")
                     else:
                         # 段落数量不匹配时的容错
                         fallback_text = f"[部分翻译失败：期望{len(chunk['paragraph_indices'])}段，实际{len(translated_paras)}段]"
                         processed_paragraphs[original_idx] = (original_text, fallback_text, style)
-                        print(f"  ✗ 段落 {original_idx + 1}: {fallback_text}")
+                        logger.info(f"  ✗ 段落 {original_idx + 1}: {fallback_text}")
 
                     translated_idx += 1
 
             except Exception as e:
-                print(f"\n[错误] 批次 {chunk_idx + 1} 翻译失败：{e}")
+                logger.error(f"[错误] 批次 {chunk_idx + 1} 翻译失败：{e}")
                 # 失败回退：逐段翻译
                 for para_local_idx, global_para_idx in enumerate(chunk["paragraph_indices"]):
                     original_idx, original_text, style = translation_needed[global_para_idx]
@@ -649,15 +649,15 @@ class DocxHandler:
                     try:
                         translated_para = self.translator.translate_text(original_text, target_lang)
                         processed_paragraphs[original_idx] = (original_text, translated_para, style)
-                        print(f"  ✓ 段落 {original_idx + 1} (回退): {len(translated_para)} 字")
+                        logger.info(f"  ✓ 段落 {original_idx + 1} (回退): {len(translated_para)} 字")
                     except Exception as e2:
                         fallback_text = f"[翻译失败：{str(e2)}]"
                         processed_paragraphs[original_idx] = (original_text, fallback_text, style)
-                        print(f"  ✗ 段落 {original_idx + 1} (回退): {fallback_text}")
+                        logger.info(f"  ✗ 段落 {original_idx + 1} (回退): {fallback_text}")
 
                     translated_idx += 1
 
-        print("\n")  # 换行
+        logger.info("")  # 换行
         return processed_paragraphs
 
     def _is_chinese_text(self, text: str) -> bool:
@@ -780,7 +780,7 @@ class DocxHandler:
             # 检查是否有合并单元格
             merge_info = self._parse_table_merge_info(table)
             if merge_info['colspan'] or merge_info['rowspan']:
-                print(f"[复杂表格检测] 发现合并单元格表格")
+                logger.info(f"[复杂表格检测] 发现合并单元格表格")
                 return True
 
             # 检查是否有嵌套表格
@@ -789,7 +789,7 @@ class DocxHandler:
                     cell_elem = cell._tc
                     nested_tables = cell_elem.xpath('.//w:tbl')
                     if nested_tables:
-                        print(f"[复杂表格检测] 发现嵌套表格")
+                        logger.info(f"[复杂表格检测] 发现嵌套表格")
                         return True
 
         return False
@@ -817,13 +817,13 @@ class DocxHandler:
         # 决策：如果有复杂表格，建议使用逐段翻译
         if complexity['has_complex_tables']:
             complexity['recommend_batch'] = False
-            print(
+            logger.info(
                 f"[文档复杂度检测] 文档包含 {complexity['total_paragraphs']} 个段落，{complexity['total_tables']} 个表格（含复杂表格）")
-            print(f"[文档复杂度检测] 建议使用逐段翻译模式以保证表格处理质量")
+            logger.info(f"[文档复杂度检测] 建议使用逐段翻译模式以保证表格处理质量")
         else:
-            print(
+            logger.info(
                 f"[文档复杂度检测] 文档包含 {complexity['total_paragraphs']} 个段落，{complexity['total_tables']} 个简单表格")
-            print(f"[文档复杂度检测] 建议使用批量翻译模式以提升速度")
+            logger.info(f"[文档复杂度检测] 建议使用批量翻译模式以提升速度")
 
         return complexity
 

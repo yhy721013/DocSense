@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 import os
 import re
 import pdfplumber
@@ -41,14 +43,14 @@ class PDFHandler:
         :return: 是否转换成功
         """
         try:
-            print(f"正在将 PDF 转换为 DOCX: {os.path.basename(pdf_path)}")
+            logger.info(f"正在将 PDF 转换为 DOCX: {os.path.basename(pdf_path)}")
             cv = Converter(pdf_path)
             cv.convert(docx_path)
             cv.close()
-            print(f"PDF 转 DOCX 完成：{os.path.basename(docx_path)}")
+            logger.info(f"PDF 转 DOCX 完成：{os.path.basename(docx_path)}")
             return True
         except Exception as e:
-            print(f"PDF 转 DOCX 失败：{e}")
+            logger.info(f"PDF 转 DOCX 失败：{e}")
             return False
 
     def _extract_text_with_position(self, path: str) -> List[Dict]:
@@ -131,7 +133,7 @@ class PDFHandler:
             base, _ = os.path.splitext(input_path)
             output_path = f"{base}_translated.pdf"
 
-        print(f"Processing PDF: {input_path}")
+        logger.info(f"Processing PDF: {input_path}")
         text_blocks = self._extract_text_with_position(input_path)
 
         doc = SimpleDocTemplate(output_path, pagesize=A4)
@@ -170,7 +172,7 @@ class PDFHandler:
 
         doc.build(story)
         tracker.mark_completed()
-        print(f"PDF saved to: {output_path}")
+        logger.info(f"PDF saved to: {output_path}")
         return output_path
 
     def convert_to_html_translated(
@@ -203,18 +205,18 @@ class PDFHandler:
             name_without_ext = os.path.splitext(base_name)[0]
             temp_docx_path = os.path.join(temp_folder, f"{name_without_ext}.docx")
 
-            print(f"\n{'=' * 50}")
-            print(f"步骤 1: 将 PDF 转换为 DOCX")
-            print(f"{'=' * 50}")
+            logger.info(f"{'=' * 50}")
+            logger.info(f"步骤 1: 将 PDF 转换为 DOCX")
+            logger.info(f"{'=' * 50}")
             success = self._convert_pdf_to_docx(input_path, temp_docx_path)
 
             if not success:
                 raise RuntimeError("PDF 转 DOCX 失败")
 
             # 2. 调用 DocxHandler 处理 DOCX 生成 HTML
-            print(f"\n{'=' * 50}")
-            print(f"步骤 2: 将 DOCX 转换为 HTML 并翻译")
-            print(f"{'=' * 50}")
+            logger.info(f"{'=' * 50}")
+            logger.info(f"步骤 2: 将 DOCX 转换为 HTML 并翻译")
+            logger.info(f"{'=' * 50}")
 
             from .docx_handler import DocxHandler
             docx_handler = DocxHandler(self.translator)
@@ -236,17 +238,17 @@ class PDFHandler:
             return bilingual_output_path, monolingual_output_path
 
         except Exception as e:
-            print(f"\n处理 PDF 时出错：{e}")
+            logger.info(f"处理 PDF 时出错：{e}")
             raise
         finally:
             # 3. 清理临时文件夹
             if os.path.exists(temp_folder):
-                print(f"\n清理临时文件夹：{temp_folder}")
+                logger.info(f"清理临时文件夹：{temp_folder}")
                 try:
                     shutil.rmtree(temp_folder)
-                    print("临时文件夹已删除")
+                    logger.info("临时文件夹已删除")
                 except Exception as e:
-                    print(f"清理临时文件夹失败：{e}")
+                    logger.info(f"清理临时文件夹失败：{e}")
 
 
 def is_point_in_rect(px, py, rect):

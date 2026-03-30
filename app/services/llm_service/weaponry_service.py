@@ -16,7 +16,6 @@ from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.translation_service import get_translation_service
 from app.services.core.prompts import (
     build_input_field_prompt,
-    build_table_column_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,7 +33,7 @@ def _translate_if_needed(text: str) -> str:
         return ""
     try:
         service = get_translation_service()
-        return service.translate_text_only(text, target_lang="Chinese")
+        return service.translate_text_only(text, target_lang="Chinese", fast_translate=True, as_html=False)
     except Exception as e:
         logger.warning("翻译失败: %s", e)
         return ""
@@ -133,16 +132,14 @@ def _build_weaponry_callback_payload(
 # ---------------------------------------------------------------------------
 
 def _count_query_fields(field_list: List[Dict[str, Any]]) -> int:
-    """统计所有需要 RAG 查询的原子字段数量（INPUT 算 1，TABLE 按列数算）。"""
+    """统计所有需要 RAG 查询的原子字段数量（INPUT 算 1，TABLE 按单元格算）。"""
     count = 0
     for field in field_list:
         if field.get("fieldType") == "TABLE":
-            # TABLE 模板第一行即列定义
             template_rows = field.get("tableFieldList") or []
-            if template_rows and isinstance(template_rows[0], list):
-                count += len(template_rows[0])
-            else:
-                count += 1
+            for row in template_rows:
+                if isinstance(row, list):
+                    count += len(row)
         else:
             count += 1
     return count
@@ -174,6 +171,7 @@ def _query_input_field(
 
     filled = dict(field)
     if result is None:
+        logger.warning("字段 [%s] 检索无返回内容 (result is None)", field_name)
         filled["analyseData"] = ""
         filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
@@ -183,8 +181,14 @@ def _query_input_field(
 
     # 如果 LLM 回答"未找到"则视为空
     if "未找到" in text_response:
+        logger.info("字段 [%s] LLM返回: 未找到相关信息", field_name)
         text_response = ""
         sources = []
+    else:
+        preview_text = text_response.replace('\n', ' ')
+        if len(preview_text) > 40:
+            preview_text = preview_text[:40] + "..."
+        logger.info("字段 [%s] 提取成功: %s (匹配来源: %d 条)", field_name, preview_text, len(sources))
 
     filled["analyseData"] = text_response
     filled["analyseDataSource"] = _build_analyse_data_sources(sources, text_response=text_response)
@@ -201,98 +205,40 @@ def _query_table_field(
     thread_slug: str,
     field: Dict[str, Any],
     user_id: int = 1,
-    on_column_done: Optional[Any] = None,
+    on_cell_done: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """查询 TABLE 类型字段：逐列查询 + 按来源分组组装多行。
+    """查询 TABLE 类型字段：当做多个普通 INPUT 字段逐个查询。
 
-    ``on_column_done`` 可选回调，每完成一列调用一次，用于更新进度。
+    ``on_cell_done`` 可选回调，每完成一个单元格调用一次，用于更新进度。
     """
     template_rows = field.get("tableFieldList") or []
-    if not template_rows or not isinstance(template_rows[0], list):
+    if not template_rows:
         filled = dict(field)
         filled["tableFieldList"] = []
         return filled
 
-    # 列定义取模板第一行
-    column_defs = template_rows[0]
-    table_name = field.get("fieldName", "表格")
-
-    # 逐列查询结果，每列存储 [{value, sources}, ...]
-    column_results: List[List[Dict[str, Any]]] = []
-
-    for col_def in column_defs:
-        col_name = col_def.get("fieldName", "")
-        col_desc = col_def.get("fieldDescription", "")
-
-        prompt = build_table_column_prompt(col_name, col_desc, table_context=table_name)
-        result = client.send_prompt_to_thread(
-            workspace_slug,
-            thread_slug,
-            prompt,
-            user_id=user_id,
-            mode="query",
-        )
-
-        if result is None or "未找到" in result.get("textResponse", ""):
-            column_results.append([])
-        else:
-            text = result.get("textResponse", "")
-            sources = result.get("sources", [])
-            # 将文本按行拆分，每行视为一条记录
-            values = _parse_multi_value_response(text)
-            entries = []
-            for val in values:
-                entries.append({
-                    "value": val,
-                    "sources": sources,
-                })
-            column_results.append(entries)
-
-        if on_column_done:
-            on_column_done()
-
-    # 按行数对齐（取最大行数），组装 tableFieldList
-    max_rows = max((len(col) for col in column_results), default=0)
+    logger.info("  -> 开始处理表格 [%s]，模板中包含 %d 行...", field.get("fieldName", "表格"), len(template_rows))
     assembled_rows: List[List[Dict[str, Any]]] = []
 
-    for row_idx in range(max_rows):
+    for row_defs in template_rows:
+        if not isinstance(row_defs, list):
+            assembled_rows.append(row_defs)
+            continue
+            
         row: List[Dict[str, Any]] = []
-        for col_idx, col_def in enumerate(column_defs):
-            cell = dict(col_def)
-            col_entries = column_results[col_idx] if col_idx < len(column_results) else []
-            if row_idx < len(col_entries):
-                entry = col_entries[row_idx]
-                cell["analyseData"] = entry["value"]
-                cell["analyseDataSource"] = _build_analyse_data_sources(entry["sources"], text_response=entry["value"])
-            else:
-                cell["analyseData"] = ""
-                cell["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
-            row.append(cell)
+        for cell_def in row_defs:
+            logger.info("    -> 开始提取单元格: %s", cell_def.get("fieldName", "unknown"))
+            filled_cell = _query_input_field(
+                client, workspace_slug, thread_slug, cell_def, user_id=user_id,
+            )
+            row.append(filled_cell)
+            if on_cell_done:
+                on_cell_done()
         assembled_rows.append(row)
 
     filled = dict(field)
     filled["tableFieldList"] = assembled_rows
     return filled
-
-
-def _parse_multi_value_response(text: str) -> List[str]:
-    """将 LLM 返回的多值文本拆分为值列表。
-
-    支持格式：
-        值1: XXX（来源：...）
-        1. XXX
-        - XXX
-    """
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    values = []
-    for line in lines:
-        # 去除序号前缀 "1." "1、" "值1:"
-        cleaned = re.sub(r"^(\d+[.、:：]|值\d+[：:])\s*", "", line)
-        # 去除来源标注 （来源：...）
-        cleaned = re.sub(r"[（(]来源[：:].*?[)）]", "", cleaned).strip()
-        if cleaned:
-            values.append(cleaned)
-    return values if values else [text.strip()] if text.strip() else []
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +331,7 @@ def run_weaponry_task(
                 filled = _query_table_field(
                     client, workspace_slug, thread_slug, field,
                     user_id=1,
-                    on_column_done=_update_field_progress,
+                    on_cell_done=_update_field_progress,
                 )
             else:
                 filled = _query_input_field(
