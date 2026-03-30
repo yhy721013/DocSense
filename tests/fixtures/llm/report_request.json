@@ -3,7 +3,6 @@
   "params": [
     {
       "filePathList": [
-        "http://127.0.0.1:8000/sample.txt",
         "http://127.0.0.1:8000/sample.txt"
       ],
       "reportId": 132,

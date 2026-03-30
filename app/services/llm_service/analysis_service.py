@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -65,6 +66,8 @@ DEFAULT_ARCHITECTURE_OPTIONS = [
     {"id": 10502, "level": 2, "name": "组织机构", "path": "105/10502", "pathName": "作战指挥/组织机构", "sort": 2},
 ]
 
+ARCHITECTURE_FALLBACK_ID = 1
+
 
 def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
@@ -91,6 +94,14 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
+def _normalize_match_text(value: Any) -> str:
+    text = _as_text(value)
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    return re.sub(r"\s+", "", normalized)
+
+
 def _round_score(value: Any) -> float:
     try:
         score = round(float(value), 1)
@@ -107,15 +118,39 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
     target = _scalar_text(value)
     if not target:
         return ""
+    normalized_target = _normalize_match_text(target)
     for item in options:
         if not isinstance(item, dict):
             continue
-        if target in {_as_text(item.get("value")), _as_text(item.get("key"))}:
-            return _as_text(item.get("value"))
+        value_text = _as_text(item.get("value"))
+        key_text = _as_text(item.get("key"))
+        if target in {value_text, key_text}:
+            return value_text
+        if normalized_target and normalized_target in {
+            _normalize_match_text(value_text),
+            _normalize_match_text(key_text),
+        }:
+            return value_text
     return ""
 
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
+    def _fallback(reason: str, detail: Any = None) -> int:
+        if detail is None:
+            logger.info(
+                "architectureId匹配失败: reason=%s fallback=%s",
+                reason,
+                ARCHITECTURE_FALLBACK_ID,
+            )
+        else:
+            logger.info(
+                "architectureId匹配失败: reason=%s detail=%s fallback=%s",
+                reason,
+                detail,
+                ARCHITECTURE_FALLBACK_ID,
+            )
+        return ARCHITECTURE_FALLBACK_ID
+
     candidate_items = [item for item in architecture_list if isinstance(item, dict)]
     candidate_ids = set()
     for item in candidate_items:
@@ -128,9 +163,14 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
     if raw_id is not None:
         try:
             matched_id = int(raw_id)
-            return matched_id if matched_id in candidate_ids else 0
+            if matched_id in candidate_ids:
+                return matched_id
+            return _fallback(
+                "raw_id_out_of_range",
+                {"raw_id": matched_id, "candidate_count": len(candidate_ids)},
+            )
         except (TypeError, ValueError):
-            return 0
+            return _fallback("raw_id_invalid", raw_id)
 
     architecture_obj = _first_non_empty_value(parsed_result, "领域体系")
     if isinstance(architecture_obj, dict):
@@ -138,9 +178,14 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
         if raw_arch_id is not None:
             try:
                 matched_id = int(raw_arch_id)
-                return matched_id if matched_id in candidate_ids else 0
+                if matched_id in candidate_ids:
+                    return matched_id
+                return _fallback(
+                    "nested_id_out_of_range",
+                    {"raw_id": matched_id, "candidate_count": len(candidate_ids)},
+                )
             except (TypeError, ValueError):
-                return 0
+                return _fallback("nested_id_invalid", raw_arch_id)
 
     name_candidates = []
     for value in (
@@ -160,7 +205,7 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
                 name_candidates.append(candidate)
 
     if not name_candidates:
-        return 0
+        return _fallback("no_candidate_name")
 
     for target_name in name_candidates:
         normalized_targets = {target_name}
@@ -175,9 +220,12 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
                 try:
                     return int(item.get("id") or 0)
                 except (TypeError, ValueError):
-                    return 0
+                    return _fallback("matched_item_id_invalid", item.get("id"))
 
-    return 0
+    return _fallback(
+        "name_not_matched",
+        {"input_candidates": name_candidates[:3], "candidate_count": len(candidate_items)},
+    )
 
 
 def _first_non_empty_value(container: Dict[str, Any], *keys: str) -> Any:
@@ -263,13 +311,15 @@ def _infer_language(original_text: str) -> str:
 
 
 def _match_option_value_from_text(options: Iterable[Dict[str, Any]], original_text: str) -> str:
+    normalized_original_text = _normalize_match_text(original_text)
+    if not normalized_original_text:
+        return ""
     for item in options:
         if not isinstance(item, dict):
             continue
-        for key in ("value", "key"):
-            candidate = _as_text(item.get(key))
-            if candidate and candidate in original_text:
-                return _as_text(item.get("value"))
+        candidate = _as_text(item.get("value"))
+        if candidate and _normalize_match_text(candidate) in normalized_original_text:
+            return _as_text(item.get("value"))
     return ""
 
 
@@ -303,22 +353,24 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     if not isinstance(file_item, dict):
         file_item = {}
 
-    resolved_country = _match_option_value(
-        _first_non_empty_value(parsed_result, "country", "国家"),
-        ranges["country"],
-    )
-    resolved_channel = _match_option_value(
-        _first_non_empty_value(parsed_result, "channel", "渠道"),
-        ranges["channel"],
-    )
-    resolved_maturity = _match_option_value(
-        _first_non_empty_value(parsed_result, "maturity", "成熟度"),
-        ranges["maturity"],
-    )
-    resolved_format = _match_option_value(
-        _first_non_empty_value(parsed_result, "format", "格式"),
-        ranges["format"],
-    )
+    raw_country = _first_non_empty_value(parsed_result, "country", "国家")
+    raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
+    raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
+    raw_format = _first_non_empty_value(parsed_result, "format", "格式")
+
+    resolved_country = _match_option_value(raw_country, ranges["country"])
+    resolved_channel = _match_option_value(raw_channel, ranges["channel"])
+    resolved_maturity = _match_option_value(raw_maturity, ranges["maturity"])
+    resolved_format = _match_option_value(raw_format, ranges["format"])
+
+    for field_name, raw_value, resolved_value in (
+        ("country", raw_country, resolved_country),
+        ("channel", raw_channel, resolved_channel),
+        ("maturity", raw_maturity, resolved_maturity),
+        ("format", raw_format, resolved_format),
+    ):
+        if raw_value not in (None, "", [], {}) and not resolved_value:
+            logger.info("字段候选匹配失败: field=%s raw=%s", field_name, _scalar_text(raw_value))
 
     resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
     resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
