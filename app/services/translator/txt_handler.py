@@ -193,8 +193,7 @@ class TXTHandler:
             # 显示进度条
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}",
-                  flush=True)
+            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}")
 
             try:
                 # 调用翻译（一次性翻译整个 chunk）
@@ -420,8 +419,7 @@ class TXTHandler:
             # 【新增】显示进度条
             current_progress = (processed_count + 1) / total_paras * 100 if total_paras > 0 else 0
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 段落 {processed_count + 1}/{total_paras}",
-                  flush=True)
+            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 段落 {processed_count + 1}/{total_paras}")
 
             # 检测是否为中文，如果是则跳过翻译
             if self._is_chinese_text(orig):

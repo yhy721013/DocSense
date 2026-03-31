@@ -293,15 +293,13 @@ class DocxHandler:
                     if not text:
                         html = '<br/>'
                         logger.info(
-                            f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [空段落]",
-                            end="", flush=True)
+                            f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [空段落]")
                     elif self._is_chinese_text(text):
                         # 中文段落不翻译
                         para_style = self._get_paragraph_style_type(para)
                         html = self._generate_paragraph_html(text, text, para_style, preserve_original_styles)
                         logger.info(
-                            f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [中文跳过]",
-                            end="", flush=True)
+                            f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [中文跳过]")
                     else:
                         # 需要翻译的段落
                         try:
@@ -314,16 +312,14 @@ class DocxHandler:
                                                                  preserve_original_styles)
 
                             logger.info(
-                                f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✓ {len(translated)}字",
-                                end="", flush=True)
+                                f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✓ {len(translated)}字")
                         except Exception as e:
                             fallback_text = f"[翻译失败：{str(e)}]"
                             para_style = self._get_paragraph_style_type(para)
                             html = self._generate_paragraph_html("", fallback_text, para_style,
                                                                  preserve_original_styles)
                             logger.info(
-                                f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✗ {fallback_text}",
-                                end="", flush=True)
+                                f"\r[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} ✗ {fallback_text}")
 
                 if html:
                     html_content.append(html)
@@ -334,8 +330,7 @@ class DocxHandler:
                 table = elem_data
                 html = self._process_single_table_to_html(table, target_lang, show_bilingual=True)
                 html_content.append(html)
-                logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [表格]",
-                      end="", flush=True)
+                logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [表格]")
                 processed_count += 1
                 tracker.update_paragraph(processed_count)
 
@@ -358,8 +353,7 @@ class DocxHandler:
                         </div>
                         '''
                 html_content.append(img_html)
-                logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [图片]",
-                      end="", flush=True)
+                logger.info(f"[{progress_bar}] {current_progress:.1f}% | 元素 {elem_idx + 1}/{len(all_elements)} [图片]")
                 img_idx += 1
                 processed_count += 1
                 tracker.update_paragraph(processed_count)
@@ -608,8 +602,7 @@ class DocxHandler:
             # 显示进度条
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}",
-                  flush=True)
+            logger.info(f"[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}")
 
             try:
                 # 调用翻译（一次性翻译整个 chunk）
