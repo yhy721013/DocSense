@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>回调结果调试页</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+    }
+
+    .banner {
+      min-height: 24px;
+      margin-bottom: 16px;
+      color: #475569;
+    }
+
+    .button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 18px;
+      background: #0f172a;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <p>DocSense Local Debug</p>
+        <h1>回调结果调试页</h1>
+      </div>
+      <button id="refresh-button" class="button" type="button">刷新</button>
+    </header>
+
+    <section id="page-message" class="banner">等待加载...</section>
+    <section id="callback-summary" class="panel"></section>
+    <section id="structured-content" class="panel"></section>
+    <section id="preview-sections"></section>
+    <section class="panel">
+      <h2>原始 JSON</h2>
+      <pre id="raw-json">等待加载...</pre>
+    </section>
+  </main>
+
+  <script>
+    const API_URL = "/debug/api/callback";
+    const refreshButton = document.getElementById("refresh-button");
+
+    refreshButton.addEventListener("click", loadPayload);
+    window.addEventListener("DOMContentLoaded", loadPayload);
+
+    async function loadPayload() {
+      const response = await fetch(API_URL, { cache: "no-store" });
+      const result = await response.json();
+      document.getElementById("page-message").textContent = result.message;
+      document.getElementById("raw-json").textContent = JSON.stringify(result.payload, null, 2) || "暂无内容";
+    }
+  </script>
+</body>
+</html>

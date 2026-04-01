@@ -136,3 +136,13 @@ class CallbackDebugRouteTests(unittest.TestCase):
                 "payload": None,
             },
         )
+
+    def test_callback_page_renders_debug_shell(self):
+        response = self.client.get("/debug/callback")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("回调结果调试页", html)
+        self.assertIn('id="refresh-button"', html)
+        self.assertIn('id="callback-summary"', html)
+        self.assertIn("/debug/api/callback", html)
