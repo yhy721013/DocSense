@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from flask import Flask
 
+from app.blueprints.debug import debug_bp
 from app.blueprints.llm import llm_bp, sock
 from app.services.core.logging import setup_logging
 from app.services.core.settings import MAX_CONTENT_LENGTH
@@ -22,7 +23,7 @@ def create_app() -> Flask:
     )
     sock.init_app(app)
 
-    # 仅保留甲方协议接口
     app.register_blueprint(llm_bp)
+    app.register_blueprint(debug_bp)
 
     return app
