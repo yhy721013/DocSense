@@ -146,3 +146,14 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertIn('id="refresh-button"', html)
         self.assertIn('id="callback-summary"', html)
         self.assertIn("/debug/api/callback", html)
+
+    def test_callback_page_contains_renderer_hooks_for_file_and_report(self):
+        response = self.client.get("/debug/callback")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("function renderFilePayload(payload)", html)
+        self.assertIn("function renderReportPayload(payload)", html)
+        self.assertIn("function renderHtmlPreview(title, content)", html)
+        self.assertIn('id="preview-sections"', html)
+        self.assertIn('id="structured-content"', html)
