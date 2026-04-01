@@ -120,3 +120,19 @@ class CallbackDebugRouteTests(unittest.TestCase):
                 "payload": None,
             },
         )
+
+    def test_callback_api_returns_read_failure_state_when_read_text_raises(self):
+        self.callback_path.write_text("{}", encoding="utf-8")
+
+        with patch("pathlib.Path.read_text", side_effect=OSError("boom")):
+            response = self.client.get("/debug/api/callback")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json(),
+            {
+                "ok": False,
+                "message": "回调文件读取失败",
+                "payload": None,
+            },
+        )

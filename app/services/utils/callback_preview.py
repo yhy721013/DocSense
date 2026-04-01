@@ -20,7 +20,16 @@ def load_callback_preview(path: Path | None = None) -> dict[str, Any]:
         }
 
     try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
+        raw_text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {
+            "ok": False,
+            "message": "回调文件读取失败",
+            "payload": None,
+        }
+
+    try:
+        payload = json.loads(raw_text)
     except json.JSONDecodeError:
         return {
             "ok": False,
