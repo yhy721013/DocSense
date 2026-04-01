@@ -175,7 +175,10 @@
       parsed.querySelectorAll("*").forEach((node) => {
         Array.from(node.attributes).forEach((attribute) => {
           const name = attribute.name.toLowerCase();
-          if (name.startsWith("on") || ["src", "srcset", "poster"].includes(name)) {
+          if (
+            name.startsWith("on") ||
+            ["src", "srcset", "poster", "href", "xlink:href", "action", "formaction", "data"].includes(name)
+          ) {
             node.removeAttribute(attribute.name);
           }
         });
