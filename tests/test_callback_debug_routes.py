@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,8 @@ from tests import workspace_tempdir
 
 class CallbackDebugRouteTests(unittest.TestCase):
     def setUp(self):
+        self.env_patcher = patch.dict(os.environ, {"DOCSENSE_ENABLE_DEBUG_CALLBACK_API": "1"})
+        self.env_patcher.start()
         self.app = create_app()
         self.client = self.app.test_client()
         self._tempdir = workspace_tempdir()
@@ -22,6 +25,7 @@ class CallbackDebugRouteTests(unittest.TestCase):
 
     def tearDown(self):
         self.path_patcher.stop()
+        self.env_patcher.stop()
         self._tempdir.__exit__(None, None, None)
 
     def test_callback_api_returns_missing_state_when_file_does_not_exist(self):
@@ -102,6 +106,21 @@ class CallbackDebugRouteTests(unittest.TestCase):
             {
                 "ok": False,
                 "message": "回调文件不是合法 JSON",
+                "payload": None,
+            },
+        )
+
+    def test_callback_api_returns_non_object_root_state(self):
+        self.callback_path.write_text("[]", encoding="utf-8")
+
+        response = self.client.get("/debug/api/callback")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json(),
+            {
+                "ok": False,
+                "message": "回调文件根节点必须为对象",
                 "payload": None,
             },
         )
