@@ -164,33 +164,36 @@
       return value ? String(value) : "暂无内容";
     }
 
-    function sanitizePreviewDocument(content) {
-      const parser = new DOMParser();
-      const parsed = parser.parseFromString(String(content ?? ""), "text/html");
+    function escapeRegExp(value) {
+      return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
 
-      parsed.querySelectorAll("script, iframe, frame, object, embed, source").forEach((node) => {
-        node.remove();
+    function sanitizePreviewMarkup(content) {
+      let sanitized = String(content ?? "");
+      const blockedTags = ["script", "iframe", "frame", "object", "embed", "source", "img", "audio", "video", "link", "meta", "base"];
+      const blockedAttributes = ["src", "srcset", "poster", "href", "xlink:href", "action", "formaction", "data"];
+
+      blockedTags.forEach((tag) => {
+        const pairedTagPattern = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}\\s*>`, "gi");
+        const singleTagPattern = new RegExp(`<${tag}\\b[^>]*\\/?>`, "gi");
+        sanitized = sanitized.replace(pairedTagPattern, "");
+        sanitized = sanitized.replace(singleTagPattern, "");
       });
 
-      parsed.querySelectorAll("*").forEach((node) => {
-        Array.from(node.attributes).forEach((attribute) => {
-          const name = attribute.name.toLowerCase();
-          if (
-            name.startsWith("on") ||
-            ["src", "srcset", "poster", "href", "xlink:href", "action", "formaction", "data"].includes(name)
-          ) {
-            node.removeAttribute(attribute.name);
-          }
-        });
+      sanitized = sanitized.replace(/\son[a-z0-9:_-]+\s*=\s*(".*?"|'.*?'|[^\s>]+)/gi, "");
+
+      blockedAttributes.forEach((attributeName) => {
+        const attributePattern = new RegExp(`\\s${escapeRegExp(attributeName)}\\s*=\\s*(".*?"|'.*?'|[^\\s>]+)`, "gi");
+        sanitized = sanitized.replace(attributePattern, "");
       });
 
-      return parsed.body ? parsed.body.innerHTML.trim() : "";
+      return sanitized.trim();
     }
 
     function previewDocument(content) {
       const text = String(content ?? "").trim();
       const previewMarkup = /<[a-z][\s\S]*>/i.test(text)
-        ? sanitizePreviewDocument(text)
+        ? sanitizePreviewMarkup(text)
         : `<pre>${escapeHtml(text || "暂无内容")}</pre>`;
       const bodyMarkup = previewMarkup || "<p>暂无内容</p>";
 
