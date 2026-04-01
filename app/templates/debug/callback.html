@@ -105,6 +105,8 @@
     pre {
       white-space: pre-wrap;
       word-break: break-word;
+      max-height: 360px;
+      overflow: auto;
     }
   </style>
 </head>
@@ -162,17 +164,64 @@
       return value ? String(value) : "暂无内容";
     }
 
+    function sanitizePreviewDocument(content) {
+      const parser = new DOMParser();
+      const parsed = parser.parseFromString(String(content ?? ""), "text/html");
+
+      parsed.querySelectorAll("script, iframe, frame, object, embed, source").forEach((node) => {
+        node.remove();
+      });
+
+      parsed.querySelectorAll("*").forEach((node) => {
+        Array.from(node.attributes).forEach((attribute) => {
+          const name = attribute.name.toLowerCase();
+          if (name.startsWith("on") || ["src", "srcset", "poster"].includes(name)) {
+            node.removeAttribute(attribute.name);
+          }
+        });
+      });
+
+      return parsed.body ? parsed.body.innerHTML.trim() : "";
+    }
+
     function previewDocument(content) {
       const text = String(content ?? "").trim();
-      if (!text) {
-        return "<!DOCTYPE html><html lang=\"zh-CN\"><body><p>暂无内容</p></body></html>";
-      }
+      const previewMarkup = /<[a-z][\s\S]*>/i.test(text)
+        ? sanitizePreviewDocument(text)
+        : `<pre>${escapeHtml(text || "暂无内容")}</pre>`;
+      const bodyMarkup = previewMarkup || "<p>暂无内容</p>";
 
-      if (/<[a-z][\s\S]*>/i.test(text)) {
-        return text;
+      return `<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+        color: #1f2937;
+        background: #ffffff;
+        line-height: 1.6;
       }
-
-      return `<!DOCTYPE html><html lang="zh-CN"><body><pre>${escapeHtml(text)}</pre></body></html>`;
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 0;
+      }
+      table {
+        border-collapse: collapse;
+        max-width: 100%;
+      }
+      img, video, audio {
+        max-width: 100%;
+      }
+    </style>
+  </head>
+  <body>${bodyMarkup}</body>
+</html>`;
     }
 
     function resetPanels() {
