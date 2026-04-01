@@ -187,27 +187,60 @@
         .join("");
     }
 
+    function isSafeHttpUrl(value) {
+      try {
+        const url = new URL(String(value || ""));
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch (_error) {
+        return false;
+      }
+    }
+
     function renderFieldValue(field) {
       const rawValue = field.value;
       const normalized = displayValue(rawValue);
+      const textNode = document.createElement("span");
+      textNode.className = "field-value";
+      textNode.textContent = normalized;
 
-      if (field.isLink && /^https?:\/\/\S+$/i.test(String(rawValue || ""))) {
-        return `<a class="field-link" href="${escapeHtml(rawValue)}" target="_blank" rel="noreferrer">${escapeHtml(rawValue)}</a>`;
+      if (field.isLink && isSafeHttpUrl(rawValue)) {
+        const link = document.createElement("a");
+        link.className = "field-link";
+        link.href = String(rawValue);
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = String(rawValue);
+        return link;
       }
 
-      return `<span class="field-value">${escapeHtml(normalized)}</span>`;
+      return textNode;
     }
 
     function renderFieldGrid(title, fields) {
       const section = document.createElement("section");
       section.className = "panel";
-      const rows = fields.map((field) => `
-        <div class="field-row">
-          <span class="field-label">${field.label}</span>
-          ${renderFieldValue(field)}
-        </div>
-      `).join("");
-      section.innerHTML = `<h2>${title}</h2><div class="field-grid">${rows}</div>`;
+
+      const heading = document.createElement("h2");
+      heading.textContent = title;
+
+      const grid = document.createElement("div");
+      grid.className = "field-grid";
+
+      fields.forEach((field) => {
+        const row = document.createElement("div");
+        row.className = "field-row";
+
+        const label = document.createElement("span");
+        label.className = "field-label";
+        label.textContent = field.label;
+
+        row.appendChild(label);
+        row.appendChild(renderFieldValue(field));
+        grid.appendChild(row);
+      });
+
+      section.appendChild(heading);
+      section.appendChild(grid);
       structured.appendChild(section);
     }
 
@@ -228,6 +261,7 @@
       const iframe = document.createElement("iframe");
       iframe.className = "html-preview";
       iframe.setAttribute("title", title);
+      iframe.setAttribute("sandbox", "");
       iframe.srcdoc = previewDocument(content);
 
       const details = document.createElement("details");
