@@ -57,7 +57,8 @@ class AnythingLLMClient:
                 return workspace
         return None
 
-    def create_workspace(self, name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def create_rag_workspace(self, name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """创建 RAG 文档抽取专用 Workspace（query 模式，JSON 输出 prompt）。"""
         url = f"{self.config.base_url}/workspace/new"
         payload = {
             "name": name,
@@ -73,7 +74,7 @@ class AnythingLLMClient:
                 "4. JSON 的字段名、层级和类型必须严格保持一致。\n"
                 "5. 不允许补充文档中未明确出现的信息。\n"
             ),
-            # 返回可解析 JSON，避免“无检索结果”时前端因纯文本报错
+            # 返回可解析 JSON，避免"无检索结果"时前端因纯文本报错
             "queryRefusalResponse": (
                 '{"outline":[],"security_level":"公开","category_confidence":0.1,'
                 '"category":null,"sub_category":null,"category_candidates":[],'
@@ -99,11 +100,45 @@ class AnythingLLMClient:
             logger.error("创建工作区 %s 时出现异常: %s", name, e)
             return None
 
+    def create_chat_workspace(self, name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """创建对话专用 Workspace（chat 模式，通用文档对话 prompt）。"""
+        url = f"{self.config.base_url}/workspace/new"
+        payload = {
+            "name": name,
+            "similarityThreshold": 0.25,
+            "openAiTemp": 0.7,
+            "openAiHistory": 20,
+            "openAiPrompt": (
+                "你是一个基于文档内容的智能问答助手。\n"
+                "请根据已提供的文档内容回答用户的问题。\n"
+                "如果文档中没有相关信息，请如实告知用户。\n"
+                "回答应当准确、清晰、有条理。\n"
+            ),
+            "chatMode": "chat",
+            "topN": 4,
+        }
+        try:
+            resp = self.session.post(
+                url,
+                headers=self._json_headers(user_id),
+                json=payload,
+                timeout=self.config.timeout,
+            )
+            if not resp.ok:
+                logger.error("创建对话工作区 %s 失败: %s %s", name, resp.status_code, resp.text)
+                return None
+            body = resp.json()
+            logger.info("已创建对话工作区: %s", name)
+            return body.get("workspace") or body
+        except Exception as e:
+            logger.error("创建对话工作区 %s 时出现异常: %s", name, e)
+            return None
+
     def ensure_workspace(self, name: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         existing = self.find_workspace_by_name(name, user_id=user_id)
         if existing:
             return existing
-        return self.create_workspace(name, user_id=user_id)
+        return self.create_rag_workspace(name, user_id=user_id)
 
     def create_thread(
         self,
@@ -471,4 +506,141 @@ class AnythingLLMClient:
             return True
         except Exception as e:
             logger.error("更新文档 %s 的嵌入时出现异常: %s", cleaned_path, e)
+            return False
+
+    def update_embeddings_batch(
+        self,
+        workspace_slug: str,
+        adds: Optional[List[str]] = None,
+        deletes: Optional[List[str]] = None,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """批量增删 Workspace 文档嵌入。"""
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/update-embeddings"
+        payload: Dict[str, Any] = {}
+        if adds:
+            payload["adds"] = [p.replace("\\", "/") for p in adds]
+        if deletes:
+            payload["deletes"] = [p.replace("\\", "/") for p in deletes]
+        if not payload:
+            return True
+        try:
+            resp = self.session.post(
+                url,
+                headers=self._json_headers(user_id),
+                json=payload,
+                timeout=self.config.timeout,
+            )
+            if not resp.ok:
+                logger.error("批量更新工作区 %s 嵌入失败: %s %s", workspace_slug, resp.status_code, resp.text)
+                return False
+            logger.info("批量更新工作区 %s 嵌入成功: adds=%d deletes=%d", workspace_slug, len(adds or []), len(deletes or []))
+            return True
+        except Exception as e:
+            logger.error("批量更新工作区 %s 嵌入时出现异常: %s", workspace_slug, e)
+            return False
+
+    def stream_chat_to_thread(
+        self,
+        workspace_slug: str,
+        thread_slug: str,
+        message: str,
+        user_id: Optional[int] = None,
+        mode: str = "chat",
+    ):
+        """向 Thread 发送消息并流式 yield 文本片段（生成器）。"""
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/chat"
+        payload: Dict[str, Any] = {
+            "message": message,
+            "mode": mode,
+        }
+        try:
+            resp = self.session.post(
+                url,
+                headers=self._json_headers(user_id),
+                json=payload,
+                timeout=self.config.timeout,
+                stream=True,
+            )
+            if not resp.ok:
+                logger.error("流式对话失败: %s %s", resp.status_code, resp.text)
+                raise RuntimeError(f"AnythingLLM 返回 {resp.status_code}")
+
+            try:
+                for raw_line in resp.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("data:"):
+                        line = line[5:].strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if event.get("close") or event.get("type") == "textResponse":
+                        # 最终事件可能也带 textResponse
+                        final_text = event.get("textResponse")
+                        if isinstance(final_text, str) and final_text:
+                            yield final_text
+                        break
+
+                    if event.get("type") == "textResponseChunk":
+                        chunk = event.get("textResponse")
+                        if isinstance(chunk, str):
+                            yield chunk
+            finally:
+                resp.close()
+
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error("流式对话时出现异常: %s", e)
+            raise RuntimeError(f"流式对话异常: {e}") from e
+
+    def get_thread_chats(
+        self,
+        workspace_slug: str,
+        thread_slug: str,
+        user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取 Thread 下的全部历史消息。"""
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/chats"
+        try:
+            resp = self.session.get(
+                url,
+                headers=self._build_headers(user_id),
+                timeout=self.config.timeout,
+            )
+            if not resp.ok:
+                logger.error("获取线程历史失败: %s %s", resp.status_code, resp.text)
+                return []
+            body = resp.json()
+            return body.get("history", [])
+        except Exception as e:
+            logger.error("获取线程历史时出现异常: %s", e)
+            return []
+
+    def delete_workspace(
+        self,
+        workspace_slug: str,
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """删除整个 Workspace。"""
+        url = f"{self.config.base_url}/workspace/{workspace_slug}"
+        try:
+            resp = self.session.delete(
+                url,
+                headers=self._build_headers(user_id),
+                timeout=self.config.timeout,
+            )
+            if resp.ok:
+                logger.info("已删除工作区: %s", workspace_slug)
+            return resp.ok
+        except Exception as e:
+            logger.error("删除工作区 %s 时出现异常: %s", workspace_slug, e)
             return False
