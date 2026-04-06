@@ -588,7 +588,7 @@ def run_file_analysis_task(
                 workspace_slug = kb_service.get_workspace_slug(architecture_id)
                 if not workspace_slug:
                     workspace_name = f"architectureId-{architecture_id}"
-                    ws_info = client.create_workspace(workspace_name, user_id=1)
+                    ws_info = client.create_rag_workspace(workspace_name, user_id=1)
                     if ws_info and ws_info.get("slug"):
                         workspace_slug = ws_info["slug"]
                         kb_service.add_workspace(architecture_id, workspace_slug)
@@ -619,7 +619,7 @@ def run_file_analysis_task(
                             client.update_embeddings(alt_path, workspace_slug, user_id=1, metadata=metadata)
                             
                         if doc_id:
-                            kb_service.save_document_record(file_name, architecture_id, str(doc_id))
+                            kb_service.save_document_record(file_name, architecture_id, str(doc_id), doc_path=doc_relative_path)
         except Exception as e:
             logger.error("知识库尝试存入文件失败: %s", e)
 

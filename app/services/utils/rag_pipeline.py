@@ -49,7 +49,7 @@ def run_anythingllm_rag(
     if reuse_workspace:
         workspace_info = client.ensure_workspace(workspace_name, user_id=user_id)
     else:
-        workspace_info = client.create_workspace(workspace_name, user_id=user_id)
+        workspace_info = client.create_rag_workspace(workspace_name, user_id=user_id)
     if not workspace_info:
         return None
 

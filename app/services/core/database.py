@@ -27,7 +27,8 @@ class DatabaseService:
                     CREATE TABLE IF NOT EXISTS documents (
                         file_name TEXT PRIMARY KEY,
                         architecture_id INTEGER NOT NULL,
-                        anything_doc_id TEXT NOT NULL
+                        anything_doc_id TEXT NOT NULL,
+                        doc_path TEXT
                     )
                 """)
                 conn.commit()
@@ -55,15 +56,15 @@ class DatabaseService:
 
     # ================= Document 表的增删改查 =================
     
-    def save_document_record(self, file_name: str, architecture_id: int, anything_doc_id: str):
-        """文件解析成功后，将其信息存入表中（由于 status 不存，只存这三个）"""
+    def save_document_record(self, file_name: str, architecture_id: int, anything_doc_id: str, doc_path: str = ""):
+        """文件解析成功后，将其信息存入表中"""
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 # 用 REPLACE 防止同一个文件被多次解析时报主键冲突
                 conn.execute("""
-                    REPLACE INTO documents (file_name, architecture_id, anything_doc_id)
-                    VALUES (?, ?, ?)
-                """, (file_name, architecture_id, anything_doc_id))
+                    REPLACE INTO documents (file_name, architecture_id, anything_doc_id, doc_path)
+                    VALUES (?, ?, ?, ?)
+                """, (file_name, architecture_id, anything_doc_id, doc_path))
                 conn.commit()
 
     def get_document_record(self, file_name: str) -> dict | None:
@@ -84,3 +85,96 @@ class DatabaseService:
                 logger.info("已删除文档记录: %s", file_name)
             except Exception as e:
                 logger.error("删除文档记录失败 %s: %s", file_name, e)
+
+
+class ChatDatabaseService:
+    """对话会话持久化（独立数据库 chat_sessions.sqlite3）"""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._lock = threading.Lock()
+        self._init_db()
+
+    def _init_db(self):
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chats (
+                        chat_id     TEXT PRIMARY KEY,
+                        file_names  TEXT NOT NULL,
+                        workspace_slug TEXT NOT NULL,
+                        thread_slug    TEXT NOT NULL,
+                        created_at  TEXT NOT NULL,
+                        updated_at  TEXT NOT NULL
+                    )
+                """)
+                conn.commit()
+            logger.info("对话数据库初始化完成: %s", self.db_path)
+
+    def create_chat(
+        self,
+        chat_id: str,
+        file_names: list[str],
+        workspace_slug: str,
+        thread_slug: str,
+    ) -> dict:
+        import json
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        file_names_json = json.dumps(file_names, ensure_ascii=False)
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO chats (chat_id, file_names, workspace_slug, thread_slug, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (chat_id, file_names_json, workspace_slug, thread_slug, now, now),
+                )
+                conn.commit()
+        logger.info("已创建对话记录: chat_id=%s", chat_id)
+        return {
+            "chat_id": chat_id,
+            "file_names": file_names,
+            "workspace_slug": workspace_slug,
+            "thread_slug": thread_slug,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def get_chat(self, chat_id: str) -> dict | None:
+        import json
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM chats WHERE chat_id = ?", (chat_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            record = dict(row)
+            record["file_names"] = json.loads(record["file_names"])
+            return record
+
+    def update_file_names(self, chat_id: str, file_names: list[str]) -> None:
+        import json
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        file_names_json = json.dumps(file_names, ensure_ascii=False)
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE chats SET file_names = ?, updated_at = ? WHERE chat_id = ?",
+                    (file_names_json, now, chat_id),
+                )
+                conn.commit()
+        logger.info("已更新对话引用文件: chat_id=%s", chat_id)
+
+    def delete_chat(self, chat_id: str) -> None:
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+                conn.commit()
+        logger.info("已删除对话记录: chat_id=%s", chat_id)
+

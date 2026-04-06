@@ -5,24 +5,33 @@ import threading
 import logging
 from typing import Any, Dict, Optional
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
-from app.services.core.config import load_llm_integration_config
+from app.services.core.config import load_anythingllm_config, load_llm_integration_config
 from app.services.llm_service.analysis_service import run_file_analysis_batch_task, run_file_analysis_task
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.weaponry_service import run_weaponry_task
-from app.services.core.settings import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH
-from app.services.core.database import DatabaseService
+from app.services.core.settings import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH, CHAT_DB_PATH
+from app.services.core.database import DatabaseService, ChatDatabaseService
+from app.services.llm_service.chat_service import (
+    handle_chat_stream,
+    get_chat_history,
+    delete_chat,
+    ChatNotFoundError,
+)
+from app.services.utils.anythingllm_client import AnythingLLMClient
 
 
 llm_bp = Blueprint("llm", __name__)
 sock = Sock()
 task_service = LLMTaskService(str(LLM_TASK_DB_PATH))
 kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
+chat_db = ChatDatabaseService(str(CHAT_DB_PATH))
 llm_config = load_llm_integration_config()
+anythingllm_config = load_anythingllm_config()
 progress_hub = LLMProgressHub()
 
 logger = logging.getLogger(__name__)
@@ -440,3 +449,101 @@ def llm_progress(ws):
     finally:
         for (business_type, business_key), callback in list(subscriptions.items()):
             progress_hub.unsubscribe(business_type, business_key, callback)
+
+
+# ══════════════════════════════════════════════════════════════
+#  文件对话接口
+# ══════════════════════════════════════════════════════════════
+
+@llm_bp.post("/llm/chat")
+def llm_chat():
+    payload = request.get_json(silent=True) or {}
+    logger.info("收到文件对话请求: payload_keys=%s", list(payload.keys()))
+
+    if payload.get("businessType") != "chat":
+        return jsonify({"error": "businessType必须为chat"}), 400
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return jsonify({"error": "params不能为空"}), 400
+
+    chat_id = params.get("chatId")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return jsonify({"error": "chatId不能为空"}), 400
+    chat_id = chat_id.strip()
+
+    file_names = params.get("fileNames")
+    if not isinstance(file_names, list) or not file_names:
+        return jsonify({"error": "fileNames不能为空"}), 400
+
+    message = params.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return jsonify({"error": "message不能为空"}), 400
+    message = message.strip()
+
+    # 校验引用文件均已解析
+    for fn in file_names:
+        if not isinstance(fn, str) or not fn.strip():
+            return jsonify({"error": "fileNames中包含无效文件名"}), 400
+        doc_record = kb_service.get_document_record(fn.strip())
+        if not doc_record:
+            return jsonify({"error": f"文件 {fn} 尚未解析，无法用于对话"}), 404
+
+    normalized_file_names = [fn.strip() for fn in file_names]
+
+    client = AnythingLLMClient(anythingllm_config)
+    generator = handle_chat_stream(
+        chat_db=chat_db,
+        kb_service=kb_service,
+        client=client,
+        chat_id=chat_id,
+        file_names=normalized_file_names,
+        message=message,
+    )
+    return Response(
+        generator,
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@llm_bp.get("/llm/chat/history")
+def llm_chat_history():
+    chat_id = request.args.get("chatId", "").strip()
+    if not chat_id:
+        return jsonify({"error": "chatId不能为空"}), 400
+
+    client = AnythingLLMClient(anythingllm_config)
+    try:
+        result = get_chat_history(chat_db=chat_db, client=client, chat_id=chat_id)
+        return jsonify(result)
+    except ChatNotFoundError:
+        return jsonify({"error": "对话不存在"}), 404
+
+
+@llm_bp.post("/llm/chat/delete")
+def llm_chat_delete():
+    payload = request.get_json(silent=True) or {}
+    logger.info("收到删除对话请求: payload_keys=%s", list(payload.keys()))
+
+    if payload.get("businessType") != "chat":
+        return jsonify({"error": "businessType必须为chat"}), 400
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return jsonify({"error": "params不能为空"}), 400
+
+    chat_id = params.get("chatId")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return jsonify({"error": "chatId不能为空"}), 400
+    chat_id = chat_id.strip()
+
+    client = AnythingLLMClient(anythingllm_config)
+    try:
+        delete_chat(chat_db=chat_db, client=client, chat_id=chat_id)
+        return jsonify({"chatId": chat_id, "deleted": True, "msg": "对话已删除"})
+    except ChatNotFoundError:
+        return jsonify({"error": "对话不存在"}), 404
