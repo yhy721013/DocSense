@@ -1,6 +1,6 @@
 # DocSense - 甲方协议 LLM 接口后端
 
-DocSense 当前为纯后端接口服务，聚焦甲方协议定义的 LLM 任务处理能力，不包含前端页面与前端调试路由。
+DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理能力；同时提供一个本地只读调试页，用于查看最近一次已落盘的回调结果。
 
 ## 1. 核心能力
 
@@ -10,6 +10,8 @@ DocSense 当前为纯后端接口服务，聚焦甲方协议定义的 LLM 任务
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
 - 结果回调：服务端主动 `POST` 到 `CALLBACK_URL`
+- 本地回调调试页：`GET /debug/callback`
+- 本地回调数据接口：`GET /debug/api/callback`
 
 ## 2. 分层架构与调用关系
 
@@ -17,10 +19,10 @@ DocSense 当前为纯后端接口服务，聚焦甲方协议定义的 LLM 任务
 
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
-| 接口层 | `app/blueprints/` | HTTP/WS 入参校验、任务受理、线程派发、返回协议响应 | `llm.py` |
+| 接口层 | `app/blueprints/` | HTTP/WS 入参校验、任务受理、线程派发、返回协议响应、本地调试页入口 | `llm.py` `debug.py` |
 | 业务层 | `app/services/llm_service/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` |
 | 核心基础层 | `app/services/core/` | 全局配置、路径常量、日志、任务/知识库数据库、进度中枢、Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
-| 工具与外部边界层 | `app/services/utils/` | AnythingLLM 客户端、回调发送、文件下载、OCR 预处理、mhtml 归一化、RAG 流程 | `anythingllm_client.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` `mhtml_normalizer.py` `rag_pipeline.py` |
+| 工具与外部边界层 | `app/services/utils/` | AnythingLLM 客户端、回调发送、回调预览读取、文件下载、OCR 预处理、mhtml 归一化、RAG 流程 | `anythingllm_client.py` `callback_client.py` `callback_preview.py` `file_downloader.py` `ocr_preprocessor.py` `mhtml_normalizer.py` `rag_pipeline.py` |
 | 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `pdf_handler.py` |
 
 ### 2.2 主要调用方向
@@ -48,9 +50,10 @@ Client Request
 
 ```text
 app/
-  __init__.py                       # Flask App 工厂，仅注册 llm 蓝图
+  __init__.py                       # Flask App 工厂，注册 llm/debug 蓝图
   blueprints/
     llm.py                          # /llm/* 路由 + WebSocket 进度通道
+    debug.py                        # /debug/* 本地调试路由
   services/
     core/
       config.py                     # 环境变量与配置加载
@@ -68,11 +71,15 @@ app/
     utils/
       anythingllm_client.py         # AnythingLLM HTTP 客户端
       callback_client.py            # 回调发送
+      callback_preview.py           # 本地回调预览读取
       file_downloader.py            # 下载到临时文件
       mhtml_normalizer.py           # mhtml/mht 归一化
       ocr_preprocessor.py           # 扫描件 OCR 预处理
       rag_pipeline.py               # 文件上传 + RAG 调用流水线
     translator/                     # 翻译底层能力
+  templates/
+    debug/
+      callback.html                 # 本地回调结果调试页模板
 
 run.py                              # 服务启动入口
 docs/接口文档/
@@ -113,6 +120,13 @@ tests/                              # unittest 测试用例
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
 | WS | `/llm/progress` | 进度订阅/查询/取消订阅 |
+
+本地调试路由（非甲方协议接口）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
+| GET | `/debug/api/callback` | 读取最近一次落盘的 `.runtime/call_back.json` |
 
 关键补充：
 
@@ -175,11 +189,31 @@ python run.py
 
 默认监听：`http://0.0.0.0:5001`
 
+4. 本地查看最近一次回调结果（可选）
+
+前提：
+
+- 已配置 `CALLBACK_URL`
+- 至少发生过一次文件解析或报告生成回调
+
+访问：
+
+- 页面：`http://127.0.0.1:5001/debug/callback`
+- 数据：`http://127.0.0.1:5001/debug/api/callback`
+
+说明：
+
+- 页面展示的数据来自仓库根目录 `.runtime/call_back.json`
+- `file` 回调会结构化展示摘要信息、原文和翻译预览
+- `report` 回调会结构化展示报告信息和 HTML 报告预览
+- 若当前还没有回调文件，页面会显示空状态提示
+
 ## 7. 运行时路径与持久化
 
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
+- 最近一次回调预览：`.runtime/call_back.json`
 
 ## 8. 本地联调与测试
 
@@ -224,6 +258,13 @@ zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures
 ```
 
 Windows 与 macOS 可按各自环境选择对应脚本。
+
+本地调试页联调建议：
+
+1. 启动服务：`python run.py`
+2. 触发一次 `/llm/analysis` 或 `/llm/generate-report`
+3. 打开 `http://127.0.0.1:5001/debug/callback`
+4. 若要比对原始报文，可同时查看 `.runtime/call_back.json`
 
 单元测试（仓库默认 `unittest`）：
 

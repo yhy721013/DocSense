@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>回调结果调试页</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+    }
+
+    .banner {
+      min-height: 24px;
+      margin-bottom: 16px;
+      color: #475569;
+    }
+
+    .button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 18px;
+      background: #0f172a;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    .summary-item {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 180px;
+      margin-right: 16px;
+      margin-bottom: 12px;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px 20px;
+    }
+
+    .field-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 12px;
+      background: #f8fafc;
+      border-radius: 12px;
+    }
+
+    .field-label {
+      font-size: 13px;
+      color: #64748b;
+    }
+
+    .field-value {
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .field-link {
+      color: #2563eb;
+      text-decoration: none;
+      word-break: break-all;
+    }
+
+    .html-preview {
+      width: 100%;
+      min-height: 420px;
+      border: 1px solid #dbe3f0;
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    details {
+      margin-top: 12px;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 360px;
+      overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <p>DocSense Local Debug</p>
+        <h1>回调结果调试页</h1>
+      </div>
+      <button id="refresh-button" class="button" type="button">刷新</button>
+    </header>
+
+    <section id="page-message" class="banner">等待加载...</section>
+    <section id="callback-summary" class="panel"></section>
+    <section id="structured-content" class="panel"></section>
+    <section id="preview-sections"></section>
+    <section class="panel">
+      <h2>原始 JSON</h2>
+      <pre id="raw-json">等待加载...</pre>
+    </section>
+  </main>
+
+  <script>
+    const API_URL = "/debug/api/callback";
+    const refreshButton = document.getElementById("refresh-button");
+    const pageMessage = document.getElementById("page-message");
+    const summary = document.getElementById("callback-summary");
+    const structured = document.getElementById("structured-content");
+    const previews = document.getElementById("preview-sections");
+    const rawJson = document.getElementById("raw-json");
+
+    refreshButton.addEventListener("click", loadPayload);
+    window.addEventListener("DOMContentLoaded", loadPayload);
+
+    function statusText(businessType, status) {
+      if (businessType === "file" && status === "2") return "解析成功";
+      if (businessType === "file" && status === "3") return "解析失败";
+      if (businessType === "report" && status === "1") return "生成成功";
+      if (businessType === "report" && status === "2") return "生成失败";
+      return `未知状态（${status || "空"}）`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function displayValue(value) {
+      if (value === 0) {
+        return "0";
+      }
+      return value ? String(value) : "暂无内容";
+    }
+
+    function escapeRegExp(value) {
+      return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function sanitizePreviewMarkup(content) {
+      let sanitized = String(content ?? "");
+      const blockedTags = ["script", "iframe", "frame", "object", "embed", "source", "img", "audio", "video", "link", "meta", "base"];
+      const blockedAttributes = ["src", "srcset", "poster", "href", "xlink:href", "action", "formaction", "data"];
+
+      blockedTags.forEach((tag) => {
+        const pairedTagPattern = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}\\s*>`, "gi");
+        const singleTagPattern = new RegExp(`<${tag}\\b[^>]*\\/?>`, "gi");
+        sanitized = sanitized.replace(pairedTagPattern, "");
+        sanitized = sanitized.replace(singleTagPattern, "");
+      });
+
+      sanitized = sanitized.replace(/\son[a-z0-9:_-]+\s*=\s*(".*?"|'.*?'|[^\s>]+)/gi, "");
+
+      blockedAttributes.forEach((attributeName) => {
+        const attributePattern = new RegExp(`\\s${escapeRegExp(attributeName)}\\s*=\\s*(".*?"|'.*?'|[^\\s>]+)`, "gi");
+        sanitized = sanitized.replace(attributePattern, "");
+      });
+
+      return sanitized.trim();
+    }
+
+    function previewDocument(content) {
+      const text = String(content ?? "").trim();
+      const previewMarkup = /<[a-z][\s\S]*>/i.test(text)
+        ? sanitizePreviewMarkup(text)
+        : `<pre>${escapeHtml(text || "暂无内容")}</pre>`;
+      const bodyMarkup = previewMarkup || "<p>暂无内容</p>";
+
+      return `<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+    <style>
+      :root { color-scheme: light; }
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+        color: #1f2937;
+        background: #ffffff;
+        line-height: 1.6;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin: 0;
+      }
+      table {
+        border-collapse: collapse;
+        max-width: 100%;
+      }
+      img, video, audio {
+        max-width: 100%;
+      }
+    </style>
+  </head>
+  <body>${bodyMarkup}</body>
+</html>`;
+    }
+
+    function resetPanels() {
+      summary.innerHTML = "";
+      structured.innerHTML = "";
+      previews.innerHTML = "";
+    }
+
+    function renderSummaryItems(items) {
+      summary.innerHTML = items
+        .map((item) => `<div class="summary-item"><span>${item.label}</span><strong>${escapeHtml(displayValue(item.value))}</strong></div>`)
+        .join("");
+    }
+
+    function isSafeHttpUrl(value) {
+      try {
+        const url = new URL(String(value || ""));
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch (_error) {
+        return false;
+      }
+    }
+
+    function renderFieldValue(field) {
+      const rawValue = field.value;
+      const normalized = displayValue(rawValue);
+      const textNode = document.createElement("span");
+      textNode.className = "field-value";
+      textNode.textContent = normalized;
+
+      if (field.isLink && isSafeHttpUrl(rawValue)) {
+        const link = document.createElement("a");
+        link.className = "field-link";
+        link.href = String(rawValue);
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = String(rawValue);
+        return link;
+      }
+
+      return textNode;
+    }
+
+    function renderFieldGrid(title, fields) {
+      const section = document.createElement("section");
+      section.className = "panel";
+
+      const heading = document.createElement("h2");
+      heading.textContent = title;
+
+      const grid = document.createElement("div");
+      grid.className = "field-grid";
+
+      fields.forEach((field) => {
+        const row = document.createElement("div");
+        row.className = "field-row";
+
+        const label = document.createElement("span");
+        label.className = "field-label";
+        label.textContent = field.label;
+
+        row.appendChild(label);
+        row.appendChild(renderFieldValue(field));
+        grid.appendChild(row);
+      });
+
+      section.appendChild(heading);
+      section.appendChild(grid);
+      structured.appendChild(section);
+    }
+
+    function renderPlainTextPreview(title, content) {
+      const section = document.createElement("section");
+      section.className = "panel";
+      section.innerHTML = `<h2>${title}</h2><pre>${escapeHtml(displayValue(content))}</pre>`;
+      previews.appendChild(section);
+    }
+
+    function renderHtmlPreview(title, content) {
+      const section = document.createElement("section");
+      section.className = "panel";
+
+      const heading = document.createElement("h2");
+      heading.textContent = title;
+
+      const iframe = document.createElement("iframe");
+      iframe.className = "html-preview";
+      iframe.setAttribute("title", title);
+      iframe.setAttribute("sandbox", "");
+      iframe.srcdoc = previewDocument(content);
+
+      const details = document.createElement("details");
+      const summaryNode = document.createElement("summary");
+      summaryNode.textContent = "查看原始 HTML";
+      const source = document.createElement("pre");
+      source.textContent = content || "暂无内容";
+
+      details.appendChild(summaryNode);
+      details.appendChild(source);
+      section.appendChild(heading);
+      section.appendChild(iframe);
+      section.appendChild(details);
+      previews.appendChild(section);
+    }
+
+    function renderFilePayload(payload) {
+      const data = payload.data || {};
+      const fileDataItem = data.fileDataItem || {};
+
+      renderSummaryItems([
+        { label: "businessType", value: payload.businessType },
+        { label: "msg", value: payload.msg },
+        { label: "fileName", value: data.fileName },
+        { label: "status", value: statusText("file", data.status) },
+      ]);
+
+      renderFieldGrid("分类信息", [
+        { label: "国家", value: data.country },
+        { label: "渠道", value: data.channel },
+        { label: "成熟度", value: data.maturity },
+        { label: "格式", value: data.format },
+        { label: "领域体系 ID", value: data.architectureId },
+      ]);
+
+      renderFieldGrid("文档摘要信息", [
+        { label: "摘要", value: fileDataItem.summary },
+        { label: "关键词", value: fileDataItem.keyword },
+        { label: "文件概述", value: fileDataItem.documentOverview },
+        { label: "评分", value: fileDataItem.score },
+        { label: "资料年代", value: fileDataItem.dataTime },
+        { label: "资料来源", value: fileDataItem.source },
+        { label: "原文链接", value: fileDataItem.originalLink, isLink: true },
+        { label: "语种", value: fileDataItem.language },
+        { label: "资料格式", value: fileDataItem.dataFormat },
+        { label: "所属装备", value: fileDataItem.associatedEquipment },
+        { label: "所属技术", value: fileDataItem.relatedTechnology },
+        { label: "装备型号", value: fileDataItem.equipmentModel },
+      ]);
+
+      renderPlainTextPreview("原文", fileDataItem.originalText);
+      renderHtmlPreview("单语翻译预览", fileDataItem.documentTranslationOne);
+      renderHtmlPreview("双语翻译预览", fileDataItem.documentTranslationTwo);
+    }
+
+    function renderReportPayload(payload) {
+      const data = payload.data || {};
+
+      renderSummaryItems([
+        { label: "businessType", value: payload.businessType },
+        { label: "msg", value: payload.msg },
+        { label: "reportId", value: data.reportId },
+        { label: "status", value: statusText("report", data.status) },
+      ]);
+
+      renderFieldGrid("报告信息", [
+        { label: "报告 ID", value: data.reportId },
+        { label: "状态", value: data.status },
+      ]);
+
+      renderHtmlPreview("报告预览", data.details);
+    }
+
+    function renderUnsupportedPayload(payload) {
+      renderSummaryItems([
+        { label: "businessType", value: payload.businessType },
+        { label: "msg", value: payload.msg },
+      ]);
+      renderFieldGrid("未支持类型", [
+        { label: "提示", value: "当前类型暂未提供友好展示" },
+      ]);
+    }
+
+    function renderResponse(result) {
+      pageMessage.textContent = result.message;
+      rawJson.textContent = result.payload ? JSON.stringify(result.payload, null, 2) : "暂无内容";
+      resetPanels();
+
+      if (!result.ok || !result.payload) {
+        return;
+      }
+
+      if (result.payload.businessType === "file") {
+        renderFilePayload(result.payload);
+        return;
+      }
+
+      if (result.payload.businessType === "report") {
+        renderReportPayload(result.payload);
+        return;
+      }
+
+      renderUnsupportedPayload(result.payload);
+    }
+
+    async function loadPayload() {
+      try {
+        const response = await fetch(API_URL, { cache: "no-store" });
+        const result = await response.json();
+        renderResponse(result);
+      } catch (error) {
+        resetPanels();
+        pageMessage.textContent = `加载失败：${error.message}`;
+        rawJson.textContent = "暂无内容";
+      }
+    }
+  </script>
+</body>
+</html>
