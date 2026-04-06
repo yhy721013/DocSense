@@ -16,5 +16,9 @@ LLM_TASK_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 KNOWLEDGE_BASE_DB_PATH = Path(os.getenv("DOCSENSE_KNOWLEDGE_BASE_DB", str(RUNTIME_DIR / "knowledge_base.sqlite3")))
 KNOWLEDGE_BASE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# 对话记录持久化
+CHAT_DB_PATH = Path(os.getenv("DOCSENSE_CHAT_DB", str(RUNTIME_DIR / "chat_sessions.sqlite3")))
+CHAT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 # Web UI 限制：单次请求最大 500MB
 MAX_CONTENT_LENGTH = int(os.getenv("DOCSENSE_MAX_CONTENT_LENGTH", str(500 * 1024 * 1024)))
