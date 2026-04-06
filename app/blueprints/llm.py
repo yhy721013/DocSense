@@ -416,6 +416,115 @@ def llm_check_task():
     return jsonify({"businessType": business_type, "data": items})
 
 
+@llm_bp.post("/llm/reassign")
+def llm_reassign():
+    payload = request.get_json(silent=True) or {}
+    logger.info("收到文档分类变更请求: payload_keys=%s", list(payload.keys()))
+
+    if payload.get("businessType") != "reassign":
+        return jsonify({"error": "businessType必须为reassign"}), 400
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return jsonify({"error": "params不能为空"}), 400
+
+    file_name = params.get("fileName")
+    if not isinstance(file_name, str) or not file_name.strip():
+        return jsonify({"error": "fileName不能为空"}), 400
+    file_name = file_name.strip()
+
+    old_architecture_id = params.get("oldArchitectureId")
+    if old_architecture_id is None:
+        return jsonify({"error": "oldArchitectureId不能为空"}), 400
+
+    new_architecture_id = params.get("newArchitectureId")
+    if new_architecture_id is None:
+        return jsonify({"error": "newArchitectureId不能为空"}), 400
+
+    if old_architecture_id == new_architecture_id:
+        return jsonify({"error": "oldArchitectureId与newArchitectureId不能相同"}), 400
+
+    doc_record = kb_service.get_document_record(file_name)
+    if not doc_record:
+        return jsonify({
+            "businessType": "reassign",
+            "message": "变更失败",
+            "data": {
+                "fileName": file_name,
+                "oldArchitectureId": old_architecture_id,
+                "newArchitectureId": new_architecture_id,
+                "success": False,
+                "message": "文档记录不存在"
+            }
+        })
+
+    actual_old_id = doc_record["architecture_id"]
+    if str(actual_old_id) != str(old_architecture_id):
+        logger.warning(
+            "变更分类请求与现有记录不一致: 记录中 architecture_id=%s, 请求 oldArchitectureId=%s",
+            actual_old_id, old_architecture_id
+        )
+        return jsonify({
+            "businessType": "reassign",
+            "message": "变更失败",
+            "data": {
+                "fileName": file_name,
+                "oldArchitectureId": old_architecture_id,
+                "newArchitectureId": new_architecture_id,
+                "success": False,
+                "message": "分类不一致，变更失败"
+            }
+        })
+
+    client = AnythingLLMClient(anythingllm_config)
+    doc_path = doc_record.get("doc_path")
+
+    try:
+        if doc_path:
+            old_workspace_slug = kb_service.get_workspace_slug(int(actual_old_id))
+            if old_workspace_slug:
+                client.update_embeddings_batch(old_workspace_slug, deletes=[doc_path], user_id=1)
+
+            new_workspace_slug = kb_service.get_workspace_slug(new_architecture_id)
+            if not new_workspace_slug:
+                workspace_name = f"architectureId-{new_architecture_id}"
+                ws_info = client.create_rag_workspace(workspace_name, user_id=1)
+                if ws_info and ws_info.get("slug"):
+                    new_workspace_slug = ws_info["slug"]
+                    kb_service.add_workspace(new_architecture_id, new_workspace_slug)
+
+            if new_workspace_slug:
+                metadata = {"file_name": file_name, "architecture_id": new_architecture_id}
+                client.update_embeddings(doc_path, new_workspace_slug, user_id=1, metadata=metadata)
+    except Exception as e:
+        logger.error("在调整工作区关联时失败: file_name=%s, exception=%s", file_name, e)
+        return jsonify({
+            "businessType": "reassign",
+            "message": "变更失败",
+            "data": {
+                "fileName": file_name,
+                "oldArchitectureId": old_architecture_id,
+                "newArchitectureId": new_architecture_id,
+                "success": False,
+                "message": f"处理知识库节点映射报错: {str(e)}"
+            }
+        })
+
+    kb_service.update_document_architecture(file_name, new_architecture_id)
+
+    return jsonify({
+        "businessType": "reassign",
+        "message": "变更成功",
+        "data": {
+            "fileName": file_name,
+            "oldArchitectureId": old_architecture_id,
+            "newArchitectureId": new_architecture_id,
+            "success": True,
+            "message": "变更成功"
+        }
+    })
+
+
 @sock.route("/llm/progress")
 def llm_progress(ws):
     subscriptions: dict[tuple[str, str], Any] = {}

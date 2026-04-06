@@ -86,6 +86,17 @@ class DatabaseService:
             except Exception as e:
                 logger.error("删除文档记录失败 %s: %s", file_name, e)
 
+    def update_document_architecture(self, file_name: str, new_architecture_id: int):
+        """更新文档的分类节点"""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE documents SET architecture_id = ? WHERE file_name = ?",
+                    (new_architecture_id, file_name)
+                )
+                conn.commit()
+            logger.info("已更新文档类别: file_name=%s, new_architecture_id=%s", file_name, new_architecture_id)
+
 
 class ChatDatabaseService:
     """对话会话持久化（独立数据库 chat_sessions.sqlite3）"""

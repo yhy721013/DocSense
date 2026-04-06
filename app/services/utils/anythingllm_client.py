@@ -443,6 +443,17 @@ class AnythingLLMClient:
                 return candidate
         return None
 
+    def _clean_doc_path(self, doc_path: str) -> str:
+        if not doc_path:
+            return ""
+        cleaned_path = doc_path.replace("\\", "/")
+        if "custom-documents/" in cleaned_path:
+            cleaned_path = cleaned_path.split("custom-documents/")[-1]
+            cleaned_path = f"custom-documents/{cleaned_path}"
+        elif cleaned_path.startswith("/"):
+            cleaned_path = cleaned_path.lstrip("/")
+        return cleaned_path
+
     def update_embeddings(
         self,
         doc_path: str,
@@ -454,12 +465,9 @@ class AnythingLLMClient:
             return False
 
         # 统一 docpath 格式，避免 Windows 分隔符影响匹配
-        cleaned_path = doc_path.replace("\\", "/")
-        if "custom-documents/" in cleaned_path:
-            cleaned_path = cleaned_path.split("custom-documents/")[-1]
-            cleaned_path = f"custom-documents/{cleaned_path}"
-        elif cleaned_path.startswith("/"):
-            cleaned_path = cleaned_path.lstrip("/")
+        cleaned_path = self._clean_doc_path(doc_path)
+        if not cleaned_path:
+            return False
 
         url = f"{self.config.base_url}/workspace/{workspace_slug}/update-embeddings"
         payload = {"adds": [cleaned_path]}
@@ -519,9 +527,9 @@ class AnythingLLMClient:
         url = f"{self.config.base_url}/workspace/{workspace_slug}/update-embeddings"
         payload: Dict[str, Any] = {}
         if adds:
-            payload["adds"] = [p.replace("\\", "/") for p in adds]
+            payload["adds"] = [self._clean_doc_path(p) for p in adds if p]
         if deletes:
-            payload["deletes"] = [p.replace("\\", "/") for p in deletes]
+            payload["deletes"] = [self._clean_doc_path(p) for p in deletes if p]
         if not payload:
             return True
         try:
