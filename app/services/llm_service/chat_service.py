@@ -57,7 +57,10 @@ def handle_chat_stream(
             # 跨 Workspace 引用文档
             doc_paths = _resolve_doc_paths(kb_service, file_names)
             if doc_paths:
-                client.update_embeddings_batch(workspace_slug, adds=doc_paths)
+                success = client.update_embeddings_batch(workspace_slug, adds=doc_paths)
+                if not success:
+                    yield _format_sse_event("error", {"error": "在工作区中引用文件失败"})
+                    return
 
             thread_info = client.create_thread(workspace_slug, f"thread-{chat_id}")
             if not thread_info:
@@ -81,7 +84,10 @@ def handle_chat_stream(
             if to_add or to_remove:
                 add_paths = _resolve_doc_paths(kb_service, list(to_add)) if to_add else []
                 remove_paths = _resolve_doc_paths(kb_service, list(to_remove)) if to_remove else []
-                client.update_embeddings_batch(workspace_slug, adds=add_paths or None, deletes=remove_paths or None)
+                success = client.update_embeddings_batch(workspace_slug, adds=add_paths or None, deletes=remove_paths or None)
+                if not success:
+                    yield _format_sse_event("error", {"error": "更新工作区文件引用失败"})
+                    return
                 chat_db.update_file_names(chat_id, file_names)
 
             is_new_chat = False
