@@ -1,5 +1,5 @@
 # 测试工具和示例文件 | Test fixtures and sample files
-tests/fixtures
+tests/fixtures/
 
 # Python 运行时和缓存文件 | Python runtime and cache files
 __pycache__/
