@@ -5,6 +5,8 @@ tests/fixtures/files/sample.txt
 __pycache__/
 .runtime/
 .worktrees/
+mineru_output/
+.pytest_cache/
 
 # Python 虚拟环境 | Python virtual environments
 .venv/

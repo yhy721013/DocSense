@@ -7,6 +7,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 - 文件解析：`POST /llm/analysis`
 - 报告生成：`POST /llm/generate-report`
 - 武器装备知识谱系解析：`POST /llm/weaponry`
+- 文件内容对话：`POST /llm/chat`（附加历史查询 `GET /llm/chat/history` 及删除 `POST /llm/chat/delete`）
+- 分类节点变更：`POST /llm/reassign`
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
 - 结果回调：服务端主动 `POST` 到 `CALLBACK_URL`
@@ -19,9 +21,9 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
-| 接口层 | `app/blueprints/` | HTTP/WS 入参校验、任务受理、线程派发、返回协议响应、本地调试页入口 | `llm.py` `debug.py` |
-| 业务层 | `app/services/llm_service/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` |
-| 核心基础层 | `app/services/core/` | 全局配置、路径常量、日志、任务/知识库数据库、进度中枢、Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
+| 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
+| 业务层 | `app/services/llm_service/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排、对话记录及文档动态联动 | `analysis_service.py` `report_service.py` `weaponry_service.py` `chat_service.py` `task_service.py` |
+| 核心基础层 | `app/services/core/` | 全局配置、路径常量、日志、任务/知识库及独立对话数据库、进度中枢、Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 工具与外部边界层 | `app/services/utils/` | AnythingLLM 客户端、回调发送、回调预览读取、文件下载、OCR 预处理、mhtml 归一化、RAG 流程 | `anythingllm_client.py` `callback_client.py` `callback_preview.py` `file_downloader.py` `ocr_preprocessor.py` `mhtml_normalizer.py` `rag_pipeline.py` |
 | 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `pdf_handler.py` |
 
@@ -59,13 +61,14 @@ app/
       config.py                     # 环境变量与配置加载
       settings.py                   # 路径常量与限制（上传目录、DB 路径等）
       logging.py                    # 日志初始化
-      database.py                   # 知识库映射持久化（architecture_id <-> workspace_slug）
+      database.py                   # 知识库映射及对话记录持久化（architecture_id <-> workspace_slug, chats）
       progress_hub.py               # 进度发布/订阅中枢
       prompts.py                    # 统一 Prompt 构建
     llm_service/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
       report_service.py             # 报告生成主流程
       weaponry_service.py           # 知识谱系字段提取主流程
+      chat_service.py               # 文件对话主流程（含 SSE 生成、跨工作区引用）
       task_service.py               # 任务状态、结果、回调状态持久化
       translation_service.py        # 翻译服务编排层
     utils/
@@ -120,6 +123,10 @@ tests/                              # unittest 测试用例
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
 | WS | `/llm/progress` | 进度订阅/查询/取消订阅 |
+| POST | `/llm/chat` | 基于指定文件内容发起对话请求（SSE 流式响应下发） |
+| GET | `/llm/chat/history` | 查询指定会话的完整聊天历史消息记录 |
+| POST | `/llm/chat/delete` | 对应彻底释放删除聊天的底座资源（工作区与 Thread 隔离模型） |
+| POST | `/llm/reassign` | 调整和修改文档分类节点，实时重定向嵌入其 RAG 工作区数据位置 |
 
 本地调试路由（非甲方协议接口）：
 
@@ -152,6 +159,15 @@ tests/                              # unittest 测试用例
    - 支持动作：`subscribe`、`query`、`unsubscribe`。
    - 未显式传 `action` 时默认按订阅处理。
    - 单连接可管理多个任务订阅。
+
+6. `/llm/chat`（文件对话体系）
+   - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
+   - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染，历史数据在 `AnythingLLM` 保留。
+   - 通过增量 update-embeddings (adds/deletes) 维护引用文件列表动态变迁。
+
+7. `/llm/reassign`（分类节点变更）
+   - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
+   - 安全方面要求调用前必须传输且一致匹配底库中存证的 `oldArchitectureId`。
 
 ## 6. 快速启动
 
@@ -212,6 +228,7 @@ python run.py
 
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
+- 对话状态库：`.runtime/chat_sessions.sqlite3`（`DOCSENSE_CHAT_DB`）
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
 - 最近一次回调预览：`.runtime/call_back.json`
 
@@ -276,6 +293,8 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 
 - 文件处理与报告生成：`docs/接口文档/文件处理和报告生成.md`
 - 知识谱系解析：`docs/接口文档/知识谱系解析.md`
+- 文件对话：`docs/接口文档/文件对话.md`
+- 节点分类与文档变更：`docs/接口文档/分类节点变更.md`
 
 ## 10. Git 规范
 
