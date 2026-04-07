@@ -216,6 +216,19 @@ class LocalScriptTests(unittest.TestCase):
         expected_body = payload.read_text(encoding="utf-8").strip()
         self.assertEqual(posted_body, expected_body)
 
+    def test_weaponry_shell_script_posts_fixture_to_expected_path(self) -> None:
+        _, port = self._start_recording_server()
+        payload = ROOT_DIR / "tests/fixtures/llm/weaponry_request.json"
+
+        result = self._run_script(f"scripts/test_llm_weaponry{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIsNotNone(RequestRecorderHandler.last_request)
+        self.assertEqual(RequestRecorderHandler.last_request["path"], "/llm/weaponry")
+        posted_body = RequestRecorderHandler.last_request["body"].strip()
+        expected_body = payload.read_text(encoding="utf-8").strip()
+        self.assertEqual(posted_body, expected_body)
+
     def test_check_task_shell_script_posts_fixture_to_expected_path(self) -> None:
         _, port = self._start_recording_server()
         payload = ROOT_DIR / "tests/fixtures/llm/check_task_file_request.json"
