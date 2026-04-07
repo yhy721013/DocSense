@@ -203,18 +203,18 @@ class HYMTTranslator:
             # 3. 检查是否找到对应的语言
             if not from_lang_obj:
                 logger.warning(f"  [警告] 未找到源语言 {from_lang_code} 的翻译包")
-                return self.translate_text(text, target_lang, fast_translate=False)
+                raise RuntimeError(f"未找到源语言 {from_lang_code} 的翻译包")
 
             if not to_lang_obj:
                 logger.warning(f"  [警告] 未找到目标语言 {to_lang_code} 的翻译包")
-                return self.translate_text(text, target_lang, fast_translate=False)
+                raise RuntimeError(f"未找到目标语言 {to_lang_code} 的翻译包")
 
             # 4. 获取翻译器对象
             translation = from_lang_obj.get_translation(to_lang_obj)
 
             if not translation:
                 logger.warning(f"  [警告] 无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
-                return self.translate_text(text, target_lang, fast_translate=False)
+                raise RuntimeError(f"无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
 
             # 5. 执行翻译
             translated = translation.translate(text)
@@ -222,19 +222,19 @@ class HYMTTranslator:
             # 6. 检查翻译结果
             if not translated:
                 logger.warning(f"  [警告] ArgoTranslate 返回空结果")
-                return self.translate_text(text, target_lang, fast_translate=False)
+                raise RuntimeError("ArgoTranslate 返回空结果")
 
             return translated
 
         except ImportError as ie:
-            logger.warning(f"  [警告] argostranslate 未安装：{ie}，回退到大模型翻译")
-            return self.translate_text(text, target_lang, fast_translate=False)
+            logger.error(f"  [错误] argostranslate 未安装：{ie}")
+            raise RuntimeError(f"argostranslate 未安装：{ie}") from ie
         except AttributeError as ae:
             logger.error(f"  [错误] ArgoTranslate API 调用失败：{ae}")
-            return self.translate_text(text, target_lang, fast_translate=False)
+            raise RuntimeError(f"ArgoTranslate API 调用失败：{ae}") from ae
         except Exception as e:
             logger.error(f"  [错误] ArgoTranslate 翻译失败：{e}")
-            return self.translate_text(text, target_lang, fast_translate=False)
+            raise RuntimeError(f"ArgoTranslate 翻译失败：{e}") from e
 
 
     def get_progress_tracker(self) -> ProgressTracker:
