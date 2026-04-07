@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
-load_dotenv(override=True)  # 加载 .env 文件到环境变量
+load_dotenv()  # 加载 .env 文件到环境变量，但不覆盖已显式传入的值
 
 
 @dataclass(frozen=True)
