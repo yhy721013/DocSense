@@ -147,6 +147,8 @@
       if (businessType === "file" && status === "3") return "解析失败";
       if (businessType === "report" && status === "1") return "生成成功";
       if (businessType === "report" && status === "2") return "生成失败";
+      if (businessType === "weaponry" && status === "2") return "解析成功";
+      if (businessType === "weaponry" && status === "3") return "解析失败";
       return `未知状态（${status || "空"}）`;
     }
 
@@ -390,6 +392,168 @@
       renderHtmlPreview("报告预览", data.details);
     }
 
+    function countWeaponryStats(fields) {
+      const stats = { totalFields: 0, populatedFields: 0, tableFields: 0 };
+
+      function visit(field) {
+        if (!field || typeof field !== "object") {
+          return;
+        }
+
+        if (field.fieldType === "TABLE") {
+          stats.tableFields += 1;
+          const rows = Array.isArray(field.tableFieldList) ? field.tableFieldList : [];
+          rows.forEach((row) => {
+            if (Array.isArray(row)) {
+              row.forEach(visit);
+            }
+          });
+          return;
+        }
+
+        stats.totalFields += 1;
+        if (String(field.analyseData || "").trim()) {
+          stats.populatedFields += 1;
+        }
+      }
+
+      (Array.isArray(fields) ? fields : []).forEach(visit);
+      return stats;
+    }
+
+    function renderWeaponrySources(sources) {
+      const wrapper = document.createElement("details");
+      const summaryNode = document.createElement("summary");
+      const sourceList = Array.isArray(sources) ? sources : [];
+      summaryNode.textContent = `查看溯源（${sourceList.length}）`;
+      wrapper.appendChild(summaryNode);
+
+      if (!sourceList.length) {
+        const empty = document.createElement("pre");
+        empty.textContent = "暂无内容";
+        wrapper.appendChild(empty);
+        return wrapper;
+      }
+
+      sourceList.forEach((item) => {
+        const block = document.createElement("pre");
+        block.textContent = [
+          `content: ${displayValue(item.content)}`,
+          `source: ${displayValue(item.source)}`,
+          `time: ${displayValue(item.time)}`,
+          `translate: ${displayValue(item.translate)}`,
+        ].join("\n");
+        wrapper.appendChild(block);
+      });
+
+      return wrapper;
+    }
+
+    function renderWeaponryField(field) {
+      const section = document.createElement("section");
+      section.className = "panel";
+
+      const heading = document.createElement("h2");
+      heading.textContent = displayValue(field.fieldName);
+      section.appendChild(heading);
+
+      const grid = document.createElement("div");
+      grid.className = "field-grid";
+      [
+        { label: "字段说明", value: field.fieldDescription },
+        { label: "提取结果", value: field.analyseData },
+      ].forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "field-row";
+
+        const label = document.createElement("span");
+        label.className = "field-label";
+        label.textContent = item.label;
+
+        row.appendChild(label);
+        row.appendChild(renderFieldValue({ value: item.value }));
+        grid.appendChild(row);
+      });
+
+      section.appendChild(grid);
+      section.appendChild(renderWeaponrySources(field.analyseDataSource));
+      structured.appendChild(section);
+    }
+
+    function renderWeaponryTable(field) {
+      const section = document.createElement("section");
+      section.className = "panel";
+
+      const heading = document.createElement("h2");
+      heading.textContent = displayValue(field.fieldName);
+      section.appendChild(heading);
+
+      if (field.fieldDescription) {
+        const description = document.createElement("p");
+        description.textContent = field.fieldDescription;
+        section.appendChild(description);
+      }
+
+      const rows = Array.isArray(field.tableFieldList) ? field.tableFieldList : [];
+      rows.forEach((row, rowIndex) => {
+        const rowTitle = document.createElement("p");
+        rowTitle.textContent = `第 ${rowIndex + 1} 行`;
+        section.appendChild(rowTitle);
+
+        const rowGrid = document.createElement("div");
+        rowGrid.className = "field-grid";
+
+        (Array.isArray(row) ? row : []).forEach((cell) => {
+          const cellBlock = document.createElement("div");
+          cellBlock.className = "field-row";
+
+          const label = document.createElement("span");
+          label.className = "field-label";
+          label.textContent = displayValue(cell.fieldName);
+
+          cellBlock.appendChild(label);
+          cellBlock.appendChild(renderFieldValue({ value: cell.analyseData }));
+          cellBlock.appendChild(renderWeaponrySources(cell.analyseDataSource));
+          rowGrid.appendChild(cellBlock);
+        });
+
+        section.appendChild(rowGrid);
+      });
+
+      structured.appendChild(section);
+    }
+
+    function renderWeaponryPayload(payload) {
+      const data = payload.data || {};
+      const fields = Array.isArray(data.weaponryTemplateFieldList) ? data.weaponryTemplateFieldList : [];
+      const stats = countWeaponryStats(fields);
+
+      renderSummaryItems([
+        { label: "businessType", value: payload.businessType },
+        { label: "msg", value: payload.msg },
+        { label: "architectureId", value: data.architectureId },
+        { label: "status", value: statusText("weaponry", data.status) },
+        { label: "字段总数", value: stats.totalFields },
+        { label: "已提取字段数", value: stats.populatedFields },
+        { label: "表格字段数", value: stats.tableFields },
+      ]);
+
+      if (!fields.length) {
+        renderFieldGrid("解析结果", [
+          { label: "提示", value: payload.msg || "暂无内容" },
+        ]);
+        return;
+      }
+
+      fields.forEach((field) => {
+        if (field.fieldType === "TABLE") {
+          renderWeaponryTable(field);
+          return;
+        }
+        renderWeaponryField(field);
+      });
+    }
+
     function renderUnsupportedPayload(payload) {
       renderSummaryItems([
         { label: "businessType", value: payload.businessType },
@@ -416,6 +580,11 @@
 
       if (result.payload.businessType === "report") {
         renderReportPayload(result.payload);
+        return;
+      }
+
+      if (result.payload.businessType === "weaponry") {
+        renderWeaponryPayload(result.payload);
         return;
       }
 
