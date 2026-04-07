@@ -1,33 +1,128 @@
 {
-    "businessType": "weaponry",
-    "params": {
-        "architectureId": 10502,
-        "weaponryTemplateFieldList": [
-            {
-                "fieldDescription": "文档中提到的新任职位的正式负责人姓名",
-                "fieldName": "任职人员姓名",
-                "fieldType": "INPUT",
-                "templateClassifyId": 1001
-            },
-            {
-                "fieldName": "过往任职经历列表",
-                "fieldType": "TABLE",
-                "templateClassifyId": 1003,
-                "tableFieldList": [
-                    [
-                        {
-                            "fieldDescription": "过往担任的职务名称",
-                            "fieldName": "职位名称",
-                            "fieldType": "INPUT"
-                        },
-                        {
-                            "fieldDescription": "该职务所属的部门或单位",
-                            "fieldName": "所属部门/单位",
-                            "fieldType": "INPUT"
-                        }
-                    ]
-                ]
-            }
-        ]
-    }
+  "businessType": "weaponry",
+  "params": {
+    "architectureId": 10502,
+    "weaponryTemplateFieldList": [
+      {
+        "fieldName": "舰级名称",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取舰级名称",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "单舰名称",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取单舰名称",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "舷号",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取舷号",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "建造厂",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取建造厂",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "开工时间",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取开工时间",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "下水时间",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取下水时间",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "服役时间",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取服役时间",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "状态",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取舰艇状态",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "标准排水量",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取标准排水量",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "满载排水量",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取满载排水量",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "舰长",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取舰长",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "舰宽",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取舰宽",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "吃水",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取吃水",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "甲板长度",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取甲板长度",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "甲板宽度",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取甲板宽度",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "航速",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取航速",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "编制",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取编制",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "动力系统",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取动力系统",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "武器系统",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取武器系统",
+        "templateClassifyId": 1001
+      },
+      {
+        "fieldName": "传感器系统",
+        "fieldType": "INPUT",
+        "fieldDescription": "根据文档提取传感器系统",
+        "templateClassifyId": 1001
+      }
+    ]
+  }
 }
