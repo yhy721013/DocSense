@@ -241,6 +241,7 @@ pwsh -NoLogo -Command "./scripts/start_test_file_server.ps1"
 pwsh -NoLogo -Command "python scripts/mock_callback_server.py"
 pwsh -NoLogo -Command "./scripts/test_llm_analysis.ps1"
 pwsh -NoLogo -Command "./scripts/test_llm_report.ps1"
+pwsh -NoLogo -Command "./scripts/test_llm_weaponry.ps1"
 pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1"
 pwsh -NoLogo -Command "./scripts/test_llm_progress.ps1"
 ```
@@ -252,6 +253,7 @@ zsh scripts/start_test_file_server.sh
 python scripts/mock_callback_server.py
 zsh scripts/test_llm_analysis.sh
 zsh scripts/test_llm_report.sh
+zsh scripts/test_llm_weaponry.sh
 zsh scripts/test_llm_check_task.sh
 zsh scripts/test_llm_progress.sh
 ```
@@ -261,6 +263,7 @@ zsh scripts/test_llm_progress.sh
 - 自动读取仓库根目录 `.env`，不存在时回退 `.env.example`
 - `test_llm_analysis.sh` 默认请求 `POST /llm/analysis`
 - `test_llm_report.sh` 默认请求 `POST /llm/generate-report`
+- `test_llm_weaponry.sh` 默认请求 `POST /llm/weaponry`
 - `test_llm_check_task.sh` 默认请求 `POST /llm/check-task`
 - `test_llm_progress.sh` 默认连接 `WS /llm/progress`
 
@@ -270,6 +273,7 @@ zsh scripts/test_llm_progress.sh
 zsh scripts/start_test_file_server.sh 8000 tests/fixtures/files
 zsh scripts/test_llm_analysis.sh http://127.0.0.1:5001 tests/fixtures/llm/analysis_request.json
 zsh scripts/test_llm_report.sh http://127.0.0.1:5001 tests/fixtures/llm/report_request.json
+zsh scripts/test_llm_weaponry.sh http://127.0.0.1:5001 tests/fixtures/llm/weaponry_request.json
 zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/check_task_file_request.json
 zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
 ```
@@ -279,7 +283,7 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 本地调试页联调建议：
 
 1. 启动服务：`python run.py`
-2. 触发一次 `/llm/analysis` 或 `/llm/generate-report`
+2. 触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
 3. 打开 `http://127.0.0.1:5001/debug/callback`
 4. 若要比对原始报文，可同时查看 `.runtime/call_back.json`
 
