@@ -73,6 +73,8 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn('if (state.isStreaming)', html)
         self.assertIn('setMessage("当前流式响应尚未结束")', html)
         self.assertIn("align-items: start;", html)
+        self.assertIn("box-sizing: border-box;", html)
+        self.assertIn("display: block;", html)
         self.assertIn("width: 100%;", html)
         self.assertIn("text-align: left;", html)
         self.assertIn("font: inherit;", html)
