@@ -33,11 +33,6 @@
       align-items: start;
     }
 
-    .stack {
-      display: grid;
-      gap: 16px;
-    }
-
     .panel {
       background: #fff;
       border: 1px solid #dbe3f0;
@@ -72,24 +67,14 @@
       background: #e2e8f0;
     }
 
-    .form-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      align-items: start;
-      margin-bottom: 12px;
-    }
-
     .form-row {
       display: grid;
       gap: 6px;
-      margin-bottom: 12px;
     }
 
     .context-row {
       display: grid;
       gap: 12px;
-      margin-bottom: 12px;
     }
 
     .context-header {
@@ -169,6 +154,71 @@
       flex-wrap: wrap;
     }
 
+    .chat-shell {
+      display: grid;
+      gap: 16px;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      min-height: 720px;
+    }
+
+    .chat-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    .toolbar-title h2,
+    .toolbar-title p {
+      margin: 0;
+    }
+
+    .toolbar-title p {
+      margin-top: 6px;
+      color: #64748b;
+    }
+
+    .toolbar-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .chat-context {
+      display: grid;
+      gap: 16px;
+      padding: 16px;
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      background: #f8fafc;
+    }
+
+    .chat-id-row {
+      max-width: 420px;
+    }
+
+    .chat-scroll-area {
+      min-height: 320px;
+      max-height: 52vh;
+      overflow: auto;
+      padding: 16px 10px 16px 16px;
+      border: 1px solid #dbe3f0;
+      border-radius: 20px;
+      background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+    }
+
+    .chat-composer {
+      display: grid;
+      gap: 12px;
+      padding-top: 8px;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .chat-composer .button-row {
+      justify-content: flex-end;
+    }
+
     .button {
       border: 0;
       border-radius: 999px;
@@ -190,6 +240,7 @@
     .event-list {
       display: grid;
       gap: 12px;
+      align-content: start;
     }
 
     .message-item,
@@ -197,6 +248,66 @@
       border-radius: 12px;
       padding: 12px;
       background: #f8fafc;
+    }
+
+    .message-item {
+      max-width: 88%;
+      border: 1px solid transparent;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+    }
+
+    .message-item strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .empty-thread {
+      max-width: none;
+      color: #64748b;
+      text-align: center;
+      background: #fff;
+      border-color: #dbe3f0;
+      box-shadow: none;
+    }
+
+    .user-message {
+      margin-left: auto;
+      background: #dbeafe;
+      border-color: #bfdbfe;
+    }
+
+    .assistant-message {
+      background: #ffffff;
+      border-color: #dbe3f0;
+    }
+
+    .streaming-message {
+      border-style: dashed;
+      border-color: #93c5fd;
+    }
+
+    .debug-details {
+      border-top: 1px solid #e2e8f0;
+      padding-top: 12px;
+    }
+
+    .debug-details summary {
+      cursor: pointer;
+      color: #475569;
+      font-weight: 600;
+      list-style: none;
+    }
+
+    .debug-details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .debug-details[open] summary {
+      margin-bottom: 12px;
     }
 
     textarea,
@@ -241,44 +352,51 @@
         <div id="chat-session-list" class="session-list"></div>
       </aside>
 
-      <section class="stack">
-        <section class="panel">
-          <h2>聊天</h2>
-          <div class="form-grid">
-            <label class="form-row">
-              <span>chatId</span>
-              <input id="chat-id-input" type="text" placeholder="请输入 chatId">
-            </label>
-            <section class="context-row">
-              <div class="context-header">
-                <span>已解析文件</span>
-                <button id="toggle-file-picker-button" class="button secondary" type="button">添加文件</button>
-              </div>
-              <div id="selected-files" class="selected-files"></div>
-              <div id="file-picker-panel" class="file-picker-panel" hidden>
-                <div id="available-file-options" class="file-option-list"></div>
-              </div>
-            </section>
+      <section id="chat-shell" class="panel chat-shell">
+        <header id="chat-toolbar" class="chat-toolbar">
+          <div class="toolbar-title">
+            <h2>聊天</h2>
+            <p>面向文件内容的本地联调视图</p>
           </div>
+          <div class="toolbar-actions">
+            <button id="load-history-button" class="button secondary" type="button">加载历史</button>
+            <button id="delete-button" class="button danger" type="button">删除当前会话</button>
+          </div>
+        </header>
+
+        <section id="chat-context" class="chat-context">
+          <label class="form-row chat-id-row">
+            <span>chatId</span>
+            <input id="chat-id-input" type="text" placeholder="请输入 chatId">
+          </label>
+          <section class="context-row">
+            <div class="context-header">
+              <span>已解析文件</span>
+              <button id="toggle-file-picker-button" class="button secondary" type="button">添加文件</button>
+            </div>
+            <div id="selected-files" class="selected-files"></div>
+            <div id="file-picker-panel" class="file-picker-panel" hidden>
+              <div id="available-file-options" class="file-option-list"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="chat-scroll-area" class="chat-scroll-area">
+          <div id="chat-thread" class="message-list"></div>
+        </section>
+
+        <section id="chat-composer" class="chat-composer">
           <label class="form-row">
             <span>message</span>
             <textarea id="chat-message-input" placeholder="请输入本轮问题"></textarea>
           </label>
           <div class="button-row">
             <button id="send-button" class="button" type="button">发送消息</button>
-            <button id="load-history-button" class="button secondary" type="button">加载历史</button>
-            <button id="delete-button" class="button danger" type="button">删除当前会话</button>
           </div>
-        </section>
-
-        <section class="panel">
-          <h2>聊天记录</h2>
-          <div id="chat-thread" class="message-list"></div>
-        </section>
-
-        <section class="panel">
-          <h2>SSE 事件流</h2>
-          <div id="chat-events" class="event-list"></div>
+          <details id="debug-details" class="debug-details">
+            <summary id="debug-summary">查看调试详情</summary>
+            <div id="chat-events" class="event-list"></div>
+          </details>
         </section>
       </section>
     </div>
@@ -301,7 +419,9 @@
     const sendButton = document.getElementById("send-button");
     const loadHistoryButton = document.getElementById("load-history-button");
     const deleteButton = document.getElementById("delete-button");
+    const chatScrollArea = document.getElementById("chat-scroll-area");
     const threadNode = document.getElementById("chat-thread");
+    const debugDetails = document.getElementById("debug-details");
     const eventsNode = document.getElementById("chat-events");
 
     const state = {
@@ -330,6 +450,7 @@
     function toggleFilePicker() {
       state.isFilePickerOpen = !state.isFilePickerOpen;
       filePickerPanel.hidden = !state.isFilePickerOpen;
+      toggleFilePickerButton.textContent = state.isFilePickerOpen ? "收起文件" : "添加文件";
     }
 
     function setStreamingState(nextValue) {
@@ -343,22 +464,29 @@
     function renderThread() {
       const messages = [...state.historyMessages];
       if (state.streamingReply) {
-        messages.push({ role: "assistant", content: state.streamingReply });
+        messages.push({ role: "assistant", content: state.streamingReply, streaming: true });
       }
 
       if (!messages.length) {
-        threadNode.innerHTML = "<div class=\"message-item\">暂无消息</div>";
+        threadNode.innerHTML = '<div class="message-item empty-thread">暂无消息</div>';
         return;
       }
 
       threadNode.innerHTML = messages
-        .map((item) => `<div class="message-item"><strong>${escapeHtml(item.role)}</strong><pre>${escapeHtml(item.content)}</pre></div>`)
+        .map((item) => {
+          const roleClass = item.role === "user" ? "message-item user-message" : "message-item assistant-message";
+          const streamingClass = item.streaming ? " streaming-message" : "";
+          return `<div class="${roleClass}${streamingClass}"><strong>${escapeHtml(item.role)}</strong><pre>${escapeHtml(item.content)}</pre></div>`;
+        })
         .join("");
+      requestAnimationFrame(() => {
+        chatScrollArea.scrollTop = chatScrollArea.scrollHeight;
+      });
     }
 
-    function renderEventList() {
+    function renderDebugEventList() {
       if (!state.streamEvents.length) {
-        eventsNode.innerHTML = "<div class=\"event-item\">暂无事件</div>";
+        eventsNode.innerHTML = '<div class="event-item">暂无调试事件</div>';
         return;
       }
 
@@ -440,6 +568,7 @@
       }
 
       state.historyMessages = payload.messages || [];
+      state.streamingReply = "";
       state.activeChatId = payload.chatId || chatId;
       renderThread();
       setMessage(`已加载会话 ${state.activeChatId} 的历史记录`);
@@ -472,9 +601,10 @@
       state.activeChatId = chatId;
       state.streamEvents = [];
       state.streamingReply = "";
+      debugDetails.open = false;
       state.historyMessages = [...state.historyMessages, { role: "user", content: message }];
       renderThread();
-      renderEventList();
+      renderDebugEventList();
 
       const response = await fetch(CHAT_SEND_URL, {
         method: "POST",
@@ -547,7 +677,7 @@
 
     async function handleSseEvent(eventName, data) {
       state.streamEvents.push({ eventName, data });
-      renderEventList();
+      renderDebugEventList();
 
       if (eventName === "chatInfo" && data.chatId) {
         state.activeChatId = data.chatId;
@@ -575,7 +705,7 @@
       }
 
       if (eventName === "error") {
-        state.streamingReply = "";
+        debugDetails.open = true;
         renderThread();
         setStreamingState(false);
         setMessage(data.error || "流式响应失败");
@@ -602,10 +732,11 @@
           state.activeChatId = item.chatId;
           chatIdInput.value = item.chatId;
           state.selectedFileNames = [...item.fileNames];
+          state.streamingReply = "";
           renderSelectedFiles();
           renderFilePickerOptions(state.availableFiles);
           state.streamEvents = [];
-          renderEventList();
+          renderDebugEventList();
           renderSessionList(state.sessions);
           await loadHistory();
         });
@@ -623,7 +754,7 @@
       renderFilePickerOptions(state.availableFiles);
       renderSessionList(state.sessions);
       renderThread();
-      renderEventList();
+      renderDebugEventList();
       setMessage(result.message || "读取完成");
     }
 
@@ -657,10 +788,13 @@
       state.historyMessages = [];
       state.streamEvents = [];
       state.streamingReply = "";
+      state.selectedFileNames = [];
       chatIdInput.value = "";
       messageInput.value = "";
       renderThread();
-      renderEventList();
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
+      renderDebugEventList();
       setMessage(`会话 ${payload.chatId} 已删除`);
       await loadBootstrap();
     }

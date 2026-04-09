@@ -245,6 +245,8 @@ python run.py
 - `/debug/chat` 不写入也不依赖 `.runtime/call_back.json`
 - 页面直接联调正式接口 `POST /llm/chat`、`GET /llm/chat/history`、`POST /llm/chat/delete`
 - 页面左侧展示本地 `chat_sessions.sqlite3` 中的会话，文件选择来自 `knowledge_base.sqlite3` 中已解析文件记录
+- 文件选择器以“已选标签 + 添加文件面板”展示，支持勾选与取消勾选
+- SSE 主输出在聊天主区域实时显示，调试事件收纳于折叠详情中
 - 该调试页仅用于本地联调文件对话模块，不参与甲方真实回调链路
 
 ## 7. 运行时路径与持久化
