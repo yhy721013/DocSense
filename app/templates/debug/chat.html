@@ -4,16 +4,340 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>文件对话调试页</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 16px;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+    }
+
+    .session-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .session-item {
+      border: 1px solid #dbe3f0;
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+      cursor: pointer;
+    }
+
+    .session-item.active {
+      border-color: #0f172a;
+      background: #e2e8f0;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .form-row {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 18px;
+      background: #0f172a;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    .button.secondary {
+      background: #475569;
+    }
+
+    .button.danger {
+      background: #b91c1c;
+    }
+
+    .message-list,
+    .event-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .message-item,
+    .event-item {
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+    }
+
+    textarea,
+    input,
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+    }
+
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
 </head>
 <body>
-  <main>
-    <h1>文件对话调试页</h1>
-    <section id="chat-session-list"></section>
-    <section id="chat-thread"></section>
-    <section id="chat-events"></section>
-    <script>
-      const BOOTSTRAP_URL = "/debug/api/chat/bootstrap";
-    </script>
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <p>DocSense Local Debug</p>
+        <h1>文件对话调试页</h1>
+      </div>
+      <button id="refresh-button" class="button secondary" type="button">刷新本地数据</button>
+    </header>
+
+    <section id="page-message" class="panel">等待加载...</section>
+
+    <div class="layout">
+      <aside class="panel">
+        <h2>本地会话列表</h2>
+        <div id="chat-session-list" class="session-list"></div>
+      </aside>
+
+      <section class="stack">
+        <section class="panel">
+          <h2>新建 / 续聊</h2>
+          <div class="form-grid">
+            <label class="form-row">
+              <span>chatId</span>
+              <input id="chat-id-input" type="text" placeholder="请输入 chatId">
+            </label>
+            <label class="form-row">
+              <span>已解析文件</span>
+              <select id="chat-file-select" multiple size="8"></select>
+            </label>
+          </div>
+          <label class="form-row">
+            <span>message</span>
+            <textarea id="chat-message-input" placeholder="请输入本轮问题"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="send-button" class="button" type="button">发送消息</button>
+            <button id="load-history-button" class="button secondary" type="button">加载历史</button>
+            <button id="delete-button" class="button danger" type="button">删除当前会话</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>聊天记录</h2>
+          <div id="chat-thread" class="message-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>SSE 事件流</h2>
+          <div id="chat-events" class="event-list"></div>
+        </section>
+      </section>
+    </div>
   </main>
+
+  <script>
+    const BOOTSTRAP_URL = "/debug/api/chat/bootstrap";
+    const CHAT_HISTORY_URL = "/llm/chat/history";
+    const pageMessage = document.getElementById("page-message");
+    const refreshButton = document.getElementById("refresh-button");
+    const sessionList = document.getElementById("chat-session-list");
+    const chatIdInput = document.getElementById("chat-id-input");
+    const fileSelect = document.getElementById("chat-file-select");
+    const messageInput = document.getElementById("chat-message-input");
+    const loadHistoryButton = document.getElementById("load-history-button");
+    const threadNode = document.getElementById("chat-thread");
+    const eventsNode = document.getElementById("chat-events");
+
+    const state = {
+      sessions: [],
+      availableFiles: [],
+      activeChatId: "",
+      historyMessages: [],
+      streamEvents: [],
+      isStreaming: false,
+    };
+
+    function setMessage(text) {
+      pageMessage.textContent = text;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function selectedFileNames() {
+      return Array.from(fileSelect.selectedOptions).map((option) => option.value);
+    }
+
+    function renderThread() {
+      if (!state.historyMessages.length) {
+        threadNode.innerHTML = "<div class=\"message-item\">暂无消息</div>";
+        return;
+      }
+
+      threadNode.innerHTML = state.historyMessages
+        .map((item) => `<div class="message-item"><strong>${escapeHtml(item.role)}</strong><pre>${escapeHtml(item.content)}</pre></div>`)
+        .join("");
+    }
+
+    function renderEventList() {
+      if (!state.streamEvents.length) {
+        eventsNode.innerHTML = "<div class=\"event-item\">暂无事件</div>";
+        return;
+      }
+
+      eventsNode.innerHTML = state.streamEvents
+        .map((item) => `<div class="event-item"><strong>${escapeHtml(item.eventName)}</strong><pre>${escapeHtml(JSON.stringify(item.data, null, 2))}</pre></div>`)
+        .join("");
+    }
+
+    function renderAvailableFiles(files) {
+      fileSelect.innerHTML = "";
+      if (!files.length) {
+        fileSelect.disabled = true;
+        return;
+      }
+
+      fileSelect.disabled = false;
+      files.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.fileName;
+        option.textContent = `${item.fileName} (architectureId=${item.architectureId})`;
+        fileSelect.appendChild(option);
+      });
+    }
+
+    function applySelectedFiles(fileNames) {
+      const selected = new Set(fileNames);
+      Array.from(fileSelect.options).forEach((option) => {
+        option.selected = selected.has(option.value);
+      });
+    }
+
+    async function loadHistory() {
+      const chatId = chatIdInput.value.trim();
+      if (!chatId) {
+        setMessage("请先输入或选择 chatId");
+        return;
+      }
+
+      const response = await fetch(`${CHAT_HISTORY_URL}?chatId=${encodeURIComponent(chatId)}`);
+      const payload = await response.json();
+      if (!response.ok) {
+        setMessage(payload.error || "加载历史失败");
+        return;
+      }
+
+      state.historyMessages = payload.messages || [];
+      state.activeChatId = payload.chatId || chatId;
+      renderThread();
+      setMessage(`已加载会话 ${state.activeChatId} 的历史记录`);
+    }
+
+    function renderSessionList(sessions) {
+      if (!sessions.length) {
+        sessionList.innerHTML = "<div class=\"session-item\">暂无本地会话</div>";
+        return;
+      }
+
+      sessionList.innerHTML = "";
+      sessions.forEach((item) => {
+        const node = document.createElement("button");
+        node.type = "button";
+        node.className = `session-item${item.chatId === state.activeChatId ? " active" : ""}`;
+        node.innerHTML = `<strong>${escapeHtml(item.chatId)}</strong><div>文件数：${item.fileNames.length}</div><div>更新时间：${escapeHtml(item.updatedAt)}</div>`;
+        node.addEventListener("click", async () => {
+          if (state.isStreaming) {
+            setMessage("当前流式响应尚未结束");
+            return;
+          }
+          state.activeChatId = item.chatId;
+          chatIdInput.value = item.chatId;
+          applySelectedFiles(item.fileNames);
+          state.streamEvents = [];
+          renderEventList();
+          renderSessionList(state.sessions);
+          await loadHistory();
+        });
+        sessionList.appendChild(node);
+      });
+    }
+
+    async function loadBootstrap() {
+      setMessage("正在加载本地数据...");
+      const response = await fetch(BOOTSTRAP_URL);
+      const result = await response.json();
+      state.sessions = result.data?.sessions || [];
+      state.availableFiles = result.data?.availableFiles || [];
+      renderAvailableFiles(state.availableFiles);
+      renderSessionList(state.sessions);
+      renderThread();
+      renderEventList();
+      setMessage(result.message || "读取完成");
+    }
+
+    refreshButton.addEventListener("click", loadBootstrap);
+    loadHistoryButton.addEventListener("click", loadHistory);
+    window.addEventListener("DOMContentLoaded", loadBootstrap);
+  </script>
 </body>
 </html>
