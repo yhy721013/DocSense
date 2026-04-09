@@ -82,6 +82,14 @@ class DocumentTranslator:
             return self.docx_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
         elif ext == '.txt':
             return self.txt_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+        elif ext == '.md':
+            return self.markdown_handler.process(
+                markdown_path=file_path,
+                output_path=output_path,
+                target_lang=target_lang,
+                translate_all=translate_all,
+                fast_translate=fast_translate,
+            )
         else:
             raise ValueError(f"Unsupported file format: {ext}")
 
@@ -114,7 +122,7 @@ class DocumentTranslator:
         self.translator.get_progress_tracker().reset()
 
         # 如果使用 MinerU 模式
-        if use_minerU and ext != '.txt':
+        if use_minerU and ext not in ['.txt', '.md']:
             print(f"\n{'=' * 60}")
             print(f"使用 MinerU 模式处理 HTML 转换：{file_path}")
             print(f"{'=' * 60}")
@@ -169,8 +177,18 @@ class DocumentTranslator:
             )
             # TXT 处理器也需要返回双语和单语两个路径
             return bilingual_path, monolingual_path
+        elif ext == '.md':
+            bilingual_path, monolingual_path = self.markdown_handler.convert_to_html(
+                markdown_path=file_path,
+                output_dir=output_dir,
+                target_lang=target_lang,
+                translate_all=translate_all,
+                fast_translate=fast_translate,
+            )
+            # Markdown 处理器返回双语和单语两个路径
+            return bilingual_path, monolingual_path
         else:
-            raise ValueError(f"不支持的文件格式：{ext}。支持的格式：PDF, DOCX, TXT")
+            raise ValueError(f"不支持的文件格式：{ext}。支持的格式：PDF, DOCX, TXT, MD")
 
     def get_progress(self) -> dict:
         """
