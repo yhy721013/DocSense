@@ -30,6 +30,7 @@
       display: grid;
       grid-template-columns: 320px minmax(0, 1fr);
       gap: 16px;
+      align-items: start;
     }
 
     .stack {
@@ -56,6 +57,12 @@
       padding: 12px;
       background: #f8fafc;
       cursor: pointer;
+      width: 100%;
+      text-align: left;
+      font: inherit;
+      color: inherit;
+      appearance: none;
+      -webkit-appearance: none;
     }
 
     .session-item.active {
@@ -156,7 +163,7 @@
 
       <section class="stack">
         <section class="panel">
-          <h2>新建 / 续聊</h2>
+          <h2>聊天</h2>
           <div class="form-grid">
             <label class="form-row">
               <span>chatId</span>

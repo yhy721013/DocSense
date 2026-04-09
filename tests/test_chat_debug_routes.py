@@ -47,6 +47,7 @@ class ChatDebugRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("文件对话调试页", html)
+        self.assertIn("<h2>聊天</h2>", html)
         self.assertIn('id="page-message"', html)
         self.assertIn('id="refresh-button"', html)
         self.assertIn('id="chat-session-list"', html)
@@ -71,3 +72,8 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn("function deleteCurrentChat()", html)
         self.assertIn('if (state.isStreaming)', html)
         self.assertIn('setMessage("当前流式响应尚未结束")', html)
+        self.assertIn("align-items: start;", html)
+        self.assertIn("width: 100%;", html)
+        self.assertIn("text-align: left;", html)
+        self.assertIn("font: inherit;", html)
+        self.assertIn("appearance: none;", html)
