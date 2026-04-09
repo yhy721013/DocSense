@@ -86,6 +86,83 @@
       margin-bottom: 12px;
     }
 
+    .context-row {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .context-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .selected-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .file-chip,
+    .empty-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #334155;
+      font: inherit;
+    }
+
+    .file-chip {
+      cursor: pointer;
+    }
+
+    .file-chip span,
+    .empty-chip {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .file-chip strong {
+      color: #0f172a;
+      font-size: 13px;
+    }
+
+    .file-picker-panel {
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .file-option-list {
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .file-option {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+
+    .file-option small {
+      grid-column: 2;
+      color: #64748b;
+    }
+
     .button-row {
       display: flex;
       gap: 12px;
@@ -172,10 +249,16 @@
               <span>chatId</span>
               <input id="chat-id-input" type="text" placeholder="请输入 chatId">
             </label>
-            <label class="form-row">
-              <span>已解析文件</span>
-              <select id="chat-file-select" multiple size="8"></select>
-            </label>
+            <section class="context-row">
+              <div class="context-header">
+                <span>已解析文件</span>
+                <button id="toggle-file-picker-button" class="button secondary" type="button">添加文件</button>
+              </div>
+              <div id="selected-files" class="selected-files"></div>
+              <div id="file-picker-panel" class="file-picker-panel" hidden>
+                <div id="available-file-options" class="file-option-list"></div>
+              </div>
+            </section>
           </div>
           <label class="form-row">
             <span>message</span>
@@ -210,7 +293,10 @@
     const refreshButton = document.getElementById("refresh-button");
     const sessionList = document.getElementById("chat-session-list");
     const chatIdInput = document.getElementById("chat-id-input");
-    const fileSelect = document.getElementById("chat-file-select");
+    const toggleFilePickerButton = document.getElementById("toggle-file-picker-button");
+    const selectedFilesNode = document.getElementById("selected-files");
+    const filePickerPanel = document.getElementById("file-picker-panel");
+    const availableFileOptionsNode = document.getElementById("available-file-options");
     const messageInput = document.getElementById("chat-message-input");
     const sendButton = document.getElementById("send-button");
     const loadHistoryButton = document.getElementById("load-history-button");
@@ -226,6 +312,8 @@
       streamEvents: [],
       streamingReply: "",
       isStreaming: false,
+      selectedFileNames: [],
+      isFilePickerOpen: false,
     };
 
     function setMessage(text) {
@@ -239,8 +327,9 @@
         .replaceAll(">", "&gt;");
     }
 
-    function selectedFileNames() {
-      return Array.from(fileSelect.selectedOptions).map((option) => option.value);
+    function toggleFilePicker() {
+      state.isFilePickerOpen = !state.isFilePickerOpen;
+      filePickerPanel.hidden = !state.isFilePickerOpen;
     }
 
     function setStreamingState(nextValue) {
@@ -278,27 +367,62 @@
         .join("");
     }
 
-    function renderAvailableFiles(files) {
-      fileSelect.innerHTML = "";
-      if (!files.length) {
-        fileSelect.disabled = true;
+    function renderSelectedFiles() {
+      if (!state.selectedFileNames.length) {
+        selectedFilesNode.innerHTML = '<div class="empty-chip">尚未选择文件</div>';
         return;
       }
 
-      fileSelect.disabled = false;
-      files.forEach((item) => {
-        const option = document.createElement("option");
-        option.value = item.fileName;
-        option.textContent = `${item.fileName} (architectureId=${item.architectureId})`;
-        fileSelect.appendChild(option);
+      selectedFilesNode.innerHTML = state.selectedFileNames
+        .map((fileName) => {
+          const file = state.availableFiles.find((item) => item.fileName === fileName);
+          const detail = file ? `architectureId=${file.architectureId}` : "未找到文件信息";
+          return `<button type="button" class="file-chip" data-file-name="${escapeHtml(fileName)}">${escapeHtml(fileName)}<span>${escapeHtml(detail)}</span><strong>移除</strong></button>`;
+        })
+        .join("");
+
+      selectedFilesNode.querySelectorAll(".file-chip").forEach((node) => {
+        node.addEventListener("click", () => removeSelectedFile(node.dataset.fileName || ""));
       });
     }
 
-    function applySelectedFiles(fileNames) {
-      const selected = new Set(fileNames);
-      Array.from(fileSelect.options).forEach((option) => {
-        option.selected = selected.has(option.value);
+    function renderFilePickerOptions(files) {
+      if (!files.length) {
+        availableFileOptionsNode.innerHTML = '<div class="event-item">暂无可选文件</div>';
+        return;
+      }
+
+      availableFileOptionsNode.innerHTML = files
+        .map((item) => {
+          const checked = state.selectedFileNames.includes(item.fileName) ? "checked" : "";
+          return `<label class="file-option"><input type="checkbox" data-file-name="${escapeHtml(item.fileName)}" ${checked}><span>${escapeHtml(item.fileName)}</span><small>architectureId=${escapeHtml(item.architectureId)}</small></label>`;
+        })
+        .join("");
+
+      availableFileOptionsNode.querySelectorAll('input[type="checkbox"]').forEach((node) => {
+        node.addEventListener("change", () => toggleSelectedFile(node.dataset.fileName || ""));
       });
+    }
+
+    function toggleSelectedFile(fileName) {
+      if (!fileName) {
+        return;
+      }
+
+      if (state.selectedFileNames.includes(fileName)) {
+        state.selectedFileNames = state.selectedFileNames.filter((item) => item !== fileName);
+      } else {
+        state.selectedFileNames = [...state.selectedFileNames, fileName];
+      }
+
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
+    }
+
+    function removeSelectedFile(fileName) {
+      state.selectedFileNames = state.selectedFileNames.filter((item) => item !== fileName);
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
     }
 
     async function loadHistory() {
@@ -328,7 +452,7 @@
       }
 
       const chatId = chatIdInput.value.trim();
-      const fileNames = selectedFileNames();
+      const fileNames = [...state.selectedFileNames];
       const message = messageInput.value.trim();
       if (!chatId) {
         setMessage("chatId 不能为空");
@@ -477,7 +601,9 @@
           }
           state.activeChatId = item.chatId;
           chatIdInput.value = item.chatId;
-          applySelectedFiles(item.fileNames);
+          state.selectedFileNames = [...item.fileNames];
+          renderSelectedFiles();
+          renderFilePickerOptions(state.availableFiles);
           state.streamEvents = [];
           renderEventList();
           renderSessionList(state.sessions);
@@ -493,7 +619,8 @@
       const result = await response.json();
       state.sessions = result.data?.sessions || [];
       state.availableFiles = result.data?.availableFiles || [];
-      renderAvailableFiles(state.availableFiles);
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
       renderSessionList(state.sessions);
       renderThread();
       renderEventList();
@@ -539,6 +666,7 @@
     }
 
     refreshButton.addEventListener("click", loadBootstrap);
+    toggleFilePickerButton.addEventListener("click", toggleFilePicker);
     sendButton.addEventListener("click", sendCurrentMessage);
     loadHistoryButton.addEventListener("click", loadHistory);
     deleteButton.addEventListener("click", deleteCurrentChat);
