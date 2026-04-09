@@ -1,6 +1,6 @@
 # DocSense - 甲方协议 LLM 接口后端
 
-DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理能力；同时提供一个本地只读调试页，用于查看最近一次已落盘的回调结果。
+DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理能力；同时提供本地调试页，用于查看最近一次已落盘的回调结果，以及联调文件对话模块。
 
 ## 1. 核心能力
 
@@ -14,6 +14,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 - 结果回调：服务端主动 `POST` 到 `CALLBACK_URL`
 - 本地回调调试页：`GET /debug/callback`
 - 本地回调数据接口：`GET /debug/api/callback`
+- 本地文件对话调试页：`GET /debug/chat`
+- 本地文件对话初始化数据接口：`GET /debug/api/chat/bootstrap`
 
 ## 2. 分层架构与调用关系
 
@@ -75,6 +77,7 @@ app/
       anythingllm_client.py         # AnythingLLM HTTP 客户端
       callback_client.py            # 回调发送
       callback_preview.py           # 本地回调预览读取
+      chat_debug_preview.py         # 本地文件对话调试页初始化数据聚合
       file_downloader.py            # 下载到临时文件
       mhtml_normalizer.py           # mhtml/mht 归一化
       ocr_preprocessor.py           # 扫描件 OCR 预处理
@@ -83,6 +86,7 @@ app/
   templates/
     debug/
       callback.html                 # 本地回调结果调试页模板
+      chat.html                     # 本地文件对话调试页模板
 
 run.py                              # 服务启动入口
 docs/接口文档/
@@ -134,6 +138,8 @@ tests/                              # unittest 测试用例
 | --- | --- | --- |
 | GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
 | GET | `/debug/api/callback` | 读取最近一次落盘的 `.runtime/call_back.json` |
+| GET | `/debug/chat` | 本地文件对话调试页，联调 `/llm/chat*` 三个接口 |
+| GET | `/debug/api/chat/bootstrap` | 读取本地会话列表与已解析文件列表，供 `/debug/chat` 初始化使用 |
 
 关键补充：
 
@@ -205,24 +211,41 @@ python run.py
 
 默认监听：`http://0.0.0.0:5001`
 
-4. 本地查看最近一次回调结果（可选）
+4. 本地调试页面（可选）
 
-前提：
+回调调试页前提：
 
 - 已配置 `CALLBACK_URL`
 - 至少发生过一次文件解析或报告生成回调
 
-访问：
+回调调试页访问：
 
 - 页面：`http://127.0.0.1:5001/debug/callback`
 - 数据：`http://127.0.0.1:5001/debug/api/callback`
 
-说明：
+回调调试页说明：
 
 - 页面展示的数据来自仓库根目录 `.runtime/call_back.json`
 - `file` 回调会结构化展示摘要信息、原文和翻译预览
 - `report` 回调会结构化展示报告信息和 HTML 报告预览
 - 若当前还没有回调文件，页面会显示空状态提示
+
+文件对话调试页前提：
+
+- `ANYTHINGLLM_API_KEY` 已配置
+- 至少已有一个成功解析并入库的文件，供 `fileNames` 选择
+
+文件对话调试页访问：
+
+- 页面：`http://127.0.0.1:5001/debug/chat`
+- 初始化数据：`http://127.0.0.1:5001/debug/api/chat/bootstrap`
+
+文件对话调试页说明：
+
+- `/debug/chat` 不写入也不依赖 `.runtime/call_back.json`
+- 页面直接联调正式接口 `POST /llm/chat`、`GET /llm/chat/history`、`POST /llm/chat/delete`
+- 页面左侧展示本地 `chat_sessions.sqlite3` 中的会话，文件选择来自 `knowledge_base.sqlite3` 中已解析文件记录
+- 该调试页仅用于本地联调文件对话模块，不参与甲方真实回调链路
 
 ## 7. 运行时路径与持久化
 
@@ -283,9 +306,11 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 本地调试页联调建议：
 
 1. 启动服务：`python run.py`
-2. 触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
+2. 若联调回调型业务，触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
 3. 打开 `http://127.0.0.1:5001/debug/callback`
 4. 若要比对原始报文，可同时查看 `.runtime/call_back.json`
+5. 若联调文件对话，先确保至少有一个已解析文件，再打开 `http://127.0.0.1:5001/debug/chat`
+6. 在 `/debug/chat` 中可直接完成发送消息、查看历史、删除会话三类联调
 
 单元测试（仓库默认 `unittest`）：
 
