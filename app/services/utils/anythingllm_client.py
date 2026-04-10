@@ -220,7 +220,8 @@ class AnythingLLMClient:
             line_count = 0
 
             try:
-                for raw_line in resp.iter_lines(decode_unicode=True):
+                # AnythingLLM 会返回很多很小的 SSE 片段，显式降低缓冲避免前端只能在末尾收到整段文本。
+                for raw_line in resp.iter_lines(decode_unicode=True, chunk_size=1):
                     if time.time() - start_time > timeout_seconds:
                         break
                     line_count += 1
@@ -575,7 +576,8 @@ class AnythingLLMClient:
                 raise RuntimeError(f"AnythingLLM 返回 {resp.status_code}")
 
             try:
-                for raw_line in resp.iter_lines(decode_unicode=True):
+                # AnythingLLM 会返回很多很小的 SSE 片段，显式降低缓冲避免前端只能在末尾收到整段文本。
+                for raw_line in resp.iter_lines(decode_unicode=True, chunk_size=1):
                     if not raw_line:
                         continue
                     line = raw_line.strip()
