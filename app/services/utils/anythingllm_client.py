@@ -558,15 +558,17 @@ class AnythingLLMClient:
         mode: str = "chat",
     ):
         """向 Thread 发送消息并流式 yield 文本片段（生成器）。"""
-        url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/chat"
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/stream-chat"
         payload: Dict[str, Any] = {
             "message": message,
             "mode": mode,
         }
         try:
+            headers = self._json_headers(user_id)
+            headers["accept"] = "text/event-stream"
             resp = self.session.post(
                 url,
-                headers=self._json_headers(user_id),
+                headers=headers,
                 json=payload,
                 timeout=self.config.timeout,
                 stream=True,
@@ -576,6 +578,8 @@ class AnythingLLMClient:
                 raise RuntimeError(f"AnythingLLM 返回 {resp.status_code}")
 
             try:
+                # AnythingLLM stream-chat 未显式附带 charset，requests 会默认 ISO-8859-1，需强制按 UTF-8 解码。
+                resp.encoding = "utf-8"
                 # AnythingLLM 会返回很多很小的 SSE 片段，显式降低缓冲避免前端只能在末尾收到整段文本。
                 for raw_line in resp.iter_lines(decode_unicode=True, chunk_size=1):
                     if not raw_line:
