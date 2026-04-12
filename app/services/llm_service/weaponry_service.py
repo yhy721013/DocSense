@@ -43,6 +43,17 @@ def _translate_if_needed(text: str) -> str:
 # source 映射
 # ---------------------------------------------------------------------------
 
+def _strip_document_metadata(text: str) -> str:
+    """去除 AnythingLLM chunk 文本中的 <document_metadata>...</document_metadata> 前缀。"""
+    if not text:
+        return ""
+    tag_end = "</document_metadata>"
+    idx = text.find(tag_end)
+    if idx != -1:
+        return text[idx + len(tag_end):].strip()
+    return text.strip()
+
+
 def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: str = "") -> Dict[str, Any]:
     """将 AnythingLLM 的 source 对象映射为甲方 analyseDataSource 格式。
 
@@ -52,7 +63,7 @@ def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: st
     - time: 得到解析结果的时间
     - translate: 对原文片段的翻译
     """
-    chunk_text = source.get("text", "")
+    chunk_text = _strip_document_metadata(source.get("text", ""))
     return {
         "content": text_response,
         "source": chunk_text,
@@ -177,21 +188,28 @@ def _query_input_field(
         return filled
 
     text_response = result.get("textResponse", "")
-    sources = result.get("sources", [])
 
     # 如果 LLM 回答"未找到"则视为空
     if "未找到" in text_response:
         logger.info("字段 [%s] LLM返回: 未找到相关信息", field_name)
-        text_response = ""
-        sources = []
+        filled["analyseData"] = ""
+        filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+        return filled
+
+    preview_text = text_response.replace('\n', ' ')
+    if len(preview_text) > 40:
+        preview_text = preview_text[:40] + "..."
+
+    # 使用 vector-search API 获取真正匹配的 chunk 文本
+    # chat API 返回的 sources[].text 是文档 pageContent 的截断版，并非实际检索的 chunk
+    vs_results = client.vector_search(workspace_slug, prompt, user_id=user_id)
+    if vs_results:
+        logger.info("字段 [%s] 提取成功: %s (向量搜索匹配: %d 条)", field_name, preview_text, len(vs_results))
     else:
-        preview_text = text_response.replace('\n', ' ')
-        if len(preview_text) > 40:
-            preview_text = preview_text[:40] + "..."
-        logger.info("字段 [%s] 提取成功: %s (匹配来源: %d 条)", field_name, preview_text, len(sources))
+        logger.info("字段 [%s] 提取成功: %s (向量搜索无匹配，使用空来源)", field_name, preview_text)
 
     filled["analyseData"] = text_response
-    filled["analyseDataSource"] = _build_analyse_data_sources(sources, text_response=text_response)
+    filled["analyseDataSource"] = _build_analyse_data_sources(vs_results, text_response=text_response)
     return filled
 
 
