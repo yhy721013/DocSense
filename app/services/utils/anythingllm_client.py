@@ -313,6 +313,43 @@ class AnythingLLMClient:
         except Exception:
             return False
 
+    def vector_search(
+        self,
+        workspace_slug: str,
+        query: str,
+        user_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """在 Workspace 中执行向量搜索，返回匹配的 chunk 列表。
+
+        Returns:
+            匹配结果列表，每个元素为
+            ``{"id": str, "text": str, "metadata": dict, "distance": float, "score": float}``。
+            失败时返回空列表。
+        """
+        url = f"{self.config.base_url}/workspace/{workspace_slug}/vector-search"
+        payload = {"query": query}
+        try:
+            resp = self.session.post(
+                url,
+                headers=self._json_headers(user_id),
+                json=payload,
+                timeout=self.config.timeout,
+            )
+            if not resp.ok:
+                logger.error(
+                    "向量搜索失败 workspace=%s: %s %s",
+                    workspace_slug, resp.status_code, resp.text,
+                )
+                return []
+            body = resp.json()
+            results = body.get("results", [])
+            if not isinstance(results, list):
+                return []
+            return results
+        except Exception as e:
+            logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, e)
+            return []
+
     def upload_document(self, file_path: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.config.base_url}/document/upload"
         try:
