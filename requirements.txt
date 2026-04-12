@@ -10,6 +10,6 @@ pdfplumber==0.11.9
 reportlab==4.4.10
 pdf2docx==0.5.12
 markdown==3.10.2
-mineru==3.0.8
+mineru[all]==3.0.4
 argostranslate==1.11.0
 albumentations==2.0.8
