@@ -390,52 +390,79 @@ class MarkdownHandler:
             output_dir: str,
     ) -> str:
         """
-        处理 HTML 中的图片路径（复制图片并更新路径）
+        处理 HTML 中的图片路径（将图片转换为 Base64 编码嵌入 HTML）
         :param html_content: HTML 内容
         :param markdown_dir: Markdown 文件所在目录
         :param output_dir: 输出目录
         :return: 处理后的 HTML
         """
+        import base64
+
         # 【关键修改】找到所有图片引用
         img_pattern = r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>'
 
         # 【新增】统计图片数量
         img_matches = re.findall(img_pattern, html_content)
         if img_matches:
-            print(f"\n[图片处理] 发现 {len(img_matches)} 张图片，开始复制...\n")
+            print(f"\n[图片处理] 发现 {len(img_matches)} 张图片，开始转换为 Base64 编码...\n")
 
-        def replace_img_path(match):
+        def replace_img_with_base64(match):
             img_tag = match.group(0)
             img_src = match.group(1)
 
-            # 如果是相对路径
+            # 如果是相对路径或本地绝对路径
             if not img_src.startswith(('http://', 'https://', 'data:')):
                 # 构建源图片路径
                 src_img_path = os.path.join(markdown_dir, img_src)
 
-                # 如果图片存在，复制到输出目录
+                # 如果图片存在，转换为 Base64 编码
                 if os.path.exists(src_img_path):
-                    img_name = os.path.basename(img_src)
-                    dest_img_path = os.path.join(output_dir, img_name)
-
-                    # 复制图片
                     try:
-                        shutil.copy2(src_img_path, dest_img_path)
-                        print(f"  ✓ [图片] 已复制：{img_name}")
+                        # 读取图片二进制数据
+                        with open(src_img_path, 'rb') as img_file:
+                            img_data = img_file.read()
 
-                        # 更新 HTML 中的路径为输出目录中的相对路径
-                        new_img_tag = img_tag.replace(img_src, img_name)
+                        # 转换为 Base64 编码
+                        img_base64 = base64.b64encode(img_data).decode('utf-8')
+
+                        # 检测图片格式（根据文件扩展名）
+                        img_ext = os.path.splitext(img_src)[1].lower()
+                        mime_type_map = {
+                            '.jpg': 'image/jpeg',
+                            '.jpeg': 'image/jpeg',
+                            '.png': 'image/png',
+                            '.gif': 'image/gif',
+                            '.webp': 'image/webp',
+                            '.svg': 'image/svg+xml',
+                            '.bmp': 'image/bmp',
+                        }
+                        mime_type = mime_type_map.get(img_ext, 'image/png')
+
+                        # 构建 data URI
+                        data_uri = f'data:{mime_type};base64,{img_base64}'
+
+                        # 更新 img 标签的 src 属性
+                        new_img_tag = img_tag.replace(f'src="{img_src}"', f'src="{data_uri}"')
+                        new_img_tag = new_img_tag.replace(f"src='{img_src}'", f'src="{data_uri}"')
+
+                        img_name = os.path.basename(img_src)
+                        img_size_kb = len(img_data) / 1024
+                        print(f"  ✓ [图片] 已转换：{img_name} ({img_size_kb:.2f} KB)")
+
                         return new_img_tag
-                    except Exception as e:
-                        print(f"  ✗ [图片复制失败] {img_name}: {e}")
 
+                    except Exception as e:
+                        print(f"  ✗ [图片转换失败] {os.path.basename(img_src)}: {e}")
+                        return img_tag
+
+            # 对于网络图片或已经是 data URI 的图片，保持不变
             return img_tag
 
-        # 替换所有图片路径
-        processed_html = re.sub(img_pattern, replace_img_path, html_content)
+        # 替换所有图片路径为 Base64 编码
+        processed_html = re.sub(img_pattern, replace_img_with_base64, html_content)
 
         if img_matches:
-            print(f"\n[完成] 图片处理完毕\n")
+            print(f"\n[完成] 图片 Base64 编码处理完毕\n")
 
         return processed_html
 
