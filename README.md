@@ -94,6 +94,10 @@ docs/接口文档/
   知识谱系解析.md
 scripts/                            # 本地联调脚本
 tests/                              # unittest 测试用例
+clean.py                            # 清理测试数据
+environment.yml                     # Conda环境依赖（Conda安装）
+requirements.txt                    # Conda环境依赖（Pip安装）
+requirements-venv.txt               # Venv环境依赖（Pip安装）
 ```
 
 ## 4. 任务模型与状态
@@ -179,14 +183,18 @@ tests/                              # unittest 测试用例
 
 1. 安装依赖
 
+Conda环境使用：
+
 ```bash
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate DocSense
+uv pip install -r requirements.txt
 ```
 
-离线环境可使用：
+Venv环境可使用：
 
 ```bash
-pip install -r requirements-offline.txt
+pip install -r requirements-venv.txt
 ```
 
 2. 配置环境变量（建议使用 `.env`）

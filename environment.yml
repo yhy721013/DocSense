@@ -1,0 +1,16 @@
+name: DocSense
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - flask
+  - python-dotenv
+  - pymupdf
+  - requests
+  - python-docx
+  - reportlab
+  - httpx
+  - markdown
+  - pip
+  - uv

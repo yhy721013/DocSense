@@ -1,15 +1,5 @@
-Flask==3.1.2
-requests==2.32.5
-PyMuPDF==1.26.7
-Flask-Sock==0.7.0
-# 环境变量加载
-python-dotenv==1.2.2
-# 翻译器 translator 的依赖
-python-docx==1.2.0
-pdfplumber==0.11.9
-reportlab==4.4.10
-pdf2docx==0.5.12
-markdown==3.10.2
-mineru[all]==3.0.4
-argostranslate==1.11.0
-albumentations==2.0.8
+flask-sock
+pdfplumber
+pdf2docx
+mineru[core]
+argostranslate
