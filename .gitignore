@@ -1,5 +1,5 @@
 # 测试工具和示例文件 | Test fixtures and sample files
-tests/fixtures/files/sample.txt
+tests/fixtures/
 
 # Python 运行时和缓存文件 | Python runtime and cache files
 __pycache__/
@@ -17,6 +17,7 @@ venv/
 .vscode/
 .cursor/
 .cursorignore
+.DS_Store
 
 # 环境变量配置文件 | Environment variables
 .env

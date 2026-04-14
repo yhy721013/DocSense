@@ -74,6 +74,19 @@ class DatabaseService:
             cursor = conn.execute("SELECT * FROM documents WHERE file_name = ?", (file_name,))
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def list_document_records(self) -> list[dict]:
+        """按文件名升序返回全部文档记录。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT file_name, architecture_id, anything_doc_id, doc_path
+                FROM documents
+                ORDER BY file_name ASC
+                """
+            )
+            return [dict(row) for row in cursor.fetchall()]
             
     def delete_document_record(self, file_name: str):
         """当文件需要删除时，从数据库抹掉该记录"""
@@ -167,6 +180,26 @@ class ChatDatabaseService:
             record["file_names"] = json.loads(record["file_names"])
             return record
 
+    def list_chats(self) -> list[dict]:
+        """按最近更新时间倒序返回全部对话记录。"""
+        import json
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT chat_id, file_names, workspace_slug, thread_slug, created_at, updated_at
+                FROM chats
+                ORDER BY updated_at DESC
+                """
+            )
+            rows = []
+            for row in cursor.fetchall():
+                record = dict(row)
+                record["file_names"] = json.loads(record["file_names"])
+                rows.append(record)
+            return rows
+
     def update_file_names(self, chat_id: str, file_names: list[str]) -> None:
         import json
         from datetime import datetime, timezone
@@ -188,4 +221,3 @@ class ChatDatabaseService:
                 conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
                 conn.commit()
         logger.info("已删除对话记录: chat_id=%s", chat_id)
-

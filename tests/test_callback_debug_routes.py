@@ -91,6 +91,44 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertEqual(data["payload"]["businessType"], "report")
         self.assertEqual(data["payload"]["data"]["reportId"], 132)
 
+    def test_callback_api_returns_payload_for_weaponry_callback(self):
+        payload = {
+            "businessType": "weaponry",
+            "data": {
+                "status": "2",
+                "architectureId": 10502,
+                "weaponryTemplateFieldList": [
+                    {
+                        "fieldName": "舰级名称",
+                        "fieldType": "INPUT",
+                        "fieldDescription": "根据文档提取舰级名称",
+                        "analyseData": "尼米兹级",
+                        "analyseDataSource": [
+                            {
+                                "content": "舰级名称为尼米兹级",
+                                "source": "CVN 文档片段",
+                                "time": "2026-04-07 12:00:00",
+                                "translate": "舰级名称为尼米兹级",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "msg": "解析成功",
+        }
+        self.callback_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        response = self.client.get("/debug/api/callback")
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["payload"]["businessType"], "weaponry")
+        self.assertEqual(data["payload"]["data"]["architectureId"], 10502)
+
     def test_callback_api_returns_invalid_json_state(self):
         self.callback_path.write_text("{invalid", encoding="utf-8")
 
@@ -183,3 +221,15 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertIn('id="preview-sections"', html)
         self.assertIn('id="structured-content"', html)
         self.assertIn('id="raw-json"', html)
+
+    def test_callback_page_contains_renderer_hooks_for_weaponry(self):
+        response = self.client.get("/debug/callback")
+        html = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("function countWeaponryStats(fields)", html)
+        self.assertIn("function renderWeaponrySources(sources)", html)
+        self.assertIn("function renderWeaponryField(field)", html)
+        self.assertIn("function renderWeaponryPayload(payload)", html)
+        self.assertIn('if (result.payload.businessType === "weaponry")', html)
+        self.assertIn("renderWeaponryPayload(result.payload)", html)

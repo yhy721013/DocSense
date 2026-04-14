@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文件对话调试页</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      background: #fff;
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.04);
+    }
+
+    .session-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .session-item {
+      border: 1px solid #dbe3f0;
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+      cursor: pointer;
+      display: block;
+      box-sizing: border-box;
+      width: 100%;
+      text-align: left;
+      font: inherit;
+      color: inherit;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+
+    .session-item.active {
+      border-color: #0f172a;
+      background: #e2e8f0;
+    }
+
+    .form-row {
+      display: grid;
+      gap: 6px;
+    }
+
+    .context-row {
+      display: grid;
+      gap: 12px;
+    }
+
+    .context-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .selected-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .file-chip,
+    .empty-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #334155;
+      font: inherit;
+    }
+
+    .file-chip {
+      cursor: pointer;
+    }
+
+    .file-chip span,
+    .empty-chip {
+      color: #64748b;
+      font-size: 13px;
+    }
+
+    .file-chip strong {
+      color: #0f172a;
+      font-size: 13px;
+    }
+
+    .file-picker-panel {
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .file-option-list {
+      display: grid;
+      gap: 8px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .file-option {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+    }
+
+    .file-option small {
+      grid-column: 2;
+      color: #64748b;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .chat-shell {
+      display: grid;
+      gap: 16px;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      min-height: 720px;
+    }
+
+    .chat-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    .toolbar-title h2,
+    .toolbar-title p {
+      margin: 0;
+    }
+
+    .toolbar-title p {
+      margin-top: 6px;
+      color: #64748b;
+    }
+
+    .toolbar-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .chat-context {
+      display: grid;
+      gap: 16px;
+      padding: 16px;
+      border: 1px solid #dbe3f0;
+      border-radius: 16px;
+      background: #f8fafc;
+    }
+
+    .chat-id-row {
+      max-width: 420px;
+    }
+
+    .chat-scroll-area {
+      min-height: 320px;
+      max-height: 52vh;
+      overflow: auto;
+      padding: 16px 10px 16px 16px;
+      border: 1px solid #dbe3f0;
+      border-radius: 20px;
+      background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+    }
+
+    .chat-composer {
+      display: grid;
+      gap: 12px;
+      padding-top: 8px;
+      border-top: 1px solid #e2e8f0;
+    }
+
+    .chat-composer .button-row {
+      justify-content: flex-end;
+    }
+
+    .button {
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 18px;
+      background: #0f172a;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    .button.secondary {
+      background: #475569;
+    }
+
+    .button.danger {
+      background: #b91c1c;
+    }
+
+    .message-list,
+    .event-list {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .message-item,
+    .event-item {
+      border-radius: 12px;
+      padding: 12px;
+      background: #f8fafc;
+    }
+
+    .message-item {
+      max-width: 88%;
+      border: 1px solid transparent;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+    }
+
+    .message-item strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .empty-thread {
+      max-width: none;
+      color: #64748b;
+      text-align: center;
+      background: #fff;
+      border-color: #dbe3f0;
+      box-shadow: none;
+    }
+
+    .user-message {
+      margin-left: auto;
+      background: #dbeafe;
+      border-color: #bfdbfe;
+    }
+
+    .assistant-message {
+      background: #ffffff;
+      border-color: #dbe3f0;
+    }
+
+    .streaming-message {
+      border-style: dashed;
+      border-color: #93c5fd;
+    }
+
+    .debug-details {
+      border-top: 1px solid #e2e8f0;
+      padding-top: 12px;
+    }
+
+    .debug-details summary {
+      cursor: pointer;
+      color: #475569;
+      font-weight: 600;
+      list-style: none;
+    }
+
+    .debug-details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .debug-details[open] summary {
+      margin-bottom: 12px;
+    }
+
+    textarea,
+    input,
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+    }
+
+    textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <p>DocSense Local Debug</p>
+        <h1>文件对话调试页</h1>
+      </div>
+      <button id="refresh-button" class="button secondary" type="button">刷新本地数据</button>
+    </header>
+
+    <section id="page-message" class="panel">等待加载...</section>
+
+    <div class="layout">
+      <aside class="panel">
+        <h2>本地会话列表</h2>
+        <div id="chat-session-list" class="session-list"></div>
+      </aside>
+
+      <section id="chat-shell" class="panel chat-shell">
+        <header id="chat-toolbar" class="chat-toolbar">
+          <div class="toolbar-title">
+            <h2>聊天</h2>
+            <p>面向文件内容的本地联调视图</p>
+          </div>
+          <div class="toolbar-actions">
+            <button id="load-history-button" class="button secondary" type="button">加载历史</button>
+            <button id="delete-button" class="button danger" type="button">删除当前会话</button>
+          </div>
+        </header>
+
+        <section id="chat-context" class="chat-context">
+          <label class="form-row chat-id-row">
+            <span>chatId</span>
+            <input id="chat-id-input" type="text" placeholder="请输入 chatId">
+          </label>
+          <section class="context-row">
+            <div class="context-header">
+              <span>已解析文件</span>
+              <button id="toggle-file-picker-button" class="button secondary" type="button">添加文件</button>
+            </div>
+            <div id="selected-files" class="selected-files"></div>
+            <div id="file-picker-panel" class="file-picker-panel" hidden>
+              <div id="available-file-options" class="file-option-list"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="chat-scroll-area" class="chat-scroll-area">
+          <div id="chat-thread" class="message-list"></div>
+        </section>
+
+        <section id="chat-composer" class="chat-composer">
+          <label class="form-row">
+            <span>message</span>
+            <textarea id="chat-message-input" placeholder="请输入本轮问题"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="send-button" class="button" type="button">发送消息</button>
+          </div>
+          <details id="debug-details" class="debug-details">
+            <summary id="debug-summary">查看调试详情</summary>
+            <div id="chat-events" class="event-list"></div>
+          </details>
+        </section>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const BOOTSTRAP_URL = "/debug/api/chat/bootstrap";
+    const CHAT_SEND_URL = "/llm/chat";
+    const CHAT_HISTORY_URL = "/llm/chat/history";
+    const CHAT_DELETE_URL = "/llm/chat/delete";
+    const pageMessage = document.getElementById("page-message");
+    const refreshButton = document.getElementById("refresh-button");
+    const sessionList = document.getElementById("chat-session-list");
+    const chatIdInput = document.getElementById("chat-id-input");
+    const toggleFilePickerButton = document.getElementById("toggle-file-picker-button");
+    const selectedFilesNode = document.getElementById("selected-files");
+    const filePickerPanel = document.getElementById("file-picker-panel");
+    const availableFileOptionsNode = document.getElementById("available-file-options");
+    const messageInput = document.getElementById("chat-message-input");
+    const sendButton = document.getElementById("send-button");
+    const loadHistoryButton = document.getElementById("load-history-button");
+    const deleteButton = document.getElementById("delete-button");
+    const chatScrollArea = document.getElementById("chat-scroll-area");
+    const threadNode = document.getElementById("chat-thread");
+    const debugDetails = document.getElementById("debug-details");
+    const eventsNode = document.getElementById("chat-events");
+
+    const state = {
+      sessions: [],
+      availableFiles: [],
+      activeChatId: "",
+      historyMessages: [],
+      streamEvents: [],
+      streamingReply: "",
+      isStreaming: false,
+      selectedFileNames: [],
+      isFilePickerOpen: false,
+    };
+
+    function setMessage(text) {
+      pageMessage.textContent = text;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function toggleFilePicker() {
+      state.isFilePickerOpen = !state.isFilePickerOpen;
+      filePickerPanel.hidden = !state.isFilePickerOpen;
+      toggleFilePickerButton.textContent = state.isFilePickerOpen ? "收起文件" : "添加文件";
+    }
+
+    function setStreamingState(nextValue) {
+      state.isStreaming = nextValue;
+      sendButton.disabled = nextValue;
+      deleteButton.disabled = nextValue;
+      loadHistoryButton.disabled = nextValue;
+      refreshButton.disabled = nextValue;
+    }
+
+    function renderThread() {
+      const messages = [...state.historyMessages];
+      if (state.streamingReply) {
+        messages.push({ role: "assistant", content: state.streamingReply, streaming: true });
+      }
+
+      if (!messages.length) {
+        threadNode.innerHTML = '<div class="message-item empty-thread">暂无消息</div>';
+        return;
+      }
+
+      threadNode.innerHTML = messages
+        .map((item) => {
+          const roleClass = item.role === "user" ? "message-item user-message" : "message-item assistant-message";
+          const streamingClass = item.streaming ? " streaming-message" : "";
+          return `<div class="${roleClass}${streamingClass}"><strong>${escapeHtml(item.role)}</strong><pre>${escapeHtml(item.content)}</pre></div>`;
+        })
+        .join("");
+      requestAnimationFrame(() => {
+        chatScrollArea.scrollTop = chatScrollArea.scrollHeight;
+      });
+    }
+
+    function renderDebugEventList() {
+      if (!state.streamEvents.length) {
+        eventsNode.innerHTML = '<div class="event-item">暂无调试事件</div>';
+        return;
+      }
+
+      eventsNode.innerHTML = state.streamEvents
+        .map((item) => `<div class="event-item"><strong>${escapeHtml(item.eventName)}</strong><pre>${escapeHtml(JSON.stringify(item.data, null, 2))}</pre></div>`)
+        .join("");
+    }
+
+    function renderSelectedFiles() {
+      if (!state.selectedFileNames.length) {
+        selectedFilesNode.innerHTML = '<div class="empty-chip">尚未选择文件</div>';
+        return;
+      }
+
+      selectedFilesNode.innerHTML = state.selectedFileNames
+        .map((fileName) => {
+          const file = state.availableFiles.find((item) => item.fileName === fileName);
+          const detail = file ? `architectureId=${file.architectureId}` : "未找到文件信息";
+          return `<button type="button" class="file-chip" data-file-name="${escapeHtml(fileName)}">${escapeHtml(fileName)}<span>${escapeHtml(detail)}</span><strong>移除</strong></button>`;
+        })
+        .join("");
+
+      selectedFilesNode.querySelectorAll(".file-chip").forEach((node) => {
+        node.addEventListener("click", () => removeSelectedFile(node.dataset.fileName || ""));
+      });
+    }
+
+    function renderFilePickerOptions(files) {
+      if (!files.length) {
+        availableFileOptionsNode.innerHTML = '<div class="event-item">暂无可选文件</div>';
+        return;
+      }
+
+      availableFileOptionsNode.innerHTML = files
+        .map((item) => {
+          const checked = state.selectedFileNames.includes(item.fileName) ? "checked" : "";
+          return `<label class="file-option"><input type="checkbox" data-file-name="${escapeHtml(item.fileName)}" ${checked}><span>${escapeHtml(item.fileName)}</span><small>architectureId=${escapeHtml(item.architectureId)}</small></label>`;
+        })
+        .join("");
+
+      availableFileOptionsNode.querySelectorAll('input[type="checkbox"]').forEach((node) => {
+        node.addEventListener("change", () => toggleSelectedFile(node.dataset.fileName || ""));
+      });
+    }
+
+    function toggleSelectedFile(fileName) {
+      if (!fileName) {
+        return;
+      }
+
+      if (state.selectedFileNames.includes(fileName)) {
+        state.selectedFileNames = state.selectedFileNames.filter((item) => item !== fileName);
+      } else {
+        state.selectedFileNames = [...state.selectedFileNames, fileName];
+      }
+
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
+    }
+
+    function removeSelectedFile(fileName) {
+      state.selectedFileNames = state.selectedFileNames.filter((item) => item !== fileName);
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
+    }
+
+    async function loadHistory() {
+      const chatId = chatIdInput.value.trim();
+      if (!chatId) {
+        setMessage("请先输入或选择 chatId");
+        return;
+      }
+
+      const response = await fetch(`${CHAT_HISTORY_URL}?chatId=${encodeURIComponent(chatId)}`);
+      const payload = await response.json();
+      if (!response.ok) {
+        setMessage(payload.error || "加载历史失败");
+        return;
+      }
+
+      state.historyMessages = payload.messages || [];
+      state.streamingReply = "";
+      state.activeChatId = payload.chatId || chatId;
+      renderThread();
+      setMessage(`已加载会话 ${state.activeChatId} 的历史记录`);
+    }
+
+    async function sendCurrentMessage() {
+      if (state.isStreaming) {
+        setMessage("当前流式响应尚未结束");
+        return;
+      }
+
+      const chatId = chatIdInput.value.trim();
+      const fileNames = [...state.selectedFileNames];
+      const message = messageInput.value.trim();
+      if (!chatId) {
+        setMessage("chatId 不能为空");
+        return;
+      }
+      if (!fileNames.length) {
+        setMessage("请至少选择一个已解析文件");
+        return;
+      }
+      if (!message) {
+        setMessage("message 不能为空");
+        return;
+      }
+
+      setStreamingState(true);
+      setMessage(`正在发送会话 ${chatId}...`);
+      state.activeChatId = chatId;
+      state.streamEvents = [];
+      state.streamingReply = "";
+      debugDetails.open = false;
+      state.historyMessages = [...state.historyMessages, { role: "user", content: message }];
+      renderThread();
+      renderDebugEventList();
+
+      const response = await fetch(CHAT_SEND_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          businessType: "chat",
+          params: { chatId, fileNames, message },
+        }),
+      });
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        setStreamingState(false);
+        setMessage(errorPayload.error || "发送失败");
+        return;
+      }
+
+      if (!response.body) {
+        setStreamingState(false);
+        setMessage("流式响应不可用");
+        return;
+      }
+
+      await consumeSseStream(response);
+      messageInput.value = "";
+    }
+
+    async function consumeSseStream(response) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        blocks.forEach(handleSseBlock);
+        if (done) {
+          break;
+        }
+      }
+
+      if (buffer.trim()) {
+        handleSseBlock(buffer);
+      }
+    }
+
+    function handleSseBlock(block) {
+      let eventName = "message";
+      const dataLines = [];
+
+      block.split(/\r?\n/).forEach((line) => {
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trim());
+        }
+      });
+
+      let data = {};
+      try {
+        data = JSON.parse(dataLines.join("\n") || "{}");
+      } catch (_error) {
+        data = { raw: dataLines.join("\n") };
+      }
+
+      void handleSseEvent(eventName, data);
+    }
+
+    async function handleSseEvent(eventName, data) {
+      state.streamEvents.push({ eventName, data });
+      renderDebugEventList();
+
+      if (eventName === "chatInfo" && data.chatId) {
+        state.activeChatId = data.chatId;
+        chatIdInput.value = data.chatId;
+        setMessage(`已连接会话 ${data.chatId}`);
+        return;
+      }
+
+      if (eventName === "textChunk") {
+        state.streamingReply += data.content || "";
+        renderThread();
+        return;
+      }
+
+      if (eventName === "done") {
+        if (state.streamingReply) {
+          state.historyMessages = [...state.historyMessages, { role: "assistant", content: state.streamingReply }];
+          state.streamingReply = "";
+        }
+        renderThread();
+        setStreamingState(false);
+        setMessage(`会话 ${state.activeChatId} 已完成`);
+        await loadBootstrap();
+        return;
+      }
+
+      if (eventName === "error") {
+        debugDetails.open = true;
+        renderThread();
+        setStreamingState(false);
+        setMessage(data.error || "流式响应失败");
+      }
+    }
+
+    function renderSessionList(sessions) {
+      if (!sessions.length) {
+        sessionList.innerHTML = "<div class=\"session-item\">暂无本地会话</div>";
+        return;
+      }
+
+      sessionList.innerHTML = "";
+      sessions.forEach((item) => {
+        const node = document.createElement("button");
+        node.type = "button";
+        node.className = `session-item${item.chatId === state.activeChatId ? " active" : ""}`;
+        node.innerHTML = `<strong>${escapeHtml(item.chatId)}</strong><div>文件数：${item.fileNames.length}</div><div>更新时间：${escapeHtml(item.updatedAt)}</div>`;
+        node.addEventListener("click", async () => {
+          if (state.isStreaming) {
+            setMessage("当前流式响应尚未结束");
+            return;
+          }
+          state.activeChatId = item.chatId;
+          chatIdInput.value = item.chatId;
+          state.selectedFileNames = [...item.fileNames];
+          state.streamingReply = "";
+          renderSelectedFiles();
+          renderFilePickerOptions(state.availableFiles);
+          state.streamEvents = [];
+          renderDebugEventList();
+          renderSessionList(state.sessions);
+          await loadHistory();
+        });
+        sessionList.appendChild(node);
+      });
+    }
+
+    async function loadBootstrap() {
+      setMessage("正在加载本地数据...");
+      const response = await fetch(BOOTSTRAP_URL);
+      const result = await response.json();
+      state.sessions = result.data?.sessions || [];
+      state.availableFiles = result.data?.availableFiles || [];
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
+      renderSessionList(state.sessions);
+      renderThread();
+      renderDebugEventList();
+      setMessage(result.message || "读取完成");
+    }
+
+    async function deleteCurrentChat() {
+      if (state.isStreaming) {
+        setMessage("当前流式响应尚未结束");
+        return;
+      }
+
+      const chatId = chatIdInput.value.trim();
+      if (!chatId) {
+        setMessage("请先输入或选择 chatId");
+        return;
+      }
+
+      const response = await fetch(CHAT_DELETE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          businessType: "chat",
+          params: { chatId },
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        setMessage(payload.error || "删除失败");
+        return;
+      }
+
+      state.activeChatId = "";
+      state.historyMessages = [];
+      state.streamEvents = [];
+      state.streamingReply = "";
+      state.selectedFileNames = [];
+      chatIdInput.value = "";
+      messageInput.value = "";
+      renderThread();
+      renderSelectedFiles();
+      renderFilePickerOptions(state.availableFiles);
+      renderDebugEventList();
+      setMessage(`会话 ${payload.chatId} 已删除`);
+      await loadBootstrap();
+    }
+
+    refreshButton.addEventListener("click", loadBootstrap);
+    toggleFilePickerButton.addEventListener("click", toggleFilePicker);
+    sendButton.addEventListener("click", sendCurrentMessage);
+    loadHistoryButton.addEventListener("click", loadHistory);
+    deleteButton.addEventListener("click", deleteCurrentChat);
+    window.addEventListener("DOMContentLoaded", loadBootstrap);
+  </script>
+</body>
+</html>

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import os
 
-# 在导入 app 之前加载 .env
+# 在导入 app 之前加载 .env。
+# 已显式传入的环境变量优先级更高，避免本地测试或启动脚本指定的端口被 .env 覆盖。
 from dotenv import load_dotenv
-load_dotenv(override=True)
+load_dotenv()
 
 from app import create_app
 
