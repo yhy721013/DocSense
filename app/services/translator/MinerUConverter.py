@@ -39,7 +39,7 @@ class MinerUConverter:
             extract_images: bool = True,
             formula_enable: bool = True,
             table_enable: bool = True,
-            backend: str = "hybrid-auto-engine",
+            backend: str = "pipeline",
             api_url: Optional[str] = None,
             server_url: Optional[str] = None,
             output_subdir: Optional[str] = None
