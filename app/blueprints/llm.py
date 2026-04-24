@@ -582,13 +582,18 @@ def llm_chat():
     chat_id = chat_id.strip()
 
     file_names = params.get("fileNames")
-    if not isinstance(file_names, list) or not file_names:
-        return jsonify({"error": "fileNames不能为空"}), 400
+    if not isinstance(file_names, list):
+        return jsonify({"error": "fileNames必须为数组"}), 400
 
     message = params.get("message")
     if not isinstance(message, str) or not message.strip():
         return jsonify({"error": "message不能为空"}), 400
     message = message.strip()
+
+    # 判断新旧对话：新对话要求 fileNames 非空，继续对话允许为空
+    existing_chat = chat_db.get_chat(chat_id)
+    if existing_chat is None and not file_names:
+        return jsonify({"error": "新对话的fileNames不能为空"}), 400
 
     # 校验引用文件均已解析
     for fn in file_names:

@@ -41,12 +41,13 @@ class ChatRouteValidationTests(unittest.TestCase):
         })
         self.assertEqual(resp.status_code, 400)
 
-    def test_chat_rejects_empty_file_names(self):
+    def test_chat_rejects_empty_file_names_for_new_chat(self):
         resp = self.client.post("/llm/chat", json={
             "businessType": "chat",
             "params": {"chatId": "c1", "fileNames": [], "message": "hi"},
         })
         self.assertEqual(resp.status_code, 400)
+        self.assertIn("新对话", resp.get_json()["error"])
 
     def test_chat_rejects_empty_message(self):
         resp = self.client.post("/llm/chat", json={
@@ -63,6 +64,21 @@ class ChatRouteValidationTests(unittest.TestCase):
         })
         self.assertEqual(resp.status_code, 404)
         self.assertIn("尚未解析", resp.get_json()["error"])
+
+    def test_chat_allows_empty_file_names_for_existing_chat(self):
+        """已有会话时传空 fileNames 不报 400（增量语义：无新增文件）。"""
+        self.chat_db.create_chat("c-exist", ["a.pdf"], "ws-slug", "th-slug")
+        # 仍然会走到 handle_chat_stream，但不会报参数错误
+        # 这里 mock handle_chat_stream 以避免实际调用 AnythingLLM
+        with patch("app.blueprints.llm.handle_chat_stream", return_value=iter([
+            'event: chatInfo\ndata: {"chatId": "c-exist", "isNewChat": false}\n\n',
+            'event: done\ndata: {"chatId": "c-exist"}\n\n',
+        ])):
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {"chatId": "c-exist", "fileNames": [], "message": "继续聊"},
+            })
+        self.assertEqual(resp.status_code, 200)
 
     # ── GET /llm/chat/history 参数校验 ──
 

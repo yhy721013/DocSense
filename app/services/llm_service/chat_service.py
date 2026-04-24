@@ -75,20 +75,17 @@ def handle_chat_stream(
             workspace_slug = existing_chat["workspace_slug"]
             thread_slug = existing_chat["thread_slug"]
 
-            # 对比 fileNames，增量更新嵌入
+            # 增量追加新引用文件（不再支持移除）
             old_set = set(existing_chat["file_names"])
-            new_set = set(file_names)
-            to_add = new_set - old_set
-            to_remove = old_set - new_set
+            to_add = [fn for fn in file_names if fn not in old_set]
 
-            if to_add or to_remove:
-                add_paths = _resolve_doc_paths(kb_service, list(to_add)) if to_add else []
-                remove_paths = _resolve_doc_paths(kb_service, list(to_remove)) if to_remove else []
-                success = client.update_embeddings_batch(workspace_slug, adds=add_paths or None, deletes=remove_paths or None)
+            if to_add:
+                add_paths = _resolve_doc_paths(kb_service, to_add)
+                success = client.update_embeddings_batch(workspace_slug, adds=add_paths or None)
                 if not success:
                     yield _format_sse_event("error", {"error": "更新工作区文件引用失败"})
                     return
-                chat_db.update_file_names(chat_id, file_names)
+                chat_db.append_file_names(chat_id, to_add)
 
             is_new_chat = False
 
