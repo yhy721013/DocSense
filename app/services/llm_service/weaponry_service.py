@@ -16,6 +16,7 @@ from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.translation_service import get_translation_service
 from app.services.core.prompts import (
     build_input_field_prompt,
+    build_chunk_based_field_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,45 +172,75 @@ def _query_input_field(
     field_name = field.get("fieldName", "")
     field_desc = field.get("fieldDescription", "")
 
+    # 步骤 1：直接执行 vector_search 拿到相关的 Chunks
     prompt = build_input_field_prompt(field_name, field_desc)
-    result = client.send_prompt_to_thread(
-        workspace_slug,
-        thread_slug,
-        prompt,
-        user_id=user_id,
-        mode="query",
-    )
+    vs_results = client.vector_search(workspace_slug, prompt, user_id=user_id)
 
     filled = dict(field)
-    if result is None:
-        logger.warning("字段 [%s] 检索无返回内容 (result is None)", field_name)
+    if not vs_results:
+        logger.info("字段 [%s] 向量搜索无匹配，使用空来源", field_name)
         filled["analyseData"] = ""
         filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
 
-    text_response = result.get("textResponse", "")
+    # 按照分数降序排列
+    def _get_score(src: Dict[str, Any]) -> float:
+        try:
+            return float(src.get("score", 0))
+        except (TypeError, ValueError):
+            return 0.0
+            
+    sorted_chunks = sorted(vs_results, key=_get_score, reverse=True)
 
-    # 如果 LLM 回答"未找到"则视为空
-    if "未找到" in text_response:
-        logger.info("字段 [%s] LLM返回: 未找到相关信息", field_name)
+    data_sources = []
+    first_valid_content = ""
+
+    for chunk in sorted_chunks:
+        chunk_text = _strip_document_metadata(chunk.get("text", ""))
+        if not chunk_text:
+            continue
+            
+        chunk_prompt = build_chunk_based_field_prompt(field_name, chunk_text, field_desc)
+        
+        # 步骤 2：对每个 Chunk，使用 chat 模式向模型提问
+        result = client.send_prompt_to_thread(
+            workspace_slug,
+            thread_slug,
+            chunk_prompt,
+            user_id=user_id,
+            mode="chat",
+        )
+        
+        if not result:
+            continue
+            
+        text_response = result.get("textResponse", "").strip()
+        
+        # 如果 LLM 回答"未找到"则过滤掉
+        if "未找到" in text_response or not text_response:
+            continue
+            
+        # 组装这一条来源
+        mapped_source = _map_source_to_analyse_data_source(chunk, text_response=text_response)
+        data_sources.append(mapped_source)
+        
+        if not first_valid_content:
+            first_valid_content = text_response
+
+    if not data_sources:
+        logger.info("字段 [%s] 提取成功: 所有相关 Chunk 均未能提取出有效信息", field_name)
         filled["analyseData"] = ""
         filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
 
-    preview_text = text_response.replace('\n', ' ')
+    preview_text = first_valid_content.replace('\n', ' ')
     if len(preview_text) > 40:
         preview_text = preview_text[:40] + "..."
-
-    # 使用 vector-search API 获取真正匹配的 chunk 文本
-    # chat API 返回的 sources[].text 是文档 pageContent 的截断版，并非实际检索的 chunk
-    vs_results = client.vector_search(workspace_slug, prompt, user_id=user_id)
-    if vs_results:
-        logger.info("字段 [%s] 提取成功: %s (向量搜索匹配: %d 条)", field_name, preview_text, len(vs_results))
-    else:
-        logger.info("字段 [%s] 提取成功: %s (向量搜索无匹配，使用空来源)", field_name, preview_text)
-
-    filled["analyseData"] = text_response
-    filled["analyseDataSource"] = _build_analyse_data_sources(vs_results, text_response=text_response)
+        
+    logger.info("字段 [%s] 提取成功: %s (有效 Chunk 数: %d)", field_name, preview_text, len(data_sources))
+    
+    filled["analyseData"] = first_valid_content
+    filled["analyseDataSource"] = data_sources
     return filled
 
 

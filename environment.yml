@@ -12,5 +12,6 @@ dependencies:
   - reportlab
   - httpx
   - markdown
+  - pytest
   - pip
   - uv
