@@ -164,3 +164,29 @@ def build_chunk_based_field_prompt(field_name: str, chunk_text: str, field_descr
         f"{chunk_text}\n"
         "【文本片段结束】"
     )
+
+
+def build_multi_chunk_based_field_prompt(field_name: str, chunks: list[str], field_description: str = "") -> str:
+    """构建基于多个 Chunk 的 INPUT 类型字段查询 Prompt。"""
+    desc_part = ""
+    if field_description:
+        desc_part = f"字段说明：{field_description}\n"
+    
+    chunks_text = ""
+    for idx, chunk in enumerate(chunks, 1):
+        chunks_text += f"第{idx}段Chunk是：\n{chunk}\n\n"
+
+    return (
+        f"请基于以下提供的文本片段，提取字段“{field_name}”的信息。\n"
+        f"{desc_part}"
+        "要求：\n"
+        "1. 存在多个相关的Chunk，必须且只能基于以下提供的所有文本片段进行综合判断和回答，不得使用其他知识。\n"
+        '2. 如果在所有文本片段中都找不到相关信息，请只回答"未找到"，不要包含额外说明。\n'
+        "3. 只需回答该字段的具体值，不要添加额外解释。\n"
+        "4. 若原文中存在多个并列的值（例如多个型号、多个编号、多个名称等），"
+        '请使用英文逗号加空格 ", " 将所有值依次串联在一行内返回，不要用自然语言连句或换行。\n'
+        "5. 若只有单个值，直接返回该值即可，不要加任何分隔符。\n\n"
+        "【文本片段开始】\n"
+        f"{chunks_text}"
+        "【文本片段结束】"
+    )

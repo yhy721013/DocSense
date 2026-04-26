@@ -5,6 +5,8 @@ import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import os
+from collections import defaultdict
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config
@@ -17,6 +19,7 @@ from app.services.llm_service.translation_service import get_translation_service
 from app.services.core.prompts import (
     build_input_field_prompt,
     build_chunk_based_field_prompt,
+    build_multi_chunk_based_field_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,65 +186,152 @@ def _query_input_field(
         filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
 
-    # 按照分数降序排列
     def _get_score(src: Dict[str, Any]) -> float:
         try:
             return float(src.get("score", 0))
         except (TypeError, ValueError):
             return 0.0
-            
-    sorted_chunks = sorted(vs_results, key=_get_score, reverse=True)
 
-    data_sources = []
-    first_valid_content = ""
+    analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "1").strip()
 
-    for chunk in sorted_chunks:
-        chunk_text = _strip_document_metadata(chunk.get("text", ""))
-        if not chunk_text:
-            continue
-            
-        chunk_prompt = build_chunk_based_field_prompt(field_name, chunk_text, field_desc)
-        
-        # 步骤 2：对每个 Chunk，使用 chat 模式向模型提问
-        result = client.send_prompt_to_thread(
-            workspace_slug,
-            thread_slug,
-            chunk_prompt,
-            user_id=user_id,
-            mode="chat",
-        )
-        
-        if not result:
-            continue
-            
-        text_response = result.get("textResponse", "").strip()
-        
-        # 如果 LLM 回答"未找到"则过滤掉
-        if "未找到" in text_response or not text_response:
-            continue
-            
-        # 组装这一条来源
-        mapped_source = _map_source_to_analyse_data_source(chunk, text_response=text_response)
-        data_sources.append(mapped_source)
-        
-        if not first_valid_content:
-            first_valid_content = text_response
+    if analyse_mode == "2":
+        # 模式 2：按文件聚合
+        file_chunks = defaultdict(list)
+        file_max_score = defaultdict(float)
 
-    if not data_sources:
-        logger.info("字段 [%s] 提取成功: 所有相关 Chunk 均未能提取出有效信息", field_name)
-        filled["analyseData"] = ""
-        filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+        for chunk in vs_results:
+            chunk_text = _strip_document_metadata(chunk.get("text", ""))
+            if not chunk_text:
+                continue
+            
+            # 提取文件名
+            metadata = chunk.get("metadata", {})
+            file_name = metadata.get("title") or metadata.get("sourceDocument")
+            
+            if not file_name:
+                raw_text = chunk.get("text", "")
+                if "sourceDocument:" in raw_text:
+                    for line in raw_text.splitlines():
+                        if line.startswith("sourceDocument:"):
+                            file_name = line.split("sourceDocument:")[1].strip()
+                            break
+
+            if not file_name:
+                raise ValueError("未能从文档片段中提取出明确的文件名。")
+            
+            file_chunks[file_name].append(chunk_text)
+            score = _get_score(chunk)
+            if score > file_max_score[file_name]:
+                file_max_score[file_name] = score
+
+        # 按照文件最高置信度降序排序
+        sorted_files = sorted(file_chunks.keys(), key=lambda f: file_max_score[f], reverse=True)
+        
+        data_sources = []
+        first_valid_content = ""
+
+        for file_name in sorted_files:
+            chunks = file_chunks[file_name]
+            chunk_prompt = build_multi_chunk_based_field_prompt(field_name, chunks, field_desc)
+            
+            result = client.send_prompt_to_thread(
+                workspace_slug,
+                thread_slug,
+                chunk_prompt,
+                user_id=user_id,
+                mode="chat",
+            )
+            
+            if not result:
+                continue
+                
+            text_response = result.get("textResponse", "").strip()
+            
+            if "未找到" in text_response or not text_response:
+                continue
+
+            # 组装针对文件的 data_source，此时 translate 为 content 的翻译
+            mapped_source = {
+                "content": text_response,
+                "source": file_name,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "translate": _translate_if_needed(text_response),
+            }
+            data_sources.append(mapped_source)
+            
+            if not first_valid_content:
+                first_valid_content = text_response
+
+        if not data_sources:
+            logger.info("字段 [%s] (模式2) 提取成功: 所有相关文件均未能提取出有效信息", field_name)
+            filled["analyseData"] = ""
+            filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+            return filled
+
+        preview_text = first_valid_content.replace('\n', ' ')
+        if len(preview_text) > 40:
+            preview_text = preview_text[:40] + "..."
+            
+        logger.info("字段 [%s] (模式2) 提取成功: %s (有效文件数: %d)", field_name, preview_text, len(data_sources))
+        
+        filled["analyseData"] = first_valid_content
+        filled["analyseDataSource"] = data_sources
         return filled
 
-    preview_text = first_valid_content.replace('\n', ' ')
-    if len(preview_text) > 40:
-        preview_text = preview_text[:40] + "..."
+    else:
+        # 模式 1：按 Chunk 提问 (现存逻辑)
+        sorted_chunks = sorted(vs_results, key=_get_score, reverse=True)
+
+        data_sources = []
+        first_valid_content = ""
+
+        for chunk in sorted_chunks:
+            chunk_text = _strip_document_metadata(chunk.get("text", ""))
+            if not chunk_text:
+                continue
+                
+            chunk_prompt = build_chunk_based_field_prompt(field_name, chunk_text, field_desc)
+            
+            # 步骤 2：对每个 Chunk，使用 chat 模式向模型提问
+            result = client.send_prompt_to_thread(
+                workspace_slug,
+                thread_slug,
+                chunk_prompt,
+                user_id=user_id,
+                mode="chat",
+            )
+            
+            if not result:
+                continue
+                
+            text_response = result.get("textResponse", "").strip()
+            
+            # 如果 LLM 回答"未找到"则过滤掉
+            if "未找到" in text_response or not text_response:
+                continue
+                
+            # 组装这一条来源
+            mapped_source = _map_source_to_analyse_data_source(chunk, text_response=text_response)
+            data_sources.append(mapped_source)
+            
+            if not first_valid_content:
+                first_valid_content = text_response
+
+        if not data_sources:
+            logger.info("字段 [%s] 提取成功: 所有相关 Chunk 均未能提取出有效信息", field_name)
+            filled["analyseData"] = ""
+            filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+            return filled
+
+        preview_text = first_valid_content.replace('\n', ' ')
+        if len(preview_text) > 40:
+            preview_text = preview_text[:40] + "..."
+            
+        logger.info("字段 [%s] 提取成功: %s (有效 Chunk 数: %d)", field_name, preview_text, len(data_sources))
         
-    logger.info("字段 [%s] 提取成功: %s (有效 Chunk 数: %d)", field_name, preview_text, len(data_sources))
-    
-    filled["analyseData"] = first_valid_content
-    filled["analyseDataSource"] = data_sources
-    return filled
+        filled["analyseData"] = first_valid_content
+        filled["analyseDataSource"] = data_sources
+        return filled
 
 
 # ---------------------------------------------------------------------------
