@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # 添加项目根目录到 Python 模块搜索路径
 # 这样能够在这份独立脚本中，直接像项目入口一样无缝 import 项目内的各种系统依赖模块（比如 app.）
-root_dir = Path(__file__).resolve().parent.parent
+root_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(root_dir))
 
 

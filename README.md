@@ -94,6 +94,10 @@ docs/接口文档/
   知识谱系解析.md
 scripts/                            # 本地联调脚本
 tests/                              # unittest 测试用例
+clean.py                            # 清理测试数据
+environment.yml                     # Conda环境依赖（Conda安装）
+requirements.txt                    # Conda环境依赖（Pip安装）
+requirements-venv.txt               # Venv环境依赖（Pip安装）
 ```
 
 ## 4. 任务模型与状态
@@ -169,7 +173,7 @@ tests/                              # unittest 测试用例
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染，历史数据在 `AnythingLLM` 保留。
-   - 通过增量 update-embeddings (adds/deletes) 维护引用文件列表动态变迁。
+   - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件。
 
 7. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
@@ -179,14 +183,18 @@ tests/                              # unittest 测试用例
 
 1. 安装依赖
 
+Conda环境使用：
+
 ```bash
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate DocSense
+uv pip install -r requirements.txt
 ```
 
-离线环境可使用：
+Venv环境可使用：
 
 ```bash
-pip install -r requirements-offline.txt
+pip install -r requirements-venv.txt
 ```
 
 2. 配置环境变量（建议使用 `.env`）

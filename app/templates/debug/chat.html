@@ -433,6 +433,7 @@
       streamingReply: "",
       isStreaming: false,
       selectedFileNames: [],
+      sentFileNames: [],
       isFilePickerOpen: false,
     };
 
@@ -581,13 +582,12 @@
       }
 
       const chatId = chatIdInput.value.trim();
-      const fileNames = [...state.selectedFileNames];
       const message = messageInput.value.trim();
       if (!chatId) {
         setMessage("chatId 不能为空");
         return;
       }
-      if (!fileNames.length) {
+      if (!state.selectedFileNames.length) {
         setMessage("请至少选择一个已解析文件");
         return;
       }
@@ -595,6 +595,10 @@
         setMessage("message 不能为空");
         return;
       }
+
+      // 增量语义：只发送本次新增的文件
+      const sentSet = new Set(state.sentFileNames);
+      const fileNames = state.selectedFileNames.filter((fn) => !sentSet.has(fn));
 
       setStreamingState(true);
       setMessage(`正在发送会话 ${chatId}...`);
@@ -629,6 +633,7 @@
       }
 
       await consumeSseStream(response);
+      state.sentFileNames = [...state.selectedFileNames];
       messageInput.value = "";
     }
 
@@ -732,6 +737,7 @@
           state.activeChatId = item.chatId;
           chatIdInput.value = item.chatId;
           state.selectedFileNames = [...item.fileNames];
+          state.sentFileNames = [...item.fileNames];
           state.streamingReply = "";
           renderSelectedFiles();
           renderFilePickerOptions(state.availableFiles);
@@ -789,6 +795,7 @@
       state.streamEvents = [];
       state.streamingReply = "";
       state.selectedFileNames = [];
+      state.sentFileNames = [];
       chatIdInput.value = "";
       messageInput.value = "";
       renderThread();

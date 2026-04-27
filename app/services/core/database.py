@@ -200,20 +200,29 @@ class ChatDatabaseService:
                 rows.append(record)
             return rows
 
-    def update_file_names(self, chat_id: str, file_names: list[str]) -> None:
+    def append_file_names(self, chat_id: str, new_file_names: list[str]) -> None:
+        """将新增文件追加到已有引用列表（去重，保持顺序）。"""
         import json
         from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc).isoformat()
-        file_names_json = json.dumps(file_names, ensure_ascii=False)
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    "SELECT file_names FROM chats WHERE chat_id = ?", (chat_id,)
+                )
+                row = cursor.fetchone()
+                existing: list[str] = json.loads(row["file_names"]) if row else []
+                existing_set = set(existing)
+                merged = existing + [fn for fn in new_file_names if fn not in existing_set]
+                now = datetime.now(timezone.utc).isoformat()
+                merged_json = json.dumps(merged, ensure_ascii=False)
                 conn.execute(
                     "UPDATE chats SET file_names = ?, updated_at = ? WHERE chat_id = ?",
-                    (file_names_json, now, chat_id),
+                    (merged_json, now, chat_id),
                 )
                 conn.commit()
-        logger.info("已更新对话引用文件: chat_id=%s", chat_id)
+        logger.info("已追加对话引用文件: chat_id=%s, new_count=%d", chat_id, len(new_file_names))
 
     def delete_chat(self, chat_id: str) -> None:
         with self._lock:

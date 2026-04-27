@@ -42,7 +42,7 @@ class ChatDebugDatabaseQueryTests(unittest.TestCase):
     def test_list_chats_returns_latest_updated_first_with_decoded_file_names(self):
         self.chat_db.create_chat("chat-older", ["a.pdf"], "ws-a", "th-a")
         self.chat_db.create_chat("chat-newer", ["b.pdf"], "ws-b", "th-b")
-        self.chat_db.update_file_names("chat-older", ["a.pdf", "c.pdf"])
+        self.chat_db.append_file_names("chat-older", ["c.pdf"])
 
         rows = self.chat_db.list_chats()
 
