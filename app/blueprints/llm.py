@@ -590,11 +590,6 @@ def llm_chat():
         return jsonify({"error": "message不能为空"}), 400
     message = message.strip()
 
-    # 判断新旧对话：新对话要求 fileNames 非空，继续对话允许为空
-    existing_chat = chat_db.get_chat(chat_id)
-    if existing_chat is None and not file_names:
-        return jsonify({"error": "新对话的fileNames不能为空"}), 400
-
     # 校验引用文件均已解析
     for fn in file_names:
         if not isinstance(fn, str) or not fn.strip():
