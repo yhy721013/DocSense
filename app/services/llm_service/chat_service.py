@@ -132,6 +132,10 @@ def get_chat_history(
         role = item.get("role")
         content = item.get("content", "")
         if role in ("user", "assistant") and content:
+            if role == "assistant":
+                import re
+                # 去除 <think>...</think> 及其内部的所有内容，包括未闭合的情况
+                content = re.sub(r"<think>[\s\S]*?(?:</think>|$)", "", content).strip()
             msg = {"role": role, "content": content}
             if role == "user":
                 if user_turn_index < len(file_names_history):
