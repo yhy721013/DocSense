@@ -630,7 +630,7 @@ def llm_chat_history():
         result = get_chat_history(chat_db=chat_db, client=client, chat_id=chat_id)
         return jsonify(result)
     except ChatNotFoundError:
-        return jsonify({"chatId": chat_id, "messages": [], "fileNames": []})
+        return jsonify({"chatId": chat_id, "messages": []})
 
 
 @llm_bp.post("/llm/chat/delete")

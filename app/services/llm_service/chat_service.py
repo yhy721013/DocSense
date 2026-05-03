@@ -76,7 +76,8 @@ def handle_chat_stream(
             thread_slug = existing_chat["thread_slug"]
 
             # 增量追加新引用文件（不再支持移除）
-            old_set = set(existing_chat["file_names"])
+            all_old_files = [fn for sublist in existing_chat["file_names"] for fn in sublist]
+            old_set = set(all_old_files)
             to_add = [fn for fn in file_names if fn not in old_set]
 
             if to_add:
@@ -85,7 +86,8 @@ def handle_chat_stream(
                 if not success:
                     yield _format_sse_event("error", {"error": "更新工作区文件引用失败"})
                     return
-                chat_db.append_file_names(chat_id, to_add)
+            
+            chat_db.append_file_names(chat_id, file_names)
 
             is_new_chat = False
 
@@ -123,15 +125,24 @@ def get_chat_history(
     )
 
     messages = []
+    file_names_history = chat_record["file_names"]
+    user_turn_index = 0
+
     for item in raw_history:
         role = item.get("role")
         content = item.get("content", "")
         if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content})
+            msg = {"role": role, "content": content}
+            if role == "user":
+                if user_turn_index < len(file_names_history):
+                    msg["fileNames"] = file_names_history[user_turn_index]
+                else:
+                    msg["fileNames"] = []
+                user_turn_index += 1
+            messages.append(msg)
 
     return {
         "chatId": chat_id,
-        "fileNames": chat_record["file_names"],
         "messages": messages,
     }
 
