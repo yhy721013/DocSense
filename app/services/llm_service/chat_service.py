@@ -23,6 +23,64 @@ def _build_doc_path(anything_doc_id: str) -> str:
     return f"custom-documents/{anything_doc_id}.json"
 
 
+def _filter_think_stream(generator: Generator[str, None, None]) -> Generator[str, None, None]:
+    """过滤流式文本中的 <think>...</think> 及其内部内容。"""
+    in_think = False
+    buffer = ""
+    start_tag = "<think>"
+    end_tag = "</think>"
+    
+    for chunk in generator:
+        if not chunk:
+            continue
+        buffer += chunk
+        
+        while buffer:
+            if not in_think:
+                start_idx = buffer.find(start_tag)
+                if start_idx != -1:
+                    if start_idx > 0:
+                        yield buffer[:start_idx]
+                    in_think = True
+                    buffer = buffer[start_idx + len(start_tag):]
+                else:
+                    possible_prefix_len = 0
+                    for i in range(len(start_tag) - 1, 0, -1):
+                        if buffer.endswith(start_tag[:i]):
+                            possible_prefix_len = i
+                            break
+                    
+                    if possible_prefix_len > 0:
+                        if len(buffer) > possible_prefix_len:
+                            yield buffer[:-possible_prefix_len]
+                        buffer = buffer[-possible_prefix_len:]
+                        break
+                    else:
+                        yield buffer
+                        buffer = ""
+            else:
+                end_idx = buffer.find(end_tag)
+                if end_idx != -1:
+                    in_think = False
+                    buffer = buffer[end_idx + len(end_tag):]
+                else:
+                    possible_prefix_len = 0
+                    for i in range(len(end_tag) - 1, 0, -1):
+                        if buffer.endswith(end_tag[:i]):
+                            possible_prefix_len = i
+                            break
+                    
+                    if possible_prefix_len > 0:
+                        buffer = buffer[-possible_prefix_len:]
+                        break
+                    else:
+                        buffer = ""
+                        break
+
+    if buffer and not in_think:
+        yield buffer
+
+
 # ── 对话主流程 ──────────────────────────────────────────────
 
 def handle_chat_stream(
@@ -95,7 +153,8 @@ def handle_chat_stream(
         yield _format_sse_event("chatInfo", {"chatId": chat_id, "isNewChat": is_new_chat})
 
         # ── 流式对话 ──
-        for chunk in client.stream_chat_to_thread(workspace_slug, thread_slug, message):
+        raw_stream = client.stream_chat_to_thread(workspace_slug, thread_slug, message)
+        for chunk in _filter_think_stream(raw_stream):
             yield _format_sse_event("textChunk", {"content": chunk})
 
         # ── 完成 ──
