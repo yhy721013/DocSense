@@ -146,7 +146,7 @@ class ChatDatabaseService:
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc).isoformat()
-        file_names_json = json.dumps(file_names, ensure_ascii=False)
+        file_names_json = json.dumps([file_names], ensure_ascii=False)
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
@@ -201,7 +201,7 @@ class ChatDatabaseService:
             return rows
 
     def append_file_names(self, chat_id: str, new_file_names: list[str]) -> None:
-        """将新增文件追加到已有引用列表（去重，保持顺序）。"""
+        """将新增文件列表作为一个新的回合追加到已有引用列表中（记录每次交互的文件列表）。"""
         import json
         from datetime import datetime, timezone
 
@@ -212,11 +212,10 @@ class ChatDatabaseService:
                     "SELECT file_names FROM chats WHERE chat_id = ?", (chat_id,)
                 )
                 row = cursor.fetchone()
-                existing: list[str] = json.loads(row["file_names"]) if row else []
-                existing_set = set(existing)
-                merged = existing + [fn for fn in new_file_names if fn not in existing_set]
+                existing: list[list[str]] = json.loads(row["file_names"]) if row else []
+                existing.append(new_file_names)
                 now = datetime.now(timezone.utc).isoformat()
-                merged_json = json.dumps(merged, ensure_ascii=False)
+                merged_json = json.dumps(existing, ensure_ascii=False)
                 conn.execute(
                     "UPDATE chats SET file_names = ?, updated_at = ? WHERE chat_id = ?",
                     (merged_json, now, chat_id),

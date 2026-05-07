@@ -23,6 +23,64 @@ def _build_doc_path(anything_doc_id: str) -> str:
     return f"custom-documents/{anything_doc_id}.json"
 
 
+def _filter_think_stream(generator: Generator[str, None, None]) -> Generator[str, None, None]:
+    """过滤流式文本中的 <think>...</think> 及其内部内容。"""
+    in_think = False
+    buffer = ""
+    start_tag = "<think>"
+    end_tag = "</think>"
+    
+    for chunk in generator:
+        if not chunk:
+            continue
+        buffer += chunk
+        
+        while buffer:
+            if not in_think:
+                start_idx = buffer.find(start_tag)
+                if start_idx != -1:
+                    if start_idx > 0:
+                        yield buffer[:start_idx]
+                    in_think = True
+                    buffer = buffer[start_idx + len(start_tag):]
+                else:
+                    possible_prefix_len = 0
+                    for i in range(len(start_tag) - 1, 0, -1):
+                        if buffer.endswith(start_tag[:i]):
+                            possible_prefix_len = i
+                            break
+                    
+                    if possible_prefix_len > 0:
+                        if len(buffer) > possible_prefix_len:
+                            yield buffer[:-possible_prefix_len]
+                        buffer = buffer[-possible_prefix_len:]
+                        break
+                    else:
+                        yield buffer
+                        buffer = ""
+            else:
+                end_idx = buffer.find(end_tag)
+                if end_idx != -1:
+                    in_think = False
+                    buffer = buffer[end_idx + len(end_tag):]
+                else:
+                    possible_prefix_len = 0
+                    for i in range(len(end_tag) - 1, 0, -1):
+                        if buffer.endswith(end_tag[:i]):
+                            possible_prefix_len = i
+                            break
+                    
+                    if possible_prefix_len > 0:
+                        buffer = buffer[-possible_prefix_len:]
+                        break
+                    else:
+                        buffer = ""
+                        break
+
+    if buffer and not in_think:
+        yield buffer
+
+
 # ── 对话主流程 ──────────────────────────────────────────────
 
 def handle_chat_stream(
@@ -76,7 +134,8 @@ def handle_chat_stream(
             thread_slug = existing_chat["thread_slug"]
 
             # 增量追加新引用文件（不再支持移除）
-            old_set = set(existing_chat["file_names"])
+            all_old_files = [fn for sublist in existing_chat["file_names"] for fn in sublist]
+            old_set = set(all_old_files)
             to_add = [fn for fn in file_names if fn not in old_set]
 
             if to_add:
@@ -85,7 +144,8 @@ def handle_chat_stream(
                 if not success:
                     yield _format_sse_event("error", {"error": "更新工作区文件引用失败"})
                     return
-                chat_db.append_file_names(chat_id, to_add)
+            
+            chat_db.append_file_names(chat_id, file_names)
 
             is_new_chat = False
 
@@ -93,7 +153,8 @@ def handle_chat_stream(
         yield _format_sse_event("chatInfo", {"chatId": chat_id, "isNewChat": is_new_chat})
 
         # ── 流式对话 ──
-        for chunk in client.stream_chat_to_thread(workspace_slug, thread_slug, message):
+        raw_stream = client.stream_chat_to_thread(workspace_slug, thread_slug, message)
+        for chunk in _filter_think_stream(raw_stream):
             yield _format_sse_event("textChunk", {"content": chunk})
 
         # ── 完成 ──
@@ -123,15 +184,28 @@ def get_chat_history(
     )
 
     messages = []
+    file_names_history = chat_record["file_names"]
+    user_turn_index = 0
+
     for item in raw_history:
         role = item.get("role")
         content = item.get("content", "")
         if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content})
+            if role == "assistant":
+                import re
+                # 去除 <think>...</think> 及其内部的所有内容，包括未闭合的情况
+                content = re.sub(r"<think>[\s\S]*?(?:</think>|$)", "", content).strip()
+            msg = {"role": role, "content": content}
+            if role == "user":
+                if user_turn_index < len(file_names_history):
+                    msg["fileNames"] = file_names_history[user_turn_index]
+                else:
+                    msg["fileNames"] = []
+                user_turn_index += 1
+            messages.append(msg)
 
     return {
         "chatId": chat_id,
-        "fileNames": chat_record["file_names"],
         "messages": messages,
     }
 

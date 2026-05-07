@@ -13,5 +13,6 @@ dependencies:
   - httpx
   - markdown
   - pytest
+  - conda-pack
   - pip
   - uv
