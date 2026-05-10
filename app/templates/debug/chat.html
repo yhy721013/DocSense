@@ -568,9 +568,9 @@
         return;
       }
 
-      state.historyMessages = payload.messages || [];
+      state.historyMessages = Array.isArray(payload) ? payload : [];
       state.streamingReply = "";
-      state.activeChatId = payload.chatId || chatId;
+      state.activeChatId = chatId;
       renderThread();
       setMessage(`已加载会话 ${state.activeChatId} 的历史记录`);
     }

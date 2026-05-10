@@ -86,9 +86,69 @@ class ChatRouteValidationTests(unittest.TestCase):
         resp = self.client.get("/llm/chat/history")
         self.assertEqual(resp.status_code, 400)
 
-    def test_history_returns_404_for_nonexistent_chat(self):
+    def test_history_returns_empty_list_for_nonexistent_chat(self):
         resp = self.client.get("/llm/chat/history?chatId=nonexistent")
-        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), [])
+
+    def test_history_returns_target_schema(self):
+        self.chat_db.create_chat(
+            "conv-target",
+            ["alpha.pdf", "beta.pdf"],
+            "ws-slug",
+            "th-slug",
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_thread_chats.return_value = [
+            {"role": "user", "content": "请总结该文件", "timestamp": 1777364120677},
+            {
+                "role": "assistant",
+                "content": "抱歉，AI 服务出现错误",
+                "timestamp": 1777364120678,
+            },
+        ]
+
+        with patch("app.blueprints.llm.AnythingLLMClient", return_value=mock_client):
+            resp = self.client.get("/llm/chat/history?chatId=conv-target")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(data[0]["role"], "user")
+        self.assertEqual(data[0]["content"], "请总结该文件")
+        self.assertEqual(data[0]["timestamp"], 1777364120677)
+        self.assertEqual(
+            data[0]["files"],
+            [{"name": "alpha.pdf"}, {"name": "beta.pdf"}],
+        )
+        self.assertEqual(data[1]["role"], "assistant")
+        self.assertEqual(data[1]["content"], "抱歉，AI 服务出现错误")
+        self.assertEqual(data[1]["timestamp"], 1777364120678)
+        self.assertNotIn("files", data[1])
+
+    def test_history_uses_db_turn_timestamp_when_upstream_missing(self):
+        self.chat_db.create_chat(
+            "conv-no-upstream-ts",
+            ["alpha.pdf"],
+            "ws-slug",
+            "th-slug",
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_thread_chats.return_value = [
+            {"role": "user", "content": "请总结该文件"},
+            {"role": "assistant", "content": "好的"},
+        ]
+
+        with patch("app.blueprints.llm.AnythingLLMClient", return_value=mock_client):
+            resp = self.client.get("/llm/chat/history?chatId=conv-no-upstream-ts")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIsInstance(data[0]["timestamp"], int)
+        self.assertIsNone(data[1]["timestamp"])
 
     # ── POST /llm/chat/delete 参数校验 ──
 
