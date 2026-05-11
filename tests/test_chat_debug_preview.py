@@ -50,6 +50,17 @@ class ChatDebugDatabaseQueryTests(unittest.TestCase):
         self.assertEqual(rows[0]["file_names"], ["a.pdf", "c.pdf"])
         self.assertEqual(rows[1]["chat_id"], "chat-newer")
 
+    def test_create_and_append_chat_persist_turn_timestamps(self):
+        self.chat_db.create_chat("chat-ts", ["a.pdf"], "ws-a", "th-a")
+        created = self.chat_db.get_chat("chat-ts")
+        self.assertEqual(len(created["turn_timestamps"]), 1)
+        self.assertIsInstance(created["turn_timestamps"][0], int)
+
+        self.chat_db.append_file_names("chat-ts", ["b.pdf"])
+        updated = self.chat_db.get_chat("chat-ts")
+        self.assertEqual(len(updated["turn_timestamps"]), 2)
+        self.assertGreaterEqual(updated["turn_timestamps"][1], updated["turn_timestamps"][0])
+
 
 class ChatDebugPreviewTests(unittest.TestCase):
     def setUp(self):

@@ -126,12 +126,19 @@ class ChatDatabaseService:
                     CREATE TABLE IF NOT EXISTS chats (
                         chat_id     TEXT PRIMARY KEY,
                         file_names  TEXT NOT NULL,
+                        turn_timestamps TEXT NOT NULL DEFAULT '[]',
                         workspace_slug TEXT NOT NULL,
                         thread_slug    TEXT NOT NULL,
                         created_at  TEXT NOT NULL,
                         updated_at  TEXT NOT NULL
                     )
                 """)
+                cursor = conn.execute("PRAGMA table_info(chats)")
+                columns = {row[1] for row in cursor.fetchall()}
+                if "turn_timestamps" not in columns:
+                    conn.execute(
+                        "ALTER TABLE chats ADD COLUMN turn_timestamps TEXT NOT NULL DEFAULT '[]'"
+                    )
                 conn.commit()
             logger.info("对话数据库初始化完成: %s", self.db_path)
 
@@ -145,22 +152,28 @@ class ChatDatabaseService:
         import json
         from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        now_ms = int(now_dt.timestamp() * 1000)
         file_names_json = json.dumps([file_names], ensure_ascii=False)
+        turn_timestamps_json = json.dumps([now_ms], ensure_ascii=False)
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     """
-                    INSERT INTO chats (chat_id, file_names, workspace_slug, thread_slug, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO chats (
+                        chat_id, file_names, turn_timestamps, workspace_slug, thread_slug, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (chat_id, file_names_json, workspace_slug, thread_slug, now, now),
+                    (chat_id, file_names_json, turn_timestamps_json, workspace_slug, thread_slug, now, now),
                 )
                 conn.commit()
         logger.info("已创建对话记录: chat_id=%s", chat_id)
         return {
             "chat_id": chat_id,
             "file_names": file_names,
+            "turn_timestamps": [now_ms],
             "workspace_slug": workspace_slug,
             "thread_slug": thread_slug,
             "created_at": now,
@@ -178,6 +191,7 @@ class ChatDatabaseService:
                 return None
             record = dict(row)
             record["file_names"] = json.loads(record["file_names"])
+            record["turn_timestamps"] = json.loads(record.get("turn_timestamps") or "[]")
             return record
 
     def list_chats(self) -> list[dict]:
@@ -188,7 +202,7 @@ class ChatDatabaseService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT chat_id, file_names, workspace_slug, thread_slug, created_at, updated_at
+                SELECT chat_id, file_names, turn_timestamps, workspace_slug, thread_slug, created_at, updated_at
                 FROM chats
                 ORDER BY updated_at DESC
                 """
@@ -197,6 +211,7 @@ class ChatDatabaseService:
             for row in cursor.fetchall():
                 record = dict(row)
                 record["file_names"] = json.loads(record["file_names"])
+                record["turn_timestamps"] = json.loads(record.get("turn_timestamps") or "[]")
                 rows.append(record)
             return rows
 
@@ -209,16 +224,21 @@ class ChatDatabaseService:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    "SELECT file_names FROM chats WHERE chat_id = ?", (chat_id,)
+                    "SELECT file_names, turn_timestamps FROM chats WHERE chat_id = ?", (chat_id,)
                 )
                 row = cursor.fetchone()
                 existing: list[list[str]] = json.loads(row["file_names"]) if row else []
+                existing_turn_timestamps: list[int] = json.loads(row["turn_timestamps"] or "[]") if row else []
                 existing.append(new_file_names)
-                now = datetime.now(timezone.utc).isoformat()
+                now_dt = datetime.now(timezone.utc)
+                now_ms = int(now_dt.timestamp() * 1000)
+                existing_turn_timestamps.append(now_ms)
+                now = now_dt.isoformat()
                 merged_json = json.dumps(existing, ensure_ascii=False)
+                merged_turn_timestamps_json = json.dumps(existing_turn_timestamps, ensure_ascii=False)
                 conn.execute(
-                    "UPDATE chats SET file_names = ?, updated_at = ? WHERE chat_id = ?",
-                    (merged_json, now, chat_id),
+                    "UPDATE chats SET file_names = ?, turn_timestamps = ?, updated_at = ? WHERE chat_id = ?",
+                    (merged_json, merged_turn_timestamps_json, now, chat_id),
                 )
                 conn.commit()
         logger.info("已追加对话引用文件: chat_id=%s, new_count=%d", chat_id, len(new_file_names))

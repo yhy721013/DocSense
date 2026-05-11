@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
@@ -172,8 +173,8 @@ def get_chat_history(
     chat_db: ChatDatabaseService,
     client: AnythingLLMClient,
     chat_id: str,
-) -> Dict[str, Any]:
-    """从 AnythingLLM Thread 获取完整对话历史。"""
+) -> List[Dict[str, Any]]:
+    """从 AnythingLLM Thread 获取完整对话历史（目标结构）。"""
     chat_record = chat_db.get_chat(chat_id)
     if chat_record is None:
         raise ChatNotFoundError(chat_id)
@@ -185,6 +186,7 @@ def get_chat_history(
 
     messages = []
     file_names_history = chat_record["file_names"]
+    turn_timestamps_history = chat_record.get("turn_timestamps", [])
     user_turn_index = 0
 
     for item in raw_history:
@@ -195,19 +197,55 @@ def get_chat_history(
                 import re
                 # 去除 <think>...</think> 及其内部的所有内容，包括未闭合的情况
                 content = re.sub(r"<think>[\s\S]*?(?:</think>|$)", "", content).strip()
-            msg = {"role": role, "content": content}
+            timestamp = _extract_timestamp_ms(item)
+            msg = {
+                "role": role,
+                "content": content,
+                "timestamp": timestamp,
+            }
             if role == "user":
+                if timestamp is None and user_turn_index < len(turn_timestamps_history):
+                    msg["timestamp"] = _to_timestamp_ms(turn_timestamps_history[user_turn_index])
                 if user_turn_index < len(file_names_history):
-                    msg["fileNames"] = file_names_history[user_turn_index]
+                    file_names = file_names_history[user_turn_index]
                 else:
-                    msg["fileNames"] = []
+                    file_names = []
+                msg["files"] = [{"name": file_name} for file_name in file_names if isinstance(file_name, str)]
                 user_turn_index += 1
             messages.append(msg)
 
-    return {
-        "chatId": chat_id,
-        "messages": messages,
-    }
+    return messages
+
+
+def _extract_timestamp_ms(item: Dict[str, Any]) -> int | None:
+    """从上游历史消息中提取毫秒时间戳。"""
+    for key in ("timestamp", "sentAt", "createdAt", "updatedAt", "created_at", "updated_at"):
+        if key in item:
+            return _to_timestamp_ms(item.get(key))
+    return None
+
+
+def _to_timestamp_ms(value: Any) -> int | None:
+    """将多种时间表示转换为毫秒时间戳。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return int(text)
+        normalized = text.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    return None
 
 
 # ── 删除对话 ──────────────────────────────────────────────
