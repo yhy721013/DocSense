@@ -6,21 +6,47 @@ from typing import Any, Iterable
 
 ARCHITECTURE_CLASSIFICATION_RULES = (
     "【领域分类判定规则】\n"
-    "1. 军事基地：军事设施、基地建设、基地布局、军事要塞、港口码头、机场跑道、后勤保障设施、营房工程、防御工事。\n"
-    "2. 体系运用：作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗。\n"
-    "3. 装备型号：武器装备、装备参数、技术指标、装备性能。若候选中存在二级节点，应优先判断为空中装备、水面装备或水下装备。\n"
-    "4. 作战环境：战场环境、地理条件、气象水文、电磁环境、海洋环境。\n"
-    "5. 作战指挥：指挥控制、决策流程、作战计划、战术战法。若候选中存在二级节点，应优先判断为条令条例或组织机构。\n"
-    "6. 组织机构：机构编制、隶属关系、职责分工、司令部、部门设置、岗位任命、职能说明等内容更偏向该类。\n"
-    "7. 条令条例：发布机构、编号、版本、规范、条令、条例、制度等内容更偏向该类。\n"
-    "8. architectureId 必须来自候选 architectureList 中的 id。若候选中同时存在上级和下级节点，优先选择更具体的下级节点。\n"
-    "9. 当文档与所有候选领域都明显无关时，architectureId 输出 1。\n"
-    "10. 不要输出分类名称、候选列表或概率，只输出最终 architectureId 数字。\n"
+    "1. architectureList 只包含 id, name, parentId, path, pathName, remark：id 是节点唯一标识，name 是节点名称，parentId 表示父节点 id，path 是从根到当前节点的 id 链，pathName 是从根到当前节点的名称链，remark 是节点名词概述，可用于理解节点含义。\n"
+    "2. 当 architectureList 只有一个节点时，architectureId 必须直接输出这个唯一节点的 id，不要再判断文件所属领域分类；但仍需继续完成 fileDataItem 信息提取。\n"
+    "3. 多节点候选中，优先分类到最具体的叶子节点。\n"
+    "4. 如果叶子节点证据不足，选择最深的可靠父节点。\n"
+    "5. 如果多个兄弟节点都可能，选择它们的最近公共父节点。\n"
+    "6. 当文档内容明确为 GJB、国军标、国家军用标准相关资料时，应归类到候选中的“数据标准”节点，并返回该节点 id。\n"
+    "7. 军事基地：军事设施、基地建设、基地布局、军事要塞、港口码头、机场跑道、后勤保障设施、营房工程、防御工事。\n"
+    "8. 体系运用：作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗。\n"
+    "9. 装备型号：武器装备、装备参数、技术指标、装备性能。若候选中存在二级节点，应优先判断为空中装备、水面装备或水下装备。\n"
+    "10. 作战环境：战场环境、地理条件、气象水文、电磁环境、海洋环境。\n"
+    "11. 作战指挥：指挥控制、决策流程、作战计划、战术战法。若候选中存在二级节点，应优先判断为条令条例或组织机构。\n"
+    "12. 组织机构：机构编制、隶属关系、职责分工、司令部、部门设置、岗位任命、职能说明等内容更偏向该类。\n"
+    "13. 条令条例：发布机构、编号、版本、规范、条令、条例、制度等内容更偏向该类。\n"
+    "14. architectureId 必须来自候选 architectureList 中的 id；无法匹配时输出 1。当文档与所有候选领域都明显无关时，architectureId 输出 1。\n"
+    "15. 不要输出分类名称、候选列表或概率，只输出最终 architectureId 数字。\n"
+)
+
+SOURCE_SCORE_RULES = (
+    "【score 评分规则】\n"
+    "score 必须且只能输出以下 5 个整数值，且为必填项：\n"
+    "1. 闭源渠道、美海军官方网站、简氏系列资料、军内单位正式手册等，评分 95。\n"
+    "2. 国家科研机构正式出版物、世界知名企业、智库、科研院所出版资料、研究成果，评分 85。\n"
+    "3. 围绕军事领域的知名开源网站资料，评分 75。\n"
+    "4. 维基百科、新闻网站、AI检索等开源网站资料，评分 65。\n"
+    "5. 未明确数据来源的资料，评分 55。\n"
 )
 
 
 def _format_options(title: str, items: Iterable[Any]) -> str:
     return f"{title}: {json.dumps(list(items), ensure_ascii=False)}\n"
+
+
+def _format_architecture_options(items: Iterable[Any]) -> str:
+    fields = ("id", "name", "parentId", "path", "pathName", "remark")
+    formatted_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            formatted_items.append(item)
+            continue
+        formatted_items.append({field: item.get(field) for field in fields if field in item})
+    return _format_options("领域体系候选", formatted_items)
 
 
 def build_file_analysis_prompt(request_params: dict) -> str:
@@ -38,7 +64,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
             "dataTime": "",
             "keyword": "",
             "summary": "",
-            "score": 2.5,
+            "score": 55,
             "fileNo": "",
             "source": "",
             "originalLink": "",
@@ -55,6 +81,9 @@ def build_file_analysis_prompt(request_params: dict) -> str:
     }
     return (
         "你是结构化抽取器。请仅基于文档内容抽取字段，并且只输出一个严格合法 JSON 对象。\n"
+        "【请求上下文】\n"
+        f"fileName: {request_params.get('fileName', '')}\n"
+        f"originalFileName: {request_params.get('originalFileName', '')}\n"
         "【输出契约】\n"
         "1. 必须只输出 JSON，不要输出 Markdown、解释文本、候选列表或思考过程。\n"
         "2. 顶层键只能是：country, channel, maturity, format, architectureId, fileDataItem。\n"
@@ -64,26 +93,28 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "6. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "8. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
-        "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断出具体值。score 字段范围在 0.0 到 5.0 之间。\n"
+        "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断出具体值。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
         "【正反例】\n"
         "- 正确：\"country\": \"美国\"\n"
         "- 错误：\"country\": {\"key\": \"02\", \"value\": \"美国\"}\n"
         "- 正确：\"architectureId\": 10502\n"
         "- 错误：\"architectureId\": \"作战指挥/组织机构\"\n"
         + ARCHITECTURE_CLASSIFICATION_RULES
+        + SOURCE_SCORE_RULES
         + "输出 JSON 必须严格匹配以下结构：\n"
         + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
-        + _format_options("领域体系候选", ranges["architectureList"])
+        + _format_architecture_options(ranges["architectureList"])
         + _format_options("国家候选", ranges["country"])
         + _format_options("渠道候选", ranges["channel"])
         + _format_options("成熟度候选", ranges["maturity"])
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
-        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：该信息的重要性评分；fileNo：文件编号；dataFormat：资料格式，保持与\"dataFormat\"一致。\n"
+        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；fileNo：文件编号；dataFormat：资料格式，保持与\"dataFormat\"一致。\n"
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/format 是否都为候选 value 或空字符串。\n"
         + "2. architectureId 是否为候选 id 或 1。\n"
-        + "3. 是否仅使用英文键名且 JSON 语法可解析。\n"
+        + "3. score 是否为 95、85、75、65、55 之一。\n"
+        + "4. 是否仅使用英文键名且 JSON 语法可解析。\n"
     )
 
 
