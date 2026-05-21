@@ -54,19 +54,21 @@ DEFAULT_MATURITY_OPTIONS = [
 ]
 
 DEFAULT_ARCHITECTURE_OPTIONS = [
-    {"id": 101, "level": 1, "name": "军事基地", "path": "101", "pathName": "军事基地", "sort": 1},
-    {"id": 102, "level": 1, "name": "体系运用", "path": "102", "pathName": "体系运用", "sort": 2},
-    {"id": 103, "level": 1, "name": "装备型号", "path": "103", "pathName": "装备型号", "sort": 3},
-    {"id": 10301, "level": 2, "name": "空中装备", "path": "103/10301", "pathName": "装备型号/空中装备", "sort": 1},
-    {"id": 10302, "level": 2, "name": "水面装备", "path": "103/10302", "pathName": "装备型号/水面装备", "sort": 2},
-    {"id": 10303, "level": 2, "name": "水下装备", "path": "103/10303", "pathName": "装备型号/水下装备", "sort": 3},
-    {"id": 104, "level": 1, "name": "作战环境", "path": "104", "pathName": "作战环境", "sort": 4},
-    {"id": 105, "level": 1, "name": "作战指挥", "path": "105", "pathName": "作战指挥", "sort": 5},
-    {"id": 10501, "level": 2, "name": "条令条例", "path": "105/10501", "pathName": "作战指挥/条令条例", "sort": 1},
-    {"id": 10502, "level": 2, "name": "组织机构", "path": "105/10502", "pathName": "作战指挥/组织机构", "sort": 2},
+    {"id": 101, "name": "军事基地", "parentId": None, "path": "101", "pathName": "军事基地", "remark": "军事设施、基地建设、基地布局、港口码头、机场跑道、后勤保障设施等。"},
+    {"id": 102, "name": "体系运用", "parentId": None, "path": "102", "pathName": "体系运用", "remark": "作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗等。"},
+    {"id": 103, "name": "装备型号", "parentId": None, "path": "103", "pathName": "装备型号", "remark": "武器装备、装备参数、技术指标、装备性能及型号资料。"},
+    {"id": 10301, "name": "空中装备", "parentId": 103, "path": "103/10301", "pathName": "装备型号/空中装备", "remark": "飞机、无人机、航空平台及相关空中装备。"},
+    {"id": 10302, "name": "水面装备", "parentId": 103, "path": "103/10302", "pathName": "装备型号/水面装备", "remark": "水面舰艇、船舶平台及相关水面装备。"},
+    {"id": 10303, "name": "水下装备", "parentId": 103, "path": "103/10303", "pathName": "装备型号/水下装备", "remark": "潜艇、水下无人平台、鱼雷及相关水下装备。"},
+    {"id": 104, "name": "作战环境", "parentId": None, "path": "104", "pathName": "作战环境", "remark": "战场环境、地理条件、气象水文、电磁环境、海洋环境等。"},
+    {"id": 105, "name": "作战指挥", "parentId": None, "path": "105", "pathName": "作战指挥", "remark": "指挥控制、决策流程、作战计划、战术战法等。"},
+    {"id": 10501, "name": "条令条例", "parentId": 105, "path": "105/10501", "pathName": "作战指挥/条令条例", "remark": "发布机构、编号、版本、规范、条令、条例、制度等。"},
+    {"id": 10502, "name": "组织机构", "parentId": 105, "path": "105/10502", "pathName": "作战指挥/组织机构", "remark": "机构编制、隶属关系、职责分工、司令部、部门设置、岗位任命等。"},
+    {"id": 106, "name": "数据标准", "parentId": None, "path": "106", "pathName": "数据标准", "remark": "GJB、国军标、国家军用标准、技术标准、数据规范和标准化资料。"},
 ]
 
 ARCHITECTURE_FALLBACK_ID = 1
+SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
 
 
 def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -102,15 +104,48 @@ def _normalize_match_text(value: Any) -> str:
     return re.sub(r"\s+", "", normalized)
 
 
-def _round_score(value: Any) -> float:
+def _contains_gjb_standard_reference(*values: Any) -> bool:
+    text = "\n".join(_as_text(value) for value in values if value not in (None, "", [], {}))
+    if not text:
+        return False
+    normalized = unicodedata.normalize("NFKC", text)
+    lowered = normalized.casefold()
+    return (
+        "国军标" in normalized
+        or "国家军用标准" in normalized
+        or re.search(r"(?<![a-z0-9])gjb(?=\s|[-_/]|\d|$)", lowered) is not None
+    )
+
+
+def _match_data_standard_architecture_id(
+        architecture_list: Iterable[Dict[str, Any]],
+        *context_values: Any,
+) -> int | None:
+    if not _contains_gjb_standard_reference(*context_values):
+        return None
+
+    for item in architecture_list:
+        if not isinstance(item, dict):
+            continue
+        names = [_as_text(item.get("name")), _as_text(item.get("pathName"))]
+        if any("数据标准" in name for name in names):
+            try:
+                return int(item.get("id"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _normalize_source_score(value: Any) -> int:
     try:
-        score = round(float(value), 1)
+        numeric_score = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    if score < 0:
-        return 0.0
-    if score > 5:
-        return 5.0
+        return 55
+    if not numeric_score.is_integer():
+        return 55
+    score = int(numeric_score)
+    if score not in SOURCE_SCORE_VALUES:
+        return 55
     return score
 
 
@@ -155,9 +190,15 @@ def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Ite
     candidate_ids = set()
     for item in candidate_items:
         try:
-            candidate_ids.add(int(item.get("id") or 0))
+            raw_candidate_id = item.get("id")
+            if raw_candidate_id in (None, ""):
+                continue
+            candidate_ids.add(int(raw_candidate_id))
         except (TypeError, ValueError):
             continue
+
+    if len(candidate_ids) == 1:
+        return next(iter(candidate_ids))
 
     raw_id = _first_non_empty_value(parsed_result, "architectureId", "领域体系 ID")
     if raw_id is not None:
@@ -375,22 +416,36 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
     resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
     resolved_language = _resolve_field(parsed_result, file_item, "language", "语种")
+    raw_score = _first_non_empty_value(file_item, "score", "评分")
+    if raw_score is None:
+        raw_score = _first_non_empty_value(parsed_result, "score", "评分")
     normalized_original_text = _as_text(
         original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
     extracted_title = _extract_title(normalized_original_text)
+    architecture_id = (
+        _match_data_standard_architecture_id(
+            ranges["architectureList"],
+            normalized_original_text,
+            request_params.get("originalFileName"),
+            _resolve_field(parsed_result, file_item, "summary", "摘要"),
+            _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+            _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
+        )
+        or _match_architecture_id(parsed_result, ranges["architectureList"])
+    )
 
     return {
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
         "format": resolved_format,
-        "architectureId": _match_architecture_id(parsed_result, ranges["architectureList"]),
+        "architectureId": architecture_id,
         "fileDataItem": {
             "fileName": file_name,
             "dataTime": resolved_date or _extract_date(normalized_original_text),
             "keyword": _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
             "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
-            "score": _round_score(_first_non_empty_value(parsed_result, "score", "评分")),
+            "score": _normalize_source_score(raw_score),
             "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
             "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(
                 normalized_original_text),
@@ -692,4 +747,3 @@ def run_file_analysis_batch_task(
             callback_url=callback_url,
             callback_timeout=callback_timeout,
         )
-
