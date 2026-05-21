@@ -17,6 +17,8 @@ venv/
 .vscode/
 .cursor/
 .cursorignore
+.codex/
+.claude/
 .DS_Store
 
 # 环境变量配置文件 | Environment variables
