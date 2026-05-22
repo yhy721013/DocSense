@@ -3,7 +3,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.services.core.progress_hub import LLMProgressHub
-from app.services.llm_service.analysis_service import build_file_callback_payload, map_analysis_result
+from app.services.llm_service.analysis_service import (
+    DEFAULT_ARCHITECTURE_OPTIONS,
+    build_file_callback_payload,
+    map_analysis_result,
+)
 from app.services.core.prompts import build_file_analysis_prompt
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
@@ -132,6 +136,85 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["architectureId"], 1)
 
+    def test_map_analysis_result_routes_gjb_content_to_data_standard_node(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "originalFileName": "GJB 9001C-2017.pdf",
+            "architectureList": [
+                {
+                    "id": 201,
+                    "name": "条令条例",
+                    "parentId": None,
+                    "path": "201",
+                    "pathName": "条令条例",
+                    "remark": "军事条令、条例、制度类文件。",
+                },
+                {
+                    "id": 202,
+                    "name": "数据标准",
+                    "parentId": None,
+                    "path": "202",
+                    "pathName": "数据标准",
+                    "remark": "国家军用标准、GJB、技术标准和数据规范。",
+                },
+            ],
+        }
+
+        result = map_analysis_result(
+            {"architectureId": 201},
+            request_params,
+            original_text="本文档为 GJB 9001C-2017 质量管理体系要求，属于国家军用标准。",
+        )
+
+        self.assertEqual(result["architectureId"], 202)
+
+    def test_map_analysis_result_uses_only_architecture_candidate_when_single_node(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [
+                {
+                    "id": 1768464916588441,
+                    "name": "测试",
+                    "parentId": None,
+                    "path": "1768464916588441",
+                    "pathName": "测试",
+                }
+            ],
+        }
+
+        result = map_analysis_result({"summary": "摘要"}, request_params)
+
+        self.assertEqual(result["architectureId"], 1768464916588441)
+
+    def test_map_analysis_result_normalizes_score_to_protocol_discrete_values(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 10, "name": "测试"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "score": "85",
+                }
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["fileDataItem"]["score"], 85)
+
+    def test_map_analysis_result_falls_back_score_to_55_when_missing_or_invalid(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 10, "name": "测试"}],
+        }
+
+        missing = map_analysis_result({}, request_params)
+        invalid = map_analysis_result({"score": 80}, request_params)
+
+        self.assertEqual(missing["fileDataItem"]["score"], 55)
+        self.assertEqual(invalid["fileDataItem"]["score"], 55)
+
     def test_map_analysis_result_uses_default_ranges_when_request_missing(self):
         result = map_analysis_result(
             {"国家": {"value": "美国", "key": "02"}},
@@ -158,6 +241,31 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("不要直接原样返回候选对象", prompt)
         self.assertIn("输出前自检清单", prompt)
         self.assertIn("无法匹配时输出 1", prompt)
+        self.assertIn("parentId 表示父节点 id", prompt)
+        self.assertIn("architectureList 只包含 id, name, parentId, path, pathName", prompt)
+
+    def test_build_file_analysis_prompt_includes_original_file_name_and_architecture_remark(self):
+        prompt = build_file_analysis_prompt(
+            {
+                "fileName": "storage-name.pdf",
+                "originalFileName": "GJB 9001C-2017 质量管理体系要求.pdf",
+                "architectureList": [
+                    {
+                        "id": 202,
+                        "name": "数据标准",
+                        "parentId": None,
+                        "path": "202",
+                        "pathName": "数据标准",
+                        "remark": "国家军用标准、GJB、技术标准和数据规范。",
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("originalFileName", prompt)
+        self.assertIn("GJB 9001C-2017 质量管理体系要求.pdf", prompt)
+        self.assertIn("remark", prompt)
+        self.assertIn("国家军用标准、GJB、技术标准和数据规范。", prompt)
 
     def test_build_file_analysis_prompt_uses_default_ranges_when_missing(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
@@ -191,6 +299,19 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("组织机构", prompt)
         self.assertIn("architectureId 必须来自候选 architectureList 中的 id", prompt)
         self.assertIn("当文档与所有候选领域都明显无关时，architectureId 输出 1", prompt)
+        self.assertIn("当 architectureList 只有一个节点时", prompt)
+        self.assertIn("优先分类到最具体的叶子节点", prompt)
+        self.assertIn("最近公共父节点", prompt)
+        self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
+        self.assertIn("GJB", prompt)
+        self.assertIn("数据标准", prompt)
+
+    def test_default_architecture_options_use_current_protocol_shape(self):
+        for item in DEFAULT_ARCHITECTURE_OPTIONS:
+            self.assertIn("parentId", item)
+            self.assertIn("remark", item)
+            self.assertNotIn("level", item)
+            self.assertNotIn("sort", item)
 
     def test_map_analysis_result_falls_back_to_original_text_for_obvious_fields(self):
         original_text = (
