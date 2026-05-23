@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  docsense:
+    build: .
+    container_name: docsense-app
+    ports:
+      - "5001:5001"
+    volumes:
+      # 只持久化业务产生的数据
+      - ./data/runtime:/app/.runtime
+      - ./data/uploads:/app/uploads
+    
+    env_file:
+      - .env
+
+    environment:
+      # 覆盖地址为宿主机通信地址
+      - ANYTHINGLLM_BASE_URL=http://host.docker.internal:3001/api/v1
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - APP_HOST=0.0.0.0
+      - MOCK_CALLBACK_HOST=0.0.0.0
+      - CALLBACK_URL=http://host.docker.internal:9000/llm/callback
+      # 显式声明 MinerU 使用本地模式及离线环境
+      - MINERU_MODEL_SOURCE=local
+      - MINERU_GLOBAL_CONFIG_PATH=/root/mineru.json
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - MODELSCOPE_CACHE=/root/.cache/modelscope
+      - USE_MODELSCOPE_HUB=0
+    restart: unless-stopped

@@ -3,3 +3,4 @@ pdfplumber
 pdf2docx
 mineru[core]
 argostranslate
+markdown

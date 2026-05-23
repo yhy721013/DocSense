@@ -1,6 +1,7 @@
 import logging
 logger = logging.getLogger(__name__)
 import requests
+import os
 import time
 from .utils import build_prompt, clean_output, ProgressTracker
 
@@ -18,15 +19,17 @@ class HYMTTranslator:
         else:
             self.model_name = model_name
 
-        # ollama API 地址
-        self.ollama_api_url = "http://localhost:11434/api/generate"
+        # 【修改】从环境变量获取 Ollama 地址，默认回退到 localhost
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        self.ollama_api_url = f"{ollama_host}/api/generate"
+        self.ollama_tags_url = f"{ollama_host}/api/tags"
 
-        logger.info(f"Using Ollama model: {self.model_name}")
+        logger.info(f"Using Ollama model: {self.model_name} at {ollama_host}")
 
         # 测试连接
         try:
             test_response = requests.post(
-                "http://localhost:11434/api/tags",
+                self.ollama_tags_url,
                 timeout=5
             )
             if test_response.status_code == 200:
