@@ -91,6 +91,7 @@ def handle_chat_stream(
     client: AnythingLLMClient,
     chat_id: str,
     file_names: List[str],
+    file_original_names: List[str],
     message: str,
 ) -> Generator[str, None, None]:
     """SSE 流式对话生成器。
@@ -127,7 +128,7 @@ def handle_chat_stream(
                 return
             thread_slug = client.extract_thread_slug(thread_info) or str(thread_info.get("id"))
 
-            chat_db.create_chat(chat_id, file_names, workspace_slug, thread_slug)
+            chat_db.create_chat(chat_id, file_original_names, workspace_slug, thread_slug)
             is_new_chat = True
         else:
             # ── 继续对话 ──
@@ -135,7 +136,7 @@ def handle_chat_stream(
             thread_slug = existing_chat["thread_slug"]
 
             # 增量追加新引用文件（不再支持移除）
-            all_old_files = [fn for sublist in existing_chat["file_names"] for fn in sublist]
+            all_old_files = [fn for sublist in existing_chat["file_original_names"] for fn in sublist]
             old_set = set(all_old_files)
             to_add = [fn for fn in file_names if fn not in old_set]
 
@@ -146,7 +147,7 @@ def handle_chat_stream(
                     yield _format_sse_event("error", {"error": "更新工作区文件引用失败"})
                     return
             
-            chat_db.append_file_names(chat_id, file_names)
+            chat_db.append_file_original_names(chat_id, file_original_names)
 
             is_new_chat = False
 
@@ -185,7 +186,7 @@ def get_chat_history(
     )
 
     messages = []
-    file_names_history = chat_record["file_names"]
+    file_original_names_history = chat_record["file_original_names"]
     turn_timestamps_history = chat_record.get("turn_timestamps", [])
     user_turn_index = 0
 
@@ -206,11 +207,11 @@ def get_chat_history(
             if role == "user":
                 if timestamp is None and user_turn_index < len(turn_timestamps_history):
                     msg["timestamp"] = _to_timestamp_ms(turn_timestamps_history[user_turn_index])
-                if user_turn_index < len(file_names_history):
-                    file_names = file_names_history[user_turn_index]
+                if user_turn_index < len(file_original_names_history):
+                    file_original_names = file_original_names_history[user_turn_index]
                 else:
-                    file_names = []
-                msg["files"] = [{"name": file_name} for file_name in file_names if isinstance(file_name, str)]
+                    file_original_names = []
+                msg["files"] = [{"name": fn} for fn in file_original_names if isinstance(fn, str)]
                 user_turn_index += 1
             messages.append(msg)
 

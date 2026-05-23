@@ -40,23 +40,23 @@ class ChatDebugDatabaseQueryTests(unittest.TestCase):
         self.assertEqual(rows[0]["anything_doc_id"], "doc-alpha")
 
     def test_list_chats_returns_latest_updated_first_with_decoded_file_names(self):
-        self.chat_db.create_chat("chat-older", ["a.pdf"], "ws-a", "th-a")
-        self.chat_db.create_chat("chat-newer", ["b.pdf"], "ws-b", "th-b")
-        self.chat_db.append_file_names("chat-older", ["c.pdf"])
+        self.chat_db.create_chat("chat-older", ["测试A.pdf"], "ws-a", "th-a")
+        self.chat_db.create_chat("chat-newer", ["测试B.pdf"], "ws-b", "th-b")
+        self.chat_db.append_file_original_names("chat-older", ["测试C.pdf"])
 
         rows = self.chat_db.list_chats()
 
         self.assertEqual(rows[0]["chat_id"], "chat-older")
-        self.assertEqual(rows[0]["file_names"], ["a.pdf", "c.pdf"])
+        self.assertEqual(rows[0]["file_original_names"], [["测试A.pdf"], ["测试C.pdf"]])
         self.assertEqual(rows[1]["chat_id"], "chat-newer")
 
     def test_create_and_append_chat_persist_turn_timestamps(self):
-        self.chat_db.create_chat("chat-ts", ["a.pdf"], "ws-a", "th-a")
+        self.chat_db.create_chat("chat-ts", ["测试A.pdf"], "ws-a", "th-a")
         created = self.chat_db.get_chat("chat-ts")
         self.assertEqual(len(created["turn_timestamps"]), 1)
         self.assertIsInstance(created["turn_timestamps"][0], int)
 
-        self.chat_db.append_file_names("chat-ts", ["b.pdf"])
+        self.chat_db.append_file_original_names("chat-ts", ["测试B.pdf"])
         updated = self.chat_db.get_chat("chat-ts")
         self.assertEqual(len(updated["turn_timestamps"]), 2)
         self.assertGreaterEqual(updated["turn_timestamps"][1], updated["turn_timestamps"][0])
@@ -75,7 +75,7 @@ class ChatDebugPreviewTests(unittest.TestCase):
     def test_load_chat_debug_bootstrap_returns_sessions_and_available_files(self):
         from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
 
-        self.chat_db.create_chat("conv-001", ["alpha.pdf"], "ws-1", "th-1")
+        self.chat_db.create_chat("conv-001", ["测试文件.pdf"], "ws-1", "th-1")
         self.kb_service.save_document_record(
             "alpha.pdf",
             12,
@@ -88,7 +88,7 @@ class ChatDebugPreviewTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["message"], "读取成功")
         self.assertEqual(result["data"]["sessions"][0]["chatId"], "conv-001")
-        self.assertEqual(result["data"]["sessions"][0]["fileNames"], ["alpha.pdf"])
+        self.assertEqual(result["data"]["sessions"][0]["fileNames"], [["测试文件.pdf"]])
         self.assertEqual(result["data"]["availableFiles"][0]["fileName"], "alpha.pdf")
         self.assertEqual(result["data"]["availableFiles"][0]["architectureId"], 12)
 
