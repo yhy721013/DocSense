@@ -41,13 +41,17 @@ class ChatRouteValidationTests(unittest.TestCase):
         })
         self.assertEqual(resp.status_code, 400)
 
-    def test_chat_rejects_empty_file_names_for_new_chat(self):
-        resp = self.client.post("/llm/chat", json={
-            "businessType": "chat",
-            "params": {"chatId": "c1", "fileNames": [], "message": "hi"},
-        })
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("新对话", resp.get_json()["error"])
+    def test_chat_accepts_empty_file_names_for_new_chat(self):
+        """新对话传空 fileNames 不再报 400（允许创建不引用文件的对话）。"""
+        with patch("app.blueprints.llm.handle_chat_stream", return_value=iter([
+            'event: chatInfo\ndata: {"chatId": "c1", "isNewChat": true}\n\n',
+            'event: done\ndata: {"chatId": "c1"}\n\n',
+        ])):
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {"chatId": "c1", "fileNames": [], "message": "hi"},
+            })
+        self.assertNotEqual(resp.status_code, 400)
 
     def test_chat_rejects_empty_message(self):
         resp = self.client.post("/llm/chat", json={
@@ -67,7 +71,7 @@ class ChatRouteValidationTests(unittest.TestCase):
 
     def test_chat_allows_empty_file_names_for_existing_chat(self):
         """已有会话时传空 fileNames 不报 400（增量语义：无新增文件）。"""
-        self.chat_db.create_chat("c-exist", ["a.pdf"], "ws-slug", "th-slug")
+        self.chat_db.create_chat("c-exist", ["测试文件.pdf"], "ws-slug", "th-slug")
         # 仍然会走到 handle_chat_stream，但不会报参数错误
         # 这里 mock handle_chat_stream 以避免实际调用 AnythingLLM
         with patch("app.blueprints.llm.handle_chat_stream", return_value=iter([
@@ -94,7 +98,7 @@ class ChatRouteValidationTests(unittest.TestCase):
     def test_history_returns_target_schema(self):
         self.chat_db.create_chat(
             "conv-target",
-            ["alpha.pdf", "beta.pdf"],
+            ["alpha原名.pdf", "beta原名.pdf"],
             "ws-slug",
             "th-slug",
         )
@@ -121,7 +125,7 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(data[0]["timestamp"], 1777364120677)
         self.assertEqual(
             data[0]["files"],
-            [{"name": "alpha.pdf"}, {"name": "beta.pdf"}],
+            [{"name": "alpha原名.pdf"}, {"name": "beta原名.pdf"}],
         )
         self.assertEqual(data[1]["role"], "assistant")
         self.assertEqual(data[1]["content"], "抱歉，AI 服务出现错误")
@@ -131,7 +135,7 @@ class ChatRouteValidationTests(unittest.TestCase):
     def test_history_uses_db_turn_timestamp_when_upstream_missing(self):
         self.chat_db.create_chat(
             "conv-no-upstream-ts",
-            ["alpha.pdf"],
+            ["测试文件.pdf"],
             "ws-slug",
             "th-slug",
         )
@@ -190,7 +194,7 @@ class ChatDeleteTests(unittest.TestCase):
     @patch("app.services.llm_service.chat_service.AnythingLLMClient", autospec=True)
     def test_delete_existing_chat_returns_200(self, _mock_client_cls):
         # 先手动创建一条对话记录
-        self.chat_db.create_chat("del-test", ["a.pdf"], "ws-slug", "th-slug")
+        self.chat_db.create_chat("del-test", ["测试文件.pdf"], "ws-slug", "th-slug")
 
         # mock AnythingLLMClient 实例方法
         mock_client = MagicMock()

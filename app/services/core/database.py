@@ -26,6 +26,7 @@ class DatabaseService:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS documents (
                         file_name TEXT PRIMARY KEY,
+                        original_name TEXT NOT NULL DEFAULT '',
                         architecture_id INTEGER NOT NULL,
                         anything_doc_id TEXT NOT NULL,
                         doc_path TEXT
@@ -56,15 +57,15 @@ class DatabaseService:
 
     # ================= Document 表的增删改查 =================
     
-    def save_document_record(self, file_name: str, architecture_id: int, anything_doc_id: str, doc_path: str = ""):
+    def save_document_record(self, file_name: str, architecture_id: int, anything_doc_id: str, doc_path: str = "", original_name: str = ""):
         """文件解析成功后，将其信息存入表中"""
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 # 用 REPLACE 防止同一个文件被多次解析时报主键冲突
                 conn.execute("""
-                    REPLACE INTO documents (file_name, architecture_id, anything_doc_id, doc_path)
-                    VALUES (?, ?, ?, ?)
-                """, (file_name, architecture_id, anything_doc_id, doc_path))
+                    REPLACE INTO documents (file_name, original_name, architecture_id, anything_doc_id, doc_path)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (file_name, original_name or file_name, architecture_id, anything_doc_id, doc_path))
                 conn.commit()
 
     def get_document_record(self, file_name: str) -> dict | None:
@@ -81,7 +82,7 @@ class DatabaseService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT file_name, architecture_id, anything_doc_id, doc_path
+                SELECT file_name, original_name, architecture_id, anything_doc_id, doc_path
                 FROM documents
                 ORDER BY file_name ASC
                 """
@@ -110,6 +111,15 @@ class DatabaseService:
                 conn.commit()
             logger.info("已更新文档类别: file_name=%s, new_architecture_id=%s", file_name, new_architecture_id)
 
+    def get_original_name(self, file_name: str) -> str:
+        """根据哈希文件名查询原始文件名，若无记录则回退返回 file_name 本身"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT original_name FROM documents WHERE file_name = ?", (file_name,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                return row[0]
+            return file_name
+
 
 class ChatDatabaseService:
     """对话会话持久化（独立数据库 chat_sessions.sqlite3）"""
@@ -125,7 +135,7 @@ class ChatDatabaseService:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS chats (
                         chat_id     TEXT PRIMARY KEY,
-                        file_names  TEXT NOT NULL,
+                        file_original_names  TEXT NOT NULL,
                         turn_timestamps TEXT NOT NULL DEFAULT '[]',
                         workspace_slug TEXT NOT NULL,
                         thread_slug    TEXT NOT NULL,
@@ -133,19 +143,13 @@ class ChatDatabaseService:
                         updated_at  TEXT NOT NULL
                     )
                 """)
-                cursor = conn.execute("PRAGMA table_info(chats)")
-                columns = {row[1] for row in cursor.fetchall()}
-                if "turn_timestamps" not in columns:
-                    conn.execute(
-                        "ALTER TABLE chats ADD COLUMN turn_timestamps TEXT NOT NULL DEFAULT '[]'"
-                    )
                 conn.commit()
             logger.info("对话数据库初始化完成: %s", self.db_path)
 
     def create_chat(
         self,
         chat_id: str,
-        file_names: list[str],
+        file_original_names: list[str],
         workspace_slug: str,
         thread_slug: str,
     ) -> dict:
@@ -155,24 +159,24 @@ class ChatDatabaseService:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         now_ms = int(now_dt.timestamp() * 1000)
-        file_names_json = json.dumps([file_names], ensure_ascii=False)
+        file_original_names_json = json.dumps([file_original_names], ensure_ascii=False)
         turn_timestamps_json = json.dumps([now_ms], ensure_ascii=False)
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     """
                     INSERT INTO chats (
-                        chat_id, file_names, turn_timestamps, workspace_slug, thread_slug, created_at, updated_at
+                        chat_id, file_original_names, turn_timestamps, workspace_slug, thread_slug, created_at, updated_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (chat_id, file_names_json, turn_timestamps_json, workspace_slug, thread_slug, now, now),
+                    (chat_id, file_original_names_json, turn_timestamps_json, workspace_slug, thread_slug, now, now),
                 )
                 conn.commit()
         logger.info("已创建对话记录: chat_id=%s", chat_id)
         return {
             "chat_id": chat_id,
-            "file_names": file_names,
+            "file_original_names": file_original_names,
             "turn_timestamps": [now_ms],
             "workspace_slug": workspace_slug,
             "thread_slug": thread_slug,
@@ -190,7 +194,7 @@ class ChatDatabaseService:
             if not row:
                 return None
             record = dict(row)
-            record["file_names"] = json.loads(record["file_names"])
+            record["file_original_names"] = json.loads(record["file_original_names"])
             record["turn_timestamps"] = json.loads(record.get("turn_timestamps") or "[]")
             return record
 
@@ -202,7 +206,7 @@ class ChatDatabaseService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT chat_id, file_names, turn_timestamps, workspace_slug, thread_slug, created_at, updated_at
+                SELECT chat_id, file_original_names, turn_timestamps, workspace_slug, thread_slug, created_at, updated_at
                 FROM chats
                 ORDER BY updated_at DESC
                 """
@@ -210,13 +214,13 @@ class ChatDatabaseService:
             rows = []
             for row in cursor.fetchall():
                 record = dict(row)
-                record["file_names"] = json.loads(record["file_names"])
+                record["file_original_names"] = json.loads(record["file_original_names"])
                 record["turn_timestamps"] = json.loads(record.get("turn_timestamps") or "[]")
                 rows.append(record)
             return rows
 
-    def append_file_names(self, chat_id: str, new_file_names: list[str]) -> None:
-        """将新增文件列表作为一个新的回合追加到已有引用列表中（记录每次交互的文件列表）。"""
+    def append_file_original_names(self, chat_id: str, new_file_original_names: list[str]) -> None:
+        """将新增文件原名列表作为一个新的回合追加到已有引用列表中（记录每次交互的文件列表）。"""
         import json
         from datetime import datetime, timezone
 
@@ -224,12 +228,12 @@ class ChatDatabaseService:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    "SELECT file_names, turn_timestamps FROM chats WHERE chat_id = ?", (chat_id,)
+                    "SELECT file_original_names, turn_timestamps FROM chats WHERE chat_id = ?", (chat_id,)
                 )
                 row = cursor.fetchone()
-                existing: list[list[str]] = json.loads(row["file_names"]) if row else []
+                existing: list[list[str]] = json.loads(row["file_original_names"]) if row else []
                 existing_turn_timestamps: list[int] = json.loads(row["turn_timestamps"] or "[]") if row else []
-                existing.append(new_file_names)
+                existing.append(new_file_original_names)
                 now_dt = datetime.now(timezone.utc)
                 now_ms = int(now_dt.timestamp() * 1000)
                 existing_turn_timestamps.append(now_ms)
@@ -237,11 +241,11 @@ class ChatDatabaseService:
                 merged_json = json.dumps(existing, ensure_ascii=False)
                 merged_turn_timestamps_json = json.dumps(existing_turn_timestamps, ensure_ascii=False)
                 conn.execute(
-                    "UPDATE chats SET file_names = ?, turn_timestamps = ?, updated_at = ? WHERE chat_id = ?",
+                    "UPDATE chats SET file_original_names = ?, turn_timestamps = ?, updated_at = ? WHERE chat_id = ?",
                     (merged_json, merged_turn_timestamps_json, now, chat_id),
                 )
                 conn.commit()
-        logger.info("已追加对话引用文件: chat_id=%s, new_count=%d", chat_id, len(new_file_names))
+        logger.info("已追加对话引用文件: chat_id=%s, new_count=%d", chat_id, len(new_file_original_names))
 
     def delete_chat(self, chat_id: str) -> None:
         with self._lock:
