@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+.venv
+.env
+.runtime/*.sqlite3
+mineru_output/*
+uploads/*
+tests/
+docs/
+data/
