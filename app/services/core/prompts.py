@@ -38,7 +38,7 @@ def _format_options(title: str, items: Iterable[Any]) -> str:
     return f"{title}: {json.dumps(list(items), ensure_ascii=False)}\n"
 
 
-def _format_architecture_options(items: Iterable[Any]) -> str:
+def _format_architecture_options(items: Iterable[Any], title: str = "领域体系候选") -> str:
     fields = ("id", "name", "parentId", "path", "pathName", "remark")
     formatted_items = []
     for item in items:
@@ -46,13 +46,14 @@ def _format_architecture_options(items: Iterable[Any]) -> str:
             formatted_items.append(item)
             continue
         formatted_items.append({field: item.get(field) for field in fields if field in item})
-    return _format_options("领域体系候选", formatted_items)
+    return _format_options(title, formatted_items)
 
 
 def build_file_analysis_prompt(request_params: dict) -> str:
     from app.services.llm_service.analysis_service import build_effective_analysis_ranges
 
     ranges = build_effective_analysis_ranges(request_params)
+    standard_ranges = ranges["architectureStandardList"]
     schema = {
         "country": "",
         "channel": "",
@@ -79,6 +80,33 @@ def build_file_analysis_prompt(request_params: dict) -> str:
             "documentTranslationTwo": "",
         },
     }
+    data_standard_contract = ""
+    data_standard_options = ""
+    data_standard_priority = ""
+    data_standard_self_check = ""
+    final_self_check_index = "4"
+    if standard_ranges:
+        schema["fileDataItem"].update(
+            {
+                "militaryName": "",
+                "num": "",
+                "startTime": "",
+                "implTime": "",
+                "approvalDept": "",
+            }
+        )
+        data_standard_contract = (
+            "10. architectureStandardList 表示数据标准额外解析范围；当最终 architectureId 命中该范围时，"
+            "fileDataItem 必须额外抽取 militaryName、num、startTime、implTime、approvalDept。"
+            "startTime 和 implTime 使用 yyyy-MM-dd；找不到则输出空字符串。\n"
+        )
+        data_standard_options = _format_architecture_options(standard_ranges, "数据标准额外解析范围")
+        data_standard_priority = (
+            "【数据标准额外字段】若文件属于 architectureStandardList 范围，请抽取："
+            "militaryName=国军标名称，num=编号，startTime=发布时间，implTime=实施时间，approvalDept=批准部门。\n"
+        )
+        data_standard_self_check = "4. 若命中 architectureStandardList，startTime/implTime 是否为 yyyy-MM-dd 或空字符串。\n"
+        final_self_check_index = "5"
     return (
         "你是结构化抽取器。请仅基于文档内容抽取字段，并且只输出一个严格合法 JSON 对象。\n"
         "【请求上下文】\n"
@@ -94,7 +122,8 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "8. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
         "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断出具体值。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
-        "【正反例】\n"
+        + data_standard_contract
+        + "【正反例】\n"
         "- 正确：\"country\": \"美国\"\n"
         "- 错误：\"country\": {\"key\": \"02\", \"value\": \"美国\"}\n"
         "- 正确：\"architectureId\": 10502\n"
@@ -104,17 +133,20 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + "输出 JSON 必须严格匹配以下结构：\n"
         + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
         + _format_architecture_options(ranges["architectureList"])
+        + data_standard_options
         + _format_options("国家候选", ranges["country"])
         + _format_options("渠道候选", ranges["channel"])
         + _format_options("成熟度候选", ranges["maturity"])
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
+        + data_standard_priority
         + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；fileNo：文件编号；dataFormat：资料格式，保持与\"dataFormat\"一致。\n"
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/format 是否都为候选 value 或空字符串。\n"
         + "2. architectureId 是否为候选 id 或 1。\n"
         + "3. score 是否为 95、85、75、65、55 之一。\n"
-        + "4. 是否仅使用英文键名且 JSON 语法可解析。\n"
+        + data_standard_self_check
+        + f"{final_self_check_index}. 是否仅使用英文键名且 JSON 语法可解析。\n"
     )
 
 

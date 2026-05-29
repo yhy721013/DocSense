@@ -152,6 +152,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
    - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
+   - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
    - 多节点分类时优先返回最具体叶子节点；叶子证据不足时返回最深可靠父节点；多个兄弟节点都可能时返回最近公共父节点。
    - 文档内容明确为 GJB、国军标、国家军用标准相关资料，且候选中存在 `数据标准` 节点时，优先返回该节点 `id`。

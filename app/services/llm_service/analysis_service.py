@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import unicodedata
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -69,6 +70,13 @@ DEFAULT_ARCHITECTURE_OPTIONS = [
 
 ARCHITECTURE_FALLBACK_ID = 1
 SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
+DATA_STANDARD_FIELD_ALIASES = {
+    "militaryName": ("militaryName", "国军标名称", "标准名称"),
+    "num": ("num", "编号", "标准编号", "国军标编号", "fileNo", "文件编号"),
+    "startTime": ("startTime", "发布时间", "发布日期", "发布日"),
+    "implTime": ("implTime", "实施时间", "实施日期", "实施日"),
+    "approvalDept": ("approvalDept", "批准部门", "批准单位", "批准机关", "批准机构", "发布部门"),
+}
 
 
 def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -85,6 +93,7 @@ def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str,
         "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
         "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
         "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
+        "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
     }
 
 
@@ -94,6 +103,15 @@ def _as_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value)
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_match_text(value: Any) -> str:
@@ -134,6 +152,80 @@ def _match_data_standard_architecture_id(
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def _architecture_id_set(items: Iterable[Dict[str, Any]]) -> set[int]:
+    ids = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = _coerce_int(item.get("id"))
+        if item_id is not None:
+            ids.add(item_id)
+    return ids
+
+
+def _path_ids(value: Any) -> set[int]:
+    text = _as_text(value)
+    if not text:
+        return set()
+    return {int(match) for match in re.findall(r"\d+", text)}
+
+
+def _architecture_ancestor_ids(architecture_id: int, architecture_list: Iterable[Dict[str, Any]]) -> set[int]:
+    items_by_id: dict[int, Dict[str, Any]] = {}
+    for item in architecture_list:
+        if not isinstance(item, dict):
+            continue
+        item_id = _coerce_int(item.get("id"))
+        if item_id is not None:
+            items_by_id[item_id] = item
+
+    ancestors = set()
+    current_id = architecture_id
+    visited = {architecture_id}
+    while True:
+        item = items_by_id.get(current_id)
+        if not item:
+            break
+        parent_id = _coerce_int(item.get("parentId"))
+        if parent_id is None or parent_id in visited:
+            break
+        ancestors.add(parent_id)
+        visited.add(parent_id)
+        current_id = parent_id
+    return ancestors
+
+
+def _is_architecture_in_standard_range(
+        architecture_id: Any,
+        architecture_list: Iterable[Dict[str, Any]],
+        architecture_standard_list: Iterable[Dict[str, Any]],
+) -> bool:
+    resolved_id = _coerce_int(architecture_id)
+    if resolved_id is None:
+        return False
+
+    standard_ids = _architecture_id_set(architecture_standard_list)
+    if not standard_ids:
+        return False
+    if resolved_id in standard_ids:
+        return True
+
+    candidate_items = [item for item in architecture_list if isinstance(item, dict)]
+    target_item = None
+    for item in candidate_items:
+        if _coerce_int(item.get("id")) == resolved_id:
+            target_item = item
+            break
+
+    if target_item:
+        if standard_ids.intersection(_path_ids(target_item.get("path"))):
+            return True
+        if standard_ids.intersection(_architecture_ancestor_ids(resolved_id, candidate_items)):
+            return True
+
+    return False
 
 
 def _normalize_source_score(value: Any) -> int:
@@ -339,6 +431,29 @@ def _extract_date(original_text: str) -> str:
     return f"{year}-{month:02d}-{int(day):02d}"
 
 
+def _format_iso_date(year: Any, month: Any, day: Any) -> str:
+    try:
+        return date(int(year), int(month), int(day)).isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _normalize_date_field(value: Any) -> str:
+    text = _scalar_text(value)
+    if not text:
+        return ""
+
+    match = re.search(r"(\d{4})[-./年](\d{1,2})[-./月](\d{1,2})日?", text)
+    if match:
+        return _format_iso_date(*match.groups())
+
+    match = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", text)
+    if match:
+        return _format_iso_date(*match.groups())
+
+    return _extract_date(text)
+
+
 def _infer_language(original_text: str) -> str:
     has_cjk = bool(re.search(r"[\u4e00-\u9fff]", original_text))
     has_latin = bool(re.search(r"[A-Za-z]", original_text))
@@ -382,6 +497,16 @@ def _extract_source(original_text: str) -> str:
     if match:
         return match.group(1).strip()
     return ""
+
+
+def _extract_data_standard_fields(parsed_result: Dict[str, Any], file_item: Dict[str, Any]) -> Dict[str, str]:
+    fields = {}
+    for field_name, aliases in DATA_STANDARD_FIELD_ALIASES.items():
+        value = _resolve_field(parsed_result, file_item, *aliases)
+        if field_name in {"startTime", "implTime"}:
+            value = _normalize_date_field(value)
+        fields[field_name] = value
+    return fields
 
 
 def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str, Any], original_text: str = "") -> Dict[
@@ -434,33 +559,42 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
         or _match_architecture_id(parsed_result, ranges["architectureList"])
     )
 
+    file_data_item = {
+        "fileName": file_name,
+        "dataTime": resolved_date or _extract_date(normalized_original_text),
+        "keyword": _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+        "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
+        "score": _normalize_source_score(raw_score),
+        "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
+        "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(
+            normalized_original_text),
+        "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
+        "language": resolved_language or _infer_language(normalized_original_text),
+        "dataFormat": _resolve_field(parsed_result, file_item, "dataFormat", "资料格式"),
+        "associatedEquipment": _resolve_field(parsed_result, file_item, "associatedEquipment", "所属装备"),
+        "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
+        "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),
+        "documentOverview": _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述")
+                            or extracted_title,
+        "originalText": normalized_original_text,
+        "documentTranslationOne": "",
+        "documentTranslationTwo": "",
+    }
+
+    if _is_architecture_in_standard_range(
+            architecture_id,
+            ranges["architectureList"],
+            ranges["architectureStandardList"],
+    ):
+        file_data_item.update(_extract_data_standard_fields(parsed_result, file_item))
+
     return {
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
         "format": resolved_format,
         "architectureId": architecture_id,
-        "fileDataItem": {
-            "fileName": file_name,
-            "dataTime": resolved_date or _extract_date(normalized_original_text),
-            "keyword": _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
-            "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
-            "score": _normalize_source_score(raw_score),
-            "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
-            "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(
-                normalized_original_text),
-            "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
-            "language": resolved_language or _infer_language(normalized_original_text),
-            "dataFormat": _resolve_field(parsed_result, file_item, "dataFormat", "资料格式"),
-            "associatedEquipment": _resolve_field(parsed_result, file_item, "associatedEquipment", "所属装备"),
-            "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
-            "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),
-            "documentOverview": _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述")
-                                or extracted_title,
-            "originalText": normalized_original_text,
-            "documentTranslationOne": "",
-            "documentTranslationTwo": "",
-        },
+        "fileDataItem": file_data_item,
     }
 
 

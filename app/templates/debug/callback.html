@@ -369,6 +369,17 @@
         { label: "装备型号", value: fileDataItem.equipmentModel },
       ]);
 
+      const dataStandardKeys = ["militaryName", "num", "startTime", "implTime", "approvalDept"];
+      if (dataStandardKeys.some((key) => Object.prototype.hasOwnProperty.call(fileDataItem, key))) {
+        renderFieldGrid("数据标准信息", [
+          { label: "国军标名称", value: fileDataItem.militaryName },
+          { label: "编号", value: fileDataItem.num },
+          { label: "发布时间", value: fileDataItem.startTime },
+          { label: "实施时间", value: fileDataItem.implTime },
+          { label: "批准部门", value: fileDataItem.approvalDept },
+        ]);
+      }
+
       renderPlainTextPreview("原文", fileDataItem.originalText);
       renderHtmlPreview("单语翻译预览", fileDataItem.documentTranslationOne);
       renderHtmlPreview("双语翻译预览", fileDataItem.documentTranslationTwo);
