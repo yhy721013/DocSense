@@ -6,11 +6,12 @@ from .utils import build_prompt, clean_output, ProgressTracker
 
 
 class HYMTTranslator:
-    def __init__(self, model_name=None, device_map="auto"):
+    def __init__(self, model_name=None, device_map="auto", check_ollama: bool = True):
         """
         初始化翻译器。
         :param model_name: 默认为 None 使用 ollama 本地模型
         :param device_map: 设备映射策略 (此处主要适配 Ollama API)
+        :param check_ollama: 是否初始化时探测 Ollama；机器翻译默认路径不需要探测
         """
         # 默认使用 qwen3.5:4b 模型（更高效，幻觉更小）
         if model_name is None:
@@ -21,21 +22,22 @@ class HYMTTranslator:
         # ollama API 地址
         self.ollama_api_url = "http://localhost:11434/api/generate"
 
-        logger.info(f"Using Ollama model: {self.model_name}")
+        if check_ollama:
+            logger.info(f"Using Ollama model: {self.model_name}")
 
-        # 测试连接
-        try:
-            test_response = requests.post(
-                "http://localhost:11434/api/tags",
-                timeout=5
-            )
-            if test_response.status_code == 200:
-                logger.info("Ollama service connected successfully.")
-            else:
-                logger.warning(f"Warning: Ollama service returned status code {test_response.status_code}")
-        except Exception as e:
-            logger.warning(f"Warning: Could not connect to Ollama service: {e}")
-            logger.info("Please ensure Ollama is running and the model is available.")
+            # 测试连接
+            try:
+                test_response = requests.post(
+                    "http://localhost:11434/api/tags",
+                    timeout=5
+                )
+                if test_response.status_code == 200:
+                    logger.info("Ollama service connected successfully.")
+                else:
+                    logger.warning(f"Warning: Ollama service returned status code {test_response.status_code}")
+            except Exception as e:
+                logger.warning(f"Warning: Could not connect to Ollama service: {e}")
+                logger.info("Please ensure Ollama is running and the model is available.")
 
         self.progress_tracker = ProgressTracker()
 
@@ -44,7 +46,7 @@ class HYMTTranslator:
         self._auto_install_argos_packages()
 
     def translate_text(self, text: str, target_lang: str = "Chinese", progress_callback=None,
-                       max_retries: int = 2, fast_translate: bool = False, model_name: str = None) -> str:
+                       max_retries: int = 2, fast_translate: bool = True, model_name: str = None) -> str:
         """
         翻译单段文本，作为选择大模型翻译或快速翻译的路由入口。
         :param text: 待翻译文本
