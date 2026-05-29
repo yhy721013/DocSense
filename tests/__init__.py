@@ -11,5 +11,5 @@ from typing import Iterator
 def workspace_tempdir() -> Iterator[str]:
     root = Path(".runtime/test-temp")
     root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=root) as tmp:
+    with tempfile.TemporaryDirectory(dir=root, ignore_cleanup_errors=True) as tmp:
         yield tmp

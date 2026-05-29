@@ -14,7 +14,7 @@ def load_chat_debug_bootstrap(
         sessions = [
             {
                 "chatId": item["chat_id"],
-                "fileNames": item["file_names"],
+                "fileNames": item["file_original_names"],
                 "createdAt": item["created_at"],
                 "updatedAt": item["updated_at"],
             }

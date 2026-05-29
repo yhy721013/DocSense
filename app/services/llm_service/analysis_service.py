@@ -778,6 +778,7 @@ def run_file_analysis_task(
 ) -> None:
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
+    original_name = _as_text(params.get("originalName")) or file_name
     file_path = _as_text(params.get("filePath"))
 
     logger.info("开始执行文件分析任务: file_name=%s", file_name)
@@ -846,7 +847,7 @@ def run_file_analysis_task(
                             client.update_embeddings(alt_path, workspace_slug, user_id=1, metadata=metadata)
                             
                         if doc_id:
-                            kb_service.save_document_record(file_name, architecture_id, str(doc_id), doc_path=doc_relative_path)
+                            kb_service.save_document_record(file_name, architecture_id, str(doc_id), doc_path=doc_relative_path, original_name=original_name)
         except Exception as e:
             logger.error("知识库尝试存入文件失败: %s", e)
 

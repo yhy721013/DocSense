@@ -600,6 +600,9 @@ def llm_chat():
 
     normalized_file_names = [fn.strip() for fn in file_names]
 
+    # 将哈希文件名映射为原始文件名
+    file_original_names = [kb_service.get_original_name(fn) for fn in normalized_file_names]
+
     client = AnythingLLMClient(anythingllm_config)
     generator = handle_chat_stream(
         chat_db=chat_db,
@@ -607,6 +610,7 @@ def llm_chat():
         client=client,
         chat_id=chat_id,
         file_names=normalized_file_names,
+        file_original_names=file_original_names,
         message=message,
     )
     return Response(
