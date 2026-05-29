@@ -499,12 +499,50 @@ def _extract_source(original_text: str) -> str:
     return ""
 
 
-def _extract_data_standard_fields(parsed_result: Dict[str, Any], file_item: Dict[str, Any]) -> Dict[str, str]:
+def _extract_labeled_value(original_text: str, labels: Iterable[str]) -> str:
+    if not original_text:
+        return ""
+    for label in labels:
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", label):
+            continue
+        match = re.search(rf"{re.escape(label)}\s*[:：]\s*([^\r\n]+)", original_text)
+        if match:
+            return match.group(1).strip(" \t;；。")
+    return ""
+
+
+def _extract_gjb_number(original_text: str) -> str:
+    match = re.search(r"\b(GJB\s*[0-9A-Za-z]+(?:[-—–][0-9A-Za-z]+)*)\b", original_text)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def _extract_standard_name(original_text: str) -> str:
+    labeled = _extract_labeled_value(original_text, DATA_STANDARD_FIELD_ALIASES["militaryName"])
+    if labeled:
+        return labeled
+    for line in original_text.splitlines():
+        candidate = line.strip()
+        if candidate and _contains_gjb_standard_reference(candidate):
+            return candidate
+    return ""
+
+
+def _extract_data_standard_fields(
+        parsed_result: Dict[str, Any],
+        file_item: Dict[str, Any],
+        original_text: str,
+) -> Dict[str, str]:
     fields = {}
     for field_name, aliases in DATA_STANDARD_FIELD_ALIASES.items():
         value = _resolve_field(parsed_result, file_item, *aliases)
         if field_name in {"startTime", "implTime"}:
-            value = _normalize_date_field(value)
+            value = _normalize_date_field(value) or _normalize_date_field(_extract_labeled_value(original_text, aliases))
+        elif not value and field_name == "militaryName":
+            value = _extract_standard_name(original_text)
+        elif not value and field_name == "num":
+            value = _extract_labeled_value(original_text, aliases) or _extract_gjb_number(original_text)
+        elif not value:
+            value = _extract_labeled_value(original_text, aliases)
         fields[field_name] = value
     return fields
 
@@ -586,7 +624,7 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
             ranges["architectureList"],
             ranges["architectureStandardList"],
     ):
-        file_data_item.update(_extract_data_standard_fields(parsed_result, file_item))
+        file_data_item.update(_extract_data_standard_fields(parsed_result, file_item, normalized_original_text))
 
     return {
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),

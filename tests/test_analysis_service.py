@@ -266,6 +266,29 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             self.assertIn(field, result["fileDataItem"])
             self.assertEqual(result["fileDataItem"][field], "")
 
+    def test_map_analysis_result_falls_back_to_original_text_for_standard_fields(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 202, "name": "数据标准"}],
+            "architectureStandardList": [{"id": 202, "name": "数据标准"}],
+        }
+        original_text = (
+            "GJB 9001C-2017 质量管理体系要求\n"
+            "国军标名称：GJB 9001C-2017 质量管理体系要求\n"
+            "编号：GJB 9001C-2017\n"
+            "发布时间：2017年5月18日\n"
+            "实施时间：2017年7月1日\n"
+            "批准部门：中央军委装备发展部\n"
+        )
+
+        result = map_analysis_result({"architectureId": 202}, request_params, original_text=original_text)
+
+        self.assertEqual(result["fileDataItem"]["militaryName"], "GJB 9001C-2017 质量管理体系要求")
+        self.assertEqual(result["fileDataItem"]["num"], "GJB 9001C-2017")
+        self.assertEqual(result["fileDataItem"]["startTime"], "2017-05-18")
+        self.assertEqual(result["fileDataItem"]["implTime"], "2017-07-01")
+        self.assertEqual(result["fileDataItem"]["approvalDept"], "中央军委装备发展部")
+
     def test_map_analysis_result_uses_only_architecture_candidate_when_single_node(self):
         request_params = {
             "fileName": "sample.txt",
