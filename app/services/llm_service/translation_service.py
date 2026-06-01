@@ -24,7 +24,7 @@ class LLMTranslationService:
         """确保翻译器已初始化（懒加载）"""
         if self._translator is None:
             model_name = os.getenv("DOCSENSE_TRANSLATION_MODEL", "Qwen3-4B-Instruct-2507-Q4_K_M")
-            self._translator = HYMTTranslator(model_name=model_name)
+            self._translator = HYMTTranslator(model_name=model_name, check_ollama=False)
             self._document_translator = DocumentTranslator(self._translator)
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:
@@ -97,7 +97,7 @@ class LLMTranslationService:
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
-    def translate_text_only(self, text: str, target_lang: str = "Chinese", fast_translate: bool = False, as_html: bool = True) -> str:
+    def translate_text_only(self, text: str, target_lang: str = "Chinese", fast_translate: bool = True, as_html: bool = True) -> str:
         """
         仅翻译纯文本（适用于短文本或摘要）
 
@@ -143,4 +143,3 @@ def get_translation_service() -> LLMTranslationService:
     if _translation_service_instance is None:
         _translation_service_instance = LLMTranslationService()
     return _translation_service_instance
-
