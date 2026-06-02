@@ -155,7 +155,14 @@ def handle_chat_stream(
         yield _format_sse_event("chatInfo", {"chatId": chat_id, "isNewChat": is_new_chat})
 
         # ── 流式对话 ──
-        raw_stream = client.stream_chat_to_thread(workspace_slug, thread_slug, message)
+        current_doc_ids = _resolve_doc_ids(client, kb_service, workspace_slug, file_names)
+        raw_stream = client.stream_chat_to_thread(
+            workspace_slug, 
+            thread_slug, 
+            message, 
+            mode="query", 
+            document_ids=current_doc_ids
+        )
         for chunk in _filter_think_stream(raw_stream):
             yield _format_sse_event("textChunk", {"content": chunk})
 
@@ -298,6 +305,33 @@ def _resolve_doc_paths(kb_service: DatabaseService, file_names: List[str]) -> Li
         elif record.get("anything_doc_id"):
             paths.append(_build_doc_path(record["anything_doc_id"]))
     return paths
+
+
+def _resolve_doc_ids(client: AnythingLLMClient, kb_service: DatabaseService, workspace_slug: str, file_names: List[str]) -> List[str]:
+    """根据 fileName 列表查询 documents 表，并在 AnythingLLM 工作区中获取实际的 docId。"""
+    ids = []
+    for file_name in file_names:
+        record = kb_service.get_document_record(file_name)
+        if not record:
+            continue
+        
+        doc_path = record.get("doc_path")
+        if not doc_path and record.get("anything_doc_id"):
+            doc_path = _build_doc_path(record["anything_doc_id"])
+            
+        if doc_path:
+            doc_entry = client.fetch_workspace_document(workspace_slug, doc_path, user_id=1)
+            if doc_entry:
+                doc_uuid = doc_entry.get("docId") or doc_entry.get("id")
+                if doc_uuid:
+                    ids.append(str(doc_uuid))
+                    continue
+        
+        # 降级：如果工作区里没查到，就用数据库里存的 anything_doc_id
+        doc_id = record.get("anything_doc_id")
+        if doc_id:
+            ids.append(str(doc_id))
+    return ids
 
 
 # ── 异常类 ──────────────────────────────────────────────

@@ -105,7 +105,7 @@ class AnythingLLMClient:
         url = f"{self.config.base_url}/workspace/new"
         payload = {
             "name": name,
-            "similarityThreshold": 0.25,
+            "similarityThreshold": 0.0,
             "openAiTemp": 0.7,
             "openAiHistory": 20,
             "openAiPrompt": (
@@ -115,7 +115,7 @@ class AnythingLLMClient:
                 "回答应当准确、清晰、有条理。\n"
             ),
             "chatMode": "chat",
-            "topN": 4,
+            "topN": 20,
         }
         try:
             resp = self.session.post(
@@ -592,13 +592,15 @@ class AnythingLLMClient:
         thread_slug: str,
         message: str,
         user_id: Optional[int] = None,
-        mode: str = "chat",
+        mode: str = "query",
+        document_ids: Optional[List[str]] = None,
     ):
         """向 Thread 发送消息并流式 yield 文本片段（生成器）。"""
         url = f"{self.config.base_url}/workspace/{workspace_slug}/thread/{thread_slug}/stream-chat"
         payload: Dict[str, Any] = {
             "message": message,
             "mode": mode,
+            "files": document_ids or [],
         }
         try:
             headers = self._json_headers(user_id)
