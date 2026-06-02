@@ -38,19 +38,22 @@ def clean_runtime():
     """
     runtime_dir = root_dir / ".runtime"
     if runtime_dir.exists() and runtime_dir.is_dir():
-        logger.info(f"正在删除本地临时运行时目录: {runtime_dir} ...")
-        # 多次尝试，以防 Windows 下杀毒软件、文件句柄未完全释放等导致暂时被占用（引发 [WinError 32] 错误）
+        logger.info(f"正在清理本地临时运行时目录的内容: {runtime_dir} ...")
+        # 多次尝试，以防 Windows 下杀毒软件、文件句柄未完全释放等导致暂时被占用
         for _ in range(3):
             try:
-                shutil.rmtree(runtime_dir)
-                logger.info("成功删除 .runtime 文件夹。")
+                for item in runtime_dir.iterdir():
+                    if item.is_file() or item.is_symlink():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item)
+                logger.info("成功清理 .runtime 文件夹内部文件。")
                 break
             except Exception as e:
-                logger.warning(f"删除 .runtime 失败: {e}，等待后重试...")
-                time.sleep(1) # 发现失败后等待1秒再次重发尝试
+                logger.warning(f"清理 .runtime 失败: {e}，等待后重试...")
+                time.sleep(1)
         else:
-            # 如果三次都失败，则打印最终的 Error，提醒可能存在必须手动干预的后台占用进程
-            logger.error("重试多次后仍无法删除 .runtime 文件夹。可能由于残留进程占用。")
+            logger.error("重试多次后仍无法清理 .runtime 文件夹。可能由于残留进程占用。")
     else:
         logger.info(".runtime 文件夹不存在或已被删除，无需操作。")
 
@@ -102,10 +105,13 @@ def clean_anythingllm():
         docs_dir = Path(storage_root) / "documents"
         if docs_dir.exists() and docs_dir.is_dir():
             logger.info(f"检测到 AnythingLLM document 内部物理存储路径: {docs_dir}")
-            logger.info("正在执行底层目录文件清空...")
+            logger.info("正在尝试底层目录文件清空...")
             try:
-                shutil.rmtree(docs_dir)
-                logger.info(f"成功清理 AnythingLLM 本地的所有文档数据文件夹: {docs_dir}")
+                if not os.access(docs_dir, os.W_OK):
+                    logger.warning(f"目录 {docs_dir} 为只读状态 (Docker 挂载)，跳过物理删除。")
+                else:
+                    shutil.rmtree(docs_dir)
+                    logger.info(f"成功清理 AnythingLLM 本地的所有文档数据文件夹: {docs_dir}")
             except Exception as e:
                 logger.error(f"删除文档存储文件夹失败，请检查文件占用权限: {e}")
         else:
@@ -115,8 +121,11 @@ def clean_anythingllm():
         vector_cache_dir = Path(storage_root) / "vector-cache"
         if vector_cache_dir.exists() and vector_cache_dir.is_dir():
             try:
-                shutil.rmtree(vector_cache_dir)
-                logger.info(f"成功删除 AnythingLLM 底层向量缓存文件夹: {vector_cache_dir}")
+                if not os.access(vector_cache_dir, os.W_OK):
+                    logger.warning(f"目录 {vector_cache_dir} 为只读状态 (Docker 挂载)，跳过物理删除。")
+                else:
+                    shutil.rmtree(vector_cache_dir)
+                    logger.info(f"成功删除 AnythingLLM 底层向量缓存文件夹: {vector_cache_dir}")
             except Exception as e:
                 logger.error(f"删除底层向量缓存文件夹失败: {e}")
     else:
