@@ -448,7 +448,7 @@ def llm_reassign():
     if not doc_record:
         return jsonify({
             "businessType": "reassign",
-            "message": "变更失败",
+            "msg": "变更失败",
             "data": {
                 "fileName": file_name,
                 "oldArchitectureId": old_architecture_id,
@@ -456,7 +456,7 @@ def llm_reassign():
                 "success": False,
                 "message": "文档记录不存在"
             }
-        })
+        }), 500
 
     actual_old_id = doc_record["architecture_id"]
     if str(actual_old_id) != str(old_architecture_id):
@@ -466,7 +466,7 @@ def llm_reassign():
         )
         return jsonify({
             "businessType": "reassign",
-            "message": "变更失败",
+            "msg": "变更失败",
             "data": {
                 "fileName": file_name,
                 "oldArchitectureId": old_architecture_id,
@@ -474,7 +474,7 @@ def llm_reassign():
                 "success": False,
                 "message": "分类不一致，变更失败"
             }
-        })
+        }), 500
 
     client = AnythingLLMClient(anythingllm_config)
     doc_path = doc_record.get("doc_path")
@@ -500,7 +500,7 @@ def llm_reassign():
         logger.error("在调整工作区关联时失败: file_name=%s, exception=%s", file_name, e)
         return jsonify({
             "businessType": "reassign",
-            "message": "变更失败",
+            "msg": "变更失败",
             "data": {
                 "fileName": file_name,
                 "oldArchitectureId": old_architecture_id,
@@ -508,13 +508,13 @@ def llm_reassign():
                 "success": False,
                 "message": f"处理知识库节点映射报错: {str(e)}"
             }
-        })
+        }), 500
 
     kb_service.update_document_architecture(file_name, new_architecture_id)
 
     return jsonify({
         "businessType": "reassign",
-        "message": "变更成功",
+        "msg": "变更成功",
         "data": {
             "fileName": file_name,
             "oldArchitectureId": old_architecture_id,
@@ -522,7 +522,7 @@ def llm_reassign():
             "success": True,
             "message": "变更成功"
         }
-    })
+    }), 200
 
 
 @sock.route("/llm/progress")
