@@ -778,7 +778,7 @@ def run_file_analysis_task(
 ) -> None:
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
-    original_name = _as_text(params.get("originalName")) or file_name
+    original_name = _as_text(params.get("originalFileName")) or file_name
     file_path = _as_text(params.get("filePath"))
 
     logger.info("开始执行文件分析任务: file_name=%s", file_name)
