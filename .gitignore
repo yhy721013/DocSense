@@ -32,3 +32,12 @@ GEMINI.md
 .clinerules
 .windsurfrules
 .github/copilot-instructions.md
+
+# Docker 部署产物 | Docker deployment artifacts
+docker/deploy/images/
+docker/deploy/volumes/
+docker/deploy/BURN_MANIFEST.txt
+models/
+data/
+*.tar
+*.tar.gz
