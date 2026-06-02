@@ -76,22 +76,24 @@ class DocumentTranslator:
             )
 
         # 原有处理逻辑
-        # if ext == '.pdf':
-        #     return self.pdf_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
-        # elif ext in ['.docx', '.doc']:
-        #     return self.docx_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
-        # elif ext == '.txt':
-        #     return self.txt_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
-        # elif ext == '.md':
-        #     return self.markdown_handler.process(
-        #         markdown_path=file_path,
-        #         output_path=output_path,
-        #         target_lang=target_lang,
-        #         translate_all=translate_all,
-        #         fast_translate=fast_translate,
-        #     )
-        # else:
-        #     raise ValueError(f"Unsupported file format: {ext}")
+        if ext == '.pdf':
+            # return self.pdf_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            pass
+        elif ext in ['.docx', '.doc']:
+            # return self.docx_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            pass
+        elif ext == '.txt':
+            return self.txt_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+        elif ext == '.md':
+            return self.markdown_handler.process(
+                markdown_path=file_path,
+                output_path=output_path,
+                target_lang=target_lang,
+                translate_all=translate_all,
+                fast_translate=fast_translate,
+            )
+        else:
+            raise ValueError(f"Unsupported file format: {ext}")
 
     def convert_to_html(
             self,
@@ -147,48 +149,36 @@ class DocumentTranslator:
             )
 
         # 原有处理逻辑 - 也需要修改返回值
-        # if ext == '.pdf':
-        #     bilingual_path, monolingual_path = self.pdf_handler.convert_to_html_translated(
-        #         file_path,
-        #         output_dir,
-        #         target_lang,
-        #         translate_all,
-        #         fast_translate
-        #     )
-        #     # PDF 处理器也需要返回双语和单语两个路径
-        #     return bilingual_path, monolingual_path
-        # elif ext in ['.docx', '.doc']:
-        #     bilingual_path, monolingual_path = self.docx_handler.convert_to_html(
-        #         file_path,
-        #         output_dir,
-        #         target_lang,
-        #         translate_all,
-        #         fast_translate
-        #     )
-        #     # DOCX 处理器也需要返回双语和单语两个路径
-        #     return bilingual_path, monolingual_path
-        # elif ext == '.txt':
-        #     bilingual_path, monolingual_path = self.txt_handler.convert_to_html(
-        #         file_path,
-        #         output_dir,
-        #         target_lang,
-        #         translate_all,
-        #         fast_translate
-        #     )
-        #     # TXT 处理器也需要返回双语和单语两个路径
-        #     return bilingual_path, monolingual_path
-        # elif ext == '.md':
-        #     bilingual_path, monolingual_path = self.markdown_handler.convert_to_html(
-        #         markdown_path=file_path,
-        #         output_dir=output_dir,
-        #         target_lang=target_lang,
-        #         translate_all=translate_all,
-        #         fast_translate=fast_translate,
-        #     )
-        #     # Markdown 处理器返回双语和单语两个路径
-        #     return bilingual_path, monolingual_path
-        # else:
-        #     raise ValueError(f"不支持的文件格式：{ext}。支持的格式：PDF, DOCX, TXT, MD")
+        if ext == '.pdf':
+            # bilingual_path, monolingual_path = self.pdf_handler.convert_to_html_translated(...)
+            # return bilingual_path, monolingual_path
+            raise ValueError("PDF is routed to MinerU, but direct handling is not implemented yet.")
+        elif ext in ['.docx', '.doc']:
+            # bilingual_path, monolingual_path = self.docx_handler.convert_to_html(...)
+            # return bilingual_path, monolingual_path
+            raise ValueError("DOCX is routed to MinerU, but direct handling is not implemented yet.")
+        elif ext == '.txt':
+            bilingual_path, monolingual_path = self.txt_handler.convert_to_html(
+                file_path,
+                output_dir,
+                target_lang,
+                translate_all,
+                fast_translate
+            )
+            # TXT 处理器也需要返回双语和单语两个路径
+            return bilingual_path, monolingual_path
+        elif ext == '.md':
+            bilingual_path, monolingual_path = self.markdown_handler.convert_to_html(
+                markdown_path=file_path,
+                output_dir=output_dir,
+                target_lang=target_lang,
+                translate_all=translate_all,
+                fast_translate=fast_translate,
+            )
+            # Markdown 处理器返回双语和单语两个路径
+            return bilingual_path, monolingual_path
+        else:
+            raise ValueError(f"不支持的文件格式：{ext}。支持的格式：PDF, DOCX, TXT, MD")
 
     def get_progress(self) -> dict:
         """
