@@ -351,30 +351,66 @@ class AnythingLLMClient:
             logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, e)
             return []
 
+    _PROCESSOR_OFFLINE_MARKERS = (
+        "Document processing API is not online",
+        "fetch failed",
+    )
+    _UPLOAD_MAX_RETRIES = 3
+    _UPLOAD_RETRY_BASE_DELAY = 3.0  # 秒，指数退避基数
+
+    def _is_processor_unavailable(self, resp_text: str) -> bool:
+        """判断上传 500 响应是否属于 Document Processor 暂时不可用。"""
+        return any(marker in resp_text for marker in self._PROCESSOR_OFFLINE_MARKERS)
+
     def upload_document(self, file_path: str, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         url = f"{self.config.base_url}/document/upload"
-        try:
-            with open(file_path, "rb") as f:
-                files = {"file": (os.path.basename(file_path), f)}
-                resp = self.session.post(
-                    url,
-                    headers=self._build_headers(user_id),
-                    files=files,
-                    timeout=self.config.timeout,
-                )
-            if not resp.ok:
+
+        for attempt in range(1 + self._UPLOAD_MAX_RETRIES):
+            try:
+                with open(file_path, "rb") as f:
+                    files = {"file": (os.path.basename(file_path), f)}
+                    resp = self.session.post(
+                        url,
+                        headers=self._build_headers(user_id),
+                        files=files,
+                        timeout=self.config.timeout,
+                    )
+
+                if resp.ok:
+                    body = resp.json()
+                    documents = body.get("documents")
+                    if isinstance(documents, list) and documents:
+                        logger.info("已上传文档: %s", file_path)
+                        return documents[0]
+                    logger.warning("文档 %s 的上传响应中不包含文档信息", file_path)
+                    return None
+
+                # Document Processor 暂时不可用（offline / fetch failed）→ 重试
+                if resp.status_code == 500 and self._is_processor_unavailable(resp.text):
+                    if attempt < self._UPLOAD_MAX_RETRIES:
+                        delay = self._UPLOAD_RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "Document Processor 暂时不可用，%ds 后重试上传 %s (第%d/%d次)",
+                            delay, file_path, attempt + 1, self._UPLOAD_MAX_RETRIES,
+                        )
+                        time.sleep(delay)
+                        continue
+                    # 重试耗尽
+                    logger.error(
+                        "Document Processor 持续不可用，上传 %s 最终失败 (已重试%d次)",
+                        file_path, self._UPLOAD_MAX_RETRIES,
+                    )
+                    return None
+
+                # 其他 HTTP 错误，不重试
                 logger.error("上传文档 %s 失败: %s %s", file_path, resp.status_code, resp.text)
                 return None
-            body = resp.json()
-            documents = body.get("documents")
-            if isinstance(documents, list) and documents:
-                logger.info("已上传文档: %s", file_path)
-                return documents[0]
-            logger.warning("文档 %s 的上传响应中不包含文档信息", file_path)
-            return None
-        except Exception as e:
-            logger.error("上传文档 %s 时出现异常: %s", file_path, e)
-            return None
+
+            except Exception as e:
+                logger.error("上传文档 %s 时出现异常: %s", file_path, e)
+                return None
+
+        return None
 
     def fetch_workspace_document(
         self,

@@ -34,7 +34,20 @@ llm_config = load_llm_integration_config()
 anythingllm_config = load_anythingllm_config()
 progress_hub = LLMProgressHub()
 
+# 全局信号量：同一时刻只允许 1 个文档上传类任务（analysis / report）执行，
+# 避免并发上传压垮 AnythingLLM 的 Document Processor。
+_upload_semaphore = threading.Semaphore(1)
+
 logger = logging.getLogger(__name__)
+
+
+def _with_upload_semaphore(fn, **kwargs):
+    """在获取 _upload_semaphore 后执行 fn，结束后自动释放。"""
+    _upload_semaphore.acquire()
+    try:
+        fn(**kwargs)
+    finally:
+        _upload_semaphore.release()
 
 
 def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -225,17 +238,20 @@ def llm_analysis():
             {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
         )
 
+    _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
+    _task_kwargs = {
+        "task_service": task_service,
+        "kb_service": kb_service,
+        "progress_hub": progress_hub,
+        "request_payload": payload if len(tasks) > 1 else {"businessType": "file", "params": [params_list[0]]},
+        "download_root": llm_config.download_dir,
+        "callback_url": llm_config.callback_url or "",
+        "callback_timeout": llm_config.callback_timeout,
+    }
     worker = threading.Thread(
-        target=run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task,
-        kwargs={
-            "task_service": task_service,
-            "kb_service": kb_service,
-            "progress_hub": progress_hub,
-            "request_payload": payload if len(tasks) > 1 else {"businessType": "file", "params": [params_list[0]]},
-            "download_root": llm_config.download_dir,
-            "callback_url": llm_config.callback_url or "",
-            "callback_timeout": llm_config.callback_timeout,
-        },
+        target=_with_upload_semaphore,
+        args=(_task_fn,),
+        kwargs=_task_kwargs,
         daemon=True,
     )
     worker.start()
@@ -269,16 +285,18 @@ def llm_generate_report():
         {"businessType": "report", "data": {"reportId": int(report_id), "progress": 0.0}},
     )
 
+    _report_kwargs = {
+        "task_service": task_service,
+        "progress_hub": progress_hub,
+        "request_payload": payload,
+        "download_root": llm_config.download_dir,
+        "callback_url": llm_config.callback_url or "",
+        "callback_timeout": llm_config.callback_timeout,
+    }
     worker = threading.Thread(
-        target=run_report_task,
-        kwargs={
-            "task_service": task_service,
-            "progress_hub": progress_hub,
-            "request_payload": payload,
-            "download_root": llm_config.download_dir,
-            "callback_url": llm_config.callback_url or "",
-            "callback_timeout": llm_config.callback_timeout,
-        },
+        target=_with_upload_semaphore,
+        args=(run_report_task,),
+        kwargs=_report_kwargs,
         daemon=True,
     )
     worker.start()
