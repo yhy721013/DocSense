@@ -11,7 +11,7 @@ ARCHITECTURE_CLASSIFICATION_RULES = (
     "3. 多节点候选中，优先分类到最具体的叶子节点。\n"
     "4. 如果叶子节点证据不足，选择最深的可靠父节点。\n"
     "5. 如果多个兄弟节点都可能，选择它们的最近公共父节点。\n"
-    "6. 当文档内容明确为 GJB、国军标、国家军用标准相关资料时，应归类到候选中的“数据标准”节点，并返回该节点 id。\n"
+    "6. 当文档内容明确为 GJB、国军标、国家军用标准相关资料时，应归类到候选中的「数据标准」下的子节点，并返回该节点 id。\n"
     "7. 军事基地：军事设施、基地建设、基地布局、军事要塞、港口码头、机场跑道、后勤保障设施、营房工程、防御工事。\n"
     "8. 体系运用：作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗。\n"
     "9. 装备型号：武器装备、装备参数、技术指标、装备性能。若候选中存在二级节点，应优先判断为空中装备、水面装备或水下装备。\n"
@@ -21,6 +21,7 @@ ARCHITECTURE_CLASSIFICATION_RULES = (
     "13. 条令条例：发布机构、编号、版本、规范、条令、条例、制度等内容更偏向该类。\n"
     "14. architectureId 必须来自候选 architectureList 中的 id；无法匹配时输出 1。当文档与所有候选领域都明显无关时，architectureId 输出 1。\n"
     "15. 不要输出分类名称、候选列表或概率，只输出最终 architectureId 数字。\n"
+    "16. 如果文档主要介绍一种武器装备，【必须】将文档分类为这种武器装备下描述某个方面的子类别，如基础数据、战技指标、运用数据、效能数据等"
 )
 
 SOURCE_SCORE_RULES = (
@@ -96,7 +97,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
             }
         )
         data_standard_contract = (
-            "10. architectureStandardList 表示数据标准额外解析范围；当最终 architectureId 命中该范围时，"
+            "11. architectureStandardList 表示数据标准额外解析范围；当最终 architectureId 命中该范围时，"
             "fileDataItem 必须额外抽取 militaryName、num、startTime、implTime、approvalDept。"
             "startTime 和 implTime 使用 yyyy-MM-dd；找不到则输出空字符串。\n"
         )
@@ -122,6 +123,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "8. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
         "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断出具体值。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
+        "10. documentOverview 字段要求输出不少于 1000 字的描述，尽可能详细完整，突出文档核心内容和特点。\n"
         + data_standard_contract
         + "【正反例】\n"
         "- 正确：\"country\": \"美国\"\n"

@@ -1,0 +1,95 @@
+# ==============================================================================
+# DocSense 三服务编排
+# ==============================================================================
+# 启动：docker compose up -d
+# 停止：docker compose down
+# 日志：docker compose logs -f
+# 重建：docker compose build docsense
+#
+# 服务间通过 Docker 内部网络以服务名互访：
+#   DocSense  → http://anythingllm:3001/api/v1
+#   DocSense  → http://ollama:11434
+#   AnythingLLM → http://ollama:11434  (在 AnythingLLM 设置中配置)
+# ==============================================================================
+
+services:
+  # ============================================
+  # 1. Ollama — LLM 推理引擎
+  # ============================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: docsense-ollama
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama         # 模型数据持久化
+    # ==========================================================
+    # 【GPU 显卡加速配置】
+    # 如果目标机器**没有** NVIDIA 独立显卡（如仅有核显），请保持此段被注释。
+    # 如果目标机器**有** NVIDIA 独立显卡且已装驱动，请取消下面 7 行的注释，
+    # 否则模型推理将仅使用 CPU，速度极其缓慢！
+    # ==========================================================
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: all
+#              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ============================================
+  # 2. AnythingLLM — RAG 平台
+  # ============================================
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: docsense-anythingllm
+    ports:
+      - "${ANYTHINGLLM_HOST_PORT:-3001}:3001"
+    volumes:
+      - anythingllm-data:/app/server/storage   # AnythingLLM 数据持久化
+    environment:
+      - STORAGE_DIR=/app/server/storage
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  # ============================================
+  # 3. DocSense — Python 业务后端
+  # ============================================
+  docsense:
+    build:
+      context: ..                         # 项目根目录作为构建上下文
+      dockerfile: docker/Dockerfile
+    image: docsense-app:latest
+    container_name: docsense-app
+    ports:
+      - "${DOCSENSE_HOST_PORT:-5001}:5001"
+    volumes:
+      # ── 源码挂载（更新代码时替换这些文件，重启即生效）──
+      - ../app:/app/app:ro
+      - ../run.py:/app/run.py:ro
+      - ../clean.py:/app/clean.py:ro
+      # ── 运行时数据持久化 ──
+      - ../data/runtime:/app/.runtime
+      - ../data/uploads:/app/uploads
+      # ── 共享 AnythingLLM 存储卷（用于监控文档处理状态） ──
+      - anythingllm-data:/anythingllm-storage:ro
+    env_file:
+      - .env.docker
+    environment:
+      # Docker 内部网络通信（通过服务名访问）
+      - ANYTHINGLLM_BASE_URL=http://anythingllm:3001/api/v1
+      - OLLAMA_HOST=http://ollama:11434
+      - APP_HOST=0.0.0.0
+    depends_on:
+      - ollama
+      - anythingllm
+    restart: unless-stopped
+
+volumes:
+  ollama-data:                        # Ollama 模型存储卷
+    name: docsense_ollama-data        # 固定卷名，与部署脚本保持一致
+  anythingllm-data:                   # AnythingLLM 数据存储卷
+    name: docsense_anythingllm-data
+

@@ -1,8 +1,8 @@
 import os
 from typing import Optional
 from .core import HYMTTranslator
-from .docx_handler import DocxHandler
-from .pdf_handler import PDFHandler
+# from .docx_handler import DocxHandler
+# from .pdf_handler import PDFHandler
 from .txt_handler import TXTHandler
 from .MarkdownHandler import MarkdownHandler
 
@@ -16,8 +16,8 @@ class DocumentTranslator:
         :param translator: HYMTTranslator 实例
         """
         self.translator = translator
-        self.docx_handler = DocxHandler(translator)
-        self.pdf_handler = PDFHandler(translator)
+        # self.docx_handler = DocxHandler(translator)
+        # self.pdf_handler = PDFHandler(translator)
         self.txt_handler = TXTHandler(translator)
         self.markdown_handler = MarkdownHandler(translator)
 
@@ -77,9 +77,11 @@ class DocumentTranslator:
 
         # 原有处理逻辑
         if ext == '.pdf':
-            return self.pdf_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            # return self.pdf_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            pass
         elif ext in ['.docx', '.doc']:
-            return self.docx_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            # return self.docx_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            pass
         elif ext == '.txt':
             return self.txt_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
         elif ext == '.md':
@@ -148,25 +150,13 @@ class DocumentTranslator:
 
         # 原有处理逻辑 - 也需要修改返回值
         if ext == '.pdf':
-            bilingual_path, monolingual_path = self.pdf_handler.convert_to_html_translated(
-                file_path,
-                output_dir,
-                target_lang,
-                translate_all,
-                fast_translate
-            )
-            # PDF 处理器也需要返回双语和单语两个路径
-            return bilingual_path, monolingual_path
+            # bilingual_path, monolingual_path = self.pdf_handler.convert_to_html_translated(...)
+            # return bilingual_path, monolingual_path
+            raise ValueError("PDF is routed to MinerU, but direct handling is not implemented yet.")
         elif ext in ['.docx', '.doc']:
-            bilingual_path, monolingual_path = self.docx_handler.convert_to_html(
-                file_path,
-                output_dir,
-                target_lang,
-                translate_all,
-                fast_translate
-            )
-            # DOCX 处理器也需要返回双语和单语两个路径
-            return bilingual_path, monolingual_path
+            # bilingual_path, monolingual_path = self.docx_handler.convert_to_html(...)
+            # return bilingual_path, monolingual_path
+            raise ValueError("DOCX is routed to MinerU, but direct handling is not implemented yet.")
         elif ext == '.txt':
             bilingual_path, monolingual_path = self.txt_handler.convert_to_html(
                 file_path,
