@@ -78,7 +78,6 @@ class LLMTranslationService:
                 target_lang=target_lang,
                 translate_all=translate_all,
                 fast_translate=fast_translate,
-                use_minerU=use_minerU
             )
 
             # 读取双语 HTML 内容
