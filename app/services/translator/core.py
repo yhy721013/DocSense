@@ -177,6 +177,23 @@ class HYMTTranslator:
         """
         try:
             from argostranslate import package, translate
+            import argostranslate.sbd
+
+            # --- Monkey patch StanzaSentencizer to fallback to simple split on error ---
+            if not getattr(argostranslate.sbd.StanzaSentencizer, '_is_patched', False):
+                original_split_sentences = argostranslate.sbd.StanzaSentencizer.split_sentences
+                def safe_split_sentences(self, text: str):
+                    try:
+                        return original_split_sentences(self, text)
+                    except Exception as e:
+                        logger.warning(f"  [警告] StanzaSentencizer 失败，回退到基础断句: {e}")
+                        import re
+                        sentences = re.split(r'(?<=[.!?。！？\n])\s+', text)
+                        return [s for s in sentences if s.strip()]
+                
+                argostranslate.sbd.StanzaSentencizer.split_sentences = safe_split_sentences
+                argostranslate.sbd.StanzaSentencizer._is_patched = True
+            # ---------------------------------------------------------------------------
 
             # 检测源语言（简单判断：如果包含中文字符则为中文）
             from_lang_code = "zh" if any('\u4e00' <= c <= '\u9fff' for c in text) else "en"
