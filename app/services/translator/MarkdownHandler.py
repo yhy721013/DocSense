@@ -28,6 +28,7 @@ class MarkdownHandler:
             extract_images: bool = True,
             formula_enable: bool = True,
             table_enable: bool = True,
+            output_dir: Optional[str] = None,
     ) -> str:
         """
         使用 MinerU 将任意格式文档转换为 Markdown
@@ -37,27 +38,38 @@ class MarkdownHandler:
         :param extract_images: 是否提取图片
         :param formula_enable: 是否启用公式识别
         :param table_enable: 是否启用表格识别
+        :param output_dir: 输出根目录（可选，默认使用 MinerUConverter 的默认目录）
         :return: Markdown 文件路径
         """
         print(f"\n{'=' * 50}")
-        print(f"步骤 1: 使用 MinerU 将文档转换为 Markdown")
+        print(f"Step 1: Convert document to Markdown via MinerU")
         print(f"{'=' * 50}")
 
-        # 【关键修改】为每个文件创建独立的输出子目录
-        input_file_name = Path(input_path).stem
-        output_subdir = f"mineru_{input_file_name}"
+        if output_dir:
+            original_output_dir = self.mineru_converter.output_dir
+            self.mineru_converter.output_dir = Path(output_dir).expanduser().resolve()
+            self.mineru_converter.output_dir.mkdir(parents=True, exist_ok=True)
 
-        md_path = self.mineru_converter.convert_to_markdown(
-            input_path=input_path,
-            use_ocr=use_ocr,
-            lang=lang,
-            extract_images=extract_images,
-            formula_enable=formula_enable,
-            table_enable=table_enable,
-            output_subdir=output_subdir
-        )
+        try:
+            self.mineru_converter.convert_to_markdown(
+                input_path=input_path,
+                use_ocr=use_ocr,
+                lang=lang,
+                extract_images=extract_images,
+                formula_enable=formula_enable,
+                table_enable=table_enable,
+            )
+        finally:
+            if output_dir:
+                self.mineru_converter.output_dir = original_output_dir
 
-        print(f"MinerU 转换完成，Markdown 文件：{md_path}")
+        target_dir = Path(output_dir) if output_dir else self.mineru_converter.output_dir
+        md_files = list(target_dir.rglob("*.md"))
+        if not md_files:
+            raise FileNotFoundError(f"No .md file found under: {target_dir}")
+        md_path = str(md_files[0])
+
+        print(f"MinerU done, Markdown: {md_path}")
         return md_path
 
     def process(
