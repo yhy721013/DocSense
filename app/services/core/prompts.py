@@ -35,6 +35,14 @@ SOURCE_SCORE_RULES = (
 )
 
 
+SOURCE_FIELD_RULES = (
+    "【source 来源出处规则】\n"
+    "source 必须输出文档内容中提到的具体数据来源出处，如发布机构、网站、刊物、报告名、原文出处或资料页来源。\n"
+    "不要把 score 数字、评分档位或“权威机构公开发布/专业信息网站”等泛泛评分理由当作 source。\n"
+    "文档未明确提到具体来源出处时，source 输出“未明确数据来源”；这种情况下 score 应按评分规则输出 55。\n"
+)
+
+
 def _format_options(title: str, items: Iterable[Any]) -> str:
     return f"{title}: {json.dumps(list(items), ensure_ascii=False)}\n"
 
@@ -122,7 +130,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "6. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "8. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
-        "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断出具体值。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
+        "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断；source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
         "10. documentOverview 字段要求输出不少于 1000 字的描述，尽可能详细完整，突出文档核心内容和特点。\n"
         + data_standard_contract
         + "【正反例】\n"
@@ -132,6 +140,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "- 错误：\"architectureId\": \"作战指挥/组织机构\"\n"
         + ARCHITECTURE_CLASSIFICATION_RULES
         + SOURCE_SCORE_RULES
+        + SOURCE_FIELD_RULES
         + "输出 JSON 必须严格匹配以下结构：\n"
         + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
         + _format_architecture_options(ranges["architectureList"])
@@ -142,11 +151,11 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + data_standard_priority
-        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；fileNo：文件编号；dataFormat：资料格式，保持与\"dataFormat\"一致。\n"
+        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，保持与\"dataFormat\"一致。\n"
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/format 是否都为候选 value 或空字符串。\n"
         + "2. architectureId 是否为候选 id 或 1。\n"
-        + "3. score 是否为 95、85、75、65、55 之一。\n"
+        + "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”。\n"
         + data_standard_self_check
         + f"{final_self_check_index}. 是否仅使用英文键名且 JSON 语法可解析。\n"
     )
