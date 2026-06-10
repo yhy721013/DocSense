@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 import os
 from collections import defaultdict
 
@@ -23,6 +25,31 @@ from app.services.core.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+TARGET_EVIDENCE_TOP_N = 8
+TERMS_RULE_TOP_N = 3
+MAX_TARGET_CHUNKS_PER_FILE = 8
+MAX_TARGET_CONTEXT_CHARS = 12000
+TERMS_RULE_CONTEXT_MAX_CHARS = 1200
+PROMPT_SEND_MAX_ATTEMPTS = 2
+PROMPT_SEND_RETRY_DELAY_SECONDS = 2.0
+TERMS_WORKSPACE_NAME = os.getenv("WEAPONRY_TERMS_WORKSPACE_NAME", "weaponry-terms-rules")
+TERMS_DIR = Path(os.getenv("WEAPONRY_TERMS_DIR", "terms"))
+
+
+@dataclass
+class WeaponryRetrievalContext:
+    """一次 weaponry 任务内的检索上下文。"""
+
+    target_file_names: Set[str]
+    target_doc_paths: Set[str]
+    terms_workspace_slug: Optional[str] = None
+    target_workspace_term_doc_paths: Optional[List[str]] = None
+
+    def __post_init__(self) -> None:
+        if self.target_workspace_term_doc_paths is None:
+            self.target_workspace_term_doc_paths = []
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +83,380 @@ def _strip_document_metadata(text: str) -> str:
     if idx != -1:
         return text[idx + len(tag_end):].strip()
     return text.strip()
+
+
+def _normalize_source_name(name: str) -> str:
+    """归一化 AnythingLLM 文档来源名，便于判断目标 PDF 与术语文件。"""
+    if not name:
+        return ""
+    normalized = str(name).replace("\\", "/").strip()
+    if "custom-documents/" in normalized:
+        normalized = normalized.split("custom-documents/")[-1]
+    return Path(normalized).name
+
+
+def _extract_chunk_source_name(chunk: Dict[str, Any]) -> str:
+    metadata = chunk.get("metadata") or {}
+    file_name = metadata.get("title") or metadata.get("sourceDocument") or metadata.get("file_name")
+
+    if not file_name:
+        raw_text = chunk.get("text", "")
+        if "sourceDocument:" in raw_text:
+            for line in raw_text.splitlines():
+                if line.startswith("sourceDocument:"):
+                    file_name = line.split("sourceDocument:", 1)[1].strip()
+                    break
+
+    return _normalize_source_name(str(file_name or ""))
+
+
+def _is_terms_source_name(source_name: str) -> bool:
+    name = _normalize_source_name(source_name).lower()
+    return name.startswith("term_rule_") or (name.endswith(".md") and "term_rule_" in name)
+
+
+def _is_target_source(source_name: str, context: Optional[WeaponryRetrievalContext]) -> bool:
+    if not context or not context.target_file_names:
+        return not _is_terms_source_name(source_name)
+    normalized = _normalize_source_name(source_name)
+    if not normalized:
+        # 术语文档会在任务开始时从目标 workspace 临时移出；剩余无来源名 chunk
+        # 只能来自当前目标 PDF，保守接受以避免 AnythingLLM metadata 缺失导致误过滤。
+        return True
+    if normalized in context.target_file_names:
+        return True
+    return any(normalized in target or target in normalized for target in context.target_file_names)
+
+
+def _get_score(src: Dict[str, Any]) -> float:
+    try:
+        return float(src.get("score", 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _vector_search_with_top_n(
+    client: AnythingLLMClient,
+    workspace_slug: str,
+    query: str,
+    *,
+    top_n: int,
+    user_id: int = 1,
+) -> List[Dict[str, Any]]:
+    """在 weaponry 内部执行带 topN 的向量检索，不修改通用 client 接口。"""
+    url = f"{client.config.base_url}/workspace/{workspace_slug}/vector-search"
+    payload = {"query": query, "topN": top_n}
+    try:
+        resp = client.session.post(
+            url,
+            headers=client._json_headers(user_id),
+            json=payload,
+            timeout=client.config.timeout,
+        )
+        if not resp.ok:
+            logger.error("向量搜索失败 workspace=%s: %s %s", workspace_slug, resp.status_code, resp.text)
+            return []
+        body = resp.json()
+        results = body.get("results", [])
+        return results if isinstance(results, list) else []
+    except Exception as e:
+        logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, e)
+        return []
+
+
+def _list_workspace_documents(
+    client: AnythingLLMClient,
+    workspace_slug: str,
+    user_id: int = 1,
+) -> List[Dict[str, Any]]:
+    url = f"{client.config.base_url}/workspace/{workspace_slug}"
+    try:
+        resp = client.session.get(url, headers=client._json_headers(user_id), timeout=client.config.timeout)
+        if not resp.ok:
+            logger.error("获取工作区 %s 文档列表失败: %s %s", workspace_slug, resp.status_code, resp.text)
+            return []
+        workspace = resp.json().get("workspace")
+        if isinstance(workspace, list):
+            workspace = workspace[0] if workspace else None
+        if not isinstance(workspace, dict):
+            return []
+        docs = workspace.get("documents", [])
+        return docs if isinstance(docs, list) else []
+    except Exception as e:
+        logger.error("获取工作区 %s 文档列表异常: %s", workspace_slug, e)
+        return []
+
+
+def _workspace_document_path(doc: Dict[str, Any]) -> str:
+    return str(doc.get("docpath") or doc.get("location") or "").replace("\\", "/")
+
+
+def _workspace_document_title(doc: Dict[str, Any]) -> str:
+    return _normalize_source_name(str(doc.get("title") or doc.get("name") or doc.get("filename") or _workspace_document_path(doc)))
+
+
+def _target_document_records(kb_service: DatabaseService, architecture_id: int) -> List[Dict[str, Any]]:
+    return [
+        record
+        for record in kb_service.list_document_records()
+        if str(record.get("architecture_id")) == str(architecture_id)
+    ]
+
+
+def _build_terms_rule_query(field_name: str, field_desc: str) -> str:
+    desc_part = f"\n字段说明：{field_desc}" if field_desc else ""
+    return (
+        f"请检索与字段“{field_name}”相关的术语规则、字段别名、口径说明和单位规则。{desc_part}\n"
+        "只需要返回有助于理解字段含义的规则资料。"
+    )
+
+
+def _format_terms_rule_context(term_chunks: List[Dict[str, Any]], *, max_chars: int = TERMS_RULE_CONTEXT_MAX_CHARS) -> str:
+    parts: List[str] = []
+    used_sources: Set[str] = set()
+    remaining = max_chars
+    for chunk in sorted(term_chunks, key=_get_score, reverse=True):
+        source_name = _extract_chunk_source_name(chunk)
+        if not _is_terms_source_name(source_name) or source_name in used_sources:
+            continue
+        text = _strip_document_metadata(chunk.get("text", ""))
+        if not text:
+            continue
+        snippet = text[: min(remaining, 900)].strip()
+        if not snippet:
+            continue
+        parts.append(f"来源：{source_name}\n{snippet}")
+        used_sources.add(source_name)
+        remaining = max_chars - sum(len(part) for part in parts)
+        if remaining <= 0 or len(parts) >= TERMS_RULE_TOP_N:
+            break
+    return "\n\n".join(parts)
+
+
+def _fallback_target_file_name(context: Optional[WeaponryRetrievalContext]) -> str:
+    if not context or not context.target_file_names:
+        return ""
+    return sorted(context.target_file_names)[0]
+
+
+def _limit_chunks_for_prompt(chunks: List[str]) -> List[str]:
+    limited: List[str] = []
+    remaining = MAX_TARGET_CONTEXT_CHARS
+    for chunk in chunks[:MAX_TARGET_CHUNKS_PER_FILE]:
+        text = (chunk or "").strip()
+        if not text:
+            continue
+        if len(text) > remaining:
+            text = text[:remaining].rstrip()
+        if text:
+            limited.append(text)
+            remaining -= len(text)
+        if remaining <= 0:
+            break
+    return limited
+
+
+def _extract_thread_slug_from_client(client: AnythingLLMClient, thread_info: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(thread_info, dict):
+        return None
+    extractor = getattr(client, "extract_thread_slug", None)
+    if callable(extractor):
+        try:
+            slug = extractor(thread_info)
+            if slug:
+                return str(slug)
+        except Exception as e:
+            logger.warning("提取临时 Thread slug 失败: %s", e)
+    for key in ("slug", "threadSlug", "thread_slug", "id"):
+        value = thread_info.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _send_prompt_to_isolated_thread(
+    client: AnythingLLMClient,
+    workspace_slug: str,
+    parent_thread_slug: str,
+    prompt: str,
+    *,
+    user_id: int = 1,
+    mode: str = "chat",
+) -> Optional[Dict[str, Any]]:
+    """每次字段抽取尽量使用独立 Thread，避免字段间历史污染；失败时回退到父 Thread。"""
+    create_thread = getattr(client, "create_thread", None)
+    delete_thread = getattr(client, "delete_thread", None)
+
+    for attempt in range(1, PROMPT_SEND_MAX_ATTEMPTS + 1):
+        active_thread_slug = parent_thread_slug
+        delete_after = False
+
+        if callable(create_thread):
+            thread_name = f"{parent_thread_slug}-field-{int(time.time() * 1000)}-{attempt}"
+            try:
+                thread_info = create_thread(workspace_slug, thread_name, user_id=user_id)
+                child_thread_slug = _extract_thread_slug_from_client(client, thread_info or {})
+                if child_thread_slug:
+                    active_thread_slug = child_thread_slug
+                    delete_after = True
+            except Exception as e:
+                logger.warning("创建字段临时 Thread 失败，回退到父 Thread: %s", e)
+
+        try:
+            result = client.send_prompt_to_thread(
+                workspace_slug,
+                active_thread_slug,
+                prompt,
+                user_id=user_id,
+                mode=mode,
+            )
+        finally:
+            if delete_after and callable(delete_thread):
+                try:
+                    if not delete_thread(workspace_slug, active_thread_slug, user_id=user_id):
+                        logger.warning("删除字段临时 Thread %s 失败（不影响结果）", active_thread_slug)
+                except Exception as e:
+                    logger.warning("删除字段临时 Thread %s 异常（不影响结果）: %s", active_thread_slug, e)
+
+        if result:
+            return result
+
+        logger.warning(
+            "字段提示词调用无有效响应，准备重试: workspace=%s thread=%s attempt=%d/%d",
+            workspace_slug,
+            active_thread_slug,
+            attempt,
+            PROMPT_SEND_MAX_ATTEMPTS,
+        )
+        if attempt < PROMPT_SEND_MAX_ATTEMPTS:
+            time.sleep(PROMPT_SEND_RETRY_DELAY_SECONDS)
+
+    return None
+
+
+def _ensure_terms_workspace(
+    client: AnythingLLMClient,
+    term_doc_paths: List[str],
+    user_id: int = 1,
+) -> Optional[str]:
+    if not term_doc_paths:
+        return None
+    workspace_info = client.ensure_workspace(TERMS_WORKSPACE_NAME, user_id=user_id)
+    if not workspace_info:
+        logger.warning("无法创建或获取术语规则 workspace: %s", TERMS_WORKSPACE_NAME)
+        return None
+    workspace_slug = workspace_info.get("slug") or str(workspace_info.get("id") or "")
+    if not workspace_slug:
+        logger.warning("术语规则 workspace 缺少 slug: %s", workspace_info)
+        return None
+    if not client.update_embeddings_batch(workspace_slug, adds=term_doc_paths, user_id=user_id):
+        logger.warning("术语规则 workspace 加入术语文档失败: %s", workspace_slug)
+        return None
+    return workspace_slug
+
+
+def _upload_local_terms_if_needed(client: AnythingLLMClient, user_id: int = 1) -> List[str]:
+    if not TERMS_DIR.exists() or not TERMS_DIR.is_dir():
+        return []
+    term_files = sorted(TERMS_DIR.glob("*.md"))
+    if not term_files:
+        return []
+
+    existing = client.find_workspace_by_name(TERMS_WORKSPACE_NAME, user_id=user_id)
+    if existing:
+        slug = existing.get("slug") or str(existing.get("id") or "")
+        if slug:
+            existing_docs = _list_workspace_documents(client, slug, user_id=user_id)
+            existing_term_paths = [
+                _workspace_document_path(doc)
+                for doc in existing_docs
+                if _is_terms_source_name(_workspace_document_title(doc)) and _workspace_document_path(doc)
+            ]
+            if existing_term_paths:
+                return existing_term_paths
+
+    uploaded_paths: List[str] = []
+    for term_file in term_files:
+        doc_info = client.upload_document(str(term_file), user_id=user_id)
+        if not doc_info:
+            logger.warning("上传术语文件失败，跳过: %s", term_file)
+            continue
+        doc_id = doc_info.get("id") or doc_info.get("docId")
+        doc_path = doc_info.get("location") or doc_info.get("docpath") or f"custom-documents/{term_file.name}-{doc_id}.json"
+        client.wait_for_processing(str(doc_path), retries=180, delay=1.0)
+        uploaded_paths.append(str(doc_path))
+    return uploaded_paths
+
+
+def _prepare_retrieval_context(
+    client: AnythingLLMClient,
+    kb_service: DatabaseService,
+    architecture_id: int,
+    workspace_slug: str,
+    user_id: int = 1,
+) -> WeaponryRetrievalContext:
+    records = _target_document_records(kb_service, architecture_id)
+    target_file_names: Set[str] = set()
+    target_doc_paths: Set[str] = set()
+    for record in records:
+        for key in ("file_name", "original_name"):
+            value = _normalize_source_name(str(record.get(key) or ""))
+            if value:
+                target_file_names.add(value)
+        doc_path = str(record.get("doc_path") or "")
+        if doc_path:
+            target_doc_paths.add(doc_path.replace("\\", "/"))
+
+    workspace_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
+    term_doc_paths = [
+        _workspace_document_path(doc)
+        for doc in workspace_docs
+        if _workspace_document_path(doc) and _is_terms_source_name(_workspace_document_title(doc))
+    ]
+
+    if not term_doc_paths:
+        term_doc_paths = _upload_local_terms_if_needed(client, user_id=user_id)
+
+    terms_workspace_slug = _ensure_terms_workspace(client, term_doc_paths, user_id=user_id)
+
+    removed_term_paths: List[str] = []
+    if term_doc_paths:
+        target_term_paths = [
+            path
+            for path in term_doc_paths
+            if any(path == _workspace_document_path(doc) for doc in workspace_docs)
+        ]
+        if target_term_paths:
+            if client.update_embeddings_batch(workspace_slug, deletes=target_term_paths, user_id=user_id):
+                removed_term_paths = target_term_paths
+                logger.info("已从目标 workspace 临时移除术语文档: workspace=%s count=%d", workspace_slug, len(removed_term_paths))
+            else:
+                logger.warning("从目标 workspace 临时移除术语文档失败: workspace=%s", workspace_slug)
+
+    return WeaponryRetrievalContext(
+        target_file_names=target_file_names,
+        target_doc_paths=target_doc_paths,
+        terms_workspace_slug=terms_workspace_slug,
+        target_workspace_term_doc_paths=removed_term_paths,
+    )
+
+
+def _restore_target_workspace_terms(
+    client: AnythingLLMClient,
+    workspace_slug: str,
+    context: Optional[WeaponryRetrievalContext],
+    user_id: int = 1,
+) -> None:
+    if not context or not context.target_workspace_term_doc_paths:
+        return
+    if client.update_embeddings_batch(workspace_slug, adds=context.target_workspace_term_doc_paths, user_id=user_id):
+        logger.info(
+            "已恢复目标 workspace 中的术语文档: workspace=%s count=%d",
+            workspace_slug,
+            len(context.target_workspace_term_doc_paths),
+        )
+    else:
+        logger.warning("恢复目标 workspace 术语文档失败: workspace=%s", workspace_slug)
 
 
 def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: str = "") -> Dict[str, Any]:
@@ -170,14 +571,38 @@ def _query_input_field(
     thread_slug: str,
     field: Dict[str, Any],
     user_id: int = 1,
+    retrieval_context: Optional[WeaponryRetrievalContext] = None,
 ) -> Dict[str, Any]:
     """查询 INPUT 类型字段并返回填充后的字段对象。"""
     field_name = field.get("fieldName", "")
     field_desc = field.get("fieldDescription", "")
 
-    # 步骤 1：直接执行 vector_search 拿到相关的 Chunks
+    # 步骤 1：目标 PDF 与术语规则分池检索，避免 term_rule_* 占用目标证据 topN。
     prompt = build_input_field_prompt(field_name, field_desc)
-    vs_results = client.vector_search(workspace_slug, prompt, user_id=user_id)
+    vs_results = _vector_search_with_top_n(
+        client,
+        workspace_slug,
+        prompt,
+        top_n=TARGET_EVIDENCE_TOP_N,
+        user_id=user_id,
+    )
+    vs_results = [
+        chunk
+        for chunk in vs_results
+        if _is_target_source(_extract_chunk_source_name(chunk), retrieval_context)
+    ]
+
+    terms_rule_context = ""
+    if retrieval_context and retrieval_context.terms_workspace_slug:
+        terms_query = _build_terms_rule_query(field_name, field_desc)
+        term_results = _vector_search_with_top_n(
+            client,
+            retrieval_context.terms_workspace_slug,
+            terms_query,
+            top_n=TERMS_RULE_TOP_N,
+            user_id=user_id,
+        )
+        terms_rule_context = _format_terms_rule_context(term_results)
 
     filled = dict(field)
     if not vs_results:
@@ -185,12 +610,6 @@ def _query_input_field(
         filled["analyseData"] = ""
         filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
         return filled
-
-    def _get_score(src: Dict[str, Any]) -> float:
-        try:
-            return float(src.get("score", 0))
-        except (TypeError, ValueError):
-            return 0.0
 
     analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "1").strip()
 
@@ -204,17 +623,9 @@ def _query_input_field(
             if not chunk_text:
                 continue
             
-            # 提取文件名
-            metadata = chunk.get("metadata", {})
-            file_name = metadata.get("title") or metadata.get("sourceDocument")
-            
+            file_name = _extract_chunk_source_name(chunk)
             if not file_name:
-                raw_text = chunk.get("text", "")
-                if "sourceDocument:" in raw_text:
-                    for line in raw_text.splitlines():
-                        if line.startswith("sourceDocument:"):
-                            file_name = line.split("sourceDocument:")[1].strip()
-                            break
+                file_name = _fallback_target_file_name(retrieval_context)
 
             if not file_name:
                 raise ValueError("未能从文档片段中提取出明确的文件名。")
@@ -231,10 +642,18 @@ def _query_input_field(
         first_valid_content = ""
 
         for file_name in sorted_files:
-            chunks = file_chunks[file_name]
-            chunk_prompt = build_multi_chunk_based_field_prompt(field_name, chunks, field_desc)
+            chunks = _limit_chunks_for_prompt(file_chunks[file_name])
+            if not chunks:
+                continue
+            chunk_prompt = build_multi_chunk_based_field_prompt(
+                field_name,
+                chunks,
+                field_desc,
+                terms_rule_context=terms_rule_context,
+            )
             
-            result = client.send_prompt_to_thread(
+            result = _send_prompt_to_isolated_thread(
+                client,
                 workspace_slug,
                 thread_slug,
                 chunk_prompt,
@@ -289,11 +708,18 @@ def _query_input_field(
             chunk_text = _strip_document_metadata(chunk.get("text", ""))
             if not chunk_text:
                 continue
+            chunk_text = _limit_chunks_for_prompt([chunk_text])[0]
                 
-            chunk_prompt = build_chunk_based_field_prompt(field_name, chunk_text, field_desc)
+            chunk_prompt = build_chunk_based_field_prompt(
+                field_name,
+                chunk_text,
+                field_desc,
+                terms_rule_context=terms_rule_context,
+            )
             
             # 步骤 2：对每个 Chunk，使用 chat 模式向模型提问
-            result = client.send_prompt_to_thread(
+            result = _send_prompt_to_isolated_thread(
+                client,
                 workspace_slug,
                 thread_slug,
                 chunk_prompt,
@@ -345,6 +771,7 @@ def _query_table_field(
     field: Dict[str, Any],
     user_id: int = 1,
     on_cell_done: Optional[Any] = None,
+    retrieval_context: Optional[WeaponryRetrievalContext] = None,
 ) -> Dict[str, Any]:
     """查询 TABLE 类型字段：当做多个普通 INPUT 字段逐个查询。
 
@@ -368,7 +795,12 @@ def _query_table_field(
         for cell_def in row_defs:
             logger.info("    -> 开始提取单元格: %s", cell_def.get("fieldName", "unknown"))
             filled_cell = _query_input_field(
-                client, workspace_slug, thread_slug, cell_def, user_id=user_id,
+                client,
+                workspace_slug,
+                thread_slug,
+                cell_def,
+                user_id=user_id,
+                retrieval_context=retrieval_context,
             )
             row.append(filled_cell)
             if on_cell_done:
@@ -444,6 +876,14 @@ def run_weaponry_task(
             )
             return
 
+        retrieval_context = _prepare_retrieval_context(
+            client,
+            kb_service,
+            architecture_id,
+            workspace_slug,
+            user_id=1,
+        )
+
         # ─── 阶段 3：逐字段查询 ───
         total_query_fields = _count_query_fields(field_list)
         completed_fields = 0
@@ -461,24 +901,36 @@ def run_weaponry_task(
             _publish_progress(progress_hub, architecture_id_str, progress)
 
         result_fields: List[Dict[str, Any]] = []
-        for field in field_list:
-            field_type = field.get("fieldType", "INPUT")
-            field_name = field.get("fieldName", "unknown")
-            logger.info("正在处理字段: %s (%s)", field_name, field_type)
+        try:
+            for field in field_list:
+                field_type = field.get("fieldType", "INPUT")
+                field_name = field.get("fieldName", "unknown")
+                logger.info("正在处理字段: %s (%s)", field_name, field_type)
 
-            if field_type == "TABLE":
-                filled = _query_table_field(
-                    client, workspace_slug, thread_slug, field,
-                    user_id=1,
-                    on_cell_done=_update_field_progress,
-                )
-            else:
-                filled = _query_input_field(
-                    client, workspace_slug, thread_slug, field, user_id=1,
-                )
-                _update_field_progress()
+                if field_type == "TABLE":
+                    filled = _query_table_field(
+                        client,
+                        workspace_slug,
+                        thread_slug,
+                        field,
+                        user_id=1,
+                        on_cell_done=_update_field_progress,
+                        retrieval_context=retrieval_context,
+                    )
+                else:
+                    filled = _query_input_field(
+                        client,
+                        workspace_slug,
+                        thread_slug,
+                        field,
+                        user_id=1,
+                        retrieval_context=retrieval_context,
+                    )
+                    _update_field_progress()
 
-            result_fields.append(filled)
+                result_fields.append(filled)
+        finally:
+            _restore_target_workspace_terms(client, workspace_slug, retrieval_context, user_id=1)
 
         # ─── 阶段 4：删除 Thread ───
         task_service.update_task_progress(

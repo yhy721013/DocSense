@@ -219,14 +219,33 @@ def build_table_column_prompt(
     )
 
 
-def build_chunk_based_field_prompt(field_name: str, chunk_text: str, field_description: str = "") -> str:
+def _build_terms_rule_part(terms_rule_context: str = "") -> str:
+    if not terms_rule_context:
+        return ""
+    return (
+        "【术语规则参考开始】\n"
+        f"{terms_rule_context}\n"
+        "【术语规则参考结束】\n"
+        "术语规则参考仅用于理解字段口径、别名和单位，不是目标装备资料；"
+        "不得从术语规则中抽取 analyseData。\n\n"
+    )
+
+
+def build_chunk_based_field_prompt(
+    field_name: str,
+    chunk_text: str,
+    field_description: str = "",
+    terms_rule_context: str = "",
+) -> str:
     """构建基于具体 Chunk 的 INPUT 类型字段查询 Prompt。"""
     desc_part = ""
     if field_description:
         desc_part = f"字段说明：{field_description}\n"
+    terms_part = _build_terms_rule_part(terms_rule_context)
     return (
         f"请基于以下给定的文本片段，提取字段“{field_name}”的信息。\n"
         f"{desc_part}"
+        f"{terms_part}"
         "要求：\n"
         "1. 必须且只能基于以下提供的文本片段进行回答，不得使用其他知识。\n"
         '2. 如果在文本片段中找不到相关信息，请只回答"未找到"，不要包含额外说明。\n'
@@ -240,11 +259,17 @@ def build_chunk_based_field_prompt(field_name: str, chunk_text: str, field_descr
     )
 
 
-def build_multi_chunk_based_field_prompt(field_name: str, chunks: list[str], field_description: str = "") -> str:
+def build_multi_chunk_based_field_prompt(
+    field_name: str,
+    chunks: list[str],
+    field_description: str = "",
+    terms_rule_context: str = "",
+) -> str:
     """构建基于多个 Chunk 的 INPUT 类型字段查询 Prompt。"""
     desc_part = ""
     if field_description:
         desc_part = f"字段说明：{field_description}\n"
+    terms_part = _build_terms_rule_part(terms_rule_context)
     
     chunks_text = ""
     for idx, chunk in enumerate(chunks, 1):
@@ -253,6 +278,7 @@ def build_multi_chunk_based_field_prompt(field_name: str, chunks: list[str], fie
     return (
         f"请基于以下提供的文本片段，提取字段“{field_name}”的信息。\n"
         f"{desc_part}"
+        f"{terms_part}"
         "要求：\n"
         "1. 存在多个相关的Chunk，必须且只能基于以下提供的所有文本片段进行综合判断和回答，不得使用其他知识。\n"
         '2. 如果在所有文本片段中都找不到相关信息，请只回答"未找到"，不要包含额外说明。\n'
