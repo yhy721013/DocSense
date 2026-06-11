@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -228,6 +229,29 @@ class LocalScriptTests(unittest.TestCase):
         posted_body = RequestRecorderHandler.last_request["body"].strip()
         expected_body = payload.read_text(encoding="utf-8").strip()
         self.assertEqual(posted_body, expected_body)
+
+    def test_weaponry_directory_script_dry_run_writes_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "weaponry-directory-dry-run"
+            result = self._run_script(
+                f"scripts/test_llm_weaponry_directory{_script_ext()}",
+                "tests/fixtures/files",
+                "--pattern",
+                "JFS_5701-JFS_-06-Mar-2024.pdf",
+                "--dry-run",
+                "--output-dir",
+                str(output_dir),
+                "--architecture-base",
+                "998570100",
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            manifest_path = output_dir / "qwen3-4b-new_manifest.json"
+            self.assertTrue(manifest_path.exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertTrue(manifest["dry_run"])
+            self.assertEqual(manifest["files"][0]["fileName"], "JFS_5701-JFS_-06-Mar-2024.pdf")
+            self.assertEqual(manifest["files"][0]["architectureId"], 998570100)
 
     def test_check_task_shell_script_posts_fixture_to_expected_path(self) -> None:
         _, port = self._start_recording_server()

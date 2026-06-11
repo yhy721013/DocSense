@@ -328,6 +328,40 @@ zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/chec
 zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
 ```
 
+目录级武器装备字段抽取自动化脚本：
+
+```bash
+# macOS / zsh
+APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py
+zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" --base-url http://127.0.0.1:5001
+
+# Windows / PowerShell
+$env:APP_DEBUG = "false"
+$env:WEAPONRY_ANALYSE_MODE = "2"
+python run.py
+pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --base-url http://127.0.0.1:5001"
+```
+
+`test_llm_weaponry_directory` 会自动为指定目录启动临时静态文件服务，按文件串行执行 `/llm/analysis -> /llm/weaponry -> /llm/check-task`，并输出：
+
+- 主表：`qwen3-4b-new.csv`
+- 来源核验表：`qwen3-4b-new_source_audit.csv/json`
+- 运行记录：`qwen3-4b-new_manifest.json`
+- 每个文件的请求、响应、任务结果与知识库映射快照
+
+常用参数：
+
+```bash
+zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
+  --pattern "*.pdf" \
+  --output-dir ".runtime/weaponry_surface_extract_manual" \
+  --architecture-base 993000000
+
+pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --pattern '*.pdf' --output-dir '.runtime/weaponry_surface_extract_manual' --architecture-base 993000000"
+```
+
+如需递归扫描子目录，加 `--recursive`；如只想确认会扫描哪些文件和使用哪些临时 `architectureId`，加 `--dry-run`。脚本会自动避开已存在的 `architectureId`，防止旧 workspace/document 记录污染本轮结果。
+
 测试文件批量武器装备字段抽取复现流程：
 
 1. 启动依赖服务：确认 AnythingLLM `3001` 可用，启动 DocSense 时建议使用 `APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py`，同时启动 `python scripts/mock_callback_server.py` 和指向 `测试文件-水面装备/` 的静态文件服务。
