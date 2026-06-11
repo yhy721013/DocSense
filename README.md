@@ -167,6 +167,10 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
    - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
+   - 字段抽取采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
+   - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语临时移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束后再恢复目标 workspace，避免术语文档占满目标证据检索结果。
+   - 术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
+   - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
 
 4. `/llm/check-task`
    - 支持 `file` / `report` / `weaponry`。
@@ -217,6 +221,12 @@ pip install -r requirements-venv.txt
 - `APP_HOST`（默认 `0.0.0.0`）
 - `APP_PORT`（默认 `5001`）
 - `APP_DEBUG`（默认 `true`）
+
+Weaponry 可选配置：
+
+- `WEAPONRY_ANALYSE_MODE`：`/llm/weaponry` 字段抽取模式，`2` 表示按文件聚合多 Chunk 后抽取。
+- `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
+- `WEAPONRY_TERMS_DIR`：本地术语规则 Markdown 目录，默认 `terms`；当目标 workspace 没有术语文档时，会从该目录上传 `*.md` 作为术语规则参考。
 
 3. 启动服务
 
@@ -317,6 +327,54 @@ zsh scripts/test_llm_weaponry.sh http://127.0.0.1:5001 tests/fixtures/llm/weapon
 zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/check_task_file_request.json
 zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
 ```
+
+目录级武器装备字段抽取自动化脚本：
+
+```bash
+# macOS / zsh
+APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py
+zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" --base-url http://127.0.0.1:5001
+
+# Windows / PowerShell
+$env:APP_DEBUG = "false"
+$env:WEAPONRY_ANALYSE_MODE = "2"
+python run.py
+pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --base-url http://127.0.0.1:5001"
+```
+
+`test_llm_weaponry_directory` 会自动为指定目录启动临时静态文件服务，按文件串行执行 `/llm/analysis -> /llm/weaponry -> /llm/check-task`，并输出：
+
+- 主表：`qwen3-4b-new.csv`
+- 来源核验表：`qwen3-4b-new_source_audit.csv/json`
+- 运行记录：`qwen3-4b-new_manifest.json`
+- 每个文件的请求、响应、任务结果与知识库映射快照
+
+常用参数：
+
+```bash
+zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
+  --pattern "*.pdf" \
+  --output-dir ".runtime/weaponry_surface_extract_manual" \
+  --architecture-base 993000000
+
+pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --pattern '*.pdf' --output-dir '.runtime/weaponry_surface_extract_manual' --architecture-base 993000000"
+```
+
+如需递归扫描子目录，加 `--recursive`；如只想确认会扫描哪些文件和使用哪些临时 `architectureId`，加 `--dry-run`。脚本会自动避开已存在的 `architectureId`，防止旧 workspace/document 记录污染本轮结果。
+
+测试文件批量武器装备字段抽取复现流程：
+
+1. 启动依赖服务：确认 AnythingLLM `3001` 可用，启动 DocSense 时建议使用 `APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py`，同时启动 `python scripts/mock_callback_server.py` 和指向 `测试文件-水面装备/` 的静态文件服务。
+2. 批量 runner 启动前先检查 `.runtime/knowledge_base.sqlite3` 和 `.runtime/llm_tasks.sqlite3`：本轮要使用的临时 `architectureId` 不应已有 workspace/document 记录；若已有记录，应停止并更换一组未占用的临时 ID，避免旧文档污染。
+3. 扫描 `terms/` 下全部 `.md` 文件，上传到 AnythingLLM 并记录每个术语文件的 `doc_path`。术语文件只用于字段口径、别名和单位参考，不作为装备事实来源。
+4. 对 `测试文件-水面装备/` 下每个目标 PDF 串行执行：
+   - 构造 `/llm/analysis` 请求，`filePath` 使用静态文件 URL，`originalFileName` 使用原始 PDF 文件名，`architectureList` 只传一个临时节点，使该 PDF 固定入库到对应 `architectureId`。
+   - 轮询 `/llm/check-task`，直到 `businessType=file` 的 `status=2`；随后核验知识库映射中该 `architectureId` 只关联当前 PDF。
+   - 将第 3 步记录的全部术语 `doc_path` 临时加入当前 PDF 的 workspace。`/llm/weaponry` 内部会把 `term_rule_*.md` 与目标证据分池处理，任务结束后应从目标 workspace 移除术语。
+   - 构造 `/llm/weaponry` 请求，20 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
+   - 轮询 `/llm/check-task`，直到 `businessType=weaponry` 的 `status=2`；从 `.runtime/llm_tasks.sqlite3` 的任务结果中读取 `weaponryTemplateFieldList`。
+   - 抽取每个字段的 `analyseData` 写入汇总表；同步保留 `analyseDataSource` 到核验表。若接口、模型或内容安全检查导致字段未返回，汇总表填“未找到明确依据”，并在 manifest 或日志中记录失败字段与错误原因。
+5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 20 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 20` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。
 
