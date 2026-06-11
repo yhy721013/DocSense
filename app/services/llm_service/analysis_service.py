@@ -561,6 +561,8 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
     raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
     raw_format = _first_non_empty_value(parsed_result, "format", "格式")
+    if raw_format in (None, "", [], {}):
+        raw_format = _first_non_empty_value(file_item, "dataFormat", "资料格式")
 
     resolved_country = _match_option_value(raw_country, ranges["country"])
     resolved_channel = _match_option_value(raw_channel, ranges["channel"])
@@ -608,7 +610,7 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
             normalized_original_text),
         "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
         "language": resolved_language or _infer_language(normalized_original_text),
-        "dataFormat": _resolve_field(parsed_result, file_item, "dataFormat", "资料格式"),
+        "dataFormat": resolved_format,
         "associatedEquipment": _resolve_field(parsed_result, file_item, "associatedEquipment", "所属装备"),
         "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
         "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),

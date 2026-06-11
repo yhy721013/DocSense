@@ -125,7 +125,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "1. 必须只输出 JSON，不要输出 Markdown、解释文本、候选列表或思考过程。\n"
         "2. 顶层键只能是：country, channel, maturity, format, architectureId, fileDataItem。\n"
         "3. 不要直接原样返回候选对象、候选数组、key/value 对象或中文键名。\n"
-        "4. country/channel/maturity/format 只能输出候选项中的 value 字符串；不能输出 key，也不能输出对象。\n"
+        "4. country/channel/maturity/format 只能输出候选项中的 value 字符串；fileDataItem.dataFormat 必须与顶层 format 完全一致，也只能输出格式候选中的 value；不能输出 key，也不能输出对象。\n"
         "5. architectureId 只能输出候选 architectureList 中的 id 数字；无法匹配时输出 1。\n"
         "6. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
@@ -151,9 +151,9 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + data_standard_priority
-        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，保持与\"dataFormat\"一致。\n"
+        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         + "【输出前自检清单】\n"
-        + "1. country/channel/maturity/format 是否都为候选 value 或空字符串。\n"
+        + "1. country/channel/maturity/format 是否都为候选 value 或空字符串；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
         + "2. architectureId 是否为候选 id 或 1。\n"
         + "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”。\n"
         + data_standard_self_check

@@ -123,6 +123,43 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["maturity"], "阶段成果")
         self.assertEqual(result["format"], "文档类")
 
+    def test_map_analysis_result_forces_data_format_to_resolved_format(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "format": [{"key": "03", "value": "文档类"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "format": " 文档类 ",
+                "fileDataItem": {
+                    "dataFormat": "PDF报告",
+                },
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["format"], "文档类")
+        self.assertEqual(result["fileDataItem"]["dataFormat"], "文档类")
+
+    def test_map_analysis_result_uses_data_format_as_format_fallback(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "format": [{"key": "03", "value": "文档类"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "dataFormat": "03",
+                },
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["format"], "文档类")
+        self.assertEqual(result["fileDataItem"]["dataFormat"], "文档类")
+
     def test_map_analysis_result_falls_back_architecture_to_one_when_not_matched(self):
         request_params = {
             "fileName": "sample.txt",
@@ -448,6 +485,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("作战指挥：", prompt)
         self.assertIn("组织机构", prompt)
         self.assertIn("architectureId 必须来自候选 architectureList 中的 id", prompt)
+        self.assertIn("fileDataItem.dataFormat 必须与顶层 format 完全一致", prompt)
         self.assertIn("当文档与所有候选领域都明显无关时，architectureId 输出 1", prompt)
         self.assertIn("当 architectureList 只有一个节点时", prompt)
         self.assertIn("优先分类到最具体的叶子节点", prompt)
