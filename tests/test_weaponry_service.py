@@ -10,6 +10,7 @@ from app.services.llm_service.weaponry_service import (
     _map_source_to_analyse_data_source,
     _build_analyse_data_sources,
     _extract_chunk_source_name,
+    _ensure_terms_workspace,
     _format_terms_rule_context,
     _is_target_source,
     _is_terms_source_name,
@@ -284,14 +285,55 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             context.target_workspace_term_doc_paths,
             ["custom-documents/term_rule_0005_中文型号.md.json"],
         )
-        self.assertEqual(client.embedding_calls[0]["workspace_slug"], "terms-ws")
-        self.assertEqual(client.embedding_calls[0]["adds"], ["custom-documents/term_rule_0005_中文型号.md.json"])
-        self.assertEqual(client.embedding_calls[1]["workspace_slug"], "target-ws")
-        self.assertEqual(client.embedding_calls[1]["deletes"], ["custom-documents/term_rule_0005_中文型号.md.json"])
+        self.assertEqual(client.embedding_calls[0]["workspace_slug"], "target-ws")
+        self.assertEqual(client.embedding_calls[0]["deletes"], ["custom-documents/term_rule_0005_中文型号.md.json"])
 
         _restore_target_workspace_terms(client, "target-ws", context)
-        self.assertEqual(client.embedding_calls[2]["workspace_slug"], "target-ws")
-        self.assertEqual(client.embedding_calls[2]["adds"], ["custom-documents/term_rule_0005_中文型号.md.json"])
+        self.assertEqual(client.embedding_calls[1]["workspace_slug"], "target-ws")
+        self.assertEqual(client.embedding_calls[1]["adds"], ["custom-documents/term_rule_0005_中文型号.md.json"])
+
+    @patch("app.services.llm_service.weaponry_service._list_workspace_documents")
+    def test_ensure_terms_workspace_reuses_existing_and_adds_only_missing(self, mock_list_docs):
+        class FakeClient:
+            def __init__(self):
+                self.embedding_calls = []
+
+            def ensure_workspace(self, name, user_id=1):
+                return {"slug": "terms-ws", "name": name}
+
+            def update_embeddings_batch(self, workspace_slug, adds=None, deletes=None, user_id=1):
+                self.embedding_calls.append(
+                    {
+                        "workspace_slug": workspace_slug,
+                        "adds": adds or [],
+                        "deletes": deletes or [],
+                    }
+                )
+                return True
+
+        mock_list_docs.return_value = [
+            {
+                "title": "term_rule_0001_国别.md",
+                "docpath": "custom-documents/term_rule_0001_国别.md-old.json",
+            }
+        ]
+
+        client = FakeClient()
+        slug = _ensure_terms_workspace(
+            client,
+            [
+                "custom-documents/term_rule_0001_国别.md-new.json",
+                "custom-documents/term_rule_0002_军种.md-new.json",
+            ],
+        )
+
+        self.assertEqual(slug, "terms-ws")
+        self.assertEqual(len(client.embedding_calls), 1)
+        self.assertEqual(client.embedding_calls[0]["workspace_slug"], "terms-ws")
+        self.assertEqual(
+            client.embedding_calls[0]["adds"],
+            ["custom-documents/term_rule_0002_军种.md-new.json"],
+        )
 
 
 if __name__ == "__main__":
