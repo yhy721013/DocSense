@@ -1,14 +1,13 @@
 ---
 card_id: "term_rule_0015"
 standard_zh: "性能特点"
-standard_en: "无"
+standard_en: "Performance Characteristics"
 category: "基础数据"
 unit: ""
 source_file: "术语库.xlsx"
 worksheet: "航母数据规则语料库_合并"
 excel_row: 16
 ---
-
 # 性能特点
 
 ## 字段定位

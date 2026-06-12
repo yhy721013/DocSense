@@ -36,6 +36,7 @@ PROMPT_SEND_MAX_ATTEMPTS = 2
 PROMPT_SEND_RETRY_DELAY_SECONDS = 2.0
 TERMS_WORKSPACE_NAME = os.getenv("WEAPONRY_TERMS_WORKSPACE_NAME", "weaponry-terms-rules")
 TERMS_DIR = Path(os.getenv("WEAPONRY_TERMS_DIR", "terms"))
+TERM_RULE_NAME_RE = re.compile(r"(term_rule_[^/\\]+?\.md)", re.IGNORECASE)
 
 
 @dataclass
@@ -195,6 +196,38 @@ def _workspace_document_title(doc: Dict[str, Any]) -> str:
     return _normalize_source_name(str(doc.get("title") or doc.get("name") or doc.get("filename") or _workspace_document_path(doc)))
 
 
+def _term_rule_key(source_name: str) -> str:
+    """Return a stable term_rule filename key from a title or AnythingLLM doc path."""
+    normalized = _normalize_source_name(source_name)
+    match = TERM_RULE_NAME_RE.search(normalized)
+    return match.group(1).lower() if match else ""
+
+
+def _workspace_term_doc_paths_by_key(docs: List[Dict[str, Any]]) -> Dict[str, str]:
+    paths_by_key: Dict[str, str] = {}
+    for doc in docs:
+        doc_path = _workspace_document_path(doc)
+        key = _term_rule_key(_workspace_document_title(doc)) or _term_rule_key(doc_path)
+        if key and doc_path and key not in paths_by_key:
+            paths_by_key[key] = doc_path
+    return paths_by_key
+
+
+def _unique_term_doc_paths(doc_paths: List[str]) -> List[str]:
+    unique_paths: List[str] = []
+    seen: Set[str] = set()
+    for doc_path in doc_paths:
+        normalized = str(doc_path or "").replace("\\", "/")
+        if not normalized:
+            continue
+        key = _term_rule_key(normalized) or normalized
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_paths.append(normalized)
+    return unique_paths
+
+
 def _target_document_records(kb_service: DatabaseService, architecture_id: int) -> List[Dict[str, Any]]:
     return [
         record
@@ -339,7 +372,8 @@ def _ensure_terms_workspace(
     term_doc_paths: List[str],
     user_id: int = 1,
 ) -> Optional[str]:
-    if not term_doc_paths:
+    requested_doc_paths = _unique_term_doc_paths(term_doc_paths)
+    if not requested_doc_paths:
         return None
     workspace_info = client.ensure_workspace(TERMS_WORKSPACE_NAME, user_id=user_id)
     if not workspace_info:
@@ -349,34 +383,54 @@ def _ensure_terms_workspace(
     if not workspace_slug:
         logger.warning("术语规则 workspace 缺少 slug: %s", workspace_info)
         return None
-    if not client.update_embeddings_batch(workspace_slug, adds=term_doc_paths, user_id=user_id):
+
+    existing_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
+    existing_paths_by_key = _workspace_term_doc_paths_by_key(existing_docs)
+    missing_doc_paths = [
+        doc_path
+        for doc_path in requested_doc_paths
+        if (_term_rule_key(doc_path) or doc_path) not in existing_paths_by_key
+    ]
+    if not missing_doc_paths:
+        logger.info(
+            "复用已有术语规则 workspace: %s term_docs=%d",
+            workspace_slug,
+            len(existing_paths_by_key),
+        )
+        return workspace_slug
+
+    if not client.update_embeddings_batch(workspace_slug, adds=missing_doc_paths, user_id=user_id):
         logger.warning("术语规则 workspace 加入术语文档失败: %s", workspace_slug)
         return None
+    logger.info(
+        "术语规则 workspace 已补充缺失文档: %s adds=%d existing=%d",
+        workspace_slug,
+        len(missing_doc_paths),
+        len(existing_paths_by_key),
+    )
     return workspace_slug
 
 
 def _upload_local_terms_if_needed(client: AnythingLLMClient, user_id: int = 1) -> List[str]:
-    if not TERMS_DIR.exists() or not TERMS_DIR.is_dir():
-        return []
-    term_files = sorted(TERMS_DIR.glob("*.md"))
-    if not term_files:
-        return []
-
+    existing_paths_by_key: Dict[str, str] = {}
     existing = client.find_workspace_by_name(TERMS_WORKSPACE_NAME, user_id=user_id)
     if existing:
         slug = existing.get("slug") or str(existing.get("id") or "")
         if slug:
             existing_docs = _list_workspace_documents(client, slug, user_id=user_id)
-            existing_term_paths = [
-                _workspace_document_path(doc)
-                for doc in existing_docs
-                if _is_terms_source_name(_workspace_document_title(doc)) and _workspace_document_path(doc)
-            ]
-            if existing_term_paths:
-                return existing_term_paths
+            existing_paths_by_key = _workspace_term_doc_paths_by_key(existing_docs)
+
+    if not TERMS_DIR.exists() or not TERMS_DIR.is_dir():
+        return list(existing_paths_by_key.values())
+    term_files = sorted(TERMS_DIR.glob("*.md"))
+    if not term_files:
+        return list(existing_paths_by_key.values())
 
     uploaded_paths: List[str] = []
     for term_file in term_files:
+        key = _term_rule_key(term_file.name)
+        if key and key in existing_paths_by_key:
+            continue
         doc_info = client.upload_document(str(term_file), user_id=user_id)
         if not doc_info:
             logger.warning("上传术语文件失败，跳过: %s", term_file)
@@ -385,7 +439,7 @@ def _upload_local_terms_if_needed(client: AnythingLLMClient, user_id: int = 1) -
         doc_path = doc_info.get("location") or doc_info.get("docpath") or f"custom-documents/{term_file.name}-{doc_id}.json"
         client.wait_for_processing(str(doc_path), retries=180, delay=1.0)
         uploaded_paths.append(str(doc_path))
-    return uploaded_paths
+    return [*existing_paths_by_key.values(), *uploaded_paths]
 
 
 def _prepare_retrieval_context(

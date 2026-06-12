@@ -1,14 +1,13 @@
 ---
 card_id: "term_rule_0014"
 standard_zh: "基本情况"
-standard_en: "无"
+standard_en: "General Information"
 category: "基础数据"
 unit: ""
 source_file: "术语库.xlsx"
 worksheet: "航母数据规则语料库_合并"
 excel_row: 15
 ---
-
 # 基本情况
 
 ## 字段定位
