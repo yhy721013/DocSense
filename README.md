@@ -155,6 +155,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
    - 多节点分类时优先返回最具体叶子节点；叶子证据不足时返回最深可靠父节点；多个兄弟节点都可能时返回最近公共父节点。
+   - 当最终分类名称严格符合 `*-基础数据`、`*-战技指标`、`*-运用数据` 或 `*-效能数据` 时，回调 `data.architectureId` 仍返回该具体子分类 ID；知识库关系表、AnythingLLM workspace 和向量 metadata 则统一按对应的武器装备父节点 ID 存储，便于 `/llm/weaponry` 检索该装备的全部文档。
    - 文档内容明确为 GJB、国军标、国家军用标准相关资料，且候选中存在 `数据标准` 节点时，优先返回该节点 `id`。
    - `fileDataItem.score` 为必填离散评分，只返回 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。

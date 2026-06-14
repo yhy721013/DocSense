@@ -7,6 +7,7 @@ from app.services.llm_service.analysis_service import (
     DEFAULT_ARCHITECTURE_OPTIONS,
     build_file_callback_payload,
     map_analysis_result,
+    resolve_storage_architecture_id,
 )
 from app.services.core.prompts import build_file_analysis_prompt
 from app.services.llm_service.task_service import LLMTaskService
@@ -557,6 +558,145 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         result = map_analysis_result({"领域体系": {"name": "组织机构"}}, request_params)
 
         self.assertEqual(result["architectureId"], 10502)
+
+    def test_resolve_storage_architecture_id_routes_weaponry_detail_categories_to_parent(self):
+        for index, suffix in enumerate(("基础数据", "战技指标", "运用数据", "效能数据"), start=1):
+            architecture_list = [
+                {"id": 680, "name": "CVN68", "parentId": 60, "path": "60/680"},
+                {
+                    "id": 6800 + index,
+                    "name": f"CVN68-{suffix}",
+                    "parentId": 680,
+                    "path": f"60/680/{6800 + index}",
+                },
+            ]
+
+            self.assertEqual(
+                resolve_storage_architecture_id(6800 + index, architecture_list),
+                680,
+            )
+
+    def test_resolve_storage_architecture_id_supports_hyphens_in_weaponry_name(self):
+        architecture_list = [
+            {"id": 35, "name": "F-35", "parentId": 3, "path": "3/35"},
+            {"id": 351, "name": "F-35-战技指标", "parentId": 35, "path": "3/35/351"},
+        ]
+
+        self.assertEqual(resolve_storage_architecture_id(351, architecture_list), 35)
+
+    def test_resolve_storage_architecture_id_uses_parent_id_when_parent_node_is_not_in_range(self):
+        architecture_list = [
+            {"id": 6801, "name": "CVN68-基础数据", "parentId": 680, "path": "60/680/6801"},
+        ]
+
+        self.assertEqual(resolve_storage_architecture_id(6801, architecture_list), 680)
+
+    def test_resolve_storage_architecture_id_keeps_original_for_non_matching_category(self):
+        architecture_list = [
+            {"id": 680, "name": "CVN68", "parentId": 60},
+            {"id": 6801, "name": "CVN68-基础数据库", "parentId": 680},
+        ]
+
+        self.assertEqual(resolve_storage_architecture_id(6801, architecture_list), 6801)
+
+    def test_resolve_storage_architecture_id_keeps_original_without_reliable_weaponry_parent(self):
+        missing_parent_id = [
+            {"id": 6801, "name": "CVN68-基础数据", "parentId": None},
+        ]
+        mismatched_parent = [
+            {"id": 999, "name": "其他装备", "parentId": None},
+            {"id": 6801, "name": "CVN68-基础数据", "parentId": 999, "path": "999/6801"},
+        ]
+
+        self.assertEqual(resolve_storage_architecture_id(6801, missing_parent_id), 6801)
+        self.assertEqual(resolve_storage_architecture_id(6801, mismatched_parent), 6801)
+
+    @patch("app.services.llm_service.analysis_service.AnythingLLMClient")
+    @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
+    @patch("app.services.llm_service.analysis_service.pipeline_process_file_with_rag", return_value='{"architectureId":6801,"summary":"摘要"}')
+    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm", side_effect=lambda path: path)
+    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
+    def test_run_file_analysis_task_keeps_result_id_and_persists_weaponry_id(
+        self,
+        mock_download,
+        _mock_normalize,
+        _mock_pipeline,
+        _mock_enrich,
+        MockClient,
+    ):
+        with workspace_tempdir() as tmp:
+            sample = Path(tmp) / "sample.txt"
+            sample.write_text("sample", encoding="utf-8")
+            mock_download.return_value = str(sample)
+
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "sample.txt",
+                        "originalFileName": "CVN68 sample.txt",
+                        "filePath": "http://127.0.0.1:8000/sample.txt",
+                        "enableFullTranslation": False,
+                        "architectureList": [
+                            {"id": 680, "name": "CVN68", "parentId": 60, "path": "60/680"},
+                            {
+                                "id": 6801,
+                                "name": "CVN68-基础数据",
+                                "parentId": 680,
+                                "path": "60/680/6801",
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("sample.txt", request_payload)
+            kb_service = Mock()
+            kb_service.get_workspace_slug.return_value = None
+            client = MockClient.return_value
+            client.create_rag_workspace.return_value = {"slug": "architectureid-680"}
+            client.upload_document.return_value = {
+                "id": "doc-1",
+                "location": "custom-documents/doc-1.json",
+            }
+            client.wait_for_processing.return_value = True
+            client.update_embeddings.return_value = True
+
+            from app.services.llm_service.analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                kb_service=kb_service,
+                progress_hub=LLMProgressHub(),
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="",
+                callback_timeout=5,
+            )
+
+            task = task_service.get_task("file", "sample.txt")
+
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 6801)
+        kb_service.get_workspace_slug.assert_called_once_with(680)
+        client.create_rag_workspace.assert_called_once_with("architectureId-680", user_id=1)
+        kb_service.add_workspace.assert_called_once_with(680, "architectureid-680")
+        client.update_embeddings.assert_called_once_with(
+            "custom-documents/doc-1.json",
+            "architectureid-680",
+            user_id=1,
+            metadata={
+                "file_name": "sample.txt",
+                "architecture_id": 680,
+            },
+        )
+        kb_service.save_document_record.assert_called_once_with(
+            "sample.txt",
+            680,
+            "doc-1",
+            doc_path="custom-documents/doc-1.json",
+            original_name="CVN68 sample.txt",
+        )
 
     @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
     @patch("app.services.llm_service.analysis_service.post_callback_payload", return_value=True)

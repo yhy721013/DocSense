@@ -235,6 +235,53 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertEqual(calls[0][1], 8)
         self.assertEqual(calls[1][1], 3)
 
+    @patch("app.services.llm_service.weaponry_service._upload_local_terms_if_needed", return_value=[])
+    @patch("app.services.llm_service.weaponry_service._list_workspace_documents", return_value=[])
+    def test_prepare_context_includes_all_documents_stored_under_weaponry_id(
+        self,
+        _mock_list_docs,
+        _mock_upload_terms,
+    ):
+        class FakeKB:
+            def list_document_records(self):
+                return [
+                    {
+                        "file_name": f"CVN68-{suffix}.pdf",
+                        "original_name": f"CVN68-{suffix}.pdf",
+                        "architecture_id": 680,
+                        "doc_path": f"custom-documents/CVN68-{suffix}.json",
+                    }
+                    for suffix in ("基础数据", "战技指标", "运用数据", "效能数据")
+                ] + [
+                    {
+                        "file_name": "other.pdf",
+                        "original_name": "other.pdf",
+                        "architecture_id": 999,
+                        "doc_path": "custom-documents/other.json",
+                    }
+                ]
+
+        context = _prepare_retrieval_context(object(), FakeKB(), 680, "architectureid-680")
+
+        self.assertEqual(
+            context.target_file_names,
+            {
+                "CVN68-基础数据.pdf",
+                "CVN68-战技指标.pdf",
+                "CVN68-运用数据.pdf",
+                "CVN68-效能数据.pdf",
+            },
+        )
+        self.assertEqual(
+            context.target_doc_paths,
+            {
+                "custom-documents/CVN68-基础数据.json",
+                "custom-documents/CVN68-战技指标.json",
+                "custom-documents/CVN68-运用数据.json",
+                "custom-documents/CVN68-效能数据.json",
+            },
+        )
+
     @patch("app.services.llm_service.weaponry_service._list_workspace_documents")
     def test_prepare_context_moves_terms_out_of_target_workspace_and_restore(self, mock_list_docs):
         class FakeClient:
