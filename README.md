@@ -154,7 +154,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
-   - 多节点分类时优先返回最具体叶子节点；叶子证据不足时返回最深可靠父节点；多个兄弟节点都可能时返回最近公共父节点。
+   - 多节点分类时优先返回最具体叶子节点；命中非叶子节点时需回退到该分支下的“其他”叶子节点（节点名称或路径包含“其他”），仍无对应“其他”时回退到 1。
    - 文档内容明确为 GJB、国军标、国家军用标准相关资料，且候选中存在 `数据标准` 节点时，优先返回该节点 `id`。
    - `fileDataItem.score` 为必填离散评分，只返回 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。
@@ -371,10 +371,10 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
    - 构造 `/llm/analysis` 请求，`filePath` 使用静态文件 URL，`originalFileName` 使用原始 PDF 文件名，`architectureList` 只传一个临时节点，使该 PDF 固定入库到对应 `architectureId`。
    - 轮询 `/llm/check-task`，直到 `businessType=file` 的 `status=2`；随后核验知识库映射中该 `architectureId` 只关联当前 PDF。
    - 将第 3 步记录的全部术语 `doc_path` 临时加入当前 PDF 的 workspace。`/llm/weaponry` 内部会把 `term_rule_*.md` 与目标证据分池处理，任务结束后应从目标 workspace 移除术语。
-   - 构造 `/llm/weaponry` 请求，20 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
+   - 构造 `/llm/weaponry` 请求，75 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
    - 轮询 `/llm/check-task`，直到 `businessType=weaponry` 的 `status=2`；从 `.runtime/llm_tasks.sqlite3` 的任务结果中读取 `weaponryTemplateFieldList`。
    - 抽取每个字段的 `analyseData` 写入汇总表；同步保留 `analyseDataSource` 到核验表。若接口、模型或内容安全检查导致字段未返回，汇总表填“未找到明确依据”，并在 manifest 或日志中记录失败字段与错误原因。
-5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 20 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 20` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
+5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 75 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 75` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。
 
