@@ -172,7 +172,7 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertNotIn("目标 PDF 正文", context)
 
     @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
-    @patch.dict(os.environ, {"WEAPONRY_ANALYSE_MODE": "2"})
+    @patch.dict(os.environ, {"WEAPONRY_ANALYSE_MODE": "2", "WEAPONRY_TERMS_RULE_CONTEXT_ENABLED": "true"})
     def test_query_input_field_filters_terms_from_target_evidence(self, _mock_translate):
         calls = []
 
@@ -234,6 +234,65 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertIn("中文型号规则", client.prompts[0])
         self.assertEqual(calls[0][1], 8)
         self.assertEqual(calls[1][1], 3)
+
+    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
+    @patch.dict(os.environ, {"WEAPONRY_ANALYSE_MODE": "2", "WEAPONRY_TERMS_RULE_CONTEXT_ENABLED": "false"})
+    def test_query_input_field_skips_terms_rule_context_when_disabled(self, _mock_translate):
+        calls = []
+
+        class FakeClient:
+            def __init__(self):
+                self.prompts = []
+
+            def send_prompt_to_thread(self, workspace_slug, thread_slug, prompt, user_id=1, mode="chat"):
+                self.prompts.append(prompt)
+                return {"textResponse": "Nimitz (CVN 68) class"}
+
+        def fake_vector_search(_client, workspace_slug, query, *, top_n, user_id=1):
+            calls.append((workspace_slug, top_n, query))
+            if workspace_slug == "target-ws":
+                return [
+                    {
+                        "metadata": {"title": "term_rule_0005_中文型号.md"},
+                        "text": "<document_metadata>\nsourceDocument: term_rule_0005_中文型号.md\n</document_metadata>\n中文型号规则",
+                        "score": 0.99,
+                    },
+                    {
+                        "metadata": {"title": "JFS_3526-JFS_-16-Aug-2023.pdf"},
+                        "text": "<document_metadata>\nsourceDocument: JFS_3526-JFS_-16-Aug-2023.pdf\n</document_metadata>\nNimitz (CVN 68) class",
+                        "score": 0.1,
+                    },
+                ]
+            self.fail(f"关闭术语规则辅助时不应检索术语 workspace: {workspace_slug}")
+
+        client = FakeClient()
+        context = WeaponryRetrievalContext(
+            target_file_names={"JFS_3526-JFS_-16-Aug-2023.pdf"},
+            target_doc_paths=set(),
+            terms_workspace_slug="terms-ws",
+        )
+
+        with patch("app.services.llm_service.weaponry_service._vector_search_with_top_n", side_effect=fake_vector_search):
+            result = _query_input_field(
+                client,
+                "target-ws",
+                "thread",
+                {
+                    "fieldName": "舰级名称",
+                    "fieldType": "INPUT",
+                    "fieldDescription": "提取舰级名称。",
+                },
+                retrieval_context=context,
+            )
+
+        self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
+        self.assertEqual(result["analyseDataSource"][0]["source"], "JFS_3526-JFS_-16-Aug-2023.pdf")
+        self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
+        self.assertNotIn("术语规则参考开始", client.prompts[0])
+        self.assertNotIn("中文型号规则", client.prompts[0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "target-ws")
+        self.assertEqual(calls[0][1], 8)
 
     @patch("app.services.llm_service.weaponry_service._list_workspace_documents")
     def test_prepare_context_moves_terms_out_of_target_workspace_and_restore(self, mock_list_docs):
