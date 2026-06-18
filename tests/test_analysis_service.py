@@ -488,9 +488,10 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("fileDataItem.dataFormat 必须与顶层 format 完全一致", prompt)
         self.assertIn("当文档与所有候选领域都明显无关时，architectureId 输出 1", prompt)
         self.assertIn("当 architectureList 只有一个节点时", prompt)
-        self.assertIn("优先分类到最具体的叶子节点", prompt)
-        self.assertIn("最近公共父节点", prompt)
+        self.assertIn("必须分类到最底层的叶子节点", prompt)
+        self.assertIn("无法区分应该归类到哪一个叶子节点，则返回「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
+        self.assertIn("由至少 10 个关键词构成", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
 
