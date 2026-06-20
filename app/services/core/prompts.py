@@ -9,9 +9,9 @@ ARCHITECTURE_CLASSIFICATION_RULES = (
     "1. architectureList 只包含 id, name, parentId, path, pathName, remark：id 是节点唯一标识，name 是节点名称，parentId 表示父节点 id，path 是从根到当前节点的 id 链，pathName 是从根到当前节点的名称链，remark 是节点名词概述，可用于理解节点含义。\n"
     "2. 当 architectureList 只有一个节点时，architectureId 必须直接输出这个唯一节点的 id，不要再判断文件所属领域分类；但仍需继续完成 fileDataItem 信息提取。\n"
     "3. 多节点候选中，必须分类到最底层的叶子节点。\n"
-    "4. 如果叶子节点证据不足，则输出 architectureId 为 1。\n"
+    "4. 如果叶子节点证据不足或者无法区分应该归类到哪一个叶子节点，则返回「战技指标」这一节点对应的 id。\n"
     "5. 如果候选的多个叶子节点证据相当，则输出证据最充分的节点 id。\n"
-    "6. 当文档内容明确为 GJB、国军标、国家军用标准相关资料时，应归类到候选中的「数据标准」下的子节点，并返回该节点 id。\n"
+    "6. 当文档内容明确为 GJB、国军标、国家军用标准相关资料时，应归类到候选中的「数据标准」下的各个子节点，并返回叶子节点的 id。\n"
     "7. 军事基地：军事设施、基地建设、基地布局、军事要塞、港口码头、机场跑道、后勤保障设施、营房工程、防御工事。\n"
     "8. 体系运用：作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗。\n"
     "9. 装备型号：武器装备、装备参数、技术指标、装备性能。若候选中存在二级节点，应优先判断为空中装备、水面装备或水下装备。\n"
@@ -151,7 +151,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + data_standard_priority
-        + "【抽取字段解释】keyword：文档中提到的关键信息或主题（由两三个简短的词构成）；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
+        + "【抽取字段解释】keyword：文档中提到的关键信息或主题，由至少 10 个关键词构成，关键词需要涵盖文章中提到的内容，按照占比从高到低排列；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/format 是否都为候选 value 或空字符串；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
         + "2. architectureId 是否为候选叶子 id 或 1。\n"

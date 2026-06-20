@@ -34,9 +34,26 @@ MAX_TARGET_CONTEXT_CHARS = 12000
 TERMS_RULE_CONTEXT_MAX_CHARS = 1200
 PROMPT_SEND_MAX_ATTEMPTS = 2
 PROMPT_SEND_RETRY_DELAY_SECONDS = 2.0
+TERMS_RULE_CONTEXT_ENABLED_ENV = "WEAPONRY_TERMS_RULE_CONTEXT_ENABLED"
 TERMS_WORKSPACE_NAME = os.getenv("WEAPONRY_TERMS_WORKSPACE_NAME", "weaponry-terms-rules")
 TERMS_DIR = Path(os.getenv("WEAPONRY_TERMS_DIR", "terms"))
 TERM_RULE_NAME_RE = re.compile(r"(term_rule_[^/\\]+?\.md)", re.IGNORECASE)
+
+
+def _parse_env_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    value = raw_value.strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _terms_rule_context_enabled() -> bool:
+    return _parse_env_bool(TERMS_RULE_CONTEXT_ENABLED_ENV, True)
 
 
 @dataclass
@@ -631,7 +648,7 @@ def _query_input_field(
     field_name = field.get("fieldName", "")
     field_desc = field.get("fieldDescription", "")
 
-    # 步骤 1：目标 PDF 与术语规则分池检索，避免 term_rule_* 占用目标证据 topN。
+    # 步骤 1：目标 PDF 检索；术语规则辅助上下文由环境变量控制。
     prompt = build_input_field_prompt(field_name, field_desc)
     vs_results = _vector_search_with_top_n(
         client,
@@ -647,7 +664,7 @@ def _query_input_field(
     ]
 
     terms_rule_context = ""
-    if retrieval_context and retrieval_context.terms_workspace_slug:
+    if _terms_rule_context_enabled() and retrieval_context and retrieval_context.terms_workspace_slug:
         terms_query = _build_terms_rule_query(field_name, field_desc)
         term_results = _vector_search_with_top_n(
             client,
