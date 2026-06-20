@@ -156,6 +156,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
    - 多节点分类时优先返回最具体叶子节点；叶子证据不足时返回最深可靠父节点；多个兄弟节点都可能时返回最近公共父节点。
    - 当最终分类名称严格符合 `*-基础数据`、`*-战技指标`、`*-运用数据` 或 `*-效能数据` 时，回调 `data.architectureId` 仍返回该具体子分类 ID；知识库关系表、AnythingLLM workspace 和向量 metadata 则统一按对应的武器装备父节点 ID 存储，便于 `/llm/weaponry` 检索该装备的全部文档。
+   - 多节点分类时优先返回最具体叶子节点；命中非叶子节点时需回退到该分支下的“其他”叶子节点（节点名称或路径包含“其他”），仍无对应“其他”时回退到 1。
    - 文档内容明确为 GJB、国军标、国家军用标准相关资料，且候选中存在 `数据标准` 节点时，优先返回该节点 `id`。
    - `fileDataItem.score` 为必填离散评分，只返回 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。
@@ -168,9 +169,10 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
    - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
-   - 字段抽取采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
+   - 字段抽取默认采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语临时移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束后再恢复目标 workspace，避免术语文档占满目标证据检索结果。
-   - 术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
+   - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息，但仍保留目标证据过滤和术语文档临时清理/恢复。
+   - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
    - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
 
 4. `/llm/check-task`
@@ -226,6 +228,7 @@ pip install -r requirements-venv.txt
 Weaponry 可选配置：
 
 - `WEAPONRY_ANALYSE_MODE`：`/llm/weaponry` 字段抽取模式，`2` 表示按文件聚合多 Chunk 后抽取。
+- `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用术语规则辅助上下文，默认 `true`；设为 `false` 时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息。
 - `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
 - `WEAPONRY_TERMS_DIR`：本地术语规则 Markdown 目录，默认 `terms`；当目标 workspace 没有术语文档时，会从该目录上传 `*.md` 作为术语规则参考。
 
@@ -372,10 +375,10 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
    - 构造 `/llm/analysis` 请求，`filePath` 使用静态文件 URL，`originalFileName` 使用原始 PDF 文件名，`architectureList` 只传一个临时节点，使该 PDF 固定入库到对应 `architectureId`。
    - 轮询 `/llm/check-task`，直到 `businessType=file` 的 `status=2`；随后核验知识库映射中该 `architectureId` 只关联当前 PDF。
    - 将第 3 步记录的全部术语 `doc_path` 临时加入当前 PDF 的 workspace。`/llm/weaponry` 内部会把 `term_rule_*.md` 与目标证据分池处理，任务结束后应从目标 workspace 移除术语。
-   - 构造 `/llm/weaponry` 请求，20 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
+   - 构造 `/llm/weaponry` 请求，75 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
    - 轮询 `/llm/check-task`，直到 `businessType=weaponry` 的 `status=2`；从 `.runtime/llm_tasks.sqlite3` 的任务结果中读取 `weaponryTemplateFieldList`。
    - 抽取每个字段的 `analyseData` 写入汇总表；同步保留 `analyseDataSource` 到核验表。若接口、模型或内容安全检查导致字段未返回，汇总表填“未找到明确依据”，并在 manifest 或日志中记录失败字段与错误原因。
-5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 20 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 20` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
+5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 75 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 75` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。
 
