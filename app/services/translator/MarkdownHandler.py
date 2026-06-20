@@ -67,7 +67,30 @@ class MarkdownHandler:
         md_files = list(target_dir.rglob("*.md"))
         if not md_files:
             raise FileNotFoundError(f"No .md file found under: {target_dir}")
-        md_path = str(md_files[0])
+        
+        # 【关键修改】找到第一个 MD 文件后，将其复制到 output_dir 根目录
+        original_md_path = md_files[0]
+        if output_dir:
+            output_dir_path = Path(output_dir).expanduser().resolve()
+            
+            # 如果 MD 文件不在 output_dir 根目录，则复制过去
+            if original_md_path.parent != output_dir_path:
+                new_md_path = output_dir_path / original_md_path.name
+                
+                # 读取原 MD 文件内容
+                with open(original_md_path, 'r', encoding='utf-8') as f:
+                    md_content = f.read()
+                
+                # 写入到 output_dir 根目录
+                with open(new_md_path, 'w', encoding='utf-8') as f:
+                    f.write(md_content)
+                
+                print(f"[MinerU] MD 文件已复制到: {new_md_path}")
+                md_path = str(new_md_path)
+            else:
+                md_path = str(original_md_path)
+        else:
+            md_path = str(original_md_path)
 
         print(f"MinerU done, Markdown: {md_path}")
         return md_path
