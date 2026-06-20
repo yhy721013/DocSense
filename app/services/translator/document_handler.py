@@ -52,6 +52,9 @@ class DocumentTranslator:
             print(f"使用 MinerU 模式处理：{file_path}")
             print(f"{'=' * 60}")
 
+            # 【修复】确定输出目录（与输出文件同目录）
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            
             # 1. 先将文档转换为 Markdown
             markdown_path = self.markdown_handler.convert_to_markdown(
                 input_path=file_path,
@@ -60,6 +63,7 @@ class DocumentTranslator:
                 extract_images=True,
                 formula_enable=True,
                 table_enable=True,
+                output_dir=output_dir,  # 【新增】指定输出目录
             )
 
             # 2. 翻译 Markdown
@@ -83,7 +87,12 @@ class DocumentTranslator:
         
         # TXT 直接处理
         elif ext == '.txt':
-            return self.txt_handler.process(file_path, output_path, target_lang, translate_all, fast_translate)
+            return self.txt_handler.process(
+                input_path=file_path,
+                output_path=output_path,
+                target_lang=target_lang,
+                translate_all=translate_all,
+                fast_translate=fast_translate)
         
         # MD 直接处理
         elif ext == '.md':
@@ -137,6 +146,7 @@ class DocumentTranslator:
                 extract_images=True,
                 formula_enable=True,
                 table_enable=True,
+                output_dir=output_dir,  # 【新增】指定输出目录
             )
 
             # 2. 将 Markdown 转换为 HTML 并翻译（返回双语和单语两个路径）
