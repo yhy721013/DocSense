@@ -17,6 +17,7 @@ from app.services.llm_service.weaponry_service import (
     _prepare_retrieval_context,
     _query_input_field,
     _restore_target_workspace_terms,
+    _resolve_original_source_name,
 )
 
 
@@ -153,6 +154,35 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertTrue(_is_target_source("JFS_3526-JFS_-16-Aug-2023.pdf", context))
         self.assertTrue(_is_target_source("", context))
 
+    def test_resolve_original_source_name_for_mode2_callback(self):
+        context = WeaponryRetrievalContext(
+            target_file_names={"hash-name.pdf", "尼米兹级资料.pdf"},
+            target_doc_paths={"custom-documents/hash-name-doc.json"},
+            source_original_names={
+                "hash-name.pdf": "尼米兹级资料.pdf",
+                "custom-documents/hash-name-doc.json": "尼米兹级资料.pdf",
+                "hash-name-doc.json": "尼米兹级资料.pdf",
+            },
+            single_target_original_name="尼米兹级资料.pdf",
+        )
+
+        self.assertEqual(
+            _resolve_original_source_name("hash-name.pdf", context),
+            "尼米兹级资料.pdf",
+        )
+        self.assertEqual(
+            _resolve_original_source_name("custom-documents/hash-name-doc.json", context),
+            "尼米兹级资料.pdf",
+        )
+        self.assertEqual(
+            _resolve_original_source_name("", context),
+            "尼米兹级资料.pdf",
+        )
+        self.assertEqual(
+            _resolve_original_source_name("term_rule_0005_中文型号.md", context),
+            "term_rule_0005_中文型号.md",
+        )
+
     def test_format_terms_rule_context_uses_only_term_sources(self):
         chunks = [
             {
@@ -211,6 +241,10 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         context = WeaponryRetrievalContext(
             target_file_names={"JFS_3526-JFS_-16-Aug-2023.pdf"},
             target_doc_paths=set(),
+            source_original_names={
+                "jfs_3526-jfs_-16-aug-2023.pdf": "尼米兹级资料.pdf",
+            },
+            single_target_original_name="尼米兹级资料.pdf",
             terms_workspace_slug="terms-ws",
         )
 
@@ -228,7 +262,7 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             )
 
         self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
-        self.assertEqual(result["analyseDataSource"][0]["source"], "JFS_3526-JFS_-16-Aug-2023.pdf")
+        self.assertEqual(result["analyseDataSource"][0]["source"], "尼米兹级资料.pdf")
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
         self.assertIn("术语规则参考开始", client.prompts[0])
         self.assertIn("中文型号规则", client.prompts[0])
@@ -269,6 +303,10 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         context = WeaponryRetrievalContext(
             target_file_names={"JFS_3526-JFS_-16-Aug-2023.pdf"},
             target_doc_paths=set(),
+            source_original_names={
+                "jfs_3526-jfs_-16-aug-2023.pdf": "尼米兹级资料.pdf",
+            },
+            single_target_original_name="尼米兹级资料.pdf",
             terms_workspace_slug="terms-ws",
         )
 
@@ -286,7 +324,7 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             )
 
         self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
-        self.assertEqual(result["analyseDataSource"][0]["source"], "JFS_3526-JFS_-16-Aug-2023.pdf")
+        self.assertEqual(result["analyseDataSource"][0]["source"], "尼米兹级资料.pdf")
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
         self.assertNotIn("术语规则参考开始", client.prompts[0])
         self.assertNotIn("中文型号规则", client.prompts[0])

@@ -62,10 +62,14 @@ class WeaponryRetrievalContext:
 
     target_file_names: Set[str]
     target_doc_paths: Set[str]
+    source_original_names: Optional[Dict[str, str]] = None
+    single_target_original_name: str = ""
     terms_workspace_slug: Optional[str] = None
     target_workspace_term_doc_paths: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
+        if self.source_original_names is None:
+            self.source_original_names = {}
         if self.target_workspace_term_doc_paths is None:
             self.target_workspace_term_doc_paths = []
 
@@ -126,6 +130,60 @@ def _extract_chunk_source_name(chunk: Dict[str, Any]) -> str:
                     break
 
     return _normalize_source_name(str(file_name or ""))
+
+
+def _source_lookup_keys(name: str) -> Set[str]:
+    """生成来源名查库映射 key，兼容 AnythingLLM 返回的多种文档标识。"""
+    raw = str(name or "").replace("\\", "/").strip()
+    if not raw:
+        return set()
+
+    candidates = {raw}
+    if "custom-documents/" in raw:
+        candidates.add("custom-documents/" + raw.split("custom-documents/", 1)[1])
+
+    normalized = _normalize_source_name(raw)
+    if normalized:
+        candidates.add(normalized)
+
+    basename = Path(raw).name
+    if basename:
+        candidates.add(basename)
+
+    return {candidate.lower() for candidate in candidates if candidate}
+
+
+def _add_source_original_name_mapping(
+    mapping: Dict[str, str],
+    aliases: List[str],
+    original_name: str,
+) -> None:
+    if not original_name:
+        return
+    for alias in aliases:
+        for key in _source_lookup_keys(alias):
+            mapping.setdefault(key, original_name)
+
+
+def _resolve_original_source_name(
+    source_name: str,
+    context: Optional[WeaponryRetrievalContext],
+) -> str:
+    """将 Mode 2 的内部来源文件名映射为 documents.original_name。"""
+    normalized = _normalize_source_name(source_name)
+    if _is_terms_source_name(normalized):
+        return normalized
+
+    if not source_name:
+        return context.single_target_original_name if context else ""
+
+    mapping = context.source_original_names if context and context.source_original_names else {}
+    for key in _source_lookup_keys(source_name):
+        original_name = mapping.get(key)
+        if original_name:
+            return original_name
+
+    return normalized or str(source_name or "")
 
 
 def _is_terms_source_name(source_name: str) -> bool:
@@ -469,14 +527,35 @@ def _prepare_retrieval_context(
     records = _target_document_records(kb_service, architecture_id)
     target_file_names: Set[str] = set()
     target_doc_paths: Set[str] = set()
+    source_original_names: Dict[str, str] = {}
+    original_names: Set[str] = set()
     for record in records:
-        for key in ("file_name", "original_name"):
-            value = _normalize_source_name(str(record.get(key) or ""))
+        file_name = str(record.get("file_name") or "")
+        original_name = str(record.get("original_name") or "") or file_name
+        doc_path = str(record.get("doc_path") or "")
+        anything_doc_id = str(record.get("anything_doc_id") or "")
+
+        if original_name:
+            original_names.add(original_name)
+
+        for value in (file_name, original_name):
+            value = _normalize_source_name(value)
             if value:
                 target_file_names.add(value)
-        doc_path = str(record.get("doc_path") or "")
+
         if doc_path:
             target_doc_paths.add(doc_path.replace("\\", "/"))
+
+        aliases = [
+            file_name,
+            original_name,
+            doc_path,
+            Path(doc_path.replace("\\", "/")).name if doc_path else "",
+            anything_doc_id,
+            f"{anything_doc_id}.json" if anything_doc_id else "",
+            f"custom-documents/{anything_doc_id}.json" if anything_doc_id else "",
+        ]
+        _add_source_original_name_mapping(source_original_names, aliases, original_name)
 
     workspace_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
     term_doc_paths = [
@@ -507,6 +586,8 @@ def _prepare_retrieval_context(
     return WeaponryRetrievalContext(
         target_file_names=target_file_names,
         target_doc_paths=target_doc_paths,
+        source_original_names=source_original_names,
+        single_target_original_name=next(iter(original_names)) if len(original_names) == 1 else "",
         terms_workspace_slug=terms_workspace_slug,
         target_workspace_term_doc_paths=removed_term_paths,
     )
@@ -741,9 +822,10 @@ def _query_input_field(
                 continue
 
             # 组装针对文件的 data_source，此时 translate 为 content 的翻译
+            original_source_name = _resolve_original_source_name(file_name, retrieval_context)
             mapped_source = {
                 "content": text_response,
-                "source": file_name,
+                "source": original_source_name,
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "translate": _translate_if_needed(text_response),
             }
