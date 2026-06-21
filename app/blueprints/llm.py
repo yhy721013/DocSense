@@ -199,28 +199,49 @@ def llm_analysis():
     payload = request.get_json(silent=True) or {}
     logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "file":
+        logger.warning(
+            "文件分析请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
         return jsonify({"error": "businessType必须为file"}), 400
 
     params_list = _get_params(payload)
     if not params_list:
+        logger.warning("文件分析请求被拒绝: params为空或格式无效")
         return jsonify({"error": "params不能为空"}), 400
 
     seen_file_names = set()
-    for params in params_list:
+    for index, params in enumerate(params_list):
         file_name = params.get("fileName")
         if not isinstance(file_name, str) or not file_name.strip():
+            logger.warning("文件分析请求被拒绝: fileName为空 index=%s", index)
             return jsonify({"error": "fileName不能为空"}), 400
         normalized_name = file_name.strip()
         if normalized_name in seen_file_names:
+            logger.warning(
+                "文件分析请求被拒绝: fileName重复 fileName=%s index=%s",
+                normalized_name,
+                index,
+            )
             return jsonify({"error": "fileName不能重复"}), 400
         seen_file_names.add(normalized_name)
 
         file_path = params.get("filePath")
         if not isinstance(file_path, str) or not file_path.strip():
+            logger.warning(
+                "文件分析请求被拒绝: filePath为空 fileName=%s index=%s",
+                normalized_name,
+                index,
+            )
             return jsonify({"error": "filePath不能为空"}), 400
 
         existing_task = task_service.get_task("file", normalized_name)
         if existing_task and existing_task["status"] in {"0", "1"}:
+            logger.warning(
+                "文件分析请求被拒绝: 任务正在处理中 fileName=%s status=%s",
+                normalized_name,
+                existing_task["status"],
+            )
             return jsonify({"error": "任务正在处理中"}), 409
 
     tasks = []
@@ -266,16 +287,28 @@ def llm_generate_report():
     payload = request.get_json(silent=True) or {}
     logger.info("收到报告生成请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "report":
+        logger.warning(
+            "报告生成请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
         return jsonify({"error": "businessType必须为report"}), 400
 
     params = _get_first_param(payload)
     if params is None:
+        logger.warning("报告生成请求被拒绝: params为空或格式无效")
         return jsonify({"error": "params不能为空"}), 400
     report_id = params.get("reportId")
     if report_id is None:
+        logger.warning("报告生成请求被拒绝: reportId为空")
         return jsonify({"error": "reportId不能为空"}), 400
     file_path_list = params.get("filePathList")
     if not isinstance(file_path_list, list) or not file_path_list:
+        logger.warning(
+            "报告生成请求被拒绝: filePathList无效 reportId=%s file_path_list_type=%s file_count=%s",
+            report_id,
+            type(file_path_list).__name__,
+            len(file_path_list) if isinstance(file_path_list, list) else "n/a",
+        )
         return jsonify({"error": "filePathList不能为空"}), 400
 
     task = task_service.create_report_task(report_id=int(report_id), request_payload=payload)
@@ -309,34 +342,69 @@ def llm_weaponry():
     payload = request.get_json(silent=True) or {}
     logger.info("收到武器装备提取请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "weaponry":
+        logger.warning(
+            "武器装备提取请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
         return jsonify({"error": "businessType必须为weaponry"}), 400
 
     params = payload.get("params")
     if not isinstance(params, dict):
+        logger.warning(
+            "武器装备提取请求被拒绝: params无效 params_type=%s",
+            type(params).__name__,
+        )
         return jsonify({"error": "params不能为空"}), 400
 
     architecture_id = params.get("architectureId")
     if architecture_id is None:
+        logger.warning("武器装备提取请求被拒绝: architectureId为空")
         return jsonify({"error": "architectureId不能为空"}), 400
 
     field_list = params.get("weaponryTemplateFieldList")
     if not isinstance(field_list, list) or not field_list:
+        logger.warning(
+            "武器装备提取请求被拒绝: weaponryTemplateFieldList无效 architectureId=%s field_list_type=%s field_count=%s",
+            architecture_id,
+            type(field_list).__name__,
+            len(field_list) if isinstance(field_list, list) else "n/a",
+        )
         return jsonify({"error": "weaponryTemplateFieldList不能为空"}), 400
 
     # 校验 analyseData / analyseDataSource 必须为空
-    for field in field_list:
+    for field_index, field in enumerate(field_list):
         if field.get("analyseData") or field.get("analyseDataSource"):
+            logger.warning(
+                "武器装备提取请求被拒绝: 字段解析结果未清空 architectureId=%s field_index=%s fieldName=%s",
+                architecture_id,
+                field_index,
+                field.get("fieldName"),
+            )
             return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
         if field.get("fieldType") == "TABLE":
-            for row in (field.get("tableFieldList") or []):
+            for row_index, row in enumerate(field.get("tableFieldList") or []):
                 if isinstance(row, list):
-                    for cell in row:
+                    for cell_index, cell in enumerate(row):
                         if isinstance(cell, dict) and (cell.get("analyseData") or cell.get("analyseDataSource")):
+                            logger.warning(
+                                "武器装备提取请求被拒绝: 表格单元格解析结果未清空 architectureId=%s field_index=%s fieldName=%s row_index=%s cell_index=%s cellFieldName=%s",
+                                architecture_id,
+                                field_index,
+                                field.get("fieldName"),
+                                row_index,
+                                cell_index,
+                                cell.get("fieldName"),
+                            )
                             return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
 
     architecture_id_str = str(architecture_id)
     existing_task = task_service.get_task("weaponry", architecture_id_str)
     if existing_task and existing_task["status"] in {"0", "1"}:
+        logger.warning(
+            "武器装备提取请求被拒绝: 任务正在处理中 architectureId=%s status=%s",
+            architecture_id,
+            existing_task["status"],
+        )
         return jsonify({"error": "任务正在处理中"}), 409
 
     task = task_service.create_weaponry_task(
@@ -371,17 +439,29 @@ def llm_check_task():
     payload = request.get_json(silent=True) or {}
     business_type = payload.get("businessType")
     if business_type not in {"file", "report", "weaponry"}:
+        logger.warning(
+            "任务查询请求被拒绝: businessType无效 businessType=%s",
+            business_type,
+        )
         return jsonify({"error": "businessType无效"}), 400
 
     params_list = _get_params(payload)
     if not params_list:
+        logger.warning(
+            "任务查询请求被拒绝: params为空或格式无效 businessType=%s",
+            business_type,
+        )
         return jsonify({"error": "params不能为空"}), 400
 
     items = []
-    for params in params_list:
+    for index, params in enumerate(params_list):
         if business_type == "file":
             business_key = params.get("fileName")
             if not isinstance(business_key, str) or not business_key.strip():
+                logger.warning(
+                    "任务查询请求被拒绝: fileName为空 index=%s",
+                    index,
+                )
                 return jsonify({"error": "fileName不能为空"}), 400
             response_key = "fileName"
             normalized_key = business_key.strip()
@@ -389,6 +469,10 @@ def llm_check_task():
         elif business_type == "weaponry":
             architecture_id = params.get("architectureId")
             if architecture_id is None:
+                logger.warning(
+                    "任务查询请求被拒绝: architectureId为空 index=%s",
+                    index,
+                )
                 return jsonify({"error": "architectureId不能为空"}), 400
             response_key = "architectureId"
             normalized_key = str(architecture_id)
@@ -396,6 +480,10 @@ def llm_check_task():
         else:
             report_id = params.get("reportId")
             if report_id is None:
+                logger.warning(
+                    "任务查询请求被拒绝: reportId为空 index=%s",
+                    index,
+                )
                 return jsonify({"error": "reportId不能为空"}), 400
             response_key = "reportId"
             normalized_key = str(report_id)
@@ -404,7 +492,18 @@ def llm_check_task():
         task = task_service.get_task(business_type, normalized_key)
         if not task:
             if len(params_list) == 1:
+                logger.warning(
+                    "任务查询请求未找到任务: businessType=%s businessKey=%s",
+                    business_type,
+                    normalized_key,
+                )
                 return jsonify({"error": "任务不存在"}), 404
+            logger.warning(
+                "批量任务查询项未找到任务: businessType=%s businessKey=%s index=%s",
+                business_type,
+                normalized_key,
+                index,
+            )
             items.append({response_key: response_value, "exists": False, "message": "任务不存在"})
             continue
 
@@ -440,30 +539,59 @@ def llm_reassign():
     logger.info("收到文档分类变更请求: payload_keys=%s", list(payload.keys()))
 
     if payload.get("businessType") != "reassign":
+        logger.warning(
+            "文档分类变更请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
         return jsonify({"error": "businessType必须为reassign"}), 400
 
     params = payload.get("params")
     if not isinstance(params, dict):
+        logger.warning(
+            "文档分类变更请求被拒绝: params无效 params_type=%s",
+            type(params).__name__,
+        )
         return jsonify({"error": "params不能为空"}), 400
 
     file_name = params.get("fileName")
     if not isinstance(file_name, str) or not file_name.strip():
+        logger.warning("文档分类变更请求被拒绝: fileName为空")
         return jsonify({"error": "fileName不能为空"}), 400
     file_name = file_name.strip()
 
     old_architecture_id = params.get("oldArchitectureId")
     if old_architecture_id is None:
+        logger.warning(
+            "文档分类变更请求被拒绝: oldArchitectureId为空 fileName=%s",
+            file_name,
+        )
         return jsonify({"error": "oldArchitectureId不能为空"}), 400
 
     new_architecture_id = params.get("newArchitectureId")
     if new_architecture_id is None:
+        logger.warning(
+            "文档分类变更请求被拒绝: newArchitectureId为空 fileName=%s oldArchitectureId=%s",
+            file_name,
+            old_architecture_id,
+        )
         return jsonify({"error": "newArchitectureId不能为空"}), 400
 
     if old_architecture_id == new_architecture_id:
+        logger.warning(
+            "文档分类变更请求被拒绝: 新旧分类相同 fileName=%s architectureId=%s",
+            file_name,
+            old_architecture_id,
+        )
         return jsonify({"error": "oldArchitectureId与newArchitectureId不能相同"}), 400
 
     doc_record = kb_service.get_document_record(file_name)
     if not doc_record:
+        logger.warning(
+            "文档分类变更失败: 文档记录不存在 fileName=%s oldArchitectureId=%s newArchitectureId=%s",
+            file_name,
+            old_architecture_id,
+            new_architecture_id,
+        )
         return jsonify({
             "businessType": "reassign",
             "msg": "变更失败",
@@ -555,12 +683,18 @@ def llm_progress(ws):
             try:
                 payload = json.loads(raw_message)
             except json.JSONDecodeError:
+                logger.warning("进度订阅消息被拒绝: 非法JSON")
                 ws.send(json.dumps({"type": "error", "message": "订阅消息不是合法JSON"}, ensure_ascii=False))
                 continue
 
             try:
                 command = _parse_progress_command(payload)
             except ValueError as exc:
+                logger.warning(
+                    "进度订阅消息被拒绝: %s payload_keys=%s",
+                    exc,
+                    list(payload.keys()) if isinstance(payload, dict) else "n/a",
+                )
                 ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
                 continue
 
@@ -588,32 +722,58 @@ def llm_chat():
     logger.info("收到文件对话请求: payload_keys=%s", list(payload.keys()))
 
     if payload.get("businessType") != "chat":
+        logger.warning(
+            "文件对话请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
         return jsonify({"error": "businessType必须为chat"}), 400
 
     params = payload.get("params")
     if not isinstance(params, dict):
+        logger.warning(
+            "文件对话请求被拒绝: params无效 params_type=%s",
+            type(params).__name__,
+        )
         return jsonify({"error": "params不能为空"}), 400
 
     chat_id = params.get("chatId")
     if not isinstance(chat_id, str) or not chat_id.strip():
+        logger.warning("文件对话请求被拒绝: chatId为空")
         return jsonify({"error": "chatId不能为空"}), 400
     chat_id = chat_id.strip()
 
     file_names = params.get("fileNames")
     if not isinstance(file_names, list):
+        logger.warning(
+            "文件对话请求被拒绝: fileNames类型无效 chatId=%s file_names_type=%s",
+            chat_id,
+            type(file_names).__name__,
+        )
         return jsonify({"error": "fileNames必须为数组"}), 400
 
     message = params.get("message")
     if not isinstance(message, str) or not message.strip():
+        logger.warning("文件对话请求被拒绝: message为空 chatId=%s", chat_id)
         return jsonify({"error": "message不能为空"}), 400
     message = message.strip()
 
     # 校验引用文件均已解析
-    for fn in file_names:
+    for index, fn in enumerate(file_names):
         if not isinstance(fn, str) or not fn.strip():
+            logger.warning(
+                "文件对话请求被拒绝: fileNames中包含无效文件名 chatId=%s index=%s",
+                chat_id,
+                index,
+            )
             return jsonify({"error": "fileNames中包含无效文件名"}), 400
         doc_record = kb_service.get_document_record(fn.strip())
         if not doc_record:
+            logger.warning(
+                "文件对话请求被拒绝: 文件尚未解析 chatId=%s fileName=%s index=%s",
+                chat_id,
+                fn.strip(),
+                index,
+            )
             return jsonify({"error": f"文件 {fn} 尚未解析，无法用于对话"}), 404
 
     normalized_file_names = [fn.strip() for fn in file_names]
@@ -645,6 +805,7 @@ def llm_chat():
 def llm_chat_history():
     chat_id = request.args.get("chatId", "").strip()
     if not chat_id:
+        logger.warning("对话历史请求被拒绝: chatId为空")
         return jsonify({"error": "chatId不能为空"}), 400
 
     client = AnythingLLMClient(anythingllm_config)
@@ -661,14 +822,23 @@ def llm_chat_delete():
     logger.info("收到删除对话请求: payload_keys=%s", list(payload.keys()))
 
     if payload.get("businessType") != "chat":
+        logger.warning(
+            "删除对话请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
         return jsonify({"error": "businessType必须为chat"}), 400
 
     params = payload.get("params")
     if not isinstance(params, dict):
+        logger.warning(
+            "删除对话请求被拒绝: params无效 params_type=%s",
+            type(params).__name__,
+        )
         return jsonify({"error": "params不能为空"}), 400
 
     chat_id = params.get("chatId")
     if not isinstance(chat_id, str) or not chat_id.strip():
+        logger.warning("删除对话请求被拒绝: chatId为空")
         return jsonify({"error": "chatId不能为空"}), 400
     chat_id = chat_id.strip()
 
@@ -677,4 +847,5 @@ def llm_chat_delete():
         delete_chat(chat_db=chat_db, client=client, chat_id=chat_id)
         return jsonify({"chatId": chat_id, "deleted": True, "msg": "对话已删除"})
     except ChatNotFoundError:
+        logger.warning("删除对话请求未找到对话: chatId=%s", chat_id)
         return jsonify({"error": "对话不存在"}), 404
