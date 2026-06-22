@@ -6,6 +6,7 @@ from datetime import datetime
 
 from app.services.llm_service.weaponry_service import (
     WeaponryRetrievalContext,
+    _count_query_fields,
     _strip_document_metadata,
     _map_source_to_analyse_data_source,
     _build_analyse_data_sources,
@@ -14,8 +15,10 @@ from app.services.llm_service.weaponry_service import (
     _format_terms_rule_context,
     _is_target_source,
     _is_terms_source_name,
+    _parse_table_json_rows,
     _prepare_retrieval_context,
     _query_input_field,
+    _query_table_field,
     _restore_target_workspace_terms,
     _resolve_original_source_name,
 )
@@ -431,6 +434,132 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             client.embedding_calls[0]["adds"],
             ["custom-documents/term_rule_0002_军种.md-new.json"],
         )
+
+
+class TestWeaponryTableFieldExtraction(unittest.TestCase):
+    """测试 TABLE 字段按整表抽取并组装多行结果。"""
+
+    def test_count_query_fields_counts_table_as_single_task(self):
+        fields = [
+            {"fieldName": "舰名", "fieldType": "INPUT"},
+            {
+                "fieldName": "雷达配置",
+                "fieldType": "TABLE",
+                "tableFieldList": [
+                    [
+                        {"fieldName": "雷达名称", "fieldType": "INPUT"},
+                        {"fieldName": "频段", "fieldType": "INPUT"},
+                        {"fieldName": "探测距离", "fieldType": "INPUT"},
+                    ]
+                ],
+            },
+        ]
+
+        self.assertEqual(_count_query_fields(fields), 2)
+
+    def test_parse_table_json_rows_accepts_code_fenced_array(self):
+        rows = _parse_table_json_rows(
+            """```json
+[
+  {"__rowKey":"AN/SPY-1D","雷达名称":"AN/SPY-1D","频段":"S波段"},
+  {"__rowKey":"AN/SPS-49","雷达名称":"AN/SPS-49","频段":"L波段"}
+]
+```""",
+            [
+                {"fieldName": "雷达名称"},
+                {"fieldName": "频段"},
+            ],
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["雷达名称"], "AN/SPY-1D")
+        self.assertEqual(rows[0]["频段"], "S波段")
+        self.assertEqual(rows[1]["雷达名称"], "AN/SPS-49")
+
+    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
+    @patch.dict(os.environ, {"WEAPONRY_TERMS_RULE_CONTEXT_ENABLED": "false"})
+    def test_query_table_field_extracts_rows_in_one_table_prompt(self, _mock_translate):
+        vector_calls = []
+        progress_calls = []
+
+        class FakeClient:
+            def __init__(self):
+                self.prompts = []
+                self.thread_count = 0
+
+            def create_thread(self, workspace_slug, thread_name, user_id=1):
+                self.thread_count += 1
+                return {"slug": f"table-thread-{self.thread_count}"}
+
+            def delete_thread(self, workspace_slug, thread_slug, user_id=1):
+                return True
+
+            def send_prompt_to_thread(self, workspace_slug, thread_slug, prompt, user_id=1, mode="chat"):
+                self.prompts.append(prompt)
+                return {
+                    "textResponse": (
+                        "["
+                        "{\"__rowKey\":\"AN/SPY-1D\",\"雷达名称\":\"AN/SPY-1D\",\"频段\":\"S波段\",\"探测距离\":\"约320公里\"},"
+                        "{\"__rowKey\":\"AN/SPS-49\",\"雷达名称\":\"AN/SPS-49\",\"频段\":\"L波段\",\"探测距离\":\"约460公里\"}"
+                        "]"
+                    )
+                }
+
+        def fake_vector_search(_client, workspace_slug, query, *, top_n, user_id=1):
+            vector_calls.append((workspace_slug, top_n, query))
+            return [
+                {
+                    "metadata": {"title": "carrier-radars.pdf"},
+                    "text": (
+                        "<document_metadata>\n"
+                        "sourceDocument: carrier-radars.pdf\n"
+                        "</document_metadata>\n"
+                        "The carrier carries AN/SPY-1D S-band radar and AN/SPS-49 L-band radar."
+                    ),
+                    "score": 0.95,
+                }
+            ]
+
+        field = {
+            "fieldName": "雷达配置",
+            "fieldType": "TABLE",
+            "fieldDescription": "提取航母装载的各型雷达及指标，每种雷达一行。",
+            "tableFieldList": [
+                [
+                    {"fieldName": "雷达名称", "fieldType": "INPUT"},
+                    {"fieldName": "频段", "fieldType": "INPUT"},
+                    {"fieldName": "探测距离", "fieldType": "INPUT"},
+                ]
+            ],
+        }
+        context = WeaponryRetrievalContext(
+            target_file_names={"carrier-radars.pdf"},
+            target_doc_paths=set(),
+            source_original_names={"carrier-radars.pdf": "航母雷达资料.pdf"},
+            single_target_original_name="航母雷达资料.pdf",
+        )
+
+        with patch("app.services.llm_service.weaponry_service._vector_search_with_top_n", side_effect=fake_vector_search):
+            result = _query_table_field(
+                FakeClient(),
+                "target-ws",
+                "parent-thread",
+                field,
+                retrieval_context=context,
+                on_cell_done=lambda: progress_calls.append(1),
+            )
+
+        self.assertEqual(len(vector_calls), 1)
+        self.assertEqual(vector_calls[0][1], 16)
+        self.assertEqual(len(progress_calls), 1)
+        self.assertEqual(len(result["tableFieldList"]), 2)
+        first_row = result["tableFieldList"][0]
+        second_row = result["tableFieldList"][1]
+        self.assertEqual(first_row[0]["analyseData"], "AN/SPY-1D")
+        self.assertEqual(first_row[1]["analyseData"], "S波段")
+        self.assertEqual(first_row[2]["analyseData"], "约320公里")
+        self.assertEqual(first_row[0]["analyseDataSource"][0]["source"], "航母雷达资料.pdf")
+        self.assertEqual(second_row[0]["analyseData"], "AN/SPS-49")
 
 
 if __name__ == "__main__":

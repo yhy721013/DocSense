@@ -197,6 +197,9 @@ def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], 
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
     payload = request.get_json(silent=True) or {}
+    print("content_type:", request.content_type)
+    print("mimetype:", request.mimetype)
+    print("raw:", request.get_data(as_text=True)[:1000])
     logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "file":
         logger.warning(
@@ -310,6 +313,10 @@ def llm_generate_report():
             len(file_path_list) if isinstance(file_path_list, list) else "n/a",
         )
         return jsonify({"error": "filePathList不能为空"}), 400
+    template_outline = params.get("templateOutline")
+    if not isinstance(template_outline, str) or not template_outline.strip():
+        logger.warning("报告生成请求被拒绝: templateOutline为空 reportId=%s", report_id)
+        return jsonify({"error": "templateOutline不能为空"}), 400
 
     task = task_service.create_report_task(report_id=int(report_id), request_payload=payload)
     progress_hub.publish(

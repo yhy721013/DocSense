@@ -219,6 +219,61 @@ def build_table_column_prompt(
     )
 
 
+def build_table_extraction_prompt(
+    table_name: str,
+    table_description: str,
+    column_defs: list[dict],
+    chunks: list[str],
+    terms_rule_context: str = "",
+) -> str:
+    """构建 TABLE 类型字段的整表抽取 Prompt。"""
+    desc_part = f"表格说明：{table_description}\n" if table_description else ""
+    terms_part = _build_terms_rule_part(terms_rule_context)
+
+    column_lines = []
+    json_fields = [
+        f'{json.dumps("__rowKey", ensure_ascii=False)}: '
+        f'{json.dumps("用于识别并合并同一行实体的名称、型号或唯一标识", ensure_ascii=False)}'
+    ]
+    for index, column in enumerate(column_defs, 1):
+        column_name = str(column.get("fieldName", "")).strip()
+        if not column_name:
+            continue
+        column_desc = str(column.get("fieldDescription", "")).strip()
+        if column_desc:
+            column_lines.append(f"{index}. {column_name}: {column_desc}")
+        else:
+            column_lines.append(f"{index}. {column_name}")
+        json_fields.append(f'{json.dumps(column_name, ensure_ascii=False)}: ""')
+
+    chunks_text = ""
+    for idx, chunk in enumerate(chunks, 1):
+        chunks_text += f"第{idx}段Chunk是：\n{chunk}\n\n"
+
+    example_json = "[\n  {\n    " + ",\n    ".join(json_fields) + "\n  }\n]"
+
+    return (
+        f"请基于以下提供的文本片段，抽取表格“{table_name}”的多行结构化数据。\n"
+        f"{desc_part}"
+        f"{terms_part}"
+        "列定义：\n"
+        f"{chr(10).join(column_lines)}\n\n"
+        "要求：\n"
+        "1. 必须且只能基于以下文本片段抽取，不得使用其他知识、常识或推测。\n"
+        "2. 每一行必须表示一个独立对象、部件、型号或记录；例如同一艘航母上的多种雷达必须拆成多行。\n"
+        "3. 不得把多个行实体用逗号、顿号、换行或项目符号合并到同一个单元格。\n"
+        "4. 每个对象只填写列定义中要求的字段；某列没有明确依据时填空字符串。\n"
+        "5. __rowKey 必须填写该行实体最稳定的名称、型号或唯一标识，用于服务端合并同一行。\n"
+        '6. 如果没有任何可抽取的行，请只输出空数组 []。\n'
+        "7. 只输出合法 JSON 数组，不要输出 Markdown、解释说明或额外文本。\n\n"
+        "JSON 格式示例：\n"
+        f"{example_json}\n\n"
+        "【文本片段开始】\n"
+        f"{chunks_text}"
+        "【文本片段结束】"
+    )
+
+
 def _build_terms_rule_part(terms_rule_context: str = "") -> str:
     if not terms_rule_context:
         return ""
