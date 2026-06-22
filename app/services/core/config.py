@@ -106,6 +106,11 @@ class RAGEnhancerConfig:
     rerank_model: str
     rerank_top_n: int
     rerank_batch_size: int
+    # 新增：关键词提取和 LLM Query 重写配置
+    use_bm25_keyword_extraction: bool
+    use_llm_query_rewrite: bool
+    llm_rewrite_model: str
+    ollama_base_url: str
 
 
 def load_rag_enhancer_config() -> RAGEnhancerConfig:
@@ -118,6 +123,11 @@ def load_rag_enhancer_config() -> RAGEnhancerConfig:
         rerank_model=os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3").strip() or "BAAI/bge-reranker-v2-m3",
         rerank_top_n=_parse_int(os.getenv("RAG_RERANK_TOP_N"), 5, min_value=1),
         rerank_batch_size=_parse_int(os.getenv("RAG_RERANK_BATCH_SIZE"), 32, min_value=1),
+        # 新增配置项
+        use_bm25_keyword_extraction=_parse_bool(os.getenv("RAG_BM25_KEYWORD_EXTRACTION"), True),
+        use_llm_query_rewrite=_parse_bool(os.getenv("RAG_LLM_QUERY_REWRITE"), False),
+        llm_rewrite_model=os.getenv("RAG_QUERY_REWRITE_MODEL", "qwen3:4b-instruct-2507-q4_K_M").strip() or "qwen3:4b-instruct-2507-q4_K_M",
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip() or "http://localhost:11434",
     )
 
 

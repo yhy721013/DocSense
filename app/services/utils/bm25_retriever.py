@@ -2,13 +2,17 @@
 BM25 关键词检索器。
 
 使用 rank-bm25 库实现 BM25 算法，用于与向量检索形成互补。
+支持关键词提取和 LLM Query 重写优化。
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from rank_bm25 import BM25Okapi
+
+from app.services.utils.bm25_keyword_extractor import get_keyword_extractor
+from app.services.utils.llm_query_rewriter import get_query_rewriter
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +20,27 @@ logger = logging.getLogger(__name__)
 class BM25Retriever:
     """基于 BM25 的关键词检索器。"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        use_keyword_extraction: bool = True,
+        use_llm_rewrite: bool = False,
+    ):
+        """初始化 BM25 检索器。
+
+        Args:
+            use_keyword_extraction: 是否启用关键词提取（停用词过滤等）
+            use_llm_rewrite: 是否启用 LLM Query 重写（需要 Ollama 服务）
+        """
         self.bm25: BM25Okapi | None = None
         self.documents: List[str] = []
         self.doc_ids: List[str] = []
         self._initialized = False
+        self.use_keyword_extraction = use_keyword_extraction
+        self.use_llm_rewrite = use_llm_rewrite
+
+        # 延迟初始化组件
+        self._keyword_extractor = None
+        self._query_rewriter = None
 
     def build_index(
         self,
@@ -79,7 +99,26 @@ class BM25Retriever:
             logger.warning("BM25 索引未初始化，返回空结果")
             return []
 
-        query_tokens = self._tokenize(query)
+        # Step 1: LLM Query 重写（可选）
+        if self.use_llm_rewrite:
+            rewritten_query = self._get_query_rewriter().rewrite(query)
+            logger.debug("LLM 重写后: '%s' -> '%s'", query[:50], rewritten_query[:50])
+            query_for_bm25 = rewritten_query
+        else:
+            query_for_bm25 = query
+
+        # Step 2: 关键词提取（停用词过滤等）
+        if self.use_keyword_extraction:
+            keywords = self._get_keyword_extractor().extract_keywords(query_for_bm25)
+            logger.debug("关键词提取: '%s' -> '%s'", query_for_bm25[:50], keywords[:50])
+            query_tokens = self._tokenize(keywords) if keywords else []
+        else:
+            query_tokens = self._tokenize(query_for_bm25)
+
+        if not query_tokens:
+            logger.warning("Query 分词后为空，返回空结果")
+            return []
+
         scores = self.bm25.get_scores(query_tokens)
 
         # 获取 Top-K 索引
@@ -96,7 +135,12 @@ class BM25Retriever:
                 "rank": rank + 1,
             })
 
-        logger.debug("BM25 检索完成: query='%s', 返回 %d 个结果", query, len(results))
+        logger.debug(
+            "BM25 检索完成: query='%s', tokens=%d, 返回 %d 个结果",
+            query,
+            len(query_tokens),
+            len(results),
+        )
         return results
 
     @staticmethod
@@ -138,6 +182,18 @@ class BM25Retriever:
             # 英文：按非字母数字字符分割
             import re
             return re.findall(r'\w+', text.lower())
+
+    def _get_keyword_extractor(self):
+        """懒加载关键词提取器。"""
+        if self._keyword_extractor is None:
+            self._keyword_extractor = get_keyword_extractor()
+        return self._keyword_extractor
+
+    def _get_query_rewriter(self):
+        """懒加载 Query 重写器。"""
+        if self._query_rewriter is None:
+            self._query_rewriter = get_query_rewriter()
+        return self._query_rewriter
 
     def is_ready(self) -> bool:
         """检查 BM25 索引是否已就绪。"""

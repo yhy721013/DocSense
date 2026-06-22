@@ -2,6 +2,7 @@
 RAG 增强器主模块。
 
 提供 BM25 + Embedding 双召回、RRF 融合、BGE-Reranker 精排的完整链路。
+支持关键词提取和 LLM Query 重写优化。
 通过配置开关控制是否启用增强，未启用时降级为原始 AnythingLLM 向量检索。
 """
 from __future__ import annotations
@@ -28,7 +29,13 @@ class RAGEnhancer:
             config: RAG 增强配置，None 则从环境变量加载
         """
         self.config = config or load_rag_enhancer_config()
-        self.bm25_retriever = BM25Retriever()
+        
+        # 初始化 BM25Retriever（支持关键词提取和 LLM 重写）
+        self.bm25_retriever = BM25Retriever(
+            use_keyword_extraction=self.config.use_bm25_keyword_extraction,
+            use_llm_rewrite=self.config.use_llm_query_rewrite,
+        )
+        
         self.reranker: Optional[BGEReranker] = None
 
         # 如果启用 rerank，初始化模型
@@ -43,11 +50,13 @@ class RAGEnhancer:
                 self.reranker = None
 
         logger.info(
-            "RAG Enhancer 初始化完成: enabled=%s, bm25_top_k=%d, embedding_top_k=%d, rerank=%s",
+            "RAG Enhancer 初始化完成: enabled=%s, bm25_top_k=%d, embedding_top_k=%d, rerank=%s, keyword_extraction=%s, llm_rewrite=%s",
             self.config.enabled,
             self.config.bm25_top_k,
             self.config.embedding_top_k,
             self.config.rerank_enabled and self.reranker is not None,
+            self.config.use_bm25_keyword_extraction,
+            self.config.use_llm_query_rewrite,
         )
 
     def hybrid_search(
