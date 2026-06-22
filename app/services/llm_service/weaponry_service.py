@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -22,15 +23,18 @@ from app.services.core.prompts import (
     build_input_field_prompt,
     build_chunk_based_field_prompt,
     build_multi_chunk_based_field_prompt,
+    build_table_extraction_prompt,
 )
 
 logger = logging.getLogger(__name__)
 
 
 TARGET_EVIDENCE_TOP_N = 8
+TABLE_EVIDENCE_TOP_N = 16
 TERMS_RULE_TOP_N = 3
 MAX_TARGET_CHUNKS_PER_FILE = 8
 MAX_TARGET_CONTEXT_CHARS = 12000
+MAX_TABLE_ROWS = 100
 TERMS_RULE_CONTEXT_MAX_CHARS = 1200
 PROMPT_SEND_MAX_ATTEMPTS = 2
 PROMPT_SEND_RETRY_DELAY_SECONDS = 2.0
@@ -700,14 +704,11 @@ def _build_weaponry_callback_payload(
 # ---------------------------------------------------------------------------
 
 def _count_query_fields(field_list: List[Dict[str, Any]]) -> int:
-    """统计所有需要 RAG 查询的原子字段数量（INPUT 算 1，TABLE 按单元格算）。"""
+    """统计需要 RAG 查询的任务数（INPUT 算 1，TABLE 按整表算 1）。"""
     count = 0
     for field in field_list:
         if field.get("fieldType") == "TABLE":
-            template_rows = field.get("tableFieldList") or []
-            for row in template_rows:
-                if isinstance(row, list):
-                    count += len(row)
+            count += 1
         else:
             count += 1
     return count
@@ -917,6 +918,292 @@ def _query_input_field(
 # TABLE 类型字段处理
 # ---------------------------------------------------------------------------
 
+def _extract_table_column_defs(field: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从请求中的 tableFieldList 提取列模板定义。"""
+    columns: List[Dict[str, Any]] = []
+    seen_names: Set[str] = set()
+    for row in field.get("tableFieldList") or []:
+        if not isinstance(row, list):
+            continue
+        for cell in row:
+            if not isinstance(cell, dict):
+                continue
+            column_name = str(cell.get("fieldName") or "").strip()
+            if not column_name or column_name in seen_names:
+                continue
+            column = dict(cell)
+            column["fieldName"] = column_name
+            column.setdefault("fieldType", "INPUT")
+            column.pop("analyseData", None)
+            column.pop("analyseDataSource", None)
+            columns.append(column)
+            seen_names.add(column_name)
+    return columns
+
+
+def _build_table_retrieval_query(field: Dict[str, Any], column_defs: List[Dict[str, Any]]) -> str:
+    table_name = str(field.get("fieldName") or "表格").strip()
+    table_desc = str(field.get("fieldDescription") or "").strip()
+    column_parts = []
+    for column in column_defs:
+        column_name = str(column.get("fieldName") or "").strip()
+        column_desc = str(column.get("fieldDescription") or "").strip()
+        if not column_name:
+            continue
+        if column_desc:
+            column_parts.append(f"{column_name}（{column_desc}）")
+        else:
+            column_parts.append(column_name)
+    desc_part = f"\n表格说明：{table_desc}" if table_desc else ""
+    columns_part = "、".join(column_parts)
+    return (
+        f"请检索与表格“{table_name}”相关的多行数据。{desc_part}\n"
+        f"每一行应对应一个独立对象、部件、型号或记录；需要关注的列包括：{columns_part}。"
+    )
+
+
+def _build_table_terms_rule_query(field: Dict[str, Any], column_defs: List[Dict[str, Any]]) -> str:
+    table_name = str(field.get("fieldName") or "表格").strip()
+    table_desc = str(field.get("fieldDescription") or "").strip()
+    column_descs = []
+    for column in column_defs:
+        column_name = str(column.get("fieldName") or "").strip()
+        column_desc = str(column.get("fieldDescription") or "").strip()
+        if not column_name:
+            continue
+        column_descs.append(f"{column_name}: {column_desc}" if column_desc else column_name)
+    desc_parts = []
+    if table_desc:
+        desc_parts.append(table_desc)
+    if column_descs:
+        desc_parts.append("列定义：" + "；".join(column_descs))
+    return _build_terms_rule_query(table_name, "\n".join(desc_parts))
+
+
+def _normalize_json_key(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).strip().lower()
+
+
+def _clean_table_json_response(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if "</think>" in cleaned:
+        cleaned = cleaned.split("</think>")[-1]
+    cleaned = cleaned.replace("<think>", "").strip()
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r"```(?:json)?\s*([\s\S]*)", cleaned, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return cleaned
+
+
+def _json_substring(text: str, start_char: str, end_char: str) -> str:
+    start = text.find(start_char)
+    end = text.rfind(end_char)
+    if start == -1 or end == -1 or end <= start:
+        return ""
+    return text[start:end + 1]
+
+
+def _load_table_json_response(text: str) -> Any:
+    cleaned = _clean_table_json_response(text)
+    candidates = [
+        cleaned,
+        _json_substring(cleaned, "[", "]"),
+        _json_substring(cleaned, "{", "}"),
+    ]
+    seen: Set[str] = set()
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _normalize_table_cell_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        values = [_normalize_table_cell_value(item) for item in value]
+        return ", ".join(item for item in values if item)
+    if isinstance(value, dict):
+        if not value:
+            return ""
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    text = str(value).strip()
+    if text.lower() in {"null", "none", "nan"}:
+        return ""
+    if text in {"未找到", "未检索到", "无明确依据", "未知", "不详"}:
+        return ""
+    return text
+
+
+def _lookup_table_value(row: Dict[str, Any], field_name: str) -> Any:
+    if field_name in row:
+        return row[field_name]
+    target_key = _normalize_json_key(field_name)
+    for key, value in row.items():
+        if _normalize_json_key(key) == target_key:
+            return value
+    return None
+
+
+def _parse_table_json_rows(text: str, column_defs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    parsed = _load_table_json_response(text)
+    if parsed is None:
+        return []
+
+    row_items: List[Any]
+    if isinstance(parsed, list):
+        row_items = parsed
+    elif isinstance(parsed, dict):
+        row_items = []
+        for key in ("rows", "data", "items", "result", "tableRows", "tableFieldList"):
+            value = parsed.get(key)
+            if isinstance(value, list):
+                row_items = value
+                break
+        if not row_items:
+            row_items = [parsed]
+    else:
+        return []
+
+    column_names = [str(column.get("fieldName") or "").strip() for column in column_defs]
+    column_names = [name for name in column_names if name]
+    parsed_rows: List[Dict[str, str]] = []
+
+    for item in row_items:
+        row: Dict[str, str] = {}
+        if isinstance(item, list):
+            for index, column_name in enumerate(column_names):
+                value = item[index] if index < len(item) else None
+                row[column_name] = _normalize_table_cell_value(value)
+        elif isinstance(item, dict):
+            row_key = (
+                item.get("__rowKey")
+                or item.get("rowKey")
+                or item.get("row_key")
+                or item.get("行标识")
+                or item.get("主键")
+            )
+            row["__rowKey"] = _normalize_table_cell_value(row_key)
+            for column_name in column_names:
+                row[column_name] = _normalize_table_cell_value(_lookup_table_value(item, column_name))
+        else:
+            continue
+
+        if any(row.get(column_name) for column_name in column_names):
+            parsed_rows.append(row)
+        if len(parsed_rows) >= MAX_TABLE_ROWS:
+            break
+
+    return parsed_rows
+
+
+def _normalize_table_row_identity(value: str) -> str:
+    text = _normalize_table_cell_value(value)
+    text = re.sub(r"\s+", "", text).lower()
+    return text.strip("，,;；。.")
+
+
+def _table_row_identity(row: Dict[str, str], column_defs: List[Dict[str, Any]], fallback_index: int) -> str:
+    explicit = _normalize_table_row_identity(row.get("__rowKey", ""))
+    if explicit:
+        return explicit
+
+    preferred_tokens = ("名称", "型号", "编号", "代号", "标识", "类型")
+    for column in column_defs:
+        column_name = str(column.get("fieldName") or "").strip()
+        if not column_name or not any(token in column_name for token in preferred_tokens):
+            continue
+        identity = _normalize_table_row_identity(row.get(column_name, ""))
+        if identity:
+            return identity
+
+    for column in column_defs:
+        column_name = str(column.get("fieldName") or "").strip()
+        identity = _normalize_table_row_identity(row.get(column_name, ""))
+        if identity:
+            return identity
+
+    return f"row-{fallback_index}"
+
+
+def _build_table_cell_source(value: str, source_name: str) -> Dict[str, Any]:
+    return {
+        "content": value,
+        "source": source_name,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "translate": _translate_if_needed(value),
+    }
+
+
+def _append_unique_source(sources: List[Dict[str, Any]], source: Dict[str, Any]) -> None:
+    source_key = (source.get("content", ""), source.get("source", ""))
+    for existing in sources:
+        if (existing.get("content", ""), existing.get("source", "")) == source_key:
+            return
+    sources.append(source)
+
+
+def _merge_table_rows(row_results: List[Dict[str, Any]], column_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    by_identity: Dict[str, Dict[str, Any]] = {}
+
+    for index, row_result in enumerate(row_results):
+        row = row_result.get("row") or {}
+        if not isinstance(row, dict):
+            continue
+        identity = _table_row_identity(row, column_defs, index)
+        item = by_identity.get(identity)
+        if item is None:
+            item = {"values": {}, "sources": defaultdict(list)}
+            by_identity[identity] = item
+            merged.append(item)
+
+        source_name = str(row_result.get("source") or "")
+        for column in column_defs:
+            column_name = str(column.get("fieldName") or "").strip()
+            if not column_name:
+                continue
+            value = _normalize_table_cell_value(row.get(column_name))
+            if not value:
+                continue
+            if not item["values"].get(column_name):
+                item["values"][column_name] = value
+            _append_unique_source(
+                item["sources"][column_name],
+                _build_table_cell_source(value, source_name),
+            )
+
+    return merged[:MAX_TABLE_ROWS]
+
+
+def _assemble_table_rows(merged_rows: List[Dict[str, Any]], column_defs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    assembled_rows: List[List[Dict[str, Any]]] = []
+    for merged_row in merged_rows:
+        row: List[Dict[str, Any]] = []
+        for column in column_defs:
+            column_name = str(column.get("fieldName") or "").strip()
+            if not column_name:
+                continue
+            cell = dict(column)
+            value = str(merged_row.get("values", {}).get(column_name) or "")
+            sources = list(merged_row.get("sources", {}).get(column_name) or [])
+            cell["analyseData"] = value
+            cell["analyseDataSource"] = sources if sources else _build_analyse_data_sources([], text_response="")
+            row.append(cell)
+        if any(str(cell.get("analyseData") or "").strip() for cell in row):
+            assembled_rows.append(row)
+    return assembled_rows
+
+
 def _query_table_field(
     client: AnythingLLMClient,
     workspace_slug: str,
@@ -926,43 +1213,116 @@ def _query_table_field(
     on_cell_done: Optional[Any] = None,
     retrieval_context: Optional[WeaponryRetrievalContext] = None,
 ) -> Dict[str, Any]:
-    """查询 TABLE 类型字段：当做多个普通 INPUT 字段逐个查询。
+    """查询 TABLE 类型字段：按整表抽取多行结果。"""
+    def _finish(filled_field: Dict[str, Any]) -> Dict[str, Any]:
+        if on_cell_done:
+            on_cell_done()
+        return filled_field
 
-    ``on_cell_done`` 可选回调，每完成一个单元格调用一次，用于更新进度。
-    """
     template_rows = field.get("tableFieldList") or []
     if not template_rows:
         filled = dict(field)
         filled["tableFieldList"] = []
-        return filled
+        return _finish(filled)
 
-    logger.info("  -> 开始处理表格 [%s]，模板中包含 %d 行...", field.get("fieldName", "表格"), len(template_rows))
-    assembled_rows: List[List[Dict[str, Any]]] = []
+    column_defs = _extract_table_column_defs(field)
+    if not column_defs:
+        filled = dict(field)
+        filled["tableFieldList"] = []
+        return _finish(filled)
 
-    for row_defs in template_rows:
-        if not isinstance(row_defs, list):
-            assembled_rows.append(row_defs)
+    table_name = field.get("fieldName", "表格")
+    logger.info("  -> 开始处理表格 [%s]，列数: %d", table_name, len(column_defs))
+
+    retrieval_query = _build_table_retrieval_query(field, column_defs)
+    vs_results = _vector_search_with_top_n(
+        client,
+        workspace_slug,
+        retrieval_query,
+        top_n=TABLE_EVIDENCE_TOP_N,
+        user_id=user_id,
+    )
+    vs_results = [
+        chunk
+        for chunk in vs_results
+        if _is_target_source(_extract_chunk_source_name(chunk), retrieval_context)
+    ]
+
+    if not vs_results:
+        logger.info("表格 [%s] 向量搜索无匹配，返回空表格", table_name)
+        filled = dict(field)
+        filled["tableFieldList"] = []
+        return _finish(filled)
+
+    terms_rule_context = ""
+    if _terms_rule_context_enabled() and retrieval_context and retrieval_context.terms_workspace_slug:
+        term_results = _vector_search_with_top_n(
+            client,
+            retrieval_context.terms_workspace_slug,
+            _build_table_terms_rule_query(field, column_defs),
+            top_n=TERMS_RULE_TOP_N,
+            user_id=user_id,
+        )
+        terms_rule_context = _format_terms_rule_context(term_results)
+
+    file_chunks: Dict[str, List[str]] = defaultdict(list)
+    file_max_score: Dict[str, float] = defaultdict(float)
+    for chunk in sorted(vs_results, key=_get_score, reverse=True):
+        chunk_text = _strip_document_metadata(chunk.get("text", ""))
+        if not chunk_text:
             continue
-            
-        row: List[Dict[str, Any]] = []
-        for cell_def in row_defs:
-            logger.info("    -> 开始提取单元格: %s", cell_def.get("fieldName", "unknown"))
-            filled_cell = _query_input_field(
-                client,
-                workspace_slug,
-                thread_slug,
-                cell_def,
-                user_id=user_id,
-                retrieval_context=retrieval_context,
+        file_name = _extract_chunk_source_name(chunk) or _fallback_target_file_name(retrieval_context)
+        if not file_name:
+            raise ValueError("未能从表格文档片段中提取出明确的文件名。")
+        file_chunks[file_name].append(chunk_text)
+        file_max_score[file_name] = max(file_max_score[file_name], _get_score(chunk))
+
+    row_results: List[Dict[str, Any]] = []
+    sorted_files = sorted(file_chunks.keys(), key=lambda file_name: file_max_score[file_name], reverse=True)
+    for file_name in sorted_files:
+        chunks = _limit_chunks_for_prompt(file_chunks[file_name])
+        if not chunks:
+            continue
+        prompt = build_table_extraction_prompt(
+            str(table_name),
+            str(field.get("fieldDescription") or ""),
+            column_defs,
+            chunks,
+            terms_rule_context=terms_rule_context,
+        )
+        result = _send_prompt_to_isolated_thread(
+            client,
+            workspace_slug,
+            thread_slug,
+            prompt,
+            user_id=user_id,
+            mode="chat",
+        )
+        if not result:
+            continue
+
+        text_response = str(result.get("textResponse", "")).strip()
+        rows = _parse_table_json_rows(text_response, column_defs)
+        if not rows:
+            if text_response and "未找到" not in text_response and text_response != "[]":
+                logger.warning("表格 [%s] 的模型响应无法解析为有效行: %s", table_name, text_response[:200])
+            continue
+
+        original_source_name = _resolve_original_source_name(file_name, retrieval_context)
+        for row in rows:
+            row_results.append(
+                {
+                    "row": row,
+                    "source": original_source_name,
+                    "score": file_max_score[file_name],
+                }
             )
-            row.append(filled_cell)
-            if on_cell_done:
-                on_cell_done()
-        assembled_rows.append(row)
 
     filled = dict(field)
-    filled["tableFieldList"] = assembled_rows
-    return filled
+    merged_rows = _merge_table_rows(row_results, column_defs)
+    filled["tableFieldList"] = _assemble_table_rows(merged_rows, column_defs)
+    logger.info("表格 [%s] 提取完成: 行数=%d", table_name, len(filled["tableFieldList"]))
+    return _finish(filled)
 
 
 # ---------------------------------------------------------------------------
