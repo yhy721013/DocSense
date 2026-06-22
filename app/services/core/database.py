@@ -32,8 +32,30 @@ class DatabaseService:
                         doc_path TEXT
                     )
                 """)
+                self._ensure_documents_schema(conn)
                 conn.commit()
             logger.info("数据库初始化完成: %s", self.db_path)
+
+    def _ensure_documents_schema(self, conn: sqlite3.Connection) -> None:
+        """兼容已存在的旧版 documents 表。"""
+        cursor = conn.execute("PRAGMA table_info(documents)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "original_name" not in columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN original_name TEXT NOT NULL DEFAULT ''")
+            logger.info("已为 documents 表补充 original_name 列: %s", self.db_path)
+
+        if "doc_path" not in columns:
+            conn.execute("ALTER TABLE documents ADD COLUMN doc_path TEXT")
+            logger.info("已为 documents 表补充 doc_path 列: %s", self.db_path)
+
+        conn.execute(
+            """
+            UPDATE documents
+            SET original_name = file_name
+            WHERE original_name IS NULL OR original_name = ''
+            """
+        )
 
     # ================= Workspace 表的增删改查 =================
     

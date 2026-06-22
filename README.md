@@ -154,6 +154,8 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
+   - 多节点分类时优先返回最具体叶子节点；叶子证据不足时返回最深可靠父节点；多个兄弟节点都可能时返回最近公共父节点。
+   - 当最终分类名称严格符合 `*-基础数据`、`*-战技指标`、`*-运用数据` 或 `*-效能数据` 时，回调 `data.architectureId` 仍返回该具体子分类 ID；知识库关系表、AnythingLLM workspace 和向量 metadata 则统一按对应的武器装备父节点 ID 存储，便于 `/llm/weaponry` 检索该装备的全部文档。
    - 多节点分类时优先返回最具体叶子节点；命中非叶子节点时需回退到该分支下的“其他”叶子节点（节点名称或路径包含“其他”），仍无对应“其他”时回退到 1。
    - 文档内容明确为 GJB、国军标、国家军用标准相关资料，且候选中存在 `数据标准` 节点时，优先返回该节点 `id`。
    - `fileDataItem.score` 为必填离散评分，只返回 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料。
@@ -171,6 +173,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语临时移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束后再恢复目标 workspace，避免术语文档占满目标证据检索结果。
    - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息，但仍保留目标证据过滤和术语文档临时清理/恢复。
    - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
+   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 优先返回 `documents.original_name` 文件原名，无法映射时回退内部文件名。
    - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
 
 4. `/llm/check-task`

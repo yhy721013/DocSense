@@ -69,6 +69,12 @@ DEFAULT_ARCHITECTURE_OPTIONS = [
 ]
 
 ARCHITECTURE_FALLBACK_ID = 1
+WEAPONRY_DETAIL_CATEGORY_SUFFIXES = frozenset({
+    "基础数据",
+    "战技指标",
+    "运用数据",
+    "效能数据",
+})
 SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
 DATA_STANDARD_FIELD_ALIASES = {
     "militaryName": ("militaryName", "国军标名称", "标准名称"),
@@ -195,6 +201,92 @@ def _architecture_ancestor_ids(architecture_id: int, architecture_list: Iterable
         visited.add(parent_id)
         current_id = parent_id
     return ancestors
+
+
+def resolve_storage_architecture_id(
+        result_architecture_id: Any,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int | None:
+    """将装备明细子分类解析为用于知识库存储的装备级分类 ID。"""
+    resolved_id = _coerce_int(result_architecture_id)
+    if resolved_id is None:
+        return None
+
+    candidate_items = [item for item in architecture_list if isinstance(item, dict)]
+    items_by_id = {
+        item_id: item
+        for item in candidate_items
+        if (item_id := _coerce_int(item.get("id"))) is not None
+    }
+    result_item = items_by_id.get(resolved_id)
+    if not result_item:
+        return resolved_id
+
+    result_name = _as_text(result_item.get("name"))
+    weaponry_name, separator, suffix = result_name.rpartition("-")
+    weaponry_name = weaponry_name.strip()
+    suffix = suffix.strip()
+    if not separator or not weaponry_name or suffix not in WEAPONRY_DETAIL_CATEGORY_SUFFIXES:
+        return resolved_id
+
+    parent_id = _coerce_int(result_item.get("parentId"))
+    if parent_id is None:
+        logger.warning(
+            "装备明细分类缺少父节点，继续按原分类存储: architecture_id=%s architecture_name=%s",
+            resolved_id,
+            result_name,
+        )
+        return resolved_id
+
+    # architectureList 可能只传当前子分类。此时 parentId 是唯一可用的装备级标识。
+    if parent_id not in items_by_id:
+        return parent_id
+
+    current_id = parent_id
+    visited = {resolved_id}
+    while current_id not in visited:
+        visited.add(current_id)
+        current_item = items_by_id.get(current_id)
+        if not current_item:
+            break
+        if _as_text(current_item.get("name")) == weaponry_name:
+            return current_id
+        next_parent_id = _coerce_int(current_item.get("parentId"))
+        if next_parent_id is None:
+            break
+        current_id = next_parent_id
+
+    # 父链字段不完整时，使用 path 中明确列出的祖先节点做一次保守补充匹配。
+    path_ids = [_coerce_int(value) for value in re.findall(r"\d+", _as_text(result_item.get("path")))]
+    matched_path_ids = [
+        path_id
+        for path_id in path_ids
+        if path_id != resolved_id
+        and path_id in items_by_id
+        and _as_text(items_by_id[path_id].get("name")) == weaponry_name
+    ]
+    if len(matched_path_ids) == 1:
+        return matched_path_ids[0]
+
+    logger.warning(
+        "装备明细分类未找到匹配的装备级节点，继续按原分类存储: "
+        "architecture_id=%s architecture_name=%s expected_weaponry_name=%s parent_id=%s",
+        resolved_id,
+        result_name,
+        weaponry_name,
+        parent_id,
+    )
+    return resolved_id
+
+
+def _architecture_name_by_id(architecture_id: Any, architecture_list: Iterable[Dict[str, Any]]) -> str:
+    resolved_id = _coerce_int(architecture_id)
+    if resolved_id is None:
+        return ""
+    for item in architecture_list:
+        if isinstance(item, dict) and _coerce_int(item.get("id")) == resolved_id:
+            return _as_text(item.get("name"))
+    return ""
 
 
 def _is_architecture_in_standard_range(
@@ -813,15 +905,31 @@ def run_file_analysis_task(
         mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(llm_file_path))
 
         try:
-            architecture_id = mapped_result.get("architectureId")
-            if architecture_id:
-                workspace_slug = kb_service.get_workspace_slug(architecture_id)
+            result_architecture_id = mapped_result.get("architectureId")
+            if result_architecture_id:
+                architecture_list = build_effective_analysis_ranges(params)["architectureList"]
+                storage_architecture_id = resolve_storage_architecture_id(
+                    result_architecture_id,
+                    architecture_list,
+                )
+                if storage_architecture_id != result_architecture_id:
+                    logger.info(
+                        "文件知识库存储分类归并: file_name=%s result_architecture_id=%s "
+                        "result_architecture_name=%s storage_architecture_id=%s storage_architecture_name=%s",
+                        file_name,
+                        result_architecture_id,
+                        _architecture_name_by_id(result_architecture_id, architecture_list),
+                        storage_architecture_id,
+                        _architecture_name_by_id(storage_architecture_id, architecture_list),
+                    )
+
+                workspace_slug = kb_service.get_workspace_slug(storage_architecture_id)
                 if not workspace_slug:
-                    workspace_name = f"architectureId-{architecture_id}"
+                    workspace_name = f"architectureId-{storage_architecture_id}"
                     ws_info = client.create_rag_workspace(workspace_name, user_id=1)
                     if ws_info and ws_info.get("slug"):
                         workspace_slug = ws_info["slug"]
-                        kb_service.add_workspace(architecture_id, workspace_slug)
+                        kb_service.add_workspace(storage_architecture_id, workspace_slug)
 
                 if workspace_slug:
                     doc_info = client.upload_document(llm_file_path, user_id=1)
@@ -838,7 +946,7 @@ def run_file_analysis_task(
                         
                         metadata = {
                             "file_name": file_name,
-                            "architecture_id": architecture_id,
+                            "architecture_id": storage_architecture_id,
                         }
                         for k in ["country", "channel", "maturity", "format"]:
                             if mapped_result.get(k):
@@ -849,7 +957,13 @@ def run_file_analysis_task(
                             client.update_embeddings(alt_path, workspace_slug, user_id=1, metadata=metadata)
                             
                         if doc_id:
-                            kb_service.save_document_record(file_name, architecture_id, str(doc_id), doc_path=doc_relative_path, original_name=original_name)
+                            kb_service.save_document_record(
+                                file_name,
+                                storage_architecture_id,
+                                str(doc_id),
+                                doc_path=doc_relative_path,
+                                original_name=original_name,
+                            )
         except Exception as e:
             logger.error("知识库尝试存入文件失败: %s", e)
 
