@@ -12,6 +12,7 @@ from collections import defaultdict
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config
+from app.services.utils.rag_enhancer import get_rag_enhancer
 
 from app.services.core.database import DatabaseService
 from app.services.utils.callback_client import post_callback_payload
@@ -219,7 +220,27 @@ def _vector_search_with_top_n(
     top_n: int,
     user_id: int = 1,
 ) -> List[Dict[str, Any]]:
-    """在 weaponry 内部执行带 topN 的向量检索，不修改通用 client 接口。"""
+    """在 weaponry 内部执行带 topN 的检索，支持增强 RAG（BM25+Embedding+RRF+Rerank）。
+    
+    如果 RAG 增强未启用，自动降级为原始向量检索。
+    """
+    # 尝试使用 RAG 增强器
+    try:
+        enhancer = get_rag_enhancer()
+        if enhancer.is_enhanced():
+            logger.debug("使用增强 RAG 检索: workspace=%s, query='%s', top_n=%d", workspace_slug, query, top_n)
+            results = enhancer.hybrid_search(
+                client=client,
+                workspace_slug=workspace_slug,
+                query=query,
+                top_n=top_n,
+                user_id=user_id,
+            )
+            return results
+    except Exception as e:
+        logger.warning("RAG 增强器调用失败，降级为向量检索: %s", e)
+    
+    # 降级方案：使用原始 AnythingLLM 向量检索
     url = f"{client.config.base_url}/workspace/{workspace_slug}/vector-search"
     payload = {"query": query, "topN": top_n}
     try:

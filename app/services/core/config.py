@@ -95,6 +95,32 @@ def load_ocr_config() -> OCRConfig:
     )
 
 
+@dataclass(frozen=True)
+class RAGEnhancerConfig:
+    """RAG 增强功能配置（BM25 + Embedding 双召回 + RRF + Reranker）。"""
+    enabled: bool
+    bm25_top_k: int
+    embedding_top_k: int
+    rrf_k: int
+    rerank_enabled: bool
+    rerank_model: str
+    rerank_top_n: int
+    rerank_batch_size: int
+
+
+def load_rag_enhancer_config() -> RAGEnhancerConfig:
+    return RAGEnhancerConfig(
+        enabled=_parse_bool(os.getenv("RAG_ENHANCER_ENABLED"), False),
+        bm25_top_k=_parse_int(os.getenv("RAG_BM25_TOP_K"), 20, min_value=1),
+        embedding_top_k=_parse_int(os.getenv("RAG_EMBEDDING_TOP_K"), 20, min_value=1),
+        rrf_k=_parse_int(os.getenv("RAG_RRF_K"), 60, min_value=1),
+        rerank_enabled=_parse_bool(os.getenv("RAG_RERANK_ENABLED"), True),
+        rerank_model=os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3").strip() or "BAAI/bge-reranker-v2-m3",
+        rerank_top_n=_parse_int(os.getenv("RAG_RERANK_TOP_N"), 5, min_value=1),
+        rerank_batch_size=_parse_int(os.getenv("RAG_RERANK_BATCH_SIZE"), 32, min_value=1),
+    )
+
+
 def load_llm_integration_config() -> LLMIntegrationConfig:
     return LLMIntegrationConfig(
         callback_url=_parse_optional_str(os.getenv("CALLBACK_URL")),
