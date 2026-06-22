@@ -164,12 +164,14 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 2. `/llm/generate-report`
    - `filePathList` 支持多文件，统一汇总后生成 HTML 报告。
    - `mhtml/mht` 文件会先归一化再参与报告生成。
+   - `templateOutline` 表示 Word 模板文件下载地址；服务端会下载 `.docx` 模板并提取其中的文字内容作为报告大纲要求，再进入原有报告生成流程。
 
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
    - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
    - 字段抽取默认采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
+   - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取，并在回调中扩展为多行二维 `tableFieldList`，例如“每种雷达一行、各指标为列”。
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语临时移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束后再恢复目标 workspace，避免术语文档占满目标证据检索结果。
    - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息，但仍保留目标证据过滤和术语文档临时清理/恢复。
    - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。

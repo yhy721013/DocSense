@@ -675,7 +675,7 @@ Invoke-RestMethod -Uri "http://0.0.0.0:5001/llm/analysis" -Method Post -ContentT
 - `params[0].reportId`
 - `params[0].filePathList`
 - `params[0].templateDesc`
-- `params[0].templateOutline`
+- `params[0].templateOutline`：Word 模板文件下载地址，服务端会下载 `.docx` 并提取模板文字内容
 - `params[0].requirement`
 
 #### 步骤 2：订阅报告任务进度
