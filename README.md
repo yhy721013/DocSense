@@ -164,6 +164,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 2. `/llm/generate-report`
    - `filePathList` 支持多文件，统一汇总后生成 HTML 报告。
    - `mhtml/mht` 文件会先归一化再参与报告生成。
+   - `templateOutline` 表示 Word 模板文件下载地址；服务端会下载 `.docx` 模板并提取其中的文字内容作为报告大纲要求，再进入原有报告生成流程。
 
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。

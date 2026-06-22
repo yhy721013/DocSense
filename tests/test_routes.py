@@ -118,12 +118,29 @@ class LLMRouteValidationTests(unittest.TestCase):
                     {
                         "reportId": 132,
                         "filePathList": ["http://127.0.0.1:8000/sample.txt"],
+                        "templateOutline": "http://127.0.0.1:8000/template.docx",
                     }
                 ],
             },
         )
         self.assertEqual(response.status_code, 202)
         mock_thread.assert_called_once()
+
+    def test_generate_report_rejects_missing_template_outline(self):
+        response = self.client.post(
+            "/llm/generate-report",
+            json={
+                "businessType": "report",
+                "params": [
+                    {
+                        "reportId": 132,
+                        "filePathList": ["http://127.0.0.1:8000/sample.txt"],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
 
     @patch("app.blueprints.llm.kb_service")
     def test_reassign_rejects_invalid_business_type(self, mock_kb_service):

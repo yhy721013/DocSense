@@ -4,6 +4,7 @@ import html
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config
@@ -12,6 +13,7 @@ from app.services.utils.rag_pipeline import prepare_upload_files, run_anythingll
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
 from app.services.utils.mhtml_normalizer import normalize_file_for_llm
+from app.services.utils.word_extractor import extract_text_from_word
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import build_report_prompt
 from app.services.llm_service.task_service import LLMTaskService
@@ -47,6 +49,30 @@ def _publish_progress(progress_hub: LLMProgressHub, report_id: int, progress: fl
     )
 
 
+def _suffix_from_url(url: str, fallback: str = "") -> str:
+    path = urlparse(url).path
+    suffix = Path(path).suffix
+    return suffix or fallback
+
+
+def _extract_template_outline_text(params: dict, report_id: int, download_root: str) -> str:
+    template_url = str(params.get("templateOutline") or "").strip()
+    if not template_url:
+        raise ValueError("templateOutline不能为空")
+
+    suffix = _suffix_from_url(template_url, fallback=".docx")
+    template_path = download_to_temp_file(
+        template_url,
+        f"report-{report_id}-template{suffix}",
+        download_root,
+        timeout=60,
+    )
+    outline_text = extract_text_from_word(template_path).strip()
+    if not outline_text:
+        raise ValueError("Word模板未提取到有效文字内容")
+    return outline_text
+
+
 def run_report_task(
     *,
     task_service: LLMTaskService,
@@ -74,6 +100,12 @@ def run_report_task(
                 prepared_source = downloaded_path
             files_to_upload.extend(prepare_upload_files(prepared_source))
 
+        task_service.update_task_progress("report", str(report_id), progress=0.25, message="正在解析报告模板")
+        _publish_progress(progress_hub, report_id, 0.25)
+        template_outline_text = _extract_template_outline_text(params, report_id, download_root)
+        prompt_params = dict(params)
+        prompt_params["templateOutline"] = template_outline_text
+
         task_service.update_task_progress("report", str(report_id), progress=0.35, message="正在生成报告")
         _publish_progress(progress_hub, report_id, 0.35)
 
@@ -81,7 +113,7 @@ def run_report_task(
         details = run_anythingllm_rag(
             client=client,
             files_to_upload=files_to_upload,
-            prompt=build_report_prompt(params),
+            prompt=build_report_prompt(prompt_params),
             workspace_name=f"llm-report-{report_id}-{int(time.time() * 1000)}",
             thread_name=f"report-{report_id}",
             user_id=1,

@@ -25,6 +25,8 @@ class LLMTestAssetsTests(unittest.TestCase):
         payload = json.loads(pathlib.Path("tests/fixtures/llm/report_request.json").read_text(encoding="utf-8"))
         self.assertEqual(payload["businessType"], "report")
         self.assertIn("filePathList", payload["params"][0])
+        self.assertIn("templateOutline", payload["params"][0])
+        self.assertTrue(payload["params"][0]["templateOutline"].endswith(".docx"))
 
     def test_weaponry_request_fixture_uses_ship_fields(self):
         payload = json.loads(pathlib.Path("tests/fixtures/llm/weaponry_request.json").read_text(encoding="utf-8"))
