@@ -141,7 +141,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
-| GET | `/debug/api/callback` | 读取最近一次落盘的 `.runtime/call_back.json` |
+| GET | `/debug/api/callback` | 读取旧版最近一次预览文件 `.runtime/call_back.json`，暂不浏览历史目录 |
 | GET | `/debug/chat` | 本地文件对话调试页，联调 `/llm/chat*` 三个接口 |
 | GET | `/debug/api/chat/bootstrap` | 读取本地会话列表与已解析文件列表，供 `/debug/chat` 初始化使用 |
 
@@ -255,7 +255,8 @@ python run.py
 
 回调调试页说明：
 
-- 页面展示的数据来自仓库根目录 `.runtime/call_back.json`
+- 新回调 JSON 历史记录统一保存在仓库根目录 `.runtime/callback/`
+- `/debug/callback` 和 `/debug/api/callback` 暂不浏览 `.runtime/callback/` 历史目录，仍只尝试读取旧版 `.runtime/call_back.json`
 - `file` 回调会结构化展示摘要信息、原文和翻译预览
 - `report` 回调会结构化展示报告信息和 HTML 报告预览
 - 若当前还没有回调文件，页面会显示空状态提示
@@ -285,7 +286,8 @@ python run.py
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
 - 对话状态库：`.runtime/chat_sessions.sqlite3`（`DOCSENSE_CHAT_DB`）
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
-- 最近一次回调预览：`.runtime/call_back.json`
+- 回调历史目录：`.runtime/callback/`
+- 旧版最近一次回调预览：`.runtime/call_back.json`（当前新回调不再更新）
 
 ## 8. 本地联调与测试
 
@@ -388,7 +390,7 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 1. 启动服务：`python run.py`
 2. 若联调回调型业务，触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
 3. 打开 `http://127.0.0.1:5001/debug/callback`
-4. 若要比对原始报文，可同时查看 `.runtime/call_back.json`
+4. 若要比对原始回调报文，优先查看 `.runtime/callback/` 下按业务键和时间戳保存的历史 JSON
 5. 若联调文件对话，先确保至少有一个已解析文件，再打开 `http://127.0.0.1:5001/debug/chat`
 6. 在 `/debug/chat` 中可直接完成发送消息、查看历史、删除会话三类联调
 

@@ -59,12 +59,12 @@
 
 - 服务端控制台日志
 - 假回调服务控制台输出
-- [last_callback.json](/e:/DocSense/.runtime/mock_callback/last_callback.json)
+- [callback 历史目录](/e:/DocSense/.runtime/callback/)
 - [llm_tasks.sqlite3](/e:/DocSense/.runtime/llm_tasks.sqlite3)
 
 其中：
 
-- `.runtime/mock_callback/last_callback.json` 只保留最后一次收到的回调
+- `.runtime/callback/` 保存每次回调的历史 JSON，文件名按业务键和时间戳生成
 - `.runtime/llm_tasks.sqlite3` 保存正式 `/llm/*` 任务状态
 
 ### 1.4 启动顺序
@@ -200,16 +200,18 @@ pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1"
 
 推送到你本地开启的模拟回调服务器里，
 
-并最终保存在 .runtime/mock_callback/last_callback.json 文件中。
+并最终保存在 `.runtime/callback/` 目录的一个历史 JSON 文件中。
 
 ```powershell
-Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8
+$latestCallback = Get-ChildItem ".runtime/callback/*.json" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content -Path $latestCallback.FullName -Raw -Encoding utf8
 ```
 
 如需格式化查看：
 
 ```powershell
-Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8 | ConvertFrom-Json | ConvertTo-Json -Depth 20
+$latestCallback = Get-ChildItem ".runtime/callback/*.json" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content -Path $latestCallback.FullName -Raw -Encoding utf8 | ConvertFrom-Json | ConvertTo-Json -Depth 20
 ```
 
 文件解析成功时，应重点检查：
@@ -270,7 +272,8 @@ print(json.dumps(DEFAULT_ARCHITECTURE_OPTIONS, ensure_ascii=False, indent=2))
 查看本次回调中的最终命中结果：
 
 ```powershell
-Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8 |
+$latestCallback = Get-ChildItem ".runtime/callback/*.json" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content -Path $latestCallback.FullName -Raw -Encoding utf8 |
   ConvertFrom-Json |
   Select-Object -ExpandProperty data |
   Select-Object architectureId
@@ -279,8 +282,9 @@ Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf
 如果要把回调中的 `architectureId` 反查为完整节点结构，可执行：
 
 ```powershell
+$latestCallback = Get-ChildItem ".runtime/callback/*.json" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 $archId = (
-  Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8 |
+  Get-Content -Path $latestCallback.FullName -Raw -Encoding utf8 |
   ConvertFrom-Json
 ).data.architectureId
 
@@ -363,18 +367,11 @@ pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1 -PayloadPath 'tests/fix
 
 #### 步骤 4：查看报告回调体
 
-报告回调同样会写入 [last_callback.json](/e:/DocSense/.runtime/mock_callback/last_callback.json)，因此执行报告链路前，建议先把文件回调结果另存。
-
-可复制保存上一份结果：
+报告回调同样会写入 `.runtime/callback/` 历史目录。每次回调都会生成独立文件，不需要再手工另存上一份结果。
 
 ```powershell
-Copy-Item ".runtime/mock_callback/last_callback.json" ".runtime/mock_callback/file_callback_snapshot.json" -Force
-```
-
-然后查看当前最新回调：
-
-```powershell
-Get-Content -Path ".runtime/mock_callback/last_callback.json" -Raw -Encoding utf8 | ConvertFrom-Json | ConvertTo-Json -Depth 20
+$latestCallback = Get-ChildItem ".runtime/callback/*.json" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Get-Content -Path $latestCallback.FullName -Raw -Encoding utf8 | ConvertFrom-Json | ConvertTo-Json -Depth 20
 ```
 
 报告生成成功时，应重点检查：
@@ -438,7 +435,7 @@ pwsh -NoLogo -Command "./scripts/test_llm_check_task.ps1 -PayloadPath 'tests/fix
 
 - 返回体中 `callbackReplayed = true`
 - 假回调服务收到回调
-- `.runtime/mock_callback/last_callback.json` 被创建或更新
+- `.runtime/callback/` 下新增一份历史 JSON
 
 ### 1.8 失败场景测试
 
@@ -519,7 +516,7 @@ Invoke-RestMethod -Uri "http://0.0.0.0:5001/llm/analysis" -Method Post -ContentT
 
 ### 1.11 本地联调常见问题
 
-#### 没有 `.runtime/mock_callback`
+#### 没有 `.runtime/callback`
 
 优先检查：
 

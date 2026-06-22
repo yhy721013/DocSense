@@ -95,7 +95,12 @@ def run_report_task(
         _publish_progress(progress_hub, report_id, 1.0)
 
         if callback_url:
-            if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
+            if post_callback_payload(
+                callback_url,
+                callback_payload,
+                timeout=callback_timeout,
+                callback_context={"businessType": "report", "reportId": report_id},
+            ):
                 task_service.mark_callback_success("report", str(report_id))
                 logger.info("回调结果提交成功: report_id=%s", report_id)
             else:
@@ -109,7 +114,12 @@ def run_report_task(
         task_service.mark_business_result("report", str(report_id), callback_payload, status="2", message="报告生成失败")
         _publish_progress(progress_hub, report_id, 1.0)
         if callback_url:
-            if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
+            if post_callback_payload(
+                callback_url,
+                callback_payload,
+                timeout=callback_timeout,
+                callback_context={"businessType": "report", "reportId": report_id},
+            ):
                 task_service.mark_callback_success("report", str(report_id))
                 logger.info("失败回调提交成功: report_id=%s", report_id)
             else:
