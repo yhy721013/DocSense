@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
@@ -19,13 +20,29 @@ class LLMTranslationService:
         self._translator: Optional[HYMTTranslator] = None
         self._document_translator: Optional[DocumentTranslator] = None
         self._progress_callback: Optional[Callable[[float, str], None]] = None
+        self._init_lock = threading.RLock()
 
     def _ensure_translator(self) -> None:
-        """确保翻译器已初始化（懒加载）"""
-        if self._translator is None:
-            model_name = os.getenv("DOCSENSE_TRANSLATION_MODEL", "Qwen3-4B-Instruct-2507-Q4_K_M")
-            self._translator = HYMTTranslator(model_name=model_name, check_ollama=False)
-            self._document_translator = DocumentTranslator(self._translator)
+        """确保基础翻译器已初始化（懒加载）"""
+        if self._translator is not None:
+            return
+
+        with self._init_lock:
+            if self._translator is None:
+                model_name = os.getenv("DOCSENSE_TRANSLATION_MODEL", "Qwen3-4B-Instruct-2507-Q4_K_M")
+                self._translator = HYMTTranslator(model_name=model_name, check_ollama=False)
+
+    def _ensure_document_translator(self) -> None:
+        """确保文档翻译器已初始化，并修复可能存在的半初始化状态。"""
+        if self._translator is not None and self._document_translator is not None:
+            return
+
+        with self._init_lock:
+            if self._translator is None:
+                model_name = os.getenv("DOCSENSE_TRANSLATION_MODEL", "Qwen3-4B-Instruct-2507-Q4_K_M")
+                self._translator = HYMTTranslator(model_name=model_name, check_ollama=False)
+            if self._document_translator is None:
+                self._document_translator = DocumentTranslator(self._translator)
 
     def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:
         """
@@ -60,7 +77,7 @@ class LLMTranslationService:
         :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
         :return: (双语 HTML 内容，单语 HTML 内容)
         """
-        self._ensure_translator()
+        self._ensure_document_translator()
 
         if not os.path.exists(file_path):
             return "", ""
@@ -72,7 +89,11 @@ class LLMTranslationService:
             output_monolingual_html = base_path.parent / f"{base_path.stem}" / "_monolingual_html"
 
             # 翻译文档（生成双语和单语 HTML，只翻译一次）
-            bilingual_html_path, monolingual_html_path = self._document_translator.convert_to_html(
+            document_translator = self._document_translator
+            if document_translator is None:
+                raise RuntimeError("文档翻译器未初始化")
+
+            bilingual_html_path, monolingual_html_path = document_translator.convert_to_html(
                 file_path=str(file_path),
                 output_dir=str(output_htmls),
                 target_lang=target_lang,
@@ -134,11 +155,14 @@ class LLMTranslationService:
 
 # 全局单例（可选）
 _translation_service_instance: Optional[LLMTranslationService] = None
+_translation_service_lock = threading.RLock()
 
 
 def get_translation_service() -> LLMTranslationService:
     """获取翻译服务单例"""
     global _translation_service_instance
     if _translation_service_instance is None:
-        _translation_service_instance = LLMTranslationService()
+        with _translation_service_lock:
+            if _translation_service_instance is None:
+                _translation_service_instance = LLMTranslationService()
     return _translation_service_instance

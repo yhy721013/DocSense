@@ -17,6 +17,17 @@ class LLMTranslationServiceTests(unittest.TestCase):
         self.assertEqual(result, "translated")
         translator.translate_text.assert_called_once_with("hello", "Chinese", fast_translate=True)
 
+    @patch("app.services.llm_service.translation_service.DocumentTranslator")
+    def test_ensure_document_translator_recovers_half_initialized_state(self, mock_document_translator_cls):
+        service = LLMTranslationService()
+        translator = Mock()
+        service._translator = translator
+
+        service._ensure_document_translator()
+
+        mock_document_translator_cls.assert_called_once_with(translator)
+        self.assertIs(service._document_translator, mock_document_translator_cls.return_value)
+
     def test_hymt_translate_text_defaults_to_machine_translation(self):
         translator = HYMTTranslator.__new__(HYMTTranslator)
         translator._translate_with_argos = Mock(return_value="translated")
