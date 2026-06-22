@@ -1108,7 +1108,12 @@ def run_weaponry_task(
         _publish_progress(progress_hub, architecture_id_str, 1.0)
 
         if callback_url:
-            if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
+            if post_callback_payload(
+                callback_url,
+                callback_payload,
+                timeout=callback_timeout,
+                callback_context={"businessType": "weaponry", "architectureId": architecture_id},
+            ):
                 task_service.mark_callback_success("weaponry", architecture_id_str)
                 logger.info("回调结果提交成功: architectureId=%s", architecture_id)
             else:
@@ -1144,7 +1149,12 @@ def _fail_task(
     _publish_progress(progress_hub, architecture_id_str, 1.0)
 
     if callback_url:
-        if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
+        if post_callback_payload(
+            callback_url,
+            callback_payload,
+            timeout=callback_timeout,
+            callback_context={"businessType": "weaponry", "architectureId": architecture_id},
+        ):
             task_service.mark_callback_success("weaponry", architecture_id_str)
         else:
             task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")

@@ -982,7 +982,17 @@ def run_file_analysis_task(
         _publish_progress(progress_hub, file_name, 1.0)
 
         if callback_url:
-            if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
+            callback_context = {
+                "businessType": "file",
+                "fileName": file_name,
+                "originalFileName": original_name,
+            }
+            if post_callback_payload(
+                callback_url,
+                callback_payload,
+                timeout=callback_timeout,
+                callback_context=callback_context,
+            ):
                 task_service.mark_callback_success("file", file_name)
                 logger.info("回调结果提交成功: file_name=%s", file_name)
             else:
@@ -997,7 +1007,17 @@ def run_file_analysis_task(
         task_service.mark_business_result("file", file_name, callback_payload, status="3", message="解析失败")
         _publish_progress(progress_hub, file_name, 1.0)
         if callback_url:
-            if post_callback_payload(callback_url, callback_payload, timeout=callback_timeout):
+            callback_context = {
+                "businessType": "file",
+                "fileName": file_name,
+                "originalFileName": original_name,
+            }
+            if post_callback_payload(
+                callback_url,
+                callback_payload,
+                timeout=callback_timeout,
+                callback_context=callback_context,
+            ):
                 task_service.mark_callback_success("file", file_name)
                 logger.info("失败回调提交成功: file_name=%s", file_name)
             else:

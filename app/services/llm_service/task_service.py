@@ -252,6 +252,35 @@ class LLMTaskService:
         completed_statuses = {"file": {"2", "3"}, "report": {"1", "2"}, "weaponry": {"2", "3"}}
         return task["status"] in completed_statuses.get(business_type, set()) and task["callback_status"] != "success"
 
+    def _callback_context_for_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        business_type = task["business_type"]
+        business_key = task["business_key"]
+        request_payload = task.get("request_payload") or {}
+        params = request_payload.get("params")
+        if isinstance(params, list) and params and isinstance(params[0], dict):
+            first_param = params[0]
+        elif isinstance(params, dict):
+            first_param = params
+        else:
+            first_param = {}
+
+        context: Dict[str, Any] = {
+            "businessType": business_type,
+            "businessKey": business_key,
+        }
+        if business_type == "file":
+            context["fileName"] = first_param.get("fileName") or business_key
+            context["originalFileName"] = (
+                first_param.get("originalFileName")
+                or first_param.get("originalName")
+                or business_key
+            )
+        elif business_type == "report":
+            context["reportId"] = first_param.get("reportId") or business_key
+        elif business_type == "weaponry":
+            context["architectureId"] = first_param.get("architectureId") or business_key
+        return context
+
     def replay_callback_if_needed(self, business_type: str, business_key: str, *, callback_url: str, timeout: float) -> bool:
         if not callback_url or not self.should_replay_callback(business_type, business_key):
             return False
@@ -261,7 +290,12 @@ class LLMTaskService:
             return False
 
         payload = task["result_payload"] or {}
-        callback_ok = post_callback_payload(callback_url, payload, timeout=timeout)
+        callback_ok = post_callback_payload(
+            callback_url,
+            payload,
+            timeout=timeout,
+            callback_context=self._callback_context_for_task(task),
+        )
         if callback_ok:
             self.mark_callback_success(business_type, business_key)
             return True
