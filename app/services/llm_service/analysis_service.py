@@ -76,6 +76,8 @@ WEAPONRY_DETAIL_CATEGORY_SUFFIXES = frozenset({
     "效能数据",
 })
 SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
+MAX_KEYWORD_COUNT = 10
+MAX_KEYWORD_LENGTH = 30
 DATA_STANDARD_FIELD_ALIASES = {
     "militaryName": ("militaryName", "国军标名称", "标准名称"),
     "num": ("num", "编号", "标准编号", "国军标编号", "fileNo", "文件编号"),
@@ -488,6 +490,46 @@ def _resolve_field(parsed_result: Dict[str, Any], file_item: Dict[str, Any], *al
     return ""
 
 
+def _sanitize_keywords(raw_value: Any) -> str:
+    """对 LLM 返回的 keyword 字段做后处理：拆分、截断单条过长关键词、限制总数量。
+
+    小模型（如 4B）有时不遵守 prompt 约束，可能返回极长的单个关键词或过多关键词，
+    此函数在输出前统一做校验与截断，确保 keyword 字段始终为不超过 MAX_KEYWORD_COUNT
+    个、每个不超过 MAX_KEYWORD_LENGTH 字符的短词，以英文逗号+空格分隔。
+    """
+    if raw_value in (None, "", [], {}):
+        return ""
+
+    # 模型可能返回列表形式的关键词
+    if isinstance(raw_value, list):
+        parts = [_as_text(item) for item in raw_value]
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return ""
+        # 按常见分隔符拆分（中英文逗号、顿号、分号、竖线、换行）
+        parts = re.split(r"[,，、;；|\n\r]+", text)
+    else:
+        parts = [str(raw_value)]
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        kw = part.strip().strip("\"'“”‘’").strip()
+        if not kw or kw in seen:
+            continue
+        seen.add(kw)
+        # 单个关键词过长时截断
+        if len(kw) > MAX_KEYWORD_LENGTH:
+            logger.warning("keyword 被截断: 原始长度=%d 超过上限 %d", len(kw), MAX_KEYWORD_LENGTH)
+            kw = kw[:MAX_KEYWORD_LENGTH]
+        cleaned.append(kw)
+        if len(cleaned) >= MAX_KEYWORD_COUNT:
+            break
+
+    return ", ".join(cleaned)
+
+
 def _extract_original_link(original_text: str) -> str:
     match = re.search(r"https?://\S+", original_text)
     return match.group(0) if match else ""
@@ -679,13 +721,17 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     normalized_original_text = _as_text(
         original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
     extracted_title = _extract_title(normalized_original_text)
+    resolved_keyword = _sanitize_keywords(
+        _first_non_empty_value(file_item, "keyword", "keywords", "关键词")
+        or _first_non_empty_value(parsed_result, "keyword", "keywords", "关键词")
+    )
     architecture_id = (
         _match_data_standard_architecture_id(
             ranges["architectureList"],
             normalized_original_text,
             request_params.get("originalFileName"),
             _resolve_field(parsed_result, file_item, "summary", "摘要"),
-            _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+            resolved_keyword,
             _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
         )
         or _match_architecture_id(parsed_result, ranges["architectureList"])
@@ -694,7 +740,7 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     file_data_item = {
         "fileName": file_name,
         "dataTime": resolved_date or _extract_date(normalized_original_text),
-        "keyword": _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+        "keyword": resolved_keyword,
         "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
         "score": _normalize_source_score(raw_score),
         "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
