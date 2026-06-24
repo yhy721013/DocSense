@@ -858,6 +858,67 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             self.assertEqual(task["result_payload"]["msg"], "解析成功")
             self.assertEqual(events[-1]["data"]["progress"], 1.0)
 
+    @patch("app.services.llm_service.analysis_service.post_callback_payload", return_value=True)
+    @patch("app.services.llm_service.analysis_service.pipeline_process_file_with_rag", return_value=None)
+    @patch("app.services.llm_service.analysis_service.enrich_with_translations")
+    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
+    def test_run_file_analysis_task_marks_failure_when_rag_returns_no_result(
+        self,
+        mock_download,
+        mock_enrich,
+        _mock_pipeline,
+        mock_callback,
+    ):
+        with workspace_tempdir() as tmp:
+            sample = Path(tmp) / "sample.txt"
+            sample.write_text("sample", encoding="utf-8")
+            mock_download.return_value = str(sample)
+
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "sample.txt",
+                        "filePath": "http://127.0.0.1:8000/sample.txt",
+                        "enableFullTranslation": False,
+                        "country": [],
+                        "channel": [],
+                        "maturity": [],
+                        "format": [],
+                        "architectureList": [],
+                    }
+                ],
+            }
+
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("sample.txt", request_payload)
+            kb_service = Mock()
+
+            from app.services.llm_service.analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                kb_service=kb_service,
+                progress_hub=LLMProgressHub(),
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="http://127.0.0.1:9000/llm/callback",
+                callback_timeout=5,
+            )
+
+            task = task_service.get_task("file", "sample.txt")
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(task["callback_status"], "success")
+        self.assertEqual(task["result_payload"]["msg"], "解析失败")
+        self.assertEqual(task["result_payload"]["data"]["status"], "3")
+        mock_enrich.assert_not_called()
+        kb_service.get_workspace_slug.assert_not_called()
+        callback_payload = mock_callback.call_args.args[1]
+        self.assertEqual(callback_payload["msg"], "解析失败")
+        self.assertEqual(callback_payload["data"]["status"], "3")
+
     @patch("app.services.llm_service.analysis_service.run_file_analysis_task")
     def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):
         with workspace_tempdir() as tmp:
