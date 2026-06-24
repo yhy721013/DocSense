@@ -901,7 +901,11 @@ def run_file_analysis_task(
             thread_name=f"analysis-{Path(file_name).stem}",
             user_id=1,
         )
+        if raw_result is None or (isinstance(raw_result, str) and not raw_result.strip()):
+            raise RuntimeError("AnythingLLM结构化抽取未返回有效结果")
         parsed_result = _parse_model_result(raw_result)
+        if not isinstance(parsed_result, dict) or not parsed_result:
+            raise RuntimeError("AnythingLLM结构化抽取结果无法解析")
         mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(llm_file_path))
 
         try:
