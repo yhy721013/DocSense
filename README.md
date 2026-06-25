@@ -293,6 +293,21 @@ python run.py
 
 ## 8. 本地联调与测试
 
+任务库 JSON 导出脚本：
+
+```bash
+python scripts/inspect_llm_tasks.py
+```
+
+`scripts/inspect_llm_tasks.py` 只使用 Python 标准库，可在 Windows 和 macOS 上运行。脚本默认读取 `.runtime/llm_tasks.sqlite3`，也会遵循 `DOCSENSE_LLM_TASK_DB` 指定的任务库路径；导出时会自动创建 `.runtime/sqlite/`，并写入按时间戳命名的 JSON 文件，例如 `.runtime/sqlite/llm_tasks_20260625_092658_122450.json`。
+
+导出的 JSON 顶层包含：
+
+- `metadata`：导出时间、来源数据库路径、输出文件路径、SQLite 版本、表数量和总行数
+- `tables`：每张表的表名、建表 SQL、列定义、行数和完整行数据
+
+其中 `llm_tasks.rows[]` 的每一项对应一条 LLM 任务记录，常用字段包括 `business_type`、`business_key`、`request_payload`、`status`、`progress`、`result_payload`、`callback_status`、`callback_attempts`、`created_at` 和 `updated_at`。脚本会把 `request_payload`、`result_payload` 这类 JSON 字符串自动展开为对象，便于直接查看原始请求和最终结果。可通过 `--db-path` 和 `--output-dir` 指定其他 SQLite 文件或输出目录。
+
 本地联调脚本（PowerShell）：
 
 ```powershell
