@@ -12,8 +12,9 @@ from typing import Any, Dict, Iterable
 import fitz
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
-from app.services.core.config import load_anythingllm_config
-from app.services.utils.rag_pipeline import process_file_with_rag as pipeline_process_file_with_rag
+from app.services.core.config import load_anythingllm_config, load_ocr_config
+from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
+from app.services.utils.rag_pipeline import run_anythingllm_rag
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
@@ -906,6 +907,19 @@ def _read_original_text(file_path: str) -> str:
     return ""
 
 
+def _prepare_analysis_upload_files(file_path: str) -> list[str]:
+    path = Path(file_path)
+    if not path.exists():
+        return []
+
+    upload_path = prepare_analysis_file_for_upload(str(path), load_ocr_config())
+    upload_path_obj = Path(upload_path)
+    if not upload_path_obj.exists():
+        return [str(path)]
+
+    return [str(upload_path_obj)]
+
+
 def run_file_analysis_task(
         *,
         task_service: LLMTaskService,
@@ -939,13 +953,19 @@ def run_file_analysis_task(
             logger.warning("mhtml归一化失败，降级使用原文件: %s (%s)", downloaded_path, exc)
 
         client = AnythingLLMClient(load_anythingllm_config())
-        raw_result = pipeline_process_file_with_rag(
+        files_to_upload = _prepare_analysis_upload_files(llm_file_path)
+        if files_to_upload:
+            llm_file_path = files_to_upload[0]
+
+        raw_result = run_anythingllm_rag(
             client=client,
-            file_path=llm_file_path,
+            files_to_upload=files_to_upload,
             prompt=build_file_analysis_prompt(params),
             workspace_name=f"llm-file-{int(time.time() * 1000)}",
             thread_name=f"analysis-{Path(file_name).stem}",
             user_id=1,
+            mode="query",
+            reuse_workspace=False,
         )
         if raw_result is None or (isinstance(raw_result, str) and not raw_result.strip()):
             raise RuntimeError("AnythingLLM结构化抽取未返回有效结果")
