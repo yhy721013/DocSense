@@ -22,6 +22,18 @@ def build_ocr_cache_key(path: Union[str, Path], size: int, mtime_ns: int) -> str
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
+def build_mineru_cache_key(
+    path: Union[str, Path],
+    size: int,
+    mtime_ns: int,
+    lang: str,
+    api_url: str | None,
+) -> str:
+    resolved_path = str(Path(path).resolve(strict=False)).replace("\\", "/")
+    fingerprint = f"mineru|{resolved_path}|{size}|{mtime_ns}|{lang}|{api_url or ''}"
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+
+
 def prepare_file_for_upload(file_path: str, ocr_config: OCRConfig) -> str:
     path = Path(file_path)
     if not path.exists() or not path.is_file():
@@ -40,6 +52,39 @@ def prepare_file_for_upload(file_path: str, ocr_config: OCRConfig) -> str:
     ):
         return str(path)
 
+    return _prepare_scanned_pdf_with_builtin_ocr(path, ocr_config)
+
+
+def prepare_analysis_file_for_upload(file_path: str, ocr_config: OCRConfig) -> str:
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        return str(path)
+
+    if not ocr_config.enabled:
+        return str(path)
+
+    if path.suffix.lower() != ".pdf":
+        return str(path)
+
+    if not is_scanned_pdf(
+        str(path),
+        sample_pages=ocr_config.sample_pages,
+        text_threshold=ocr_config.text_threshold,
+    ):
+        return str(path)
+
+    if ocr_config.analysis_scanned_pdf_engine == "mineru":
+        try:
+            markdown_path = mineru_pdf_to_markdown(path, ocr_config)
+            logger.info("扫描件 MinerU 解析完成，改为上传 Markdown: %s -> %s", path, markdown_path)
+            return str(markdown_path)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("扫描件 MinerU 解析失败，降级使用内置 OCR: %s (%s)", path, exc)
+
+    return _prepare_scanned_pdf_with_builtin_ocr(path, ocr_config)
+
+
+def _prepare_scanned_pdf_with_builtin_ocr(path: Path, ocr_config: OCRConfig) -> str:
     try:
         markdown_path = ocr_pdf_to_markdown(path, ocr_config)
         logger.info("扫描件 OCR 完成，改为上传 Markdown: %s -> %s", path, markdown_path)
@@ -47,6 +92,83 @@ def prepare_file_for_upload(file_path: str, ocr_config: OCRConfig) -> str:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("扫描件 OCR 失败，降级直传原 PDF: %s (%s)", path, exc)
         return str(path)
+
+
+def mineru_pdf_to_markdown(pdf_path: Path, ocr_config: OCRConfig) -> Path:
+    source_path = pdf_path.resolve(strict=True)
+    source_stat = source_path.stat()
+
+    cache_root = _resolve_cache_root(ocr_config.mineru_cache_dir)
+    cache_key = build_mineru_cache_key(
+        source_path,
+        source_stat.st_size,
+        source_stat.st_mtime_ns,
+        ocr_config.mineru_lang,
+        ocr_config.mineru_api_url,
+    )
+    markdown_path = _safe_cache_file(cache_root, f"{cache_key}.md")
+    metadata_path = _safe_cache_file(cache_root, f"{cache_key}.meta.json")
+
+    if markdown_path.exists() and markdown_path.stat().st_size > 0:
+        return markdown_path
+
+    from app.services.translator.MinerUConverter import MinerUConverter
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    converter = MinerUConverter(output_dir=str(cache_root))
+    result_path = Path(
+        converter.convert_to_markdown(
+            input_path=str(source_path),
+            use_ocr=True,
+            lang=ocr_config.mineru_lang,
+            extract_images=True,
+            formula_enable=True,
+            table_enable=True,
+            backend="pipeline",
+            api_url=ocr_config.mineru_api_url,
+            output_subdir=cache_key,
+        )
+    )
+
+    if result_path.is_dir():
+        md_files = sorted(result_path.rglob("*.md"))
+        if not md_files:
+            raise FileNotFoundError(f"MinerU 未生成 Markdown: {result_path}")
+        result_path = md_files[0]
+
+    markdown_body = result_path.read_text(encoding="utf-8", errors="ignore").strip()
+    if not markdown_body:
+        raise ValueError(f"MinerU 生成的 Markdown 为空: {result_path}")
+
+    markdown_text = "\n".join(
+        [
+            "# MinerU Markdown",
+            "",
+            f"- Source File: `{source_path.name}`",
+            f"- Generated At (UTC): {generated_at}",
+            f"- MinerU Language: `{ocr_config.mineru_lang}`",
+            "",
+            markdown_body,
+            "",
+        ]
+    )
+    _atomic_write_text(markdown_path, markdown_text)
+
+    metadata = {
+        "cache_key": cache_key,
+        "source_file": source_path.name,
+        "source_path": str(source_path),
+        "source_size": source_stat.st_size,
+        "source_mtime_ns": source_stat.st_mtime_ns,
+        "generated_at_utc": generated_at,
+        "mineru_lang": ocr_config.mineru_lang,
+        "mineru_api_url": ocr_config.mineru_api_url,
+        "mineru_result_path": str(result_path),
+        "markdown_path": str(markdown_path),
+    }
+    _atomic_write_text(metadata_path, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+
+    return markdown_path
 
 
 def ocr_pdf_to_markdown(pdf_path: Path, ocr_config: OCRConfig) -> Path:

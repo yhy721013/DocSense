@@ -12,8 +12,9 @@ from typing import Any, Dict, Iterable
 import fitz
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
-from app.services.core.config import load_anythingllm_config
-from app.services.utils.rag_pipeline import process_file_with_rag as pipeline_process_file_with_rag
+from app.services.core.config import load_anythingllm_config, load_ocr_config
+from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
+from app.services.utils.rag_pipeline import run_anythingllm_rag
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
@@ -76,6 +77,8 @@ WEAPONRY_DETAIL_CATEGORY_SUFFIXES = frozenset({
     "效能数据",
 })
 SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
+MAX_KEYWORD_COUNT = 10
+MAX_KEYWORD_LENGTH = 30
 DATA_STANDARD_FIELD_ALIASES = {
     "militaryName": ("militaryName", "国军标名称", "标准名称"),
     "num": ("num", "编号", "标准编号", "国军标编号", "fileNo", "文件编号"),
@@ -488,6 +491,46 @@ def _resolve_field(parsed_result: Dict[str, Any], file_item: Dict[str, Any], *al
     return ""
 
 
+def _sanitize_keywords(raw_value: Any) -> str:
+    """对 LLM 返回的 keyword 字段做后处理：拆分、截断单条过长关键词、限制总数量。
+
+    小模型（如 4B）有时不遵守 prompt 约束，可能返回极长的单个关键词或过多关键词，
+    此函数在输出前统一做校验与截断，确保 keyword 字段始终为不超过 MAX_KEYWORD_COUNT
+    个、每个不超过 MAX_KEYWORD_LENGTH 字符的短词，以英文逗号+空格分隔。
+    """
+    if raw_value in (None, "", [], {}):
+        return ""
+
+    # 模型可能返回列表形式的关键词
+    if isinstance(raw_value, list):
+        parts = [_as_text(item) for item in raw_value]
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return ""
+        # 按常见分隔符拆分（中英文逗号、顿号、分号、竖线、换行）
+        parts = re.split(r"[,，、;；|\n\r]+", text)
+    else:
+        parts = [str(raw_value)]
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        kw = part.strip().strip("\"'“”‘’").strip()
+        if not kw or kw in seen:
+            continue
+        seen.add(kw)
+        # 单个关键词过长时截断
+        if len(kw) > MAX_KEYWORD_LENGTH:
+            logger.warning("keyword 被截断: 原始长度=%d 超过上限 %d", len(kw), MAX_KEYWORD_LENGTH)
+            kw = kw[:MAX_KEYWORD_LENGTH]
+        cleaned.append(kw)
+        if len(cleaned) >= MAX_KEYWORD_COUNT:
+            break
+
+    return ", ".join(cleaned)
+
+
 def _extract_original_link(original_text: str) -> str:
     match = re.search(r"https?://\S+", original_text)
     return match.group(0) if match else ""
@@ -679,13 +722,17 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     normalized_original_text = _as_text(
         original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
     extracted_title = _extract_title(normalized_original_text)
+    resolved_keyword = _sanitize_keywords(
+        _first_non_empty_value(file_item, "keyword", "keywords", "关键词")
+        or _first_non_empty_value(parsed_result, "keyword", "keywords", "关键词")
+    )
     architecture_id = (
         _match_data_standard_architecture_id(
             ranges["architectureList"],
             normalized_original_text,
             request_params.get("originalFileName"),
             _resolve_field(parsed_result, file_item, "summary", "摘要"),
-            _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+            resolved_keyword,
             _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
         )
         or _match_architecture_id(parsed_result, ranges["architectureList"])
@@ -694,7 +741,7 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     file_data_item = {
         "fileName": file_name,
         "dataTime": resolved_date or _extract_date(normalized_original_text),
-        "keyword": _resolve_field(parsed_result, file_item, "keyword", "keywords", "关键词"),
+        "keyword": resolved_keyword,
         "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
         "score": _normalize_source_score(raw_score),
         "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
@@ -860,6 +907,19 @@ def _read_original_text(file_path: str) -> str:
     return ""
 
 
+def _prepare_analysis_upload_files(file_path: str) -> list[str]:
+    path = Path(file_path)
+    if not path.exists():
+        return []
+
+    upload_path = prepare_analysis_file_for_upload(str(path), load_ocr_config())
+    upload_path_obj = Path(upload_path)
+    if not upload_path_obj.exists():
+        return [str(path)]
+
+    return [str(upload_path_obj)]
+
+
 def run_file_analysis_task(
         *,
         task_service: LLMTaskService,
@@ -893,15 +953,25 @@ def run_file_analysis_task(
             logger.warning("mhtml归一化失败，降级使用原文件: %s (%s)", downloaded_path, exc)
 
         client = AnythingLLMClient(load_anythingllm_config())
-        raw_result = pipeline_process_file_with_rag(
+        files_to_upload = _prepare_analysis_upload_files(llm_file_path)
+        if files_to_upload:
+            llm_file_path = files_to_upload[0]
+
+        raw_result = run_anythingllm_rag(
             client=client,
-            file_path=llm_file_path,
+            files_to_upload=files_to_upload,
             prompt=build_file_analysis_prompt(params),
             workspace_name=f"llm-file-{int(time.time() * 1000)}",
             thread_name=f"analysis-{Path(file_name).stem}",
             user_id=1,
+            mode="query",
+            reuse_workspace=False,
         )
+        if raw_result is None or (isinstance(raw_result, str) and not raw_result.strip()):
+            raise RuntimeError("AnythingLLM结构化抽取未返回有效结果")
         parsed_result = _parse_model_result(raw_result)
+        if not isinstance(parsed_result, dict) or not parsed_result:
+            raise RuntimeError("AnythingLLM结构化抽取结果无法解析")
         mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(llm_file_path))
 
         try:

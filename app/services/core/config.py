@@ -24,6 +24,10 @@ class OCRConfig:
     sample_pages: int
     text_threshold: int
     cache_dir: str
+    analysis_scanned_pdf_engine: str
+    mineru_cache_dir: str
+    mineru_lang: str
+    mineru_api_url: Optional[str]
     tessdata_prefix: Optional[str]
 
 
@@ -74,6 +78,13 @@ def _parse_int(raw_value: Optional[str], default: int, *, min_value: int = 0) ->
     return value if value >= min_value else default
 
 
+def _parse_choice(raw_value: Optional[str], default: str, allowed: set[str]) -> str:
+    if raw_value is None:
+        return default
+    value = raw_value.strip().lower()
+    return value if value in allowed else default
+
+
 def load_anythingllm_config() -> AnythingLLMConfig:
     return AnythingLLMConfig(
         base_url=os.getenv("ANYTHINGLLM_BASE_URL").strip(),
@@ -91,6 +102,15 @@ def load_ocr_config() -> OCRConfig:
         sample_pages=_parse_int(os.getenv("DOCSENSE_OCR_SAMPLE_PAGES"), 3, min_value=1),
         text_threshold=_parse_int(os.getenv("DOCSENSE_OCR_TEXT_THRESHOLD"), 50, min_value=0),
         cache_dir=os.getenv("DOCSENSE_OCR_CACHE_DIR", ".runtime/ocr_markdown").strip() or ".runtime/ocr_markdown",
+        analysis_scanned_pdf_engine=_parse_choice(
+            os.getenv("DOCSENSE_ANALYSIS_SCANNED_PDF_ENGINE"),
+            "mineru",
+            {"mineru", "ocr"},
+        ),
+        mineru_cache_dir=os.getenv("DOCSENSE_MINERU_CACHE_DIR", ".runtime/mineru_markdown").strip()
+        or ".runtime/mineru_markdown",
+        mineru_lang=os.getenv("DOCSENSE_MINERU_LANG", "ch").strip() or "ch",
+        mineru_api_url=_parse_optional_str(os.getenv("DOCSENSE_MINERU_API_URL")),
         tessdata_prefix=_parse_optional_str(os.getenv("TESSDATA_PREFIX")),
     )
 

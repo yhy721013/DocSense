@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from email import policy
 from email.parser import BytesParser
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 # 【新增】导入 MHTML 转 PDF 转换器
@@ -106,7 +109,51 @@ class _HTMLTextExtractor(HTMLParser):
 
 
 def is_mhtml_file(file_path: str) -> bool:
-    return Path(file_path).suffix.lower() in {".mhtml", ".mht"}
+    """
+    检查文件是否是MHTML格式。
+    
+    【关键增强】不仅检查扩展名，还通过文件头内容验证真实格式。
+    这样可以检测到被错误命名为 .pdf 的MHTML文件。
+    
+    :param file_path: 文件路径
+    :return: True 如果是MHTML格式，否则 False
+    """
+    path = Path(file_path)
+    if not path.exists() or not path.is_file():
+        return False
+    
+    # 先检查扩展名（快速判断）
+    if path.suffix.lower() in {".mhtml", ".mht"}:
+        return True
+    
+    # 【关键修复】如果扩展名不是 .mhtml/.mht，但可能是被错误命名的MHTML文件
+    # 通过读取文件头内容进行二次验证
+    try:
+        with open(file_path, 'rb') as f:
+            # MHTML文件通常以 MIME 头部开始，包含 "From:" 和 multipart boundary
+            header = f.read(1024)  # 读取前1KB足够判断
+        
+        header_str = header.decode('utf-8', errors='ignore').lower()
+        
+        # MHTML典型特征：
+        # 1. 包含 "From: <Saved by Blink>" 或类似的邮件头
+        # 2. 包含 multipart MIME boundary
+        # 3. 可能包含 "Content-Type: multipart/related"
+        if 'from:' in header_str and ('saved by blink' in header_str or 'multipart/' in header_str):
+            logger.warning("检测到文件实际是MHTML格式（尽管扩展名是 %s）: %s", 
+                          path.suffix, file_path)
+            return True
+        
+        # 额外的MIME边界检测
+        if 'content-type: multipart/' in header_str and 'boundary=' in header_str:
+            logger.warning("检测到MIME multipart格式，可能是MHTML文件: %s", file_path)
+            return True
+            
+    except Exception:
+        # 如果读取失败，保守起见不认为是MHTML
+        pass
+    
+    return False
 
 
 def extract_text_from_mhtml(file_path: str) -> str:

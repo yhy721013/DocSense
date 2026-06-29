@@ -150,6 +150,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 1. `/llm/analysis`
    - 同请求可提交多个文件，服务端按数组顺序串行执行。
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
+   - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
    - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
@@ -288,10 +289,26 @@ python run.py
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
 - 对话状态库：`.runtime/chat_sessions.sqlite3`（`DOCSENSE_CHAT_DB`）
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
+- MinerU Markdown 缓存目录：`.runtime/mineru_markdown`（`DOCSENSE_MINERU_CACHE_DIR`）
 - 回调历史目录：`.runtime/callback/`
 - 旧版最近一次回调预览：`.runtime/call_back.json`（当前新回调不再更新）
 
 ## 8. 本地联调与测试
+
+任务库 JSON 导出脚本：
+
+```bash
+python scripts/inspect_llm_tasks.py
+```
+
+`scripts/inspect_llm_tasks.py` 只使用 Python 标准库，可在 Windows 和 macOS 上运行。脚本默认读取 `.runtime/llm_tasks.sqlite3`，也会遵循 `DOCSENSE_LLM_TASK_DB` 指定的任务库路径；导出时会自动创建 `.runtime/sqlite/`，并写入按时间戳命名的 JSON 文件，例如 `.runtime/sqlite/llm_tasks_20260625_092658_122450.json`。
+
+导出的 JSON 顶层包含：
+
+- `metadata`：导出时间、来源数据库路径、输出文件路径、SQLite 版本、表数量和总行数
+- `tables`：每张表的表名、建表 SQL、列定义、行数和完整行数据
+
+其中 `llm_tasks.rows[]` 的每一项对应一条 LLM 任务记录，常用字段包括 `business_type`、`business_key`、`request_payload`、`status`、`progress`、`result_payload`、`callback_status`、`callback_attempts`、`created_at` 和 `updated_at`。脚本会把 `request_payload`、`result_payload` 这类 JSON 字符串自动展开为对象，便于直接查看原始请求和最终结果。可通过 `--db-path` 和 `--output-dir` 指定其他 SQLite 文件或输出目录。
 
 本地联调脚本（PowerShell）：
 
