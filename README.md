@@ -150,6 +150,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 1. `/llm/analysis`
    - 同请求可提交多个文件，服务端按数组顺序串行执行。
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
+   - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
    - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
@@ -288,6 +289,7 @@ python run.py
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
 - 对话状态库：`.runtime/chat_sessions.sqlite3`（`DOCSENSE_CHAT_DB`）
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
+- MinerU Markdown 缓存目录：`.runtime/mineru_markdown`（`DOCSENSE_MINERU_CACHE_DIR`）
 - 回调历史目录：`.runtime/callback/`
 - 旧版最近一次回调预览：`.runtime/call_back.json`（当前新回调不再更新）
 
