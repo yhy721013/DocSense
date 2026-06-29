@@ -23,3 +23,5 @@ mineru[core]
 # 5. RAG 增强依赖（BM25 + Reranker）
 rank-bm25>=0.2.2
 sentence-transformers>=2.3.0
+# 6. 中文分词（可选，用于 BM25 关键词提取优化，未安装时降级为字符级切分）
+jieba

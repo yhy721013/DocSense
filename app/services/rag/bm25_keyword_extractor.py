@@ -3,6 +3,10 @@ BM25 关键词提取器。
 
 从自然语言 query 中提取适合 BM25 检索的关键词，
 支持停用词过滤、专业术语提取和 token 优化。
+
+v3.0 改进：
+- 使用统一 tokenize() 函数（支持 jieba 分词）
+- 修复中文关键词提取后为空的问题
 """
 from __future__ import annotations
 
@@ -10,13 +14,14 @@ import logging
 import re
 from typing import List
 
-from app.services.utils.stopwords import (
+from app.services.rag.stopwords import (
     CHINESE_STOP_WORDS,
     ENGLISH_STOP_WORDS,
     extract_numeric_terms,
     filter_short_tokens,
     normalize_text,
     remove_stop_words,
+    tokenize,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,10 +52,10 @@ class BM25KeywordExtractor:
 
         流程：
         1. 文本标准化
-        2. 分词（中文按字符，英文按单词）
+        2. 分词（统一 tokenize 函数，支持 jieba）
         3. 去除停用词
         4. 提取专业术语（型号、编号等）
-        5. 过滤过短 token
+        5. 过滤过短 token（保留中文字符）
         6. 合并为关键词字符串
 
         Args:
@@ -67,8 +72,8 @@ class BM25KeywordExtractor:
         normalized = normalize_text(query)
         logger.debug("标准化后: %s", normalized)
 
-        # Step 2: 分词
-        tokens = self._tokenize(normalized)
+        # Step 2: 分词（使用统一 tokenize 函数）
+        tokens = tokenize(normalized)
         logger.debug("分词结果: %s", tokens)
 
         # Step 3: 去除停用词
@@ -82,8 +87,8 @@ class BM25KeywordExtractor:
             numeric_terms = extract_numeric_terms(normalized)
             logger.debug("提取的专业术语: %s", numeric_terms)
 
-        # Step 5: 过滤过短 token
-        tokens = filter_short_tokens(tokens, min_length=self.min_token_length)
+        # Step 5: 过滤过短 token（v3.0: 保留中文字符）
+        tokens = filter_short_tokens(tokens, min_length=self.min_token_length, keep_chinese_chars=True)
         logger.debug("过滤短 token 后: %s", tokens)
 
         # Step 6: 合并所有关键词
@@ -102,44 +107,6 @@ class BM25KeywordExtractor:
         logger.info("最终关键词: '%s' (原始: '%s')", result, query[:50])
 
         return result
-
-    def _tokenize(self, text: str) -> List[str]:
-        """对文本进行分词。
-
-        对于中文：按字符分割，同时保留英文单词完整性
-        对于英文：按非字母数字字符分割
-
-        Args:
-            text: 输入文本
-
-        Returns:
-            分词后的 token 列表
-        """
-        # 检测是否包含中文字符
-        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
-
-        if has_chinese:
-            # 中文：按字符分割，同时保留英文单词完整性
-            tokens = []
-            current_word = []
-            for char in text:
-                if '\u4e00' <= char <= '\u9fff':
-                    if current_word:
-                        tokens.append(''.join(current_word))
-                        current_word = []
-                    tokens.append(char)
-                elif char.isalnum():
-                    current_word.append(char)
-                else:
-                    if current_word:
-                        tokens.append(''.join(current_word))
-                        current_word = []
-            if current_word:
-                tokens.append(''.join(current_word))
-            return tokens
-        else:
-            # 英文：按非字母数字字符分割
-            return re.findall(r'\w+', text.lower())
 
 
 # 全局单例

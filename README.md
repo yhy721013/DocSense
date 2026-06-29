@@ -26,7 +26,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
 | 业务层 | `app/services/llm_service/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排、对话记录及文档动态联动 | `analysis_service.py` `report_service.py` `weaponry_service.py` `chat_service.py` `task_service.py` |
 | 核心基础层 | `app/services/core/` | 全局配置、路径常量、日志、任务/知识库及独立对话数据库、进度中枢、Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
-| 工具与外部边界层 | `app/services/utils/` | AnythingLLM 客户端、回调发送、回调预览读取、文件下载、OCR 预处理、mhtml 归一化、RAG 流程 | `anythingllm_client.py` `callback_client.py` `callback_preview.py` `file_downloader.py` `ocr_preprocessor.py` `mhtml_normalizer.py` `rag_pipeline.py` |
+| 工具与外部边界层 | `app/services/utils/` | AnythingLLM 客户端、回调发送、回调预览读取、文件下载、OCR 预处理、mhtml 归一化、RAG 流水线 | `anythingllm_client.py` `callback_client.py` `callback_preview.py` `file_downloader.py` `ocr_preprocessor.py` `mhtml_normalizer.py` `rag_pipeline.py` |
+| RAG 增强检索层 | `app/services/rag/` | BM25+Embedding 双召回、RRF 融合、BGE-Reranker 精排、索引缓存（可选能力，懒加载） | `rag_enhancer.py` `bm25_retriever.py` `chunk_reader.py` `cache.py` `bge_reranker.py` |
 | 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `pdf_handler.py` |
 
 ### 2.2 主要调用方向
@@ -34,8 +35,9 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 1. `blueprints -> llm_service`：蓝图只负责协议入口，不承载长流程业务。
 2. `llm_service -> core`：读取配置、写任务状态、发布进度、构建 Prompt。
 3. `llm_service -> utils`：下载文件、规范化文本、调用 AnythingLLM、发送回调。
-4. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
-5. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
+4. `llm_service.weaponry_service -> rag`：武器装备字段抽取时，可选启用 RAG 增强检索（BM25+Embedding 双召回+RRF+Reranker），未启用时降级为原始向量检索。
+5. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
+6. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
 
 ### 2.3 请求到回调的链路
 
@@ -82,6 +84,16 @@ app/
       mhtml_normalizer.py           # mhtml/mht 归一化
       ocr_preprocessor.py           # 扫描件 OCR 预处理
       rag_pipeline.py               # 文件上传 + RAG 调用流水线
+    rag/                            # RAG 增强检索软件包（可选能力，懒加载）
+      rag_enhancer.py               # 增强器主模块（编排双召回+融合+重排）
+      bm25_retriever.py             # BM25 关键词检索器（懒加载 rank_bm25）
+      bm25_keyword_extractor.py     # BM25 关键词提取器
+      llm_query_rewriter.py         # LLM Query 重写器（Ollama）
+      rrf_fusion.py                 # RRF 融合算法
+      bge_reranker.py               # BGE-Reranker 重排序器（懒加载）
+      chunk_reader.py               # 文档 chunk 读取器（从存储目录读取全量文本）
+      cache.py                      # BM25 索引缓存（workspace 级，TTL 过期）
+      stopwords.py                  # 停用词表和文本预处理工具
     translator/                     # 翻译底层能力
   templates/
     debug/

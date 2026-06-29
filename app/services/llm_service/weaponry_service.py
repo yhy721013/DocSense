@@ -13,7 +13,7 @@ from collections import defaultdict
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config
-from app.services.utils.rag_enhancer import get_rag_enhancer
+from app.services.rag.rag_enhancer import get_rag_enhancer
 
 from app.services.core.database import DatabaseService
 from app.services.utils.callback_client import post_callback_payload

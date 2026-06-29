@@ -3,6 +3,8 @@ BGE-Reranker 重排序器。
 
 使用 BAAI/bge-reranker 系列模型对检索结果进行精排，提升最终召回质量。
 支持 ONNX 加速和 CPU/GPU 自动选择。
+
+依赖 sentence-transformers，通过懒加载方式导入，未安装时不阻塞服务启动。
 """
 from __future__ import annotations
 
@@ -41,7 +43,7 @@ class BGEReranker:
             logger.warning("Reranker 不可用，将跳过重排序步骤")
 
     def _load_model(self) -> None:
-        """加载 BGE-Reranker 模型。"""
+        """加载 BGE-Reranker 模型（懒加载 sentence-transformers）。"""
         try:
             from sentence_transformers import CrossEncoder
 

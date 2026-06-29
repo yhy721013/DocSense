@@ -3,22 +3,30 @@ BM25 关键词检索器。
 
 使用 rank-bm25 库实现 BM25 算法，用于与向量检索形成互补。
 支持关键词提取和 LLM Query 重写优化。
+
+v3.0 改进：
+- rank_bm25 改为懒加载导入，未安装时不阻塞服务启动
+- 使用统一 tokenize() 函数替代内部 _tokenize()，确保索引和查询使用一致的分词策略
+- 支持外部传入已构建的 chunks 数据（配合缓存使用）
 """
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
 
-from rank_bm25 import BM25Okapi
-
-from app.services.utils.bm25_keyword_extractor import get_keyword_extractor
-from app.services.utils.llm_query_rewriter import get_query_rewriter
+from app.services.rag.bm25_keyword_extractor import get_keyword_extractor
+from app.services.rag.llm_query_rewriter import get_query_rewriter
+from app.services.rag.stopwords import tokenize
 
 logger = logging.getLogger(__name__)
 
 
 class BM25Retriever:
-    """基于 BM25 的关键词检索器。"""
+    """基于 BM25 的关键词检索器。
+
+    依赖 rank-bm25 库，通过懒加载方式导入。
+    未安装 rank-bm25 时，build_index() 会失败但不影响服务启动。
+    """
 
     def __init__(
         self,
@@ -31,7 +39,7 @@ class BM25Retriever:
             use_keyword_extraction: 是否启用关键词提取（停用词过滤等）
             use_llm_rewrite: 是否启用 LLM Query 重写（需要 Ollama 服务）
         """
-        self.bm25: BM25Okapi | None = None
+        self.bm25 = None
         self.documents: List[str] = []
         self.doc_ids: List[str] = []
         self._initialized = False
@@ -45,16 +53,30 @@ class BM25Retriever:
     def build_index(
         self,
         documents: List[Dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """从文档列表构建 BM25 索引。
 
         Args:
-            documents: AnythingLLM 返回的 chunk 列表，每个元素包含 text、id 等字段。
+            documents: chunk 列表，每个元素包含 text、id 等字段。
+
+        Returns:
+            True 表示构建成功，False 表示失败（如依赖缺失）
         """
         if not documents:
             logger.warning("文档列表为空，无法构建 BM25 索引")
             self._initialized = False
-            return
+            return False
+
+        # 懒加载导入 rank_bm25
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            logger.error(
+                "缺少 rank-bm25 依赖，无法构建 BM25 索引。"
+                "请运行: pip install rank-bm25"
+            )
+            self._initialized = False
+            return False
 
         self.documents = []
         self.doc_ids = []
@@ -72,13 +94,14 @@ class BM25Retriever:
         if not self.documents:
             logger.warning("有效文档数量为 0，无法构建 BM25 索引")
             self._initialized = False
-            return
+            return False
 
-        # 对中文文本进行简单分词（按字符分割）
-        tokenized_docs = [self._tokenize(doc) for doc in self.documents]
+        # 使用统一 tokenize 函数进行分词
+        tokenized_docs = [tokenize(doc) for doc in self.documents]
         self.bm25 = BM25Okapi(tokenized_docs)
         self._initialized = True
         logger.info("BM25 索引构建完成: %d 个文档", len(self.documents))
+        return True
 
     def search(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
         """执行 BM25 检索。
@@ -110,10 +133,10 @@ class BM25Retriever:
         # Step 2: 关键词提取（停用词过滤等）
         if self.use_keyword_extraction:
             keywords = self._get_keyword_extractor().extract_keywords(query_for_bm25)
-            logger.debug("关键词提取: '%s' -> '%s'", query_for_bm25[:50], keywords[:50])
-            query_tokens = self._tokenize(keywords) if keywords else []
+            logger.debug("关键词提取: '%s' -> '%s'", query_for_bm25[:50], keywords[:50] if keywords else "")
+            query_tokens = tokenize(keywords) if keywords else []
         else:
-            query_tokens = self._tokenize(query_for_bm25)
+            query_tokens = tokenize(query_for_bm25)
 
         if not query_tokens:
             logger.warning("Query 分词后为空，返回空结果")
@@ -142,46 +165,6 @@ class BM25Retriever:
             len(results),
         )
         return results
-
-    @staticmethod
-    def _tokenize(text: str) -> List[str]:
-        """对文本进行简单分词。
-
-        对于中文：按字符分割（BM25Okapi 支持字符级索引）
-        对于英文：按空格分割
-
-        Args:
-            text: 输入文本
-
-        Returns:
-            分词后的 token 列表
-        """
-        # 检测是否包含中文字符
-        has_chinese = any('\u4e00' <= char <= '\u9fff' for char in text)
-
-        if has_chinese:
-            # 中文：按字符分割，同时保留英文单词完整性
-            tokens = []
-            current_word = []
-            for char in text:
-                if '\u4e00' <= char <= '\u9fff':
-                    if current_word:
-                        tokens.append(''.join(current_word))
-                        current_word = []
-                    tokens.append(char)
-                elif char.isalnum():
-                    current_word.append(char)
-                else:
-                    if current_word:
-                        tokens.append(''.join(current_word))
-                        current_word = []
-            if current_word:
-                tokens.append(''.join(current_word))
-            return tokens
-        else:
-            # 英文：按非字母数字字符分割
-            import re
-            return re.findall(r'\w+', text.lower())
 
     def _get_keyword_extractor(self):
         """懒加载关键词提取器。"""

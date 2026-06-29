@@ -4,7 +4,7 @@
 
 本项目实现了基于 **BM25 + Embedding 双召回**、**RRF 融合**、**BGE-Reranker 精排**的增强 RAG 检索链路。
 
-**v2.0 新增**: 支持 **LLM Query 重写** 和 **智能关键词提取**,进一步提升 BM25 检索质量,实现方案 C:混合检索优化（最佳）。
+**v2.0 新增**: 支持 **LLM Query 重写** 和 **智能关键词提取**,进一步提升 BM25 检索质量,实现方案:混合检索优化（最佳）。
 
 可显著提升文档检索的召回率和精确率。
 
@@ -134,6 +134,10 @@ RAG_QUERY_REWRITE_MODEL=qwen2.5:7b
 
 # Ollama 服务地址，默认 http://localhost:11434
 OLLAMA_BASE_URL=http://localhost:11434
+
+# BM25 索引缓存存活时间（秒），默认 1800（30 分钟）
+# 同一 workspace 的索引在 TTL 内复用，避免重复构建
+RAG_BM25_CACHE_TTL=1800
 ```
 
 ### 3. 启动服务
@@ -149,24 +153,33 @@ python run.py
 ### 模块结构
 
 ```
-app/services/utils/
-├── stopwords.py                  # 停用词表和文本预处理工具 (v2.0 新增)
-├── bm25_keyword_extractor.py     # BM25 关键词提取器 (v2.0 新增)
-├── llm_query_rewriter.py         # LLM Query 重写器 (v2.0 新增)
-├── bm25_retriever.py             # BM25 关键词检索器 (已改造支持 v2.0)
+app/services/rag/                    # RAG 增强检索软件包 (v3.0 重构)
+├── __init__.py                  # 包入口，导出 RAGEnhancer / get_rag_enhancer / reset_rag_enhancer
+├── stopwords.py                 # 停用词表和文本预处理工具（含统一 tokenize 函数，支持 jieba）
+├── bm25_keyword_extractor.py     # BM25 关键词提取器
+├── llm_query_rewriter.py         # LLM Query 重写器（Ollama）
+├── bm25_retriever.py             # BM25 关键词检索器（懒加载 rank_bm25）
 ├── rrf_fusion.py                 # RRF 融合算法
-├── bge_reranker.py               # BGE-Reranker 重排序器
-└── rag_enhancer.py               # RAG 增强器主模块(已改造支持 v2.0)
+├── bge_reranker.py               # BGE-Reranker 重排序器（懒加载 sentence_transformers）
+├── chunk_reader.py               # 文档 chunk 读取器（从存储目录读取全量文本）(v3.0 新增)
+├── cache.py                      # BM25 索引缓存（workspace 级，TTL 过期）(v3.0 新增)
+└── rag_enhancer.py               # RAG 增强器主模块（编排上述所有组件）
 
 app/services/core/
-└── config.py                     # RAGEnhancerConfig 配置类 (已扩展 v2.0 参数)
+└── config.py                     # RAGEnhancerConfig 配置类 (已扩展 v3.0 参数)
 ```
+
+**v3.0 重构要点：**
+- 所有 RAG 模块从 `app/services/utils/` 迁移到独立的 `app/services/rag/` 软件包
+- `rank_bm25` 和 `sentence_transformers` 均为懒加载，未安装时不阻塞服务启动
+- 新增 `chunk_reader.py`：从 AnythingLLM 存储目录直接读取文档全量文本构建 BM25 索引
+- 新增 `cache.py`：workspace 级 BM25 索引缓存，避免重复构建索引，缓存日志记录到 `.runtime/rag_cache.log`
 
 ### 调用流程
 
 ```python
 # 业务层无需修改,仅需在 weaponry_service 中替换一处调用
-from app.services.utils.rag_enhancer import get_rag_enhancer
+from app.services.rag import get_rag_enhancer
 
 # 获取增强器单例
 enhancer = get_rag_enhancer()
@@ -463,7 +476,7 @@ extractor = BM25KeywordExtractor(min_token_length=1)
 
 ```python
 # 在 analysis_service.py 中
-from app.services.utils.rag_enhancer import get_rag_enhancer
+from app.services.rag import get_rag_enhancer
 
 def process_file_with_rag(...):
     # 原代码:
