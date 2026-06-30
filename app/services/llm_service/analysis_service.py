@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config, load_ocr_config
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 from app.services.utils.rag_pipeline import run_anythingllm_rag
+from app.services.utils.architecture_prefilter import prune_architecture_list
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
@@ -920,6 +922,44 @@ def _prepare_analysis_upload_files(file_path: str) -> list[str]:
     return [str(upload_path_obj)]
 
 
+def _apply_architecture_prefilter(
+    params: Dict[str, Any],
+    downloaded_path: str,
+    original_name: str,
+) -> None:
+    """Read document text and narrow ``params['architectureList']`` via
+    traditional text retrieval, falling back to the original list on any
+    failure.
+
+    This is the integration point for the hybrid
+    *traditional-search + LLM-selection* strategy.  When the architecture
+    list is small the pre-filter is a no-op and the current pure-LLM
+    approach acts as the natural degradation strategy.
+    """
+    architecture_list = params.get("architectureList")
+    if not isinstance(architecture_list, list) or len(architecture_list) <= 20:
+        return
+
+    # Build a search query from file name + document opening
+    doc_snippet = _read_original_text(downloaded_path)
+    if doc_snippet:
+        doc_snippet = doc_snippet[:2000]
+    search_text = " ".join(filter(None, [
+        original_name,
+        params.get("fileName", ""),
+        doc_snippet,
+    ]))
+
+    narrowed = prune_architecture_list(architecture_list, search_text)
+    if narrowed is not architecture_list:
+        params["architectureList"] = narrowed
+        logger.info(
+            "Architecture pre-filter applied: %d -> %d nodes",
+            len(architecture_list),
+            len(narrowed),
+        )
+
+
 def run_file_analysis_task(
         *,
         task_service: LLMTaskService,
@@ -930,7 +970,8 @@ def run_file_analysis_task(
         callback_url: str,
         callback_timeout: float,
 ) -> None:
-    params = request_payload["params"][0]
+    # Deep copy params so pre-filter mutations don't affect the shared request_payload
+    params = copy.deepcopy(request_payload["params"][0])
     file_name = _as_text(params.get("fileName"))
     original_name = _as_text(params.get("originalFileName")) or file_name
     file_path = _as_text(params.get("filePath"))
@@ -942,6 +983,9 @@ def run_file_analysis_task(
         _publish_progress(progress_hub, file_name, 0.15)
 
         downloaded_path = download_to_temp_file(file_path, file_name, download_root, timeout=60)
+
+        # ── 传统搜索预筛选：缩小分类候选列表 ──
+        _apply_architecture_prefilter(params, downloaded_path, original_name)
 
         task_service.update_task_progress("file", file_name, progress=0.35, message="正在执行文档解析")
         _publish_progress(progress_hub, file_name, 0.35)
