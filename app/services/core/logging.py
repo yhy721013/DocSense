@@ -23,5 +23,7 @@ def setup_logging():
     # 抑制一些第三方库的详细日志
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("argostranslate").setLevel(logging.WARNING)
+    logging.getLogger("argostranslate.utils").setLevel(logging.WARNING)
     
     logging.info("日志系统初始化完成 (Level: %s)", log_level_str)

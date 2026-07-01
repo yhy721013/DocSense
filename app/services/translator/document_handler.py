@@ -1,9 +1,13 @@
 import os
+import logging
 from typing import Optional
 from .core import HYMTTranslator
 from .txt_handler import TXTHandler
 from .MarkdownHandler import MarkdownHandler
 from .mhtml_handler import MHTMLHandler
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentTranslator:
@@ -48,9 +52,7 @@ class DocumentTranslator:
 
         # DOCX、PDF、PPTX、XLSX 统一使用 MinerU 模式
         if ext in ['.pdf', '.docx', '.pptx', '.xlsx']:
-            print(f"\n{'=' * 60}")
-            print(f"使用 MinerU 模式处理：{file_path}")
-            print(f"{'=' * 60}")
+            logger.info("使用 MinerU 模式处理：%s", file_path)
 
             # 【修复】确定输出目录（与输出文件同目录）
             output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -134,9 +136,7 @@ class DocumentTranslator:
 
         # DOCX、PDF、PPTX、XLSX 统一使用 MinerU 模式
         if ext in ['.pdf', '.docx', '.pptx', '.xlsx']:
-            print(f"\n{'=' * 60}")
-            print(f"使用 MinerU 模式处理 HTML 转换：{file_path}")
-            print(f"{'=' * 60}")
+            logger.info("使用 MinerU 模式处理 HTML 转换：%s", file_path)
 
             # 1. 先将文档转换为 Markdown
             markdown_path = self.markdown_handler.convert_to_markdown(

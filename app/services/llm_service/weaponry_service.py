@@ -67,13 +67,17 @@ class WeaponryRetrievalContext:
     target_file_names: Set[str]
     target_doc_paths: Set[str]
     source_original_names: Optional[Dict[str, str]] = None
+    source_file_names: Optional[Dict[str, str]] = None
     single_target_original_name: str = ""
+    single_target_file_name: str = ""
     terms_workspace_slug: Optional[str] = None
     target_workspace_term_doc_paths: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
         if self.source_original_names is None:
             self.source_original_names = {}
+        if self.source_file_names is None:
+            self.source_file_names = {}
         if self.target_workspace_term_doc_paths is None:
             self.target_workspace_term_doc_paths = []
 
@@ -157,16 +161,16 @@ def _source_lookup_keys(name: str) -> Set[str]:
     return {candidate.lower() for candidate in candidates if candidate}
 
 
-def _add_source_original_name_mapping(
+def _add_source_name_mapping(
     mapping: Dict[str, str],
     aliases: List[str],
-    original_name: str,
+    target_name: str,
 ) -> None:
-    if not original_name:
+    if not target_name:
         return
     for alias in aliases:
         for key in _source_lookup_keys(alias):
-            mapping.setdefault(key, original_name)
+            mapping.setdefault(key, target_name)
 
 
 def _resolve_original_source_name(
@@ -186,6 +190,27 @@ def _resolve_original_source_name(
         original_name = mapping.get(key)
         if original_name:
             return original_name
+
+    return normalized or str(source_name or "")
+
+
+def _resolve_hashed_source_name(
+    source_name: str,
+    context: Optional[WeaponryRetrievalContext],
+) -> str:
+    """将 AnythingLLM 来源标识映射为 documents.file_name（哈希文件名）。"""
+    normalized = _normalize_source_name(source_name)
+    if _is_terms_source_name(normalized):
+        return normalized
+
+    if not source_name:
+        return context.single_target_file_name if context else ""
+
+    mapping = context.source_file_names if context and context.source_file_names else {}
+    for key in _source_lookup_keys(source_name):
+        file_name = mapping.get(key)
+        if file_name:
+            return file_name
 
     return normalized or str(source_name or "")
 
@@ -307,12 +332,39 @@ def _unique_term_doc_paths(doc_paths: List[str]) -> List[str]:
     return unique_paths
 
 
-def _target_document_records(kb_service: DatabaseService, architecture_id: int) -> List[Dict[str, Any]]:
-    return [
+def _target_document_records(
+    kb_service: DatabaseService,
+    architecture_id: int,
+    selected_file_names: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    records = [
         record
         for record in kb_service.list_document_records()
         if str(record.get("architecture_id")) == str(architecture_id)
     ]
+    if not selected_file_names:
+        return records
+
+    records_by_file_name = {
+        str(record.get("file_name") or ""): record
+        for record in records
+        if record.get("file_name")
+    }
+    selected_records: List[Dict[str, Any]] = []
+    for file_name in selected_file_names:
+        record = records_by_file_name.get(file_name)
+        if not record:
+            raise ValueError(f"文件 {file_name} 不存在或不属于当前类别")
+        selected_records.append(record)
+    return selected_records
+
+
+def _document_record_path(record: Dict[str, Any]) -> str:
+    doc_path = str(record.get("doc_path") or "").strip()
+    if doc_path:
+        return doc_path
+    anything_doc_id = str(record.get("anything_doc_id") or "").strip()
+    return f"custom-documents/{anything_doc_id}.json" if anything_doc_id else ""
 
 
 def _build_terms_rule_query(field_name: str, field_desc: str) -> str:
@@ -527,12 +579,15 @@ def _prepare_retrieval_context(
     architecture_id: int,
     workspace_slug: str,
     user_id: int = 1,
+    selected_file_names: Optional[List[str]] = None,
 ) -> WeaponryRetrievalContext:
-    records = _target_document_records(kb_service, architecture_id)
+    records = _target_document_records(kb_service, architecture_id, selected_file_names)
     target_file_names: Set[str] = set()
     target_doc_paths: Set[str] = set()
     source_original_names: Dict[str, str] = {}
+    source_file_names: Dict[str, str] = {}
     original_names: Set[str] = set()
+    file_names: Set[str] = set()
     for record in records:
         file_name = str(record.get("file_name") or "")
         original_name = str(record.get("original_name") or "") or file_name
@@ -541,6 +596,8 @@ def _prepare_retrieval_context(
 
         if original_name:
             original_names.add(original_name)
+        if file_name:
+            file_names.add(file_name)
 
         for value in (file_name, original_name):
             value = _normalize_source_name(value)
@@ -559,7 +616,8 @@ def _prepare_retrieval_context(
             f"{anything_doc_id}.json" if anything_doc_id else "",
             f"custom-documents/{anything_doc_id}.json" if anything_doc_id else "",
         ]
-        _add_source_original_name_mapping(source_original_names, aliases, original_name)
+        _add_source_name_mapping(source_original_names, aliases, original_name)
+        _add_source_name_mapping(source_file_names, aliases, file_name)
 
     workspace_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
     term_doc_paths = [
@@ -591,7 +649,9 @@ def _prepare_retrieval_context(
         target_file_names=target_file_names,
         target_doc_paths=target_doc_paths,
         source_original_names=source_original_names,
+        source_file_names=source_file_names,
         single_target_original_name=next(iter(original_names)) if len(original_names) == 1 else "",
+        single_target_file_name=next(iter(file_names)) if len(file_names) == 1 else "",
         terms_workspace_slug=terms_workspace_slug,
         target_workspace_term_doc_paths=removed_term_paths,
     )
@@ -655,6 +715,35 @@ def _build_analyse_data_sources(sources: List[Dict[str, Any]], text_response: st
         # 甲方接口要求：无来源时返回空内容对象
         return [_map_source_to_analyse_data_source({}, text_response=text_response)]
     return res
+
+
+def _build_file_analyse_data_source(
+    *,
+    content: str,
+    source: str,
+    file_name: str,
+    rows: List[str],
+) -> Dict[str, Any]:
+    """构造按文件聚合模式的溯源对象，rows 必须是实际进入 Prompt 的 Chunk。"""
+    return {
+        "content": content,
+        "source": source,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "fileName": file_name,
+        "rows": list(rows),
+        "translate": _translate_if_needed(content),
+    }
+
+
+def _build_empty_file_analyse_data_sources(content: str = "") -> List[Dict[str, Any]]:
+    return [
+        _build_file_analyse_data_source(
+            content=content,
+            source="",
+            file_name="",
+            rows=[],
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -761,10 +850,15 @@ def _query_input_field(
     if not vs_results:
         logger.info("字段 [%s] 向量搜索无匹配，使用空来源", field_name)
         filled["analyseData"] = ""
-        filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+        analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
+        filled["analyseDataSource"] = (
+            _build_empty_file_analyse_data_sources()
+            if analyse_mode == "2"
+            else _build_analyse_data_sources([], text_response="")
+        )
         return filled
 
-    analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "1").strip()
+    analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
 
     if analyse_mode == "2":
         # 模式 2：按文件聚合
@@ -824,12 +918,13 @@ def _query_input_field(
 
             # 组装针对文件的 data_source，此时 translate 为 content 的翻译
             original_source_name = _resolve_original_source_name(file_name, retrieval_context)
-            mapped_source = {
-                "content": text_response,
-                "source": original_source_name,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "translate": _translate_if_needed(text_response),
-            }
+            hashed_file_name = _resolve_hashed_source_name(file_name, retrieval_context)
+            mapped_source = _build_file_analyse_data_source(
+                content=text_response,
+                source=original_source_name,
+                file_name=hashed_file_name,
+                rows=chunks,
+            )
             data_sources.append(mapped_source)
             
             if not first_valid_content:
@@ -838,7 +933,7 @@ def _query_input_field(
         if not data_sources:
             logger.info("字段 [%s] (模式2) 提取成功: 所有相关文件均未能提取出有效信息", field_name)
             filled["analyseData"] = ""
-            filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+            filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
             return filled
 
         preview_text = first_valid_content.replace('\n', ' ')
@@ -1135,19 +1230,35 @@ def _table_row_identity(row: Dict[str, str], column_defs: List[Dict[str, Any]], 
     return f"row-{fallback_index}"
 
 
-def _build_table_cell_source(value: str, source_name: str) -> Dict[str, Any]:
-    return {
-        "content": value,
-        "source": source_name,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "translate": _translate_if_needed(value),
-    }
+def _build_table_cell_source(
+    value: str,
+    source_name: str,
+    file_name: str,
+    rows: List[str],
+) -> Dict[str, Any]:
+    return _build_file_analyse_data_source(
+        content=value,
+        source=source_name,
+        file_name=file_name,
+        rows=rows,
+    )
 
 
 def _append_unique_source(sources: List[Dict[str, Any]], source: Dict[str, Any]) -> None:
-    source_key = (source.get("content", ""), source.get("source", ""))
+    source_key = (
+        source.get("content", ""),
+        source.get("source", ""),
+        source.get("fileName", ""),
+        tuple(source.get("rows") or []),
+    )
     for existing in sources:
-        if (existing.get("content", ""), existing.get("source", "")) == source_key:
+        existing_key = (
+            existing.get("content", ""),
+            existing.get("source", ""),
+            existing.get("fileName", ""),
+            tuple(existing.get("rows") or []),
+        )
+        if existing_key == source_key:
             return
     sources.append(source)
 
@@ -1168,6 +1279,8 @@ def _merge_table_rows(row_results: List[Dict[str, Any]], column_defs: List[Dict[
             merged.append(item)
 
         source_name = str(row_result.get("source") or "")
+        file_name = str(row_result.get("fileName") or "")
+        rows = list(row_result.get("rows") or [])
         for column in column_defs:
             column_name = str(column.get("fieldName") or "").strip()
             if not column_name:
@@ -1179,7 +1292,7 @@ def _merge_table_rows(row_results: List[Dict[str, Any]], column_defs: List[Dict[
                 item["values"][column_name] = value
             _append_unique_source(
                 item["sources"][column_name],
-                _build_table_cell_source(value, source_name),
+                _build_table_cell_source(value, source_name, file_name, rows),
             )
 
     return merged[:MAX_TABLE_ROWS]
@@ -1197,7 +1310,7 @@ def _assemble_table_rows(merged_rows: List[Dict[str, Any]], column_defs: List[Di
             value = str(merged_row.get("values", {}).get(column_name) or "")
             sources = list(merged_row.get("sources", {}).get(column_name) or [])
             cell["analyseData"] = value
-            cell["analyseDataSource"] = sources if sources else _build_analyse_data_sources([], text_response="")
+            cell["analyseDataSource"] = sources if sources else _build_empty_file_analyse_data_sources()
             row.append(cell)
         if any(str(cell.get("analyseData") or "").strip() for cell in row):
             assembled_rows.append(row)
@@ -1309,11 +1422,14 @@ def _query_table_field(
             continue
 
         original_source_name = _resolve_original_source_name(file_name, retrieval_context)
+        hashed_file_name = _resolve_hashed_source_name(file_name, retrieval_context)
         for row in rows:
             row_results.append(
                 {
                     "row": row,
                     "source": original_source_name,
+                    "fileName": hashed_file_name,
+                    "rows": chunks,
                     "score": file_max_score[file_name],
                 }
             )
@@ -1337,6 +1453,7 @@ def run_weaponry_task(
     request_payload: Dict[str, Any],
     callback_url: str,
     callback_timeout: float,
+    selected_file_names: Optional[List[str]] = None,
 ) -> None:
     """后台线程入口：执行 weaponry 解析任务。"""
 
@@ -1344,6 +1461,15 @@ def run_weaponry_task(
     architecture_id = params.get("architectureId")
     architecture_id_str = str(architecture_id)
     field_list: List[Dict[str, Any]] = params.get("weaponryTemplateFieldList", [])
+    selected_file_names = list(selected_file_names or [])
+
+    client: Optional[AnythingLLMClient] = None
+    workspace_slug = ""
+    temporary_workspace_slug = ""
+    thread_slug = ""
+    thread_deleted = False
+    retrieval_context: Optional[WeaponryRetrievalContext] = None
+    terms_restored = False
 
     try:
         # ─── 阶段 1：查找 Workspace ───
@@ -1353,8 +1479,8 @@ def run_weaponry_task(
         )
         _publish_progress(progress_hub, architecture_id_str, 0.05)
 
-        workspace_slug = kb_service.get_workspace_slug(architecture_id)
-        if not workspace_slug:
+        base_workspace_slug = kb_service.get_workspace_slug(architecture_id)
+        if not base_workspace_slug:
             logger.warning("architectureId=%s 无对应 Workspace，标记失败", architecture_id)
             _fail_task(
                 task_service, progress_hub, architecture_id, architecture_id_str,
@@ -1363,6 +1489,60 @@ def run_weaponry_task(
             )
             return
 
+        client = AnythingLLMClient(load_anythingllm_config())
+        workspace_slug = base_workspace_slug
+
+        if selected_file_names:
+            selected_records = _target_document_records(
+                kb_service,
+                architecture_id,
+                selected_file_names,
+            )
+            selected_doc_paths = [_document_record_path(record) for record in selected_records]
+            if any(not doc_path for doc_path in selected_doc_paths):
+                raise ValueError("部分选中文件缺少 AnythingLLM 文档路径")
+
+            temporary_workspace_name = f"weaponry-selection-{architecture_id}-{int(time.time() * 1000)}"
+            workspace_info = client.create_rag_workspace(temporary_workspace_name, user_id=1)
+            if not workspace_info:
+                _fail_task(
+                    task_service, progress_hub, architecture_id, architecture_id_str,
+                    callback_url, callback_timeout,
+                    msg="创建选中文件临时知识库失败",
+                )
+                return
+
+            temporary_workspace_slug = str(
+                workspace_info.get("slug") or workspace_info.get("id") or ""
+            )
+            if not temporary_workspace_slug:
+                _fail_task(
+                    task_service, progress_hub, architecture_id, architecture_id_str,
+                    callback_url, callback_timeout,
+                    msg="获取选中文件临时知识库标识失败",
+                )
+                return
+
+            if not client.update_embeddings_batch(
+                temporary_workspace_slug,
+                adds=selected_doc_paths,
+                user_id=1,
+            ):
+                _fail_task(
+                    task_service, progress_hub, architecture_id, architecture_id_str,
+                    callback_url, callback_timeout,
+                    msg="向临时知识库关联选中文件失败",
+                )
+                return
+
+            workspace_slug = temporary_workspace_slug
+            logger.info(
+                "武器装备解析已限定选中文件: architectureId=%s workspace=%s file_count=%d",
+                architecture_id,
+                workspace_slug,
+                len(selected_file_names),
+            )
+
         # ─── 阶段 2：创建临时 Thread ───
         task_service.update_task_progress(
             "weaponry", architecture_id_str,
@@ -1370,7 +1550,6 @@ def run_weaponry_task(
         )
         _publish_progress(progress_hub, architecture_id_str, 0.10)
 
-        client = AnythingLLMClient(load_anythingllm_config())
         thread_name = f"weaponry-{architecture_id}-{int(time.time() * 1000)}"
         thread_info = client.create_thread(workspace_slug, thread_name, user_id=1)
         if not thread_info:
@@ -1395,6 +1574,7 @@ def run_weaponry_task(
             architecture_id,
             workspace_slug,
             user_id=1,
+            selected_file_names=selected_file_names,
         )
 
         # ─── 阶段 3：逐字段查询 ───
@@ -1444,6 +1624,7 @@ def run_weaponry_task(
                 result_fields.append(filled)
         finally:
             _restore_target_workspace_terms(client, workspace_slug, retrieval_context, user_id=1)
+            terms_restored = True
 
         # ─── 阶段 4：删除 Thread ───
         task_service.update_task_progress(
@@ -1452,7 +1633,8 @@ def run_weaponry_task(
         )
         _publish_progress(progress_hub, architecture_id_str, 0.92)
 
-        if not client.delete_thread(workspace_slug, thread_slug, user_id=1):
+        thread_deleted = client.delete_thread(workspace_slug, thread_slug, user_id=1)
+        if not thread_deleted:
             logger.warning("删除 Thread %s 失败（不影响结果）", thread_slug)
 
         logger.info("武器装备提取任务完成: architectureId=%s", architecture_id)
@@ -1487,6 +1669,33 @@ def run_weaponry_task(
             callback_url, callback_timeout,
             msg=f"解析异常: {e}",
         )
+    finally:
+        if client and retrieval_context and workspace_slug and not terms_restored:
+            try:
+                _restore_target_workspace_terms(client, workspace_slug, retrieval_context, user_id=1)
+            except Exception as cleanup_error:
+                logger.warning("恢复目标 workspace 术语文档异常（不影响任务结果）: %s", cleanup_error)
+
+        if client and workspace_slug and thread_slug and not thread_deleted:
+            try:
+                if not client.delete_thread(workspace_slug, thread_slug, user_id=1):
+                    logger.warning("最终清理 Thread %s 失败（不影响任务结果）", thread_slug)
+            except Exception as cleanup_error:
+                logger.warning("最终清理 Thread %s 异常（不影响任务结果）: %s", thread_slug, cleanup_error)
+
+        if client and temporary_workspace_slug:
+            try:
+                if not client.delete_workspace(temporary_workspace_slug, user_id=1):
+                    logger.warning(
+                        "删除选中文件临时 workspace %s 失败（不影响任务结果）",
+                        temporary_workspace_slug,
+                    )
+            except Exception as cleanup_error:
+                logger.warning(
+                    "删除选中文件临时 workspace %s 异常（不影响任务结果）: %s",
+                    temporary_workspace_slug,
+                    cleanup_error,
+                )
 
 
 def _fail_task(
