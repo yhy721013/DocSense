@@ -11,10 +11,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB_PATH = ROOT / ".runtime" / "llm_tasks.sqlite3"
-DEFAULT_OUTPUT_DIR = ROOT / ".runtime" / "sqlite"
+load_dotenv(ROOT / ".env", override=False)
+
+RUNTIME_DIR = Path(os.getenv("DOCSENSE_RUNTIME_DIR", str(ROOT / ".runtime"))).expanduser()
+if not RUNTIME_DIR.is_absolute():
+    raise RuntimeError("DOCSENSE_RUNTIME_DIR必须配置为绝对路径")
+RUNTIME_DIR = RUNTIME_DIR.resolve()
+
+DEFAULT_DB_PATH = Path(
+    os.getenv("DOCSENSE_LLM_TASK_DB", str(RUNTIME_DIR / "llm_tasks.sqlite3"))
+).expanduser().resolve()
+DEFAULT_OUTPUT_DIR = RUNTIME_DIR / "sqlite"
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,12 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--db-path",
         default=os.getenv("DOCSENSE_LLM_TASK_DB", str(DEFAULT_DB_PATH)),
-        help="SQLite 文件路径；默认读取 DOCSENSE_LLM_TASK_DB 或 .runtime/llm_tasks.sqlite3。",
+        help="SQLite 文件路径；默认读取 DOCSENSE_LLM_TASK_DB 或 DOCSENSE_RUNTIME_DIR/llm_tasks.sqlite3。",
     )
     parser.add_argument(
         "--output-dir",
         default=str(DEFAULT_OUTPUT_DIR),
-        help="JSON 输出目录；默认 .runtime/sqlite，目录不存在时自动创建。",
+        help="JSON 输出目录；默认 DOCSENSE_RUNTIME_DIR/sqlite，目录不存在时自动创建。",
     )
     return parser.parse_args()
 

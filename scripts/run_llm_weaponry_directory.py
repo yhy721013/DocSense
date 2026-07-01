@@ -26,8 +26,9 @@ from app.services.core.config import load_anythingllm_config  # noqa: E402
 from app.services.utils.anythingllm_client import AnythingLLMClient  # noqa: E402
 
 
-TASK_DB = ROOT / ".runtime" / "llm_tasks.sqlite3"
-KB_DB = ROOT / ".runtime" / "knowledge_base.sqlite3"
+RUNTIME_DIR = ROOT / ".runtime"
+TASK_DB = RUNTIME_DIR / "llm_tasks.sqlite3"
+KB_DB = RUNTIME_DIR / "knowledge_base.sqlite3"
 DEFAULT_OUTPUT_PREFIX = "qwen3-4b-new"
 
 FIELD_NAMES = [
@@ -193,9 +194,24 @@ class QuietDirectoryHandler(SimpleHTTPRequestHandler):
 
 
 def load_env() -> None:
+    global RUNTIME_DIR, TASK_DB, KB_DB
     load_dotenv(ROOT / ".env", override=False)
     if not (ROOT / ".env").exists():
         load_dotenv(ROOT / ".env.example", override=False)
+
+    RUNTIME_DIR = Path(os.getenv("DOCSENSE_RUNTIME_DIR", str(ROOT / ".runtime"))).expanduser()
+    if not RUNTIME_DIR.is_absolute():
+        raise RuntimeError("DOCSENSE_RUNTIME_DIR必须配置为绝对路径")
+    RUNTIME_DIR = RUNTIME_DIR.resolve()
+    TASK_DB = Path(
+        os.getenv("DOCSENSE_LLM_TASK_DB", str(RUNTIME_DIR / "llm_tasks.sqlite3"))
+    ).expanduser().resolve()
+    KB_DB = Path(
+        os.getenv(
+            "DOCSENSE_KNOWLEDGE_BASE_DB",
+            os.getenv("KNOWLEDGE_BASE_DB_PATH", str(RUNTIME_DIR / "knowledge_base.sqlite3")),
+        )
+    ).expanduser().resolve()
 
 
 def default_base_url() -> str:
@@ -212,7 +228,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="", help="DocSense 服务地址，默认读取 .env 的 APP_HOST/APP_PORT。")
     parser.add_argument("--pattern", action="append", default=None, help="文件匹配模式，可重复；默认：*.pdf。")
     parser.add_argument("--recursive", action="store_true", help="递归扫描 file_dir。")
-    parser.add_argument("--output-dir", default="", help="输出目录；默认写入 .runtime/weaponry_directory_<timestamp>。")
+    parser.add_argument(
+        "--output-dir",
+        default="",
+        help="输出目录；默认写入 DOCSENSE_RUNTIME_DIR/weaponry_directory_<timestamp>。",
+    )
     parser.add_argument("--output-prefix", default=DEFAULT_OUTPUT_PREFIX, help="输出文件名前缀。")
     parser.add_argument("--architecture-base", type=int, default=0, help="临时 architectureId 起始值；默认按时间生成。")
     parser.add_argument("--template-classify-id", type=int, default=1772442376645740)
@@ -677,7 +697,7 @@ def main() -> int:
     architecture_ids = allocate_architecture_ids(files, architecture_base)
 
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.output_dir).expanduser() if args.output_dir else ROOT / ".runtime" / f"weaponry_directory_{run_id}"
+    out_dir = Path(args.output_dir).expanduser() if args.output_dir else RUNTIME_DIR / f"weaponry_directory_{run_id}"
     if not out_dir.is_absolute():
         out_dir = (ROOT / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=False)

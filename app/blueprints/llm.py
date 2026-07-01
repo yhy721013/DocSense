@@ -228,9 +228,6 @@ def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], 
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
     payload = request.get_json(silent=True) or {}
-    print("content_type:", request.content_type)
-    print("mimetype:", request.mimetype)
-    print("raw:", request.get_data(as_text=True)[:1000])
     logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "file":
         logger.warning(
