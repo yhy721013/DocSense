@@ -58,6 +58,33 @@ class LLMTaskService:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_interactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    business_type TEXT NOT NULL,
+                    business_key TEXT NOT NULL,
+                    workspace_name TEXT NOT NULL DEFAULT '',
+                    workspace_slug TEXT NOT NULL DEFAULT '',
+                    thread_slug TEXT NOT NULL DEFAULT '',
+                    prompt TEXT NOT NULL DEFAULT '',
+                    response TEXT,
+                    sources_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL,
+                    error_message TEXT NOT NULL DEFAULT '',
+                    workspace_cleanup_status TEXT NOT NULL DEFAULT 'pending',
+                    workspace_cleanup_error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_llm_interactions_business
+                ON llm_interactions (business_type, business_key, created_at)
+                """
+            )
 
     def _serialize(self, value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
@@ -155,6 +182,104 @@ class LLMTaskService:
             if task is not None:
                 tasks.append(task)
         return tasks
+
+    def create_llm_interaction(
+        self,
+        *,
+        business_type: str,
+        business_key: str,
+        workspace_name: str,
+        workspace_slug: str,
+        thread_slug: str,
+        prompt: str,
+        response: Optional[str],
+        sources: list[Dict[str, Any]],
+        status: str,
+        error_message: str = "",
+    ) -> int:
+        """持久化一次模型交互，返回自增记录 ID。"""
+        now = _utc_now_iso()
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO llm_interactions (
+                    business_type, business_key, workspace_name, workspace_slug,
+                    thread_slug, prompt, response, sources_json, status,
+                    error_message, workspace_cleanup_status,
+                    workspace_cleanup_error, created_at, completed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?, ?)
+                """,
+                (
+                    business_type,
+                    business_key,
+                    workspace_name,
+                    workspace_slug,
+                    thread_slug,
+                    prompt,
+                    response,
+                    self._serialize(sources),
+                    status,
+                    error_message,
+                    now,
+                    now,
+                ),
+            )
+            interaction_id = int(cursor.lastrowid)
+        logger.info(
+            "LLM交互已持久化: id=%s, type=%s, key=%s, status=%s",
+            interaction_id,
+            business_type,
+            business_key,
+            status,
+        )
+        return interaction_id
+
+    def update_llm_interaction_cleanup(
+        self,
+        interaction_id: int,
+        *,
+        status: str,
+        error_message: str = "",
+    ) -> None:
+        """记录临时 Workspace 的清理结果。"""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                UPDATE llm_interactions
+                SET workspace_cleanup_status = ?, workspace_cleanup_error = ?
+                WHERE id = ?
+                """,
+                (status, error_message, interaction_id),
+            )
+
+    def get_llm_interactions(
+        self,
+        business_type: str,
+        business_key: str,
+    ) -> list[Dict[str, Any]]:
+        """按创建顺序返回指定业务任务的全部模型交互。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, business_type, business_key, workspace_name,
+                       workspace_slug, thread_slug, prompt, response,
+                       sources_json, status, error_message,
+                       workspace_cleanup_status, workspace_cleanup_error,
+                       created_at, completed_at
+                FROM llm_interactions
+                WHERE business_type = ? AND business_key = ?
+                ORDER BY id ASC
+                """,
+                (business_type, business_key),
+            ).fetchall()
+
+        interactions: list[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["sources"] = self._deserialize(item.pop("sources_json")) or []
+            interactions.append(item)
+        return interactions
 
     def mark_business_completed(
         self,
