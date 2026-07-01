@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, render_template
+from flask import Blueprint, jsonify, render_template, request
 
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.settings import CHAT_DB_PATH, KNOWLEDGE_BASE_DB_PATH
@@ -15,7 +15,7 @@ kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
 
 @debug_bp.get("/debug/api/callback")
 def callback_debug_api():
-    return jsonify(load_callback_preview())
+    return jsonify(load_callback_preview(record=request.args.get("record")))
 
 
 @debug_bp.get("/debug/api/chat/bootstrap")

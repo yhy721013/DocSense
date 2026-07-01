@@ -141,7 +141,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
-| GET | `/debug/api/callback` | 读取旧版最近一次预览文件 `.runtime/call_back.json`，暂不浏览历史目录 |
+| GET | `/debug/api/callback` | 读取 `.runtime/callback/` 最新或指定历史回调 JSON |
 | GET | `/debug/chat` | 本地文件对话调试页，联调 `/llm/chat*` 三个接口 |
 | GET | `/debug/api/chat/bootstrap` | 读取本地会话列表与已解析文件列表，供 `/debug/chat` 初始化使用 |
 
@@ -249,7 +249,7 @@ python run.py
 回调调试页前提：
 
 - 已配置 `CALLBACK_URL`
-- 至少发生过一次文件解析或报告生成回调
+- 至少发生过一次文件解析、报告生成或武器装备知识谱系解析回调
 
 回调调试页访问：
 
@@ -259,10 +259,12 @@ python run.py
 回调调试页说明：
 
 - 新回调 JSON 历史记录统一保存在仓库根目录 `.runtime/callback/`
-- `/debug/callback` 和 `/debug/api/callback` 暂不浏览 `.runtime/callback/` 历史目录，仍只尝试读取旧版 `.runtime/call_back.json`
+- `/debug/callback` 默认展示 `.runtime/callback/` 下最新一条回调，并可在页面中选择最近历史记录
+- `/debug/api/callback?record=<json文件名>` 可读取指定历史回调文件；不再兜底读取旧版 `.runtime/call_back.json`
 - `file` 回调会结构化展示摘要信息、原文和翻译预览
 - `report` 回调会结构化展示报告信息和 HTML 报告预览
-- 若当前还没有回调文件，页面会显示空状态提示
+- `weaponry` 回调会结构化展示字段抽取结果和溯源信息
+- 若当前还没有新版回调历史文件，页面会显示空状态提示
 
 文件对话调试页前提：
 
@@ -291,7 +293,7 @@ python run.py
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
 - MinerU Markdown 缓存目录：`.runtime/mineru_markdown`（`DOCSENSE_MINERU_CACHE_DIR`）
 - 回调历史目录：`.runtime/callback/`
-- 旧版最近一次回调预览：`.runtime/call_back.json`（当前新回调不再更新）
+- 旧版最近一次回调预览：`.runtime/call_back.json`（历史兼容遗留文件，当前新回调和 debug 页不再更新或读取）
 
 ## 8. 本地联调与测试
 
@@ -409,7 +411,7 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 1. 启动服务：`python run.py`
 2. 若联调回调型业务，触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
 3. 打开 `http://127.0.0.1:5001/debug/callback`
-4. 若要比对原始回调报文，优先查看 `.runtime/callback/` 下按业务键和时间戳保存的历史 JSON
+4. 页面默认展示最新回调；若要比对历史报文，可在页面中选择记录，或查看 `.runtime/callback/` 下按业务键和时间戳保存的历史 JSON
 5. 若联调文件对话，先确保至少有一个已解析文件，再打开 `http://127.0.0.1:5001/debug/chat`
 6. 在 `/debug/chat` 中可直接完成发送消息、查看历史、删除会话三类联调
 
