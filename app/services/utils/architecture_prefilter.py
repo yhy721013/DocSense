@@ -1,4 +1,4 @@
-"""Architecture classification pre-filter.
+"""Architecture classification pre-filter (per-category).
 
 When the caller passes a large architecture tree (100+ nodes) via the
 ``architectureList`` request parameter, local small-scale LLMs struggle
@@ -8,17 +8,24 @@ This module implements a **traditional text retrieval** strategy that
 narrows the candidate list *before* the LLM sees it:
 
 1. **Tokenize** the document content (file name + opening text).
-2. **Score** every architecture node by token overlap with the document,
+2. **Group** leaf nodes by their root ancestor category.
+3. **Score** every node by token overlap with the document,
    with extra weight when the node name appears verbatim in the text.
-3. **Select** the top-K scoring leaf nodes and **preserve their full
-   ancestor chain** so the LLM still sees valid parent/child
-   relationships.
-4. **Always retain root-level nodes** as structural context and
+4. **Per-category pruning**: for each root category, look up its config
+   entry:
+   - If the category **has** a config entry and its leaf count exceeds
+     ``prune_threshold``, keep only the top-``top_k`` scoring leaves and
+     their ancestor chains.
+   - If the category **has** a config entry but its leaf count is within
+     the threshold, keep all its leaves intact.
+   - If the category has **no** config entry (or value is ``None``),
+     **keep** all its leaf nodes intact (no pruning).
+5. **Always retain root-level nodes** as structural context and
    potential fallback choices.
 
-If the pre-filter encounters any error or the list is already small
-enough, it returns the original list untouched — making the current
-pure-LLM approach the natural **degradation strategy**.
+If the pre-filter encounters any error or every category is already
+small enough, it returns the original list untouched — making the
+current pure-LLM approach the natural **degradation strategy**.
 
 Usage::
 
@@ -32,7 +39,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +47,28 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-#: Only trigger pre-filtering when the architecture list exceeds this size.
-DEFAULT_PRUNE_THRESHOLD = 20
-
-#: Maximum number of leaf candidates to retain after pruning.
-DEFAULT_TOP_K = 15
+#: Per-category pruning configuration.
+#:
+#: Keys are **root category names** (matching the ``name`` field of
+#: root-level nodes whose ``parentId`` is ``None``).
+#:
+#: Values are dicts with two keys:
+#:
+#: * ``prune_threshold`` — if the category's leaf-node count is at or
+#:   below this number, the category is left intact (no pruning).
+#: * ``top_k`` — when pruning is triggered, how many top-scoring leaf
+#:   nodes to retain for this category.
+#:
+#: Categories **not** present in this config (or whose value is
+#: ``None``) are **never pruned** — all their leaves are kept.
+DEFAULT_CATEGORY_CONFIG: Dict[str, Optional[Dict[str, int]]] = {
+    "军事基地": {"prune_threshold": 4, "top_k": 5},
+    "体系运用": {"prune_threshold": 4, "top_k": 5},
+    "装备型号": {"prune_threshold": 4, "top_k": 5},
+    "作战环境": {"prune_threshold": 4, "top_k": 5},
+    "作战指挥": {"prune_threshold": 4, "top_k": 5},
+    "数据标准": {"prune_threshold": 4, "top_k": 5},
+}
 
 #: Minimum number of meaningful document tokens required to run scoring.
 #: If fewer tokens are extracted the pre-filter bails out early.
@@ -59,8 +83,7 @@ def prune_architecture_list(
     architecture_list: List[Dict[str, Any]],
     document_text: str,
     *,
-    top_k: int = DEFAULT_TOP_K,
-    prune_threshold: int = DEFAULT_PRUNE_THRESHOLD,
+    category_config: Dict[str, Optional[Dict[str, int]]] | None = None,
 ) -> List[Dict[str, Any]]:
     """Narrow *architecture_list* using traditional text retrieval.
 
@@ -74,10 +97,10 @@ def prune_architecture_list(
         Raw document content used as the search query.  The more text
         the better — typically the file name concatenated with the
         first ~2000 characters of document body.
-    top_k:
-        How many top-scoring leaf nodes to keep.
-    prune_threshold:
-        If the list is already smaller than this, return it as-is.
+    category_config:
+        Per-category pruning configuration.  Defaults to
+        :data:`DEFAULT_CATEGORY_CONFIG`.  See the module-level docstring
+        for the expected structure.
 
     Returns
     -------
@@ -85,11 +108,14 @@ def prune_architecture_list(
         A (possibly smaller) architecture list.  On any internal error
         the *original* list is returned unchanged.
     """
-    if not architecture_list or len(architecture_list) <= prune_threshold:
+    if not architecture_list:
         return architecture_list
 
+    if category_config is None:
+        category_config = DEFAULT_CATEGORY_CONFIG
+
     try:
-        return _do_prune(architecture_list, document_text, top_k)
+        return _do_prune(architecture_list, document_text, category_config)
     except Exception:  # pragma: no cover — safety net
         logger.warning("Architecture pre-filter failed, returning full list", exc_info=True)
         return architecture_list
@@ -166,12 +192,12 @@ def _score_nodes(
         if not node_tokens:
             continue
 
-        overlap = len(node_tokens & document_tokens)
+        overlap = len(set(node_tokens).intersection(document_tokens))
         if overlap == 0:
             continue
 
         # Jaccard-like similarity (lenient denominator)
-        score = overlap / max(len(node_tokens), 1)
+        score = float(overlap) / max(len(node_tokens), 1)
 
         # Bonus: node name appears verbatim in document
         node_name = _normalize(node.get("name") or "")
@@ -189,12 +215,32 @@ def _collect_path_ids(node: Dict[str, Any]) -> List[int]:
     return [int(m) for m in re.findall(r"\d+", path_text)]
 
 
+def _find_root_id(
+    node_id: int,
+    nodes_by_id: Dict[int, Dict[str, Any]],
+) -> int | None:
+    """Walk up the parent chain from *node_id* to find its root ancestor ID."""
+    current_id = node_id
+    visited: Set[int] = {node_id}
+    while True:
+        node = nodes_by_id.get(current_id)
+        if not node:
+            return None
+        parent_id = _coerce_int(node.get("parentId"))
+        if parent_id is None:
+            return current_id
+        if parent_id in visited:
+            return current_id  # cycle guard
+        visited.add(parent_id)
+        current_id = parent_id
+
+
 def _do_prune(
     architecture_list: List[Dict[str, Any]],
     document_text: str,
-    top_k: int,
+    category_config: Dict[str, Optional[Dict[str, int]]],
 ) -> List[Dict[str, Any]]:
-    """Core pruning logic (may raise on unexpected data shapes)."""
+    """Core pruning logic with per-category thresholds."""
     normalized_doc = _normalize(document_text)
     document_tokens = _tokenize(document_text)
 
@@ -207,7 +253,6 @@ def _do_prune(
 
     # ── Index ──
     nodes_by_id: Dict[int, Dict[str, Any]] = {}
-    leaf_nodes: List[Dict[str, Any]] = []
     root_nodes: List[Dict[str, Any]] = []
     child_ids: Set[int] = set()
 
@@ -224,7 +269,8 @@ def _do_prune(
         else:
             child_ids.add(node_id)
 
-    # A node is a "leaf" if no other node references it as parentId
+    # Identify leaf nodes (not referenced as parentId by any other node)
+    leaf_nodes: List[Dict[str, Any]] = []
     for node in architecture_list:
         if not isinstance(node, dict):
             continue
@@ -232,44 +278,91 @@ def _do_prune(
         if node_id is not None and node_id not in child_ids:
             leaf_nodes.append(node)
 
-    # If there are no identifiable leaves (unusual), bail out
     if not leaf_nodes:
         return architecture_list
 
-    # ── Score ──
-    scores = _score_nodes(architecture_list, document_tokens, normalized_doc)
-
-    # Score leaf nodes and rank them
-    scored_leaves = [
-        (scores.get(_coerce_int(n.get("id")) or 0, 0.0), n)
-        for n in leaf_nodes
-    ]
-    scored_leaves.sort(key=lambda pair: pair[0], reverse=True)
-
-    # ── Select top-K leaves + ancestor chains ──
-    keep_ids: Set[int] = set()
-
-    for score, leaf in scored_leaves[:top_k]:
+    # ── Group leaves by root ancestor ──
+    leaves_by_root: Dict[int, List[Dict[str, Any]]] = {}
+    for leaf in leaf_nodes:
         leaf_id = _coerce_int(leaf.get("id"))
         if leaf_id is None:
             continue
-        keep_ids.add(leaf_id)
+        root_id = _find_root_id(leaf_id, nodes_by_id)
+        if root_id is not None:
+            leaves_by_root.setdefault(root_id, []).append(leaf)
 
-        # Walk up the parent chain
-        current_id = _coerce_int(leaf.get("parentId"))
-        visited: Set[int] = {leaf_id}
-        while current_id is not None and current_id not in visited:
-            visited.add(current_id)
-            keep_ids.add(current_id)
-            parent_node = nodes_by_id.get(current_id)
-            if parent_node is None:
-                break
-            current_id = _coerce_int(parent_node.get("parentId"))
+    # ── Score all nodes ──
+    scores = _score_nodes(architecture_list, document_tokens, normalized_doc)
 
-        # Also include IDs from the path field (handles incomplete chains)
-        for path_id in _collect_path_ids(leaf):
-            if path_id in nodes_by_id:
-                keep_ids.add(path_id)
+    # ── Per-category pruning ──
+    keep_ids: Set[int] = set()
+    pruned_categories: List[str] = []
+
+    for root in root_nodes:
+        root_id = _coerce_int(root.get("id"))
+        if root_id is None:
+            continue
+
+        root_name = root.get("name", "")
+        root_leaves = leaves_by_root.get(root_id, [])
+        config = category_config.get(root_name)
+
+        # No config for this category → keep all leaves intact (no pruning)
+        if config is None:
+            for leaf in root_leaves:
+                leaf_id = _coerce_int(leaf.get("id"))
+                if leaf_id is not None:
+                    keep_ids.add(leaf_id)
+            continue
+
+        threshold = config.get("prune_threshold", 4)
+        top_k = config.get("top_k", 5)
+
+        # Leaf count within threshold → no pruning for this category
+        if len(root_leaves) <= threshold:
+            for leaf in root_leaves:
+                leaf_id = _coerce_int(leaf.get("id"))
+                if leaf_id is not None:
+                    keep_ids.add(leaf_id)
+            continue
+
+        # ── Prune: score, rank and select top-K leaves ──
+        pruned_categories.append(root_name)
+        scored = [
+            (scores.get(_coerce_int(lf.get("id")) or 0, 0.0), lf)
+            for lf in root_leaves
+        ]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+
+        for _score, leaf in scored[:top_k]:
+            leaf_id = _coerce_int(leaf.get("id"))
+            if leaf_id is None:
+                continue
+            keep_ids.add(leaf_id)
+
+            # Walk up the parent chain
+            current_id = _coerce_int(leaf.get("parentId"))
+            visited: Set[int] = {leaf_id}
+            while current_id is not None and current_id not in visited:
+                visited.add(current_id)
+                keep_ids.add(current_id)
+                parent_node = nodes_by_id.get(current_id)
+                if parent_node is None:
+                    break
+                current_id = _coerce_int(parent_node.get("parentId"))
+
+            # Also include IDs from the path field (handles incomplete chains)
+            for path_id in _collect_path_ids(leaf):
+                if path_id in nodes_by_id:
+                    keep_ids.add(path_id)
+
+    # If no category was pruned, return original list
+    if not pruned_categories:
+        logger.info(
+            "Architecture pre-filter: all categories within thresholds, skipping (%d leaves)",
+            len(leaf_nodes),
+        )
+        return architecture_list
 
     # Always keep root nodes — they are cheap and provide structural context
     for root in root_nodes:
@@ -289,11 +382,10 @@ def _do_prune(
         return architecture_list
 
     logger.info(
-        "Architecture pre-filter: %d → %d nodes (top %d leaves from %d)",
+        "Architecture pre-filter: %d → %d nodes (pruned categories: %s)",
         len(architecture_list),
         len(pruned),
-        min(top_k, len(scored_leaves)),
-        len(leaf_nodes),
+        ", ".join(pruned_categories),
     )
 
     return pruned

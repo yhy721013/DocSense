@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from app.services.core.config import load_anythingllm_config, load_ocr_config
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 from app.services.utils.rag_pipeline import RAGExecutionDetails, run_anythingllm_rag
 
+from app.services.utils.architecture_prefilter import prune_architecture_list
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
 from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
@@ -920,6 +922,60 @@ def _prepare_analysis_upload_files(file_path: str) -> list[str]:
     return [str(upload_path_obj)]
 
 
+def _apply_architecture_prefilter(
+    params: Dict[str, Any],
+    file_path: str,
+    original_name: str,
+) -> None:
+    """Read document text and narrow ``params["architectureList"]`` in-place.
+
+    Uses :func:`prune_architecture_list` to score leaf nodes against the
+    document content and keep only the top-K candidates plus their
+    ancestor chains.  If anything goes wrong (or the list is already
+    small enough) the original list is kept untouched, so the pure-LLM
+    approach serves as the natural degradation strategy.
+    """
+    architecture_list = params.get("architectureList")
+    if not isinstance(architecture_list, list) or not architecture_list:
+        logger.info("预筛选跳过: architectureList 为空或不存在")
+        return
+
+    # Build search text: file names + document opening (~2000 chars)
+    file_name = _as_text(params.get("fileName"))
+
+    logger.info(
+        "预筛选开始: architectureList 节点数=%d, fileName=%s",
+        len(architecture_list), file_name,
+    )
+
+    doc_text = ""
+    try:
+        doc_text = _read_original_text(file_path)
+        if len(doc_text) > 2000:
+            doc_text = doc_text[:2000]
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("预筛选读取文档文本失败，跳过预筛选", exc_info=True)
+        return
+
+    search_parts = [original_name, file_name, doc_text]
+    search_text = "\n".join(part for part in search_parts if part)
+
+    if not search_text.strip():
+        logger.info("预筛选跳过: 搜索文本为空")
+        return
+
+    logger.info("预筛选搜索文本长度: %d 字符", len(search_text))
+    pruned = prune_architecture_list(architecture_list, search_text)
+    if pruned is not architecture_list:
+        logger.info(
+            "预筛选生效: %d → %d 节点",
+            len(architecture_list), len(pruned),
+        )
+        params["architectureList"] = pruned
+    else:
+        logger.info("预筛选未触发裁剪，保留原始 %d 节点", len(architecture_list))
+
+
 def run_file_analysis_task(
         *,
         task_service: LLMTaskService,
@@ -930,7 +986,8 @@ def run_file_analysis_task(
         callback_url: str,
         callback_timeout: float,
 ) -> None:
-    params = request_payload["params"][0]
+    # Deep copy params to avoid mutating the shared request_payload
+    params = copy.deepcopy(request_payload["params"][0])
     file_name = _as_text(params.get("fileName"))
     original_name = _as_text(params.get("originalFileName")) or file_name
     file_path = _as_text(params.get("filePath"))
@@ -947,6 +1004,9 @@ def run_file_analysis_task(
         _publish_progress(progress_hub, file_name, 0.15)
 
         downloaded_path = download_to_temp_file(file_path, file_name, download_root, timeout=60)
+
+        # Pre-filter architecture tree before LLM call
+        _apply_architecture_prefilter(params, downloaded_path, original_name)
 
         task_service.update_task_progress("file", file_name, progress=0.35, message="正在执行文档解析")
         _publish_progress(progress_hub, file_name, 0.35)
