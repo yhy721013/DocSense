@@ -1,5 +1,6 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import asyncio
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -9,6 +10,9 @@ import httpx
 from mineru.cli import api_client as _api_client
 from mineru.cli.common import image_suffixes, office_suffixes, pdf_suffixes
 from mineru.utils.guess_suffix_or_lang import guess_suffix_by_path
+
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_INPUT_SUFFIXES = set(pdf_suffixes + image_suffixes + office_suffixes)
 
@@ -139,7 +143,7 @@ async def run_demo(
                 prepare_local_api_temp_dir()
                 local_server = _api_client.LocalAPIServer()
                 base_url = local_server.start()
-                print(f"Started local mineru-api: {base_url}")
+                logger.info("Started local mineru-api: %s", base_url)
                 server_health = await _api_client.wait_for_local_api_ready(
                     http_client,
                     local_server,
@@ -150,16 +154,16 @@ async def run_demo(
                     _api_client.normalize_base_url(api_url),
                 )
 
-            print(f"Using API: {server_health.base_url}")
-            print(f"Submitting {len(upload_assets)} file(s)")
+            logger.info("Using API: %s", server_health.base_url)
+            logger.info("Submitting %d file(s)", len(upload_assets))
             submit_response = await _api_client.submit_parse_task(
                 base_url=server_health.base_url,
                 upload_assets=upload_assets,
                 form_data=form_data,
             )
-            print(f"task_id: {submit_response.task_id}")
+            logger.info("task_id: %s", submit_response.task_id)
             if submit_response.queued_ahead is not None:
-                print(f"status: pending (queued_ahead={submit_response.queued_ahead})")
+                logger.info("status: pending (queued_ahead=%s)", submit_response.queued_ahead)
 
             last_status_message = None
 
@@ -169,7 +173,7 @@ async def run_demo(
                 if message == last_status_message:
                     return
                 last_status_message = message
-                print(f"status: {message}")
+                logger.info("status: %s", message)
 
             await _api_client.wait_for_task_result(
                 client=http_client,
@@ -177,7 +181,7 @@ async def run_demo(
                 task_label=task_label,
                 status_snapshot_callback=on_status_update,
             )
-            print("status: completed")
+            logger.info("status: completed")
             result_zip_path = await _api_client.download_result_zip(
                 client=http_client,
                 submit_response=submit_response,
@@ -192,10 +196,14 @@ async def run_demo(
         _api_client.safe_extract_zip(result_zip_path, output_path)
     finally:
         result_zip_path.unlink(missing_ok=True)
-    print(f"Extracted result to: {output_path}")
+    logger.info("Extracted result to: %s", output_path)
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)d] %(message)s",
+    )
     demo_dir = Path(__file__).resolve().parent
 
     # Input can be a single supported file or a directory containing supported files.

@@ -1,9 +1,13 @@
 import os
+import logging
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class MHTMLToPDFConverter:
@@ -18,7 +22,7 @@ class MHTMLToPDFConverter:
                 "请确保系统已安装 Google Chrome 或 Microsoft Edge。\n"
                 "Windows 通常自带 Edge，Chrome 可从 https://www.google.com/chrome/ 下载。"
             )
-        print(f"[MHTML→PDF] 使用浏览器: {self.chrome_path}")
+        logger.info("MHTML→PDF 使用浏览器: %s", self.chrome_path)
 
     def _find_chrome(self) -> Optional[str]:
         """查找系统中可用的 Chrome/Edge 浏览器"""
@@ -95,17 +99,13 @@ class MHTMLToPDFConverter:
             output_dir = Path(mhtml_path).parent
             output_path = str(output_dir / f"{base_name}.pdf")
 
-        print(f"\n{'=' * 60}")
-        print(f"MHTML 转 PDF")
-        print(f"输入: {mhtml_path}")
-        print(f"输出: {output_path}")
-        print(f"{'=' * 60}")
+        logger.info("MHTML 转 PDF: 输入=%s 输出=%s", mhtml_path, output_path)
 
         return self._convert_mhtml_to_pdf(mhtml_path, output_path)
 
     def _convert_mhtml_to_pdf(self, mhtml_path: str, output_path: str) -> str:
         """直接将 MHTML 文件交给 Chrome 无头模式生成 PDF"""
-        print(f"[转换] 使用 {Path(self.chrome_path).name} 无头模式生成 PDF...")
+        logger.info("使用 %s 无头模式生成 PDF", Path(self.chrome_path).name)
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
@@ -138,11 +138,11 @@ class MHTMLToPDFConverter:
                 if result.returncode != 0 and result.stderr:
                     stderr_lines = [l for l in result.stderr.strip().split('\n') if l.strip()]
                     error_summary = '\n'.join(stderr_lines[:5])
-                    print(f"[警告] 浏览器输出:\n{error_summary}")
+                    logger.warning("浏览器输出:\n%s", error_summary)
 
                 if os.path.exists(tmp_pdf_path) and os.path.getsize(tmp_pdf_path) > 0:
                     self._safe_copy(tmp_pdf_path, output_path)
-                    print(f"[完成] PDF 已保存至: {output_path}")
+                    logger.info("PDF 已保存至: %s", output_path)
                     return output_path
 
                 raise RuntimeError(

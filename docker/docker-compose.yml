@@ -71,7 +71,7 @@ services:
       - ../run.py:/app/run.py:ro
       - ../clean.py:/app/clean.py:ro
       # ── 运行时数据持久化 ──
-      - ../data/runtime:/app/.runtime
+      - ../data/runtime:/app/runtime
       - ../data/uploads:/app/uploads
       # ── 共享 AnythingLLM 存储卷（用于监控文档处理状态） ──
       - anythingllm-data:/anythingllm-storage:ro
@@ -80,6 +80,7 @@ services:
     environment:
       # Docker 内部网络通信（通过服务名访问）
       - ANYTHINGLLM_BASE_URL=http://anythingllm:3001/api/v1
+      - DOCSENSE_RUNTIME_DIR=/app/runtime
       - OLLAMA_HOST=http://ollama:11434
       - APP_HOST=0.0.0.0
     depends_on:

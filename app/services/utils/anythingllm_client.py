@@ -267,6 +267,7 @@ class AnythingLLMClient:
 
             model_answer = final_event.get("textResponse", final_event)
             if isinstance(model_answer, str):
+                raw_text_response = model_answer
                 # 清理思维标记与代码块，尽量得到纯 JSON 字符串
                 cleaned = model_answer.split("</think>")[-1] if "</think>" in model_answer else model_answer
                 cleaned = cleaned.replace("<think>", "")
@@ -285,13 +286,21 @@ class AnythingLLMClient:
                 if not result:
                     logger.warning("线程 %s 收到空响应", thread_slug)
                     return None
-                return {"textResponse": result, "sources": sources}
+                return {
+                    "textResponse": result,
+                    "rawTextResponse": raw_text_response,
+                    "sources": sources,
+                }
 
             result = json.dumps(model_answer, ensure_ascii=False)
             if not result or result in ("{}", "null"):
                 logger.warning("线程 %s 收到无效的 JSON 响应", thread_slug)
                 return None
-            return {"textResponse": result, "sources": sources}
+            return {
+                "textResponse": result,
+                "rawTextResponse": result,
+                "sources": sources,
+            }
         except Exception as e:
             logger.error("向线程 %s 发送提示词时出现异常: %s", thread_slug, e)
             return None

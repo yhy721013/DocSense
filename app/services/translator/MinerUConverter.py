@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 from pathlib import Path
 from typing import Optional, List
 import tempfile
@@ -8,6 +9,9 @@ import httpx
 from mineru.cli import api_client as _api_client
 from mineru.cli.common import image_suffixes, office_suffixes, pdf_suffixes
 from mineru.utils.guess_suffix_or_lang import guess_suffix_by_path
+
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_INPUT_SUFFIXES = set(pdf_suffixes + image_suffixes + office_suffixes)
 
@@ -29,7 +33,7 @@ class MinerUConverter:
 
         # 【新增】设置使用本地模型，避免自动下载
         os.environ['MINERU_MODEL_SOURCE'] = "local"
-        print(f"[MinerU] 已设置模型来源为本地模式 (MINERU_MODEL_SOURCE=local)")
+        logger.info("MinerU 已设置模型来源为本地模式 (MINERU_MODEL_SOURCE=local)")
 
     def convert_to_markdown(
             self,
@@ -73,7 +77,7 @@ class MinerUConverter:
 
         # 收集输入文件
         input_files = self._collect_input_files(input_path)
-        print(f"📄 待转换文件：{len(input_files)} 个")
+        logger.info("待转换文件：%d 个", len(input_files))
 
         # 构建表单数据
         form_data = self._build_form_data(
@@ -189,7 +193,7 @@ class MinerUConverter:
                         self._prepare_local_api_temp_dir()
                         local_server = _api_client.LocalAPIServer()
                         base_url = local_server.start()
-                        print(f"Started local mineru-api: {base_url}")
+                        logger.info("Started local mineru-api: %s", base_url)
 
                         server_health = await _api_client.wait_for_local_api_ready(
                             http_client,
@@ -201,18 +205,18 @@ class MinerUConverter:
                             _api_client.normalize_base_url(api_url),
                         )
 
-                    print(f"Using API: {server_health.base_url}")
-                    print(f"Submitting {len(upload_assets)} file(s)")
+                    logger.info("Using API: %s", server_health.base_url)
+                    logger.info("Submitting %d file(s)", len(upload_assets))
 
                     submit_response = await _api_client.submit_parse_task(
                         base_url=server_health.base_url,
                         upload_assets=upload_assets,
                         form_data=form_data,
                     )
-                    print(f"task_id: {submit_response.task_id}")
+                    logger.info("task_id: %s", submit_response.task_id)
 
                     if submit_response.queued_ahead is not None:
-                        print(f"status: pending (queued_ahead={submit_response.queued_ahead})")
+                        logger.info("status: pending (queued_ahead=%s)", submit_response.queued_ahead)
 
                     await _api_client.wait_for_task_result(
                         client=http_client,
@@ -220,7 +224,7 @@ class MinerUConverter:
                         task_label=task_label,
                         status_snapshot_callback=self._on_status_update,
                     )
-                    print("status: completed")
+                    logger.info("status: completed")
 
                     result_zip_path = await _api_client.download_result_zip(
                         client=http_client,
@@ -235,7 +239,7 @@ class MinerUConverter:
             try:
                 # 【关键修复】参考 demo_minerU 的实现，不依赖返回值
                 _api_client.safe_extract_zip(result_zip_path, output_dir)
-                print(f"Extracted result to: {output_dir}")
+                logger.info("Extracted result to: %s", output_dir)
             finally:
                 result_zip_path.unlink(missing_ok=True)
 
@@ -261,7 +265,7 @@ class MinerUConverter:
             message = status_snapshot.status
         else:
             message = f"{status_snapshot.status} (queued_ahead={status_snapshot.queued_ahead})"
-        print(f"status: {message}")
+        logger.info("status: %s", message)
 
     def _prepare_local_api_temp_dir(self):
         """准备本地 API 临时目录"""

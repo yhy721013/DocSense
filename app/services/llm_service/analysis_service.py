@@ -14,7 +14,7 @@ import fitz
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config, load_ocr_config
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
-from app.services.utils.rag_pipeline import run_anythingllm_rag
+from app.services.utils.rag_pipeline import RAGExecutionDetails, run_anythingllm_rag
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
@@ -934,6 +934,11 @@ def run_file_analysis_task(
     file_name = _as_text(params.get("fileName"))
     original_name = _as_text(params.get("originalFileName")) or file_name
     file_path = _as_text(params.get("filePath"))
+    client: AnythingLLMClient | None = None
+    analysis_prompt = ""
+    raw_result: str | None = None
+    task_error = ""
+    rag_details = RAGExecutionDetails()
 
     logger.info("开始执行文件分析任务: file_name=%s", file_name)
 
@@ -957,16 +962,21 @@ def run_file_analysis_task(
         if files_to_upload:
             llm_file_path = files_to_upload[0]
 
+        analysis_prompt = build_file_analysis_prompt(params)
+        temporary_workspace_name = f"llm-file-{int(time.time() * 1000)}"
         raw_result = run_anythingllm_rag(
             client=client,
             files_to_upload=files_to_upload,
-            prompt=build_file_analysis_prompt(params),
-            workspace_name=f"llm-file-{int(time.time() * 1000)}",
+            prompt=analysis_prompt,
+            workspace_name=temporary_workspace_name,
             thread_name=f"analysis-{Path(file_name).stem}",
             user_id=1,
             mode="query",
             reuse_workspace=False,
+            execution_details=rag_details,
         )
+        if rag_details.text_response is None and isinstance(raw_result, str):
+            rag_details.text_response = raw_result
         if raw_result is None or (isinstance(raw_result, str) and not raw_result.strip()):
             raise RuntimeError("AnythingLLM结构化抽取未返回有效结果")
         parsed_result = _parse_model_result(raw_result)
@@ -1072,6 +1082,7 @@ def run_file_analysis_task(
         logger.info("文件分析任务完成: file_name=%s", file_name)
 
     except Exception as e:
+        task_error = str(e)
         logger.exception("文件分析任务执行异常: file_name=%s, error=%s", file_name, e)
         callback_payload = build_file_callback_payload(file_name, {}, status="3")
         task_service.mark_business_result("file", file_name, callback_payload, status="3", message="解析失败")
@@ -1093,6 +1104,69 @@ def run_file_analysis_task(
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
                 logger.warning("失败回调提交失败: file_name=%s", file_name)
+    finally:
+        is_temporary_workspace = (
+            rag_details.workspace_created
+            and bool(rag_details.workspace_slug)
+            and rag_details.workspace_name.startswith("llm-file-")
+        )
+        if is_temporary_workspace and client is not None:
+            interaction_id: int | None = None
+            try:
+                interaction_succeeded = bool(rag_details.text_response and rag_details.text_response.strip())
+                interaction_id = task_service.create_llm_interaction(
+                    business_type="file",
+                    business_key=file_name,
+                    workspace_name=rag_details.workspace_name,
+                    workspace_slug=rag_details.workspace_slug or "",
+                    thread_slug=rag_details.thread_slug or "",
+                    prompt=analysis_prompt,
+                    response=rag_details.raw_response or rag_details.text_response,
+                    sources=rag_details.sources,
+                    status="succeeded" if interaction_succeeded else "failed",
+                    error_message="" if interaction_succeeded else (task_error or "模型未返回有效结果"),
+                )
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "LLM交互落库失败，保留临时Workspace避免对话丢失: file_name=%s, workspace=%s",
+                    file_name,
+                    rag_details.workspace_slug,
+                )
+
+            if interaction_id is not None:
+                cleanup_status = "failed"
+                cleanup_error = "AnythingLLM删除Workspace失败"
+                try:
+                    if client.delete_workspace(rag_details.workspace_slug or "", user_id=1):
+                        cleanup_status = "deleted"
+                        cleanup_error = ""
+                    else:
+                        logger.warning(
+                            "删除文件分析临时Workspace失败: file_name=%s, workspace=%s",
+                            file_name,
+                            rag_details.workspace_slug,
+                        )
+                except Exception as cleanup_exc:  # pylint: disable=broad-except
+                    cleanup_error = str(cleanup_exc)
+                    logger.warning(
+                        "删除文件分析临时Workspace异常: file_name=%s, workspace=%s, error=%s",
+                        file_name,
+                        rag_details.workspace_slug,
+                        cleanup_exc,
+                    )
+
+                try:
+                    task_service.update_llm_interaction_cleanup(
+                        interaction_id,
+                        status=cleanup_status,
+                        error_message=cleanup_error,
+                    )
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception(
+                        "更新Workspace清理状态失败: interaction_id=%s, workspace=%s",
+                        interaction_id,
+                        rag_details.workspace_slug,
+                    )
 
 
 def run_file_analysis_batch_task(

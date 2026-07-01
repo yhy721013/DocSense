@@ -4,7 +4,7 @@
 该脚本的主要用途是：
 在我们的单元测试、集成测试或本地调试完成后，自动清理残留产生的测试数据和环境状态。
 这些残留数据主要包括两部分：
-1. 项目本地的临时测试数据：例如存放在 `.runtime` 目录下的 SQLite 数据库（如 knowledge_base.sqlite3、chat_sessions.sqlite3）、OCR 缓存等本地文件。
+1. 项目本地的临时测试数据：例如存放在 `DOCSENSE_RUNTIME_DIR` 目录下的 SQLite 数据库（如 knowledge_base.sqlite3、chat_sessions.sqlite3）、OCR 缓存等本地文件。
 2. AnythingLLM 服务端的测试数据：例如在测试交互流程时临时创建的工作区（Workspaces）以及向 AnythingLLM 系统中上传的各类测试文档文件。
 
 执行该脚本后能将项目和 AnythingLLM 的状态重置为一个干净的环境，避免此前的测试数据影响下一轮测试的结果或者过度占用存储空间。
@@ -18,6 +18,8 @@ import logging
 from pathlib import Path
 import time
 
+from dotenv import load_dotenv
+
 # 配置标准输出日志，方便在终端运行脚本时直接观察清理进度
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -26,17 +28,28 @@ logger = logging.getLogger(__name__)
 # 这样能够在这份独立脚本中，直接像项目入口一样无缝 import 项目内的各种系统依赖模块（比如 app.）
 root_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(root_dir))
+load_dotenv(root_dir / ".env", override=False)
+
+
+def _runtime_dir() -> Path:
+    raw_value = os.getenv("DOCSENSE_RUNTIME_DIR", "").strip()
+    if not raw_value:
+        return (root_dir / ".runtime").resolve()
+    runtime_dir = Path(raw_value).expanduser()
+    if not runtime_dir.is_absolute():
+        raise RuntimeError("DOCSENSE_RUNTIME_DIR必须配置为绝对路径")
+    return runtime_dir.resolve()
 
 
 def clean_runtime():
     """
-    清理本地运行时产生的所有临时文件夹 (.runtime)
+    清理 DOCSENSE_RUNTIME_DIR 指向的运行时目录。
     
     其中包括: 
     - 测试用或临时创建的 SQLite 数据库
     - 下载的文件、系统临时解析缓存等
     """
-    runtime_dir = root_dir / ".runtime"
+    runtime_dir = _runtime_dir()
     if runtime_dir.exists() and runtime_dir.is_dir():
         logger.info(f"正在清理本地临时运行时目录的内容: {runtime_dir} ...")
         # 多次尝试，以防 Windows 下杀毒软件、文件句柄未完全释放等导致暂时被占用
@@ -47,15 +60,15 @@ def clean_runtime():
                         item.unlink()
                     elif item.is_dir():
                         shutil.rmtree(item)
-                logger.info("成功清理 .runtime 文件夹内部文件。")
+                logger.info("成功清理运行时目录内部文件。")
                 break
             except Exception as e:
-                logger.warning(f"清理 .runtime 失败: {e}，等待后重试...")
+                logger.warning(f"清理运行时目录失败: {e}，等待后重试...")
                 time.sleep(1)
         else:
-            logger.error("重试多次后仍无法清理 .runtime 文件夹。可能由于残留进程占用。")
+            logger.error("重试多次后仍无法清理运行时目录。可能由于残留进程占用。")
     else:
-        logger.info(".runtime 文件夹不存在或已被删除，无需操作。")
+        logger.info("运行时目录不存在或已被删除，无需操作。")
 
 def clean_anythingllm():
     """
@@ -67,7 +80,7 @@ def clean_anythingllm():
     """
     # 【重点策略】：我们在这里进行包的即时（延迟）导入，而不是在文件头部导入。
     # 因为导入 app.services.core.config 时系统有可能在后台初始化配置所关连的一些数据库（比如连接并创建 SQLite 文件），
-    # 这导致 .runtime 目录下的 SQLite 立即被数据库引擎创建并获得文件锁，如果将导入置放于头部则会导致先前的 `clean_runtime()` 函数操作中 shutil.rmtree() 无法删除被锁定的 .runtime 文件。
+    # 这会导致运行时目录下的 SQLite 立即被数据库引擎创建并获得文件锁，如果将导入置放于头部则会导致先前的 clean_runtime() 无法删除被锁定的文件。
     from app.services.core.config import load_anythingllm_config
     from app.services.utils.anythingllm_client import AnythingLLMClient
 
@@ -138,7 +151,7 @@ def main():
     """
     logger.info("=== 开始执行测试数据及环境状态清理脚本 ===")
     
-    # 步骤一：先由于未锁定文件的情况下强制清理本地产生的 .runtime 和各 SQLite DB
+    # 步骤一：先在文件未锁定时清理运行时目录和各 SQLite DB
     clean_runtime()
     
     # 步骤二：清理 AnythingLLM 上的所有业务状态与存储记录

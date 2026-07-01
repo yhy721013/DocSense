@@ -1,7 +1,7 @@
 """tests/test_weaponry_service.py — weaponry_service 核心映射函数的单元测试"""
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from datetime import datetime
 
 from app.services.llm_service.weaponry_service import (
@@ -20,7 +20,10 @@ from app.services.llm_service.weaponry_service import (
     _query_input_field,
     _query_table_field,
     _restore_target_workspace_terms,
+    _resolve_hashed_source_name,
     _resolve_original_source_name,
+    _target_document_records,
+    run_weaponry_task,
 )
 
 
@@ -157,6 +160,21 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertTrue(_is_target_source("JFS_3526-JFS_-16-Aug-2023.pdf", context))
         self.assertTrue(_is_target_source("", context))
 
+    def test_target_document_records_preserve_selected_file_order(self):
+        class FakeKB:
+            def list_document_records(self):
+                return [
+                    {"file_name": "a.pdf", "architecture_id": 123},
+                    {"file_name": "b.pdf", "architecture_id": 123},
+                    {"file_name": "other.pdf", "architecture_id": 456},
+                ]
+
+        records = _target_document_records(FakeKB(), 123, ["b.pdf", "a.pdf"])
+
+        self.assertEqual([record["file_name"] for record in records], ["b.pdf", "a.pdf"])
+        with self.assertRaisesRegex(ValueError, "不存在或不属于当前类别"):
+            _target_document_records(FakeKB(), 123, ["other.pdf"])
+
     def test_resolve_original_source_name_for_mode2_callback(self):
         context = WeaponryRetrievalContext(
             target_file_names={"hash-name.pdf", "尼米兹级资料.pdf"},
@@ -166,7 +184,14 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
                 "custom-documents/hash-name-doc.json": "尼米兹级资料.pdf",
                 "hash-name-doc.json": "尼米兹级资料.pdf",
             },
+            source_file_names={
+                "hash-name.pdf": "hash-name.pdf",
+                "尼米兹级资料.pdf": "hash-name.pdf",
+                "custom-documents/hash-name-doc.json": "hash-name.pdf",
+                "hash-name-doc.json": "hash-name.pdf",
+            },
             single_target_original_name="尼米兹级资料.pdf",
+            single_target_file_name="hash-name.pdf",
         )
 
         self.assertEqual(
@@ -185,6 +210,15 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             _resolve_original_source_name("term_rule_0005_中文型号.md", context),
             "term_rule_0005_中文型号.md",
         )
+        self.assertEqual(
+            _resolve_hashed_source_name("尼米兹级资料.pdf", context),
+            "hash-name.pdf",
+        )
+        self.assertEqual(
+            _resolve_hashed_source_name("custom-documents/hash-name-doc.json", context),
+            "hash-name.pdf",
+        )
+        self.assertEqual(_resolve_hashed_source_name("", context), "hash-name.pdf")
 
     def test_format_terms_rule_context_uses_only_term_sources(self):
         chunks = [
@@ -231,6 +265,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
                         "text": "<document_metadata>\nsourceDocument: JFS_3526-JFS_-16-Aug-2023.pdf\n</document_metadata>\nNimitz (CVN 68) class",
                         "score": 0.1,
                     },
+                    {
+                        "metadata": {"title": "JFS_3526-JFS_-16-Aug-2023.pdf"},
+                        "text": "<document_metadata>\nsourceDocument: JFS_3526-JFS_-16-Aug-2023.pdf\n</document_metadata>\nThe class serves in the United States Navy.",
+                        "score": 0.08,
+                    },
                 ]
             return [
                 {
@@ -247,7 +286,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             source_original_names={
                 "jfs_3526-jfs_-16-aug-2023.pdf": "尼米兹级资料.pdf",
             },
+            source_file_names={
+                "jfs_3526-jfs_-16-aug-2023.pdf": "3199b401658d49e781469534e8613913.pdf",
+            },
             single_target_original_name="尼米兹级资料.pdf",
+            single_target_file_name="3199b401658d49e781469534e8613913.pdf",
             terms_workspace_slug="terms-ws",
         )
 
@@ -266,6 +309,14 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
 
         self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
         self.assertEqual(result["analyseDataSource"][0]["source"], "尼米兹级资料.pdf")
+        self.assertEqual(
+            result["analyseDataSource"][0]["fileName"],
+            "3199b401658d49e781469534e8613913.pdf",
+        )
+        self.assertEqual(
+            result["analyseDataSource"][0]["rows"],
+            ["Nimitz (CVN 68) class", "The class serves in the United States Navy."],
+        )
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
         self.assertIn("术语规则参考开始", client.prompts[0])
         self.assertIn("中文型号规则", client.prompts[0])
@@ -309,7 +360,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             source_original_names={
                 "jfs_3526-jfs_-16-aug-2023.pdf": "尼米兹级资料.pdf",
             },
+            source_file_names={
+                "jfs_3526-jfs_-16-aug-2023.pdf": "3199b401658d49e781469534e8613913.pdf",
+            },
             single_target_original_name="尼米兹级资料.pdf",
+            single_target_file_name="3199b401658d49e781469534e8613913.pdf",
             terms_workspace_slug="terms-ws",
         )
 
@@ -328,6 +383,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
 
         self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
         self.assertEqual(result["analyseDataSource"][0]["source"], "尼米兹级资料.pdf")
+        self.assertEqual(
+            result["analyseDataSource"][0]["fileName"],
+            "3199b401658d49e781469534e8613913.pdf",
+        )
+        self.assertEqual(result["analyseDataSource"][0]["rows"], ["Nimitz (CVN 68) class"])
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
         self.assertNotIn("术语规则参考开始", client.prompts[0])
         self.assertNotIn("中文型号规则", client.prompts[0])
@@ -381,6 +441,10 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
 
         self.assertEqual(context.terms_workspace_slug, "terms-ws")
         self.assertEqual(context.target_file_names, {"JFS_3526-JFS_-16-Aug-2023.pdf"})
+        self.assertEqual(
+            context.source_file_names["jfs_3526-jfs_-16-aug-2023.pdf"],
+            "JFS_3526-JFS_-16-Aug-2023.pdf",
+        )
         self.assertEqual(
             context.target_workspace_term_doc_paths,
             ["custom-documents/term_rule_0005_中文型号.md.json"],
@@ -536,7 +600,9 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
             target_file_names={"carrier-radars.pdf"},
             target_doc_paths=set(),
             source_original_names={"carrier-radars.pdf": "航母雷达资料.pdf"},
+            source_file_names={"carrier-radars.pdf": "3199b401658d49e781469534e8613913.pdf"},
             single_target_original_name="航母雷达资料.pdf",
+            single_target_file_name="3199b401658d49e781469534e8613913.pdf",
         )
 
         with patch("app.services.llm_service.weaponry_service._vector_search_with_top_n", side_effect=fake_vector_search):
@@ -559,7 +625,143 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
         self.assertEqual(first_row[1]["analyseData"], "S波段")
         self.assertEqual(first_row[2]["analyseData"], "约320公里")
         self.assertEqual(first_row[0]["analyseDataSource"][0]["source"], "航母雷达资料.pdf")
+        self.assertEqual(
+            first_row[0]["analyseDataSource"][0]["fileName"],
+            "3199b401658d49e781469534e8613913.pdf",
+        )
+        self.assertEqual(
+            first_row[0]["analyseDataSource"][0]["rows"],
+            ["The carrier carries AN/SPY-1D S-band radar and AN/SPS-49 L-band radar."],
+        )
         self.assertEqual(second_row[0]["analyseData"], "AN/SPS-49")
+
+
+class TestWeaponrySelectedFilesTask(unittest.TestCase):
+    @patch("app.services.llm_service.weaponry_service._query_input_field")
+    @patch("app.services.llm_service.weaponry_service._prepare_retrieval_context")
+    @patch("app.services.llm_service.weaponry_service.AnythingLLMClient")
+    def test_selected_files_use_and_cleanup_temporary_workspace(
+        self,
+        MockClient,
+        mock_prepare_context,
+        mock_query_input,
+    ):
+        client = MockClient.return_value
+        client.create_rag_workspace.return_value = {"slug": "selected-ws"}
+        client.update_embeddings_batch.return_value = True
+        client.create_thread.return_value = {"slug": "selected-thread"}
+        client.extract_thread_slug.return_value = "selected-thread"
+        client.delete_thread.return_value = True
+        client.delete_workspace.return_value = True
+
+        context = WeaponryRetrievalContext(
+            target_file_names={"selected.pdf"},
+            target_doc_paths={"custom-documents/selected.json"},
+        )
+        mock_prepare_context.return_value = context
+        mock_query_input.return_value = {
+            "fieldName": "舰级名称",
+            "fieldType": "INPUT",
+            "analyseData": "尼米兹级",
+            "analyseDataSource": [],
+        }
+
+        kb_service = MagicMock()
+        kb_service.get_workspace_slug.return_value = "architecture-ws"
+        kb_service.list_document_records.return_value = [
+            {
+                "file_name": "selected.pdf",
+                "original_name": "选中文件.pdf",
+                "architecture_id": 10502,
+                "anything_doc_id": "selected-doc-id",
+                "doc_path": "custom-documents/selected.json",
+            },
+            {
+                "file_name": "unselected.pdf",
+                "original_name": "未选文件.pdf",
+                "architecture_id": 10502,
+                "anything_doc_id": "unselected-doc-id",
+                "doc_path": "custom-documents/unselected.json",
+            },
+        ]
+
+        run_weaponry_task(
+            task_service=MagicMock(),
+            kb_service=kb_service,
+            progress_hub=MagicMock(),
+            request_payload={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+            callback_url="",
+            callback_timeout=5.0,
+            selected_file_names=["selected.pdf"],
+        )
+
+        client.create_rag_workspace.assert_called_once()
+        client.update_embeddings_batch.assert_called_once_with(
+            "selected-ws",
+            adds=["custom-documents/selected.json"],
+            user_id=1,
+        )
+        mock_prepare_context.assert_called_once_with(
+            client,
+            kb_service,
+            10502,
+            "selected-ws",
+            user_id=1,
+            selected_file_names=["selected.pdf"],
+        )
+        self.assertEqual(mock_query_input.call_args.args[1], "selected-ws")
+        client.delete_workspace.assert_called_once_with("selected-ws", user_id=1)
+
+    @patch("app.services.llm_service.weaponry_service.AnythingLLMClient")
+    def test_selected_workspace_is_deleted_when_document_binding_fails(self, MockClient):
+        client = MockClient.return_value
+        client.create_rag_workspace.return_value = {"slug": "selected-ws"}
+        client.update_embeddings_batch.return_value = False
+        client.delete_workspace.return_value = True
+
+        kb_service = MagicMock()
+        kb_service.get_workspace_slug.return_value = "architecture-ws"
+        kb_service.list_document_records.return_value = [
+            {
+                "file_name": "selected.pdf",
+                "original_name": "选中文件.pdf",
+                "architecture_id": 10502,
+                "anything_doc_id": "selected-doc-id",
+                "doc_path": "custom-documents/selected.json",
+            }
+        ]
+        task_service = MagicMock()
+
+        run_weaponry_task(
+            task_service=task_service,
+            kb_service=kb_service,
+            progress_hub=MagicMock(),
+            request_payload={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+            callback_url="",
+            callback_timeout=5.0,
+            selected_file_names=["selected.pdf"],
+        )
+
+        task_service.mark_business_result.assert_called_once()
+        self.assertEqual(task_service.mark_business_result.call_args.kwargs["status"], "3")
+        client.create_thread.assert_not_called()
+        client.delete_workspace.assert_called_once_with("selected-ws", user_id=1)
 
 
 if __name__ == "__main__":
