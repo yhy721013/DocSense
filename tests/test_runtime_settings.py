@@ -31,12 +31,12 @@ class RuntimeSettingsTests(unittest.TestCase):
         with workspace_tempdir() as temp_dir:
             runtime_dir = pathlib.Path(temp_dir) / "runtime"
             script = (
-                "import json; "
+                "import json; import sys; "
                 "from app.services.core.settings import ("
                 "RUNTIME_DIR, LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH, CHAT_DB_PATH, "
                 "LLM_DOWNLOAD_DIR, OCR_CACHE_DIR, MINERU_CACHE_DIR, SQLITE_EXPORT_DIR"
                 "); "
-                "print(json.dumps([str(p) for p in ("
+                "sys.stdout.write(json.dumps([str(p) for p in ("
                 "RUNTIME_DIR, LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH, CHAT_DB_PATH, "
                 "LLM_DOWNLOAD_DIR, OCR_CACHE_DIR, MINERU_CACHE_DIR, SQLITE_EXPORT_DIR"
                 ")]))"

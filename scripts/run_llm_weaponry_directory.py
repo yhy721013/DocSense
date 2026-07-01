@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -30,6 +31,8 @@ RUNTIME_DIR = ROOT / ".runtime"
 TASK_DB = RUNTIME_DIR / "llm_tasks.sqlite3"
 KB_DB = RUNTIME_DIR / "knowledge_base.sqlite3"
 DEFAULT_OUTPUT_PREFIX = "qwen3-4b-new"
+
+logger = logging.getLogger(__name__)
 
 FIELD_NAMES = [
     "装备编号",
@@ -348,7 +351,7 @@ def wait_task(
         status = str(data.get("status", ""))
         progress = data.get("progress")
         if progress != last_progress:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {label} status={status} progress={progress}", flush=True)
+            logger.info("%s status=%s progress=%s", label, status, progress)
             last_progress = progress
         if status in {"2", "3"}:
             return body
@@ -563,7 +566,7 @@ def run_file(
         json.dumps(analysis_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] POST /llm/analysis {file_name}", flush=True)
+    logger.info("POST /llm/analysis %s", file_name)
     analysis_submit = request_json("POST", base_url, "/llm/analysis", analysis_payload, timeout=60)
     (file_out_dir / "analysis_submit_response.json").write_text(
         json.dumps(analysis_submit, ensure_ascii=False, indent=2) + "\n",
@@ -599,17 +602,14 @@ def run_file(
     related_docs = [record for record in kb_records if record.get("file_name")]
     if len(related_docs) != 1 or related_docs[0].get("file_name") != file_name:
         raise RuntimeError(f"architectureId={architecture_id} isolation check failed: {kb_records}")
-    print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] KB isolation OK workspace={related_docs[0].get('workspace_slug')}",
-        flush=True,
-    )
+    logger.info("KB isolation OK workspace=%s", related_docs[0].get("workspace_slug"))
 
     weaponry_payload = build_weaponry_payload(architecture_id, file_name, template_classify_id)
     (file_out_dir / "weaponry_request.json").write_text(
         json.dumps(weaponry_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] POST /llm/weaponry arch={architecture_id}", flush=True)
+    logger.info("POST /llm/weaponry arch=%s", architecture_id)
     weaponry_submit = request_json("POST", base_url, "/llm/weaponry", weaponry_payload, timeout=60)
     (file_out_dir / "weaponry_submit_response.json").write_text(
         json.dumps(weaponry_submit, ensure_ascii=False, indent=2) + "\n",
@@ -682,6 +682,10 @@ def run_file(
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)d] %(message)s",
+    )
     load_env()
     args = parse_args()
 
@@ -726,7 +730,7 @@ def main() -> int:
 
     if args.dry_run:
         write_outputs(out_dir, args.output_prefix, [], [], manifest)
-        print(f"DRY_RUN OUT_DIR={out_dir} files={len(files)}", flush=True)
+        logger.info("DRY_RUN OUT_DIR=%s files=%d", out_dir, len(files))
         return 0
 
     ensure_doc_sense_reachable(base_url)
@@ -746,10 +750,12 @@ def main() -> int:
     try:
         for index, file_path in enumerate(files, 1):
             architecture_id = architecture_ids[file_path]
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] START {index}/{len(files)} "
-                f"{file_path.name} arch={architecture_id}",
-                flush=True,
+            logger.info(
+                "START %d/%d %s arch=%s",
+                index,
+                len(files),
+                file_path.name,
+                architecture_id,
             )
             row, file_audit_rows, file_manifest = run_file(
                 base_url=base_url,
@@ -769,11 +775,12 @@ def main() -> int:
             manifest["completed_rows"] = len(rows)
             manifest["updated_at"] = datetime.now().isoformat()
             write_outputs(out_dir, args.output_prefix, rows, audit_rows, manifest)
-            print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] DONE {file_path.name} "
-                f"non_empty={file_manifest['non_empty_count']}/{len(FIELD_NAMES)} "
-                f"term_source_fields={file_manifest['term_source_fields']}",
-                flush=True,
+            logger.info(
+                "DONE %s non_empty=%s/%d term_source_fields=%s",
+                file_path.name,
+                file_manifest["non_empty_count"],
+                len(FIELD_NAMES),
+                file_manifest["term_source_fields"],
             )
     finally:
         if static_server is not None:
@@ -783,7 +790,7 @@ def main() -> int:
     manifest["finished_at"] = datetime.now().isoformat()
     manifest["completed_rows"] = len(rows)
     write_outputs(out_dir, args.output_prefix, rows, audit_rows, manifest)
-    print(f"DONE OUT_DIR={out_dir} completed_rows={len(rows)}", flush=True)
+    logger.info("DONE OUT_DIR=%s completed_rows=%d", out_dir, len(rows))
     return 0
 
 

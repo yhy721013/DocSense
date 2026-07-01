@@ -17,7 +17,7 @@ try:
     MHTML2PDF_AVAILABLE = True
 except ImportError:
     MHTML2PDF_AVAILABLE = False
-    print("[警告] mhtml2pdf 模块未找到，将降级使用纯文本提取模式")
+    logger.warning("mhtml2pdf 模块未找到，将降级使用纯文本提取模式")
 
 
 _BLOCK_BREAK_TAGS = {
@@ -218,7 +218,7 @@ def normalize_mhtml_file(file_path: str, use_pdf_conversion: bool = True) -> str
     # 【新流程】尝试使用 MHTML → PDF 转换
     if use_pdf_conversion and MHTML2PDF_AVAILABLE:
         try:
-            print(f"[MHTML 标准化] 使用高质量流程：MHTML → PDF")
+            logger.info("MHTML 标准化使用高质量流程：MHTML → PDF")
             
             # 生成 PDF 输出路径
             pdf_output_path = str(source.with_name(f"{source.name}.normalized.pdf"))
@@ -226,18 +226,18 @@ def normalize_mhtml_file(file_path: str, use_pdf_conversion: bool = True) -> str
             # 调用 MHTML → PDF 转换器
             convert_mhtml_to_pdf(str(source), pdf_output_path)
             
-            print(f"[MHTML 标准化] PDF 已生成: {pdf_output_path}")
+            logger.info("MHTML 标准化 PDF 已生成: %s", pdf_output_path)
             return pdf_output_path
             
         except Exception as e:
-            print(f"[警告] MHTML → PDF 转换失败: {e}")
-            print(f"[降级] 切换到纯文本提取模式")
+            logger.warning("MHTML → PDF 转换失败: %s", e)
+            logger.info("MHTML 标准化切换到纯文本提取模式")
     
     # 【降级方案】使用纯文本提取
-    print(f"[MHTML 标准化] 使用降级流程：MHTML → 纯文本 MD")
+    logger.info("MHTML 标准化使用降级流程：MHTML → 纯文本 MD")
     normalized_path = source.with_name(f"{source.name}.normalized.md")
     normalized_path.write_text(extract_text_from_mhtml(file_path) + "\n", encoding="utf-8")
-    print(f"[MHTML 标准化] Markdown 已生成: {normalized_path}")
+    logger.info("MHTML 标准化 Markdown 已生成: %s", normalized_path)
     return str(normalized_path)
 
 

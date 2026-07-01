@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -13,6 +14,9 @@ sys.path.insert(0, str(ROOT))
 from app.services.utils.callback_client import save_callback_history_payload  # noqa: E402
 
 from dotenv import load_dotenv
+
+
+logger = logging.getLogger(__name__)
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -35,8 +39,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
             parsed = {"raw": text}
 
         target = save_callback_history_payload(parsed)
-        print(f"Callback history saved to {target}")
-        print(json.dumps(parsed, ensure_ascii=False, indent=2))
+        logger.info("Callback history saved to %s", target)
+        logger.info("Callback payload:\n%s", json.dumps(parsed, ensure_ascii=False, indent=2))
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
@@ -44,6 +48,10 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)d] %(message)s",
+    )
     load_dotenv(override=True)
     parser = argparse.ArgumentParser(description="Local callback receiver for DocSense integration tests")
     parser.add_argument("--host", default=os.getenv("MOCK_CALLBACK_HOST", "127.0.0.1"))
@@ -51,7 +59,7 @@ def main() -> None:
     args = parser.parse_args()
 
     server = HTTPServer((args.host, args.port), CallbackHandler)
-    print(f"Mock callback server listening on http://{args.host}:{args.port}")
+    logger.info("Mock callback server listening on http://%s:%s", args.host, args.port)
     server.serve_forever()
 
 

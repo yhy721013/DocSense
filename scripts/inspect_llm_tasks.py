@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import sqlite3
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,8 @@ DEFAULT_DB_PATH = Path(
     os.getenv("DOCSENSE_LLM_TASK_DB", str(RUNTIME_DIR / "llm_tasks.sqlite3"))
 ).expanduser().resolve()
 DEFAULT_OUTPUT_DIR = RUNTIME_DIR / "sqlite"
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -169,14 +171,18 @@ def export_database(db_path: Path, output_dir: Path) -> Path:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s [%(name)s:%(lineno)d] %(message)s",
+    )
     args = parse_args()
     try:
         output_path = export_database(Path(args.db_path), Path(args.output_dir))
     except Exception as exc:  # noqa: BLE001 - script entrypoint should return a concise CLI error.
-        print(f"导出失败: {exc}", file=sys.stderr)
+        logger.error("导出失败: %s", exc)
         return 1
 
-    print(f"已导出 llm_tasks SQLite 内容到: {output_path}")
+    logger.info("已导出 llm_tasks SQLite 内容到: %s", output_path)
     return 0
 
 

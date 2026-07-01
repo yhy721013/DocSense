@@ -485,8 +485,8 @@ class TXTHandler:
             f.write("\n".join(monolingual_html_content))
 
         tracker.mark_completed()
-        print(f"双语 HTML 已保存至：{bilingual_output_path}")
-        print(f"单语 HTML 已保存至：{monolingual_output_path}")
+        logger.info("双语 HTML 已保存至：%s", bilingual_output_path)
+        logger.info("单语 HTML 已保存至：%s", monolingual_output_path)
         return bilingual_output_path, monolingual_output_path
 
     def _create_progress_bar(self, percentage: float, width: int = 30) -> str:
