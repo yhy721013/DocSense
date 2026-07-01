@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import threading
 import logging
-from typing import Any, Dict, Optional
+from pathlib import PurePosixPath
+from typing import Any, Dict, List, Optional
+from urllib.parse import unquote, urlparse
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
@@ -48,6 +50,35 @@ def _with_upload_semaphore(fn, **kwargs):
         fn(**kwargs)
     finally:
         _upload_semaphore.release()
+
+
+def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
+    """将 weaponry filePathList 中的 URL/裸文件名归一化为哈希文件名。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("filePathList必须为数组")
+
+    normalized: List[str] = []
+    seen = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"filePathList中第{index + 1}项不是有效字符串")
+
+        raw_value = item.strip()
+        parsed = urlparse(raw_value)
+        decoded_path = unquote(parsed.path or raw_value).replace("\\", "/")
+        file_name = PurePosixPath(decoded_path).name.strip()
+        if not file_name or file_name in {".", ".."}:
+            raise ValueError(f"filePathList中第{index + 1}项无法提取文件名")
+
+        key = file_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(file_name)
+
+    return normalized
 
 
 def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -368,6 +399,34 @@ def llm_weaponry():
         logger.warning("武器装备提取请求被拒绝: architectureId为空")
         return jsonify({"error": "architectureId不能为空"}), 400
 
+    try:
+        selected_file_names = _normalize_weaponry_file_path_list(params.get("filePathList"))
+    except ValueError as exc:
+        logger.warning(
+            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error=%s",
+            architecture_id,
+            exc,
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    for file_name in selected_file_names:
+        document_record = kb_service.get_document_record(file_name)
+        if not document_record:
+            logger.warning(
+                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s fileName=%s",
+                architecture_id,
+                file_name,
+            )
+            return jsonify({"error": f"文件 {file_name} 尚未解析"}), 404
+        if str(document_record.get("architecture_id")) != str(architecture_id):
+            logger.warning(
+                "武器装备提取请求被拒绝: 选中文件不属于当前类别 architectureId=%s fileName=%s actualArchitectureId=%s",
+                architecture_id,
+                file_name,
+                document_record.get("architecture_id"),
+            )
+            return jsonify({"error": f"文件 {file_name} 不属于当前类别"}), 400
+
     field_list = params.get("weaponryTemplateFieldList")
     if not isinstance(field_list, list) or not field_list:
         logger.warning(
@@ -431,6 +490,7 @@ def llm_weaponry():
             "kb_service": kb_service,
             "progress_hub": progress_hub,
             "request_payload": payload,
+            "selected_file_names": selected_file_names,
             "callback_url": llm_config.callback_url or "",
             "callback_timeout": llm_config.callback_timeout,
         },

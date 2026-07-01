@@ -170,6 +170,8 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
+   - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时只解析列表选中的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并严格校验文件已解析且属于当前 `architectureId`。
+   - 指定文件范围时会创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束后自动删除，原类别 workspace 不做增删。
    - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
    - 字段抽取默认采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取，并在回调中扩展为多行二维 `tableFieldList`，例如“每种雷达一行、各指标为列”。

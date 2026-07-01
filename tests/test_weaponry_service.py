@@ -1,7 +1,7 @@
 """tests/test_weaponry_service.py — weaponry_service 核心映射函数的单元测试"""
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from datetime import datetime
 
 from app.services.llm_service.weaponry_service import (
@@ -22,6 +22,8 @@ from app.services.llm_service.weaponry_service import (
     _restore_target_workspace_terms,
     _resolve_hashed_source_name,
     _resolve_original_source_name,
+    _target_document_records,
+    run_weaponry_task,
 )
 
 
@@ -157,6 +159,21 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertFalse(_is_target_source("term_rule_0005_中文型号.md", context))
         self.assertTrue(_is_target_source("JFS_3526-JFS_-16-Aug-2023.pdf", context))
         self.assertTrue(_is_target_source("", context))
+
+    def test_target_document_records_preserve_selected_file_order(self):
+        class FakeKB:
+            def list_document_records(self):
+                return [
+                    {"file_name": "a.pdf", "architecture_id": 123},
+                    {"file_name": "b.pdf", "architecture_id": 123},
+                    {"file_name": "other.pdf", "architecture_id": 456},
+                ]
+
+        records = _target_document_records(FakeKB(), 123, ["b.pdf", "a.pdf"])
+
+        self.assertEqual([record["file_name"] for record in records], ["b.pdf", "a.pdf"])
+        with self.assertRaisesRegex(ValueError, "不存在或不属于当前类别"):
+            _target_document_records(FakeKB(), 123, ["other.pdf"])
 
     def test_resolve_original_source_name_for_mode2_callback(self):
         context = WeaponryRetrievalContext(
@@ -617,6 +634,134 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
             ["The carrier carries AN/SPY-1D S-band radar and AN/SPS-49 L-band radar."],
         )
         self.assertEqual(second_row[0]["analyseData"], "AN/SPS-49")
+
+
+class TestWeaponrySelectedFilesTask(unittest.TestCase):
+    @patch("app.services.llm_service.weaponry_service._query_input_field")
+    @patch("app.services.llm_service.weaponry_service._prepare_retrieval_context")
+    @patch("app.services.llm_service.weaponry_service.AnythingLLMClient")
+    def test_selected_files_use_and_cleanup_temporary_workspace(
+        self,
+        MockClient,
+        mock_prepare_context,
+        mock_query_input,
+    ):
+        client = MockClient.return_value
+        client.create_rag_workspace.return_value = {"slug": "selected-ws"}
+        client.update_embeddings_batch.return_value = True
+        client.create_thread.return_value = {"slug": "selected-thread"}
+        client.extract_thread_slug.return_value = "selected-thread"
+        client.delete_thread.return_value = True
+        client.delete_workspace.return_value = True
+
+        context = WeaponryRetrievalContext(
+            target_file_names={"selected.pdf"},
+            target_doc_paths={"custom-documents/selected.json"},
+        )
+        mock_prepare_context.return_value = context
+        mock_query_input.return_value = {
+            "fieldName": "舰级名称",
+            "fieldType": "INPUT",
+            "analyseData": "尼米兹级",
+            "analyseDataSource": [],
+        }
+
+        kb_service = MagicMock()
+        kb_service.get_workspace_slug.return_value = "architecture-ws"
+        kb_service.list_document_records.return_value = [
+            {
+                "file_name": "selected.pdf",
+                "original_name": "选中文件.pdf",
+                "architecture_id": 10502,
+                "anything_doc_id": "selected-doc-id",
+                "doc_path": "custom-documents/selected.json",
+            },
+            {
+                "file_name": "unselected.pdf",
+                "original_name": "未选文件.pdf",
+                "architecture_id": 10502,
+                "anything_doc_id": "unselected-doc-id",
+                "doc_path": "custom-documents/unselected.json",
+            },
+        ]
+
+        run_weaponry_task(
+            task_service=MagicMock(),
+            kb_service=kb_service,
+            progress_hub=MagicMock(),
+            request_payload={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+            callback_url="",
+            callback_timeout=5.0,
+            selected_file_names=["selected.pdf"],
+        )
+
+        client.create_rag_workspace.assert_called_once()
+        client.update_embeddings_batch.assert_called_once_with(
+            "selected-ws",
+            adds=["custom-documents/selected.json"],
+            user_id=1,
+        )
+        mock_prepare_context.assert_called_once_with(
+            client,
+            kb_service,
+            10502,
+            "selected-ws",
+            user_id=1,
+            selected_file_names=["selected.pdf"],
+        )
+        self.assertEqual(mock_query_input.call_args.args[1], "selected-ws")
+        client.delete_workspace.assert_called_once_with("selected-ws", user_id=1)
+
+    @patch("app.services.llm_service.weaponry_service.AnythingLLMClient")
+    def test_selected_workspace_is_deleted_when_document_binding_fails(self, MockClient):
+        client = MockClient.return_value
+        client.create_rag_workspace.return_value = {"slug": "selected-ws"}
+        client.update_embeddings_batch.return_value = False
+        client.delete_workspace.return_value = True
+
+        kb_service = MagicMock()
+        kb_service.get_workspace_slug.return_value = "architecture-ws"
+        kb_service.list_document_records.return_value = [
+            {
+                "file_name": "selected.pdf",
+                "original_name": "选中文件.pdf",
+                "architecture_id": 10502,
+                "anything_doc_id": "selected-doc-id",
+                "doc_path": "custom-documents/selected.json",
+            }
+        ]
+        task_service = MagicMock()
+
+        run_weaponry_task(
+            task_service=task_service,
+            kb_service=kb_service,
+            progress_hub=MagicMock(),
+            request_payload={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+            callback_url="",
+            callback_timeout=5.0,
+            selected_file_names=["selected.pdf"],
+        )
+
+        task_service.mark_business_result.assert_called_once()
+        self.assertEqual(task_service.mark_business_result.call_args.kwargs["status"], "3")
+        client.create_thread.assert_not_called()
+        client.delete_workspace.assert_called_once_with("selected-ws", user_id=1)
 
 
 if __name__ == "__main__":
