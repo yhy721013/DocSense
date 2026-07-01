@@ -7,6 +7,13 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()  # 加载 .env 文件到环境变量，但不覆盖已显式传入的值
 
+from app.services.core.settings import (
+    LLM_DOWNLOAD_DIR,
+    LLM_TASK_DB_PATH,
+    MINERU_CACHE_DIR,
+    OCR_CACHE_DIR,
+)
+
 
 @dataclass(frozen=True)
 class AnythingLLMConfig:
@@ -101,14 +108,13 @@ def load_ocr_config() -> OCRConfig:
         dpi=_parse_int(os.getenv("DOCSENSE_OCR_DPI"), 300, min_value=50),
         sample_pages=_parse_int(os.getenv("DOCSENSE_OCR_SAMPLE_PAGES"), 3, min_value=1),
         text_threshold=_parse_int(os.getenv("DOCSENSE_OCR_TEXT_THRESHOLD"), 50, min_value=0),
-        cache_dir=os.getenv("DOCSENSE_OCR_CACHE_DIR", ".runtime/ocr_markdown").strip() or ".runtime/ocr_markdown",
+        cache_dir=str(OCR_CACHE_DIR),
         analysis_scanned_pdf_engine=_parse_choice(
             os.getenv("DOCSENSE_ANALYSIS_SCANNED_PDF_ENGINE"),
             "mineru",
             {"mineru", "ocr"},
         ),
-        mineru_cache_dir=os.getenv("DOCSENSE_MINERU_CACHE_DIR", ".runtime/mineru_markdown").strip()
-        or ".runtime/mineru_markdown",
+        mineru_cache_dir=str(MINERU_CACHE_DIR),
         mineru_lang=os.getenv("DOCSENSE_MINERU_LANG", "ch").strip() or "ch",
         mineru_api_url=_parse_optional_str(os.getenv("DOCSENSE_MINERU_API_URL")),
         tessdata_prefix=_parse_optional_str(os.getenv("TESSDATA_PREFIX")),
@@ -119,9 +125,7 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
     return LLMIntegrationConfig(
         callback_url=_parse_optional_str(os.getenv("CALLBACK_URL")),
         callback_timeout=float(os.getenv("CALLBACK_TIMEOUT", "10").strip() or "10"),
-        task_db_path=os.getenv("DOCSENSE_LLM_TASK_DB", "../../../.runtime/llm_tasks.sqlite3").strip()
-        or ".runtime/llm_tasks.sqlite3",
+        task_db_path=str(LLM_TASK_DB_PATH),
         download_timeout=float(os.getenv("FILE_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
-        download_dir=os.getenv("FILE_DOWNLOAD_DIR", "../../../.runtime/llm_downloads").strip()
-        or ".runtime/llm_downloads",
+        download_dir=str(LLM_DOWNLOAD_DIR),
     )

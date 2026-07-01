@@ -34,6 +34,31 @@ class LLMTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["business_key"] for item in tasks], ["a.pdf", "b.pdf"])
 
+    def test_llm_interaction_persists_content_and_cleanup_status(self):
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+
+            interaction_id = service.create_llm_interaction(
+                business_type="file",
+                business_key="demo.pdf",
+                workspace_name="llm-file-1000",
+                workspace_slug="llm-file-1000",
+                thread_slug="analysis-demo",
+                prompt="提取文档字段",
+                response='{"summary":"摘要"}',
+                sources=[{"title": "demo.pdf", "text": "原文片段"}],
+                status="succeeded",
+            )
+            service.update_llm_interaction_cleanup(interaction_id, status="deleted")
+
+            interactions = service.get_llm_interactions("file", "demo.pdf")
+
+            self.assertEqual(len(interactions), 1)
+            self.assertEqual(interactions[0]["prompt"], "提取文档字段")
+            self.assertEqual(interactions[0]["response"], '{"summary":"摘要"}')
+            self.assertEqual(interactions[0]["sources"][0]["text"], "原文片段")
+            self.assertEqual(interactions[0]["workspace_cleanup_status"], "deleted")
+
     def test_completed_task_with_failed_callback_should_replay(self):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")

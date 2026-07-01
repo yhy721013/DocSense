@@ -102,7 +102,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 
 ## 4. 任务模型与状态
 
-所有任务统一持久化到任务库（默认 `.runtime/llm_tasks.sqlite3`），查询键如下：
+所有任务统一持久化到任务库（默认 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`），查询键如下：
 
 - `file`：`fileName`
 - `report`：`reportId`
@@ -141,7 +141,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
-| GET | `/debug/api/callback` | 读取旧版最近一次预览文件 `.runtime/call_back.json`，暂不浏览历史目录 |
+| GET | `/debug/api/callback` | 读取旧版最近一次预览文件 `${DOCSENSE_RUNTIME_DIR}/call_back.json`，暂不浏览历史目录 |
 | GET | `/debug/chat` | 本地文件对话调试页，联调 `/llm/chat*` 三个接口 |
 | GET | `/debug/api/chat/bootstrap` | 读取本地会话列表与已解析文件列表，供 `/debug/chat` 初始化使用 |
 
@@ -170,13 +170,15 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
+   - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时只解析列表选中的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并严格校验文件已解析且属于当前 `architectureId`。
+   - 指定文件范围时会创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束后自动删除，原类别 workspace 不做增删。
    - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
    - 字段抽取默认采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取，并在回调中扩展为多行二维 `tableFieldList`，例如“每种雷达一行、各指标为列”。
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语临时移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束后再恢复目标 workspace，避免术语文档占满目标证据检索结果。
    - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息，但仍保留目标证据过滤和术语文档临时清理/恢复。
    - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
-   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 优先返回 `documents.original_name` 文件原名，无法映射时回退内部文件名。
+   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 优先返回 `documents.original_name` 文件原名，`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表；文件映射缺失时文件名字段回退为 AnythingLLM 返回的内部来源名。
    - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
 
 4. `/llm/check-task`
@@ -249,7 +251,7 @@ python run.py
 回调调试页前提：
 
 - 已配置 `CALLBACK_URL`
-- 至少发生过一次文件解析或报告生成回调
+- 至少发生过一次文件解析、报告生成或武器装备知识谱系解析回调
 
 回调调试页访问：
 
@@ -258,11 +260,15 @@ python run.py
 
 回调调试页说明：
 
+- 新回调 JSON 历史记录统一保存在 `${DOCSENSE_RUNTIME_DIR}/callback/`
+- `/debug/callback` 和 `/debug/api/callback` 暂不浏览回调历史目录，仍只尝试读取旧版 `${DOCSENSE_RUNTIME_DIR}/call_back.json`
 - 新回调 JSON 历史记录统一保存在仓库根目录 `.runtime/callback/`
-- `/debug/callback` 和 `/debug/api/callback` 暂不浏览 `.runtime/callback/` 历史目录，仍只尝试读取旧版 `.runtime/call_back.json`
+- `/debug/callback` 默认展示 `.runtime/callback/` 下最新一条回调，并可在页面中选择最近历史记录
+- `/debug/api/callback?record=<json文件名>` 可读取指定历史回调文件；不再兜底读取旧版 `.runtime/call_back.json`
 - `file` 回调会结构化展示摘要信息、原文和翻译预览
 - `report` 回调会结构化展示报告信息和 HTML 报告预览
-- 若当前还没有回调文件，页面会显示空状态提示
+- `weaponry` 回调会结构化展示字段抽取结果和溯源信息
+- 若当前还没有新版回调历史文件，页面会显示空状态提示
 
 文件对话调试页前提：
 
@@ -276,7 +282,7 @@ python run.py
 
 文件对话调试页说明：
 
-- `/debug/chat` 不写入也不依赖 `.runtime/call_back.json`
+- `/debug/chat` 不写入也不依赖 `${DOCSENSE_RUNTIME_DIR}/call_back.json`
 - 页面直接联调正式接口 `POST /llm/chat`、`GET /llm/chat/history`、`POST /llm/chat/delete`
 - 页面左侧展示本地 `chat_sessions.sqlite3` 中的会话，文件选择来自 `knowledge_base.sqlite3` 中已解析文件记录
 - 文件选择器以“已选标签 + 添加文件面板”展示，支持勾选与取消勾选
@@ -285,13 +291,32 @@ python run.py
 
 ## 7. 运行时路径与持久化
 
+所有运行时文件统一派生自绝对根目录 `DOCSENSE_RUNTIME_DIR`。Windows 推荐使用正斜杠，例如：
+
+```env
+DOCSENSE_RUNTIME_DIR=C:/.me/envs/DocSenseEnv
+```
+
+显式配置时必须使用绝对路径；未配置时为了向后兼容，默认使用仓库根目录 `.runtime`。目录结构如下：
+
+- 任务库：`${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`
+- 知识库映射库：`${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3`
+- 对话状态库：`${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`
+- 下载缓存：`${DOCSENSE_RUNTIME_DIR}/llm_downloads/`
+- OCR Markdown 缓存：`${DOCSENSE_RUNTIME_DIR}/ocr_markdown/`
+- MinerU Markdown 缓存：`${DOCSENSE_RUNTIME_DIR}/mineru_markdown/`
+- 回调历史：`${DOCSENSE_RUNTIME_DIR}/callback/`
+- SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
+- 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`
+
+旧的组件级变量仍可作为兼容覆盖项，但一旦配置就会覆盖统一根目录。若希望全部内容位于同一目录，应删除 `DOCSENSE_LLM_TASK_DB`、`DOCSENSE_KNOWLEDGE_BASE_DB`、`KNOWLEDGE_BASE_DB_PATH`、`DOCSENSE_CHAT_DB`、`FILE_DOWNLOAD_DIR`、`DOCSENSE_OCR_CACHE_DIR` 和 `DOCSENSE_MINERU_CACHE_DIR`。
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）
 - 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
 - 对话状态库：`.runtime/chat_sessions.sqlite3`（`DOCSENSE_CHAT_DB`）
 - 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
 - MinerU Markdown 缓存目录：`.runtime/mineru_markdown`（`DOCSENSE_MINERU_CACHE_DIR`）
 - 回调历史目录：`.runtime/callback/`
-- 旧版最近一次回调预览：`.runtime/call_back.json`（当前新回调不再更新）
+- 旧版最近一次回调预览：`.runtime/call_back.json`（历史兼容遗留文件，当前新回调和 debug 页不再更新或读取）
 
 ## 8. 本地联调与测试
 
@@ -301,7 +326,7 @@ python run.py
 python scripts/inspect_llm_tasks.py
 ```
 
-`scripts/inspect_llm_tasks.py` 只使用 Python 标准库，可在 Windows 和 macOS 上运行。脚本默认读取 `.runtime/llm_tasks.sqlite3`，也会遵循 `DOCSENSE_LLM_TASK_DB` 指定的任务库路径；导出时会自动创建 `.runtime/sqlite/`，并写入按时间戳命名的 JSON 文件，例如 `.runtime/sqlite/llm_tasks_20260625_092658_122450.json`。
+`scripts/inspect_llm_tasks.py` 可在 Windows 和 macOS 上运行。脚本默认读取 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`，也会遵循 `DOCSENSE_LLM_TASK_DB` 指定的兼容覆盖路径；导出时会自动创建 `${DOCSENSE_RUNTIME_DIR}/sqlite/`，并写入按时间戳命名的 JSON 文件。
 
 导出的 JSON 顶层包含：
 
@@ -380,10 +405,10 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
 ```bash
 zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
   --pattern "*.pdf" \
-  --output-dir ".runtime/weaponry_surface_extract_manual" \
+  --output-dir "/var/lib/docsense/runtime/weaponry_surface_extract_manual" \
   --architecture-base 993000000
 
-pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --pattern '*.pdf' --output-dir '.runtime/weaponry_surface_extract_manual' --architecture-base 993000000"
+pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --pattern '*.pdf' --output-dir 'C:/.me/envs/DocSenseEnv/weaponry_surface_extract_manual' --architecture-base 993000000"
 ```
 
 如需递归扫描子目录，加 `--recursive`；如只想确认会扫描哪些文件和使用哪些临时 `architectureId`，加 `--dry-run`。脚本会自动避开已存在的 `architectureId`，防止旧 workspace/document 记录污染本轮结果。
@@ -391,14 +416,14 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
 测试文件批量武器装备字段抽取复现流程：
 
 1. 启动依赖服务：确认 AnythingLLM `3001` 可用，启动 DocSense 时建议使用 `APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py`，同时启动 `python scripts/mock_callback_server.py` 和指向 `测试文件-水面装备/` 的静态文件服务。
-2. 批量 runner 启动前先检查 `.runtime/knowledge_base.sqlite3` 和 `.runtime/llm_tasks.sqlite3`：本轮要使用的临时 `architectureId` 不应已有 workspace/document 记录；若已有记录，应停止并更换一组未占用的临时 ID，避免旧文档污染。
+2. 批量 runner 启动前先检查 `${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3` 和 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`：本轮要使用的临时 `architectureId` 不应已有 workspace/document 记录；若已有记录，应停止并更换一组未占用的临时 ID，避免旧文档污染。
 3. 扫描 `terms/` 下全部 `.md` 文件，上传到 AnythingLLM 并记录每个术语文件的 `doc_path`。术语文件只用于字段口径、别名和单位参考，不作为装备事实来源。
 4. 对 `测试文件-水面装备/` 下每个目标 PDF 串行执行：
    - 构造 `/llm/analysis` 请求，`filePath` 使用静态文件 URL，`originalFileName` 使用原始 PDF 文件名，`architectureList` 只传一个临时节点，使该 PDF 固定入库到对应 `architectureId`。
    - 轮询 `/llm/check-task`，直到 `businessType=file` 的 `status=2`；随后核验知识库映射中该 `architectureId` 只关联当前 PDF。
    - 将第 3 步记录的全部术语 `doc_path` 临时加入当前 PDF 的 workspace。`/llm/weaponry` 内部会把 `term_rule_*.md` 与目标证据分池处理，任务结束后应从目标 workspace 移除术语。
    - 构造 `/llm/weaponry` 请求，75 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
-   - 轮询 `/llm/check-task`，直到 `businessType=weaponry` 的 `status=2`；从 `.runtime/llm_tasks.sqlite3` 的任务结果中读取 `weaponryTemplateFieldList`。
+   - 轮询 `/llm/check-task`，直到 `businessType=weaponry` 的 `status=2`；从 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3` 的任务结果中读取 `weaponryTemplateFieldList`。
    - 抽取每个字段的 `analyseData` 写入汇总表；同步保留 `analyseDataSource` 到核验表。若接口、模型或内容安全检查导致字段未返回，汇总表填“未找到明确依据”，并在 manifest 或日志中记录失败字段与错误原因。
 5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 75 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 75` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
 
@@ -409,7 +434,8 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 1. 启动服务：`python run.py`
 2. 若联调回调型业务，触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
 3. 打开 `http://127.0.0.1:5001/debug/callback`
-4. 若要比对原始回调报文，优先查看 `.runtime/callback/` 下按业务键和时间戳保存的历史 JSON
+4. 若要比对原始回调报文，优先查看 `${DOCSENSE_RUNTIME_DIR}/callback/` 下按业务键和时间戳保存的历史 JSON
+4. 页面默认展示最新回调；若要比对历史报文，可在页面中选择记录，或查看 `.runtime/callback/` 下按业务键和时间戳保存的历史 JSON
 5. 若联调文件对话，先确保至少有一个已解析文件，再打开 `http://127.0.0.1:5001/debug/chat`
 6. 在 `/debug/chat` 中可直接完成发送消息、查看历史、删除会话三类联调
 

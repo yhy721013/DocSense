@@ -1,10 +1,14 @@
 import os
+import logging
 from typing import Optional
 from pathlib import Path
 
 from .mhtml2pdf import MHTMLToPDFConverter
 from .MarkdownHandler import MarkdownHandler
 from .core import HYMTTranslator
+
+
+logger = logging.getLogger(__name__)
 
 
 class MHTMLHandler:
@@ -44,7 +48,7 @@ class MHTMLHandler:
             output_dir=output_dir,
         )
 
-        print(f"[MHTML] Markdown saved: {md_path}")
+        logger.info("MHTML Markdown saved: %s", md_path)
         return md_path
 
     def process(

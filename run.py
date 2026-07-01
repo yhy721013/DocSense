@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import logging
 
 # 在导入 app 之前加载 .env。
 # 已显式传入的环境变量优先级更高，避免本地测试或启动脚本指定的端口被 .env 覆盖。
@@ -16,6 +17,9 @@ load_dotenv()
 from app import create_app
 
 
+logger = logging.getLogger(__name__)
+
+
 def main() -> None:
     app = create_app()
     host = os.environ.get("APP_HOST").strip()
@@ -23,7 +27,7 @@ def main() -> None:
     debug = os.environ.get("APP_DEBUG").strip().lower() in ("true", "1", "yes")
 
     # 开发与生产模式均使用 Flask 内置服务器
-    print(f"Starting server on {host}:{port} (debug={debug})")
+    logger.info("Starting server on %s:%s (debug=%s)", host, port, debug)
     app.run(host=host, port=port, debug=debug, threaded=True)
 
 

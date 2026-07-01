@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_ocr_config
@@ -11,6 +12,19 @@ from app.services.utils.ocr_preprocessor import prepare_file_for_upload
 
 
 OCR_CONFIG = load_ocr_config()
+
+
+@dataclass
+class RAGExecutionDetails:
+    """记录一次 RAG 调用创建的临时资源及返回内容。"""
+
+    workspace_name: str = ""
+    workspace_slug: Optional[str] = None
+    thread_slug: Optional[str] = None
+    workspace_created: bool = False
+    text_response: Optional[str] = None
+    raw_response: Optional[str] = None
+    sources: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def prepare_upload_files(file_path: str) -> List[str]:
@@ -41,8 +55,18 @@ def run_anythingllm_rag(
     user_id: int,
     mode: str = "query",
     reuse_workspace: bool = False,
+    execution_details: Optional[RAGExecutionDetails] = None,
 ) -> Optional[str]:
     # 负责：建 workspace/thread -> 上传 -> 绑 embedding -> 发送 prompt
+    if execution_details is not None:
+        execution_details.workspace_name = workspace_name
+        execution_details.workspace_slug = None
+        execution_details.thread_slug = None
+        execution_details.workspace_created = False
+        execution_details.text_response = None
+        execution_details.raw_response = None
+        execution_details.sources = []
+
     if not files_to_upload:
         return None
 
@@ -53,9 +77,13 @@ def run_anythingllm_rag(
     if not workspace_info:
         return None
 
-    workspace_slug = workspace_info.get("slug") or str(workspace_info.get("id"))
-    if not workspace_slug:
+    workspace_identifier = workspace_info.get("slug") or workspace_info.get("id")
+    if not workspace_identifier:
         return None
+    workspace_slug = str(workspace_identifier)
+    if execution_details is not None:
+        execution_details.workspace_slug = workspace_slug
+        execution_details.workspace_created = not reuse_workspace
 
     thread_info = client.create_thread(workspace_slug, thread_name, user_id=user_id)
     if not thread_info:
@@ -64,6 +92,9 @@ def run_anythingllm_rag(
     thread_slug = client.extract_thread_slug(thread_info) or thread_info.get("id")
     if not thread_slug:
         return None
+    thread_slug = str(thread_slug)
+    if execution_details is not None:
+        execution_details.thread_slug = thread_slug
 
     attached_document_ids: List[str] = []
     for upload_file in files_to_upload:
@@ -115,7 +146,16 @@ def run_anythingllm_rag(
     )
     if result is None:
         return None
-    return result.get("textResponse")
+    text_response = result.get("textResponse")
+    raw_response = result.get("rawTextResponse")
+    sources = result.get("sources", [])
+    if execution_details is not None:
+        execution_details.text_response = text_response if isinstance(text_response, str) else None
+        execution_details.raw_response = (
+            raw_response if isinstance(raw_response, str) else execution_details.text_response
+        )
+        execution_details.sources = sources if isinstance(sources, list) else []
+    return text_response
 
 
 def process_file_with_rag(
