@@ -67,13 +67,17 @@ class WeaponryRetrievalContext:
     target_file_names: Set[str]
     target_doc_paths: Set[str]
     source_original_names: Optional[Dict[str, str]] = None
+    source_file_names: Optional[Dict[str, str]] = None
     single_target_original_name: str = ""
+    single_target_file_name: str = ""
     terms_workspace_slug: Optional[str] = None
     target_workspace_term_doc_paths: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
         if self.source_original_names is None:
             self.source_original_names = {}
+        if self.source_file_names is None:
+            self.source_file_names = {}
         if self.target_workspace_term_doc_paths is None:
             self.target_workspace_term_doc_paths = []
 
@@ -157,16 +161,16 @@ def _source_lookup_keys(name: str) -> Set[str]:
     return {candidate.lower() for candidate in candidates if candidate}
 
 
-def _add_source_original_name_mapping(
+def _add_source_name_mapping(
     mapping: Dict[str, str],
     aliases: List[str],
-    original_name: str,
+    target_name: str,
 ) -> None:
-    if not original_name:
+    if not target_name:
         return
     for alias in aliases:
         for key in _source_lookup_keys(alias):
-            mapping.setdefault(key, original_name)
+            mapping.setdefault(key, target_name)
 
 
 def _resolve_original_source_name(
@@ -186,6 +190,27 @@ def _resolve_original_source_name(
         original_name = mapping.get(key)
         if original_name:
             return original_name
+
+    return normalized or str(source_name or "")
+
+
+def _resolve_hashed_source_name(
+    source_name: str,
+    context: Optional[WeaponryRetrievalContext],
+) -> str:
+    """将 AnythingLLM 来源标识映射为 documents.file_name（哈希文件名）。"""
+    normalized = _normalize_source_name(source_name)
+    if _is_terms_source_name(normalized):
+        return normalized
+
+    if not source_name:
+        return context.single_target_file_name if context else ""
+
+    mapping = context.source_file_names if context and context.source_file_names else {}
+    for key in _source_lookup_keys(source_name):
+        file_name = mapping.get(key)
+        if file_name:
+            return file_name
 
     return normalized or str(source_name or "")
 
@@ -532,7 +557,9 @@ def _prepare_retrieval_context(
     target_file_names: Set[str] = set()
     target_doc_paths: Set[str] = set()
     source_original_names: Dict[str, str] = {}
+    source_file_names: Dict[str, str] = {}
     original_names: Set[str] = set()
+    file_names: Set[str] = set()
     for record in records:
         file_name = str(record.get("file_name") or "")
         original_name = str(record.get("original_name") or "") or file_name
@@ -541,6 +568,8 @@ def _prepare_retrieval_context(
 
         if original_name:
             original_names.add(original_name)
+        if file_name:
+            file_names.add(file_name)
 
         for value in (file_name, original_name):
             value = _normalize_source_name(value)
@@ -559,7 +588,8 @@ def _prepare_retrieval_context(
             f"{anything_doc_id}.json" if anything_doc_id else "",
             f"custom-documents/{anything_doc_id}.json" if anything_doc_id else "",
         ]
-        _add_source_original_name_mapping(source_original_names, aliases, original_name)
+        _add_source_name_mapping(source_original_names, aliases, original_name)
+        _add_source_name_mapping(source_file_names, aliases, file_name)
 
     workspace_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
     term_doc_paths = [
@@ -591,7 +621,9 @@ def _prepare_retrieval_context(
         target_file_names=target_file_names,
         target_doc_paths=target_doc_paths,
         source_original_names=source_original_names,
+        source_file_names=source_file_names,
         single_target_original_name=next(iter(original_names)) if len(original_names) == 1 else "",
+        single_target_file_name=next(iter(file_names)) if len(file_names) == 1 else "",
         terms_workspace_slug=terms_workspace_slug,
         target_workspace_term_doc_paths=removed_term_paths,
     )
@@ -655,6 +687,35 @@ def _build_analyse_data_sources(sources: List[Dict[str, Any]], text_response: st
         # 甲方接口要求：无来源时返回空内容对象
         return [_map_source_to_analyse_data_source({}, text_response=text_response)]
     return res
+
+
+def _build_file_analyse_data_source(
+    *,
+    content: str,
+    source: str,
+    file_name: str,
+    rows: List[str],
+) -> Dict[str, Any]:
+    """构造按文件聚合模式的溯源对象，rows 必须是实际进入 Prompt 的 Chunk。"""
+    return {
+        "content": content,
+        "source": source,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "fileName": file_name,
+        "rows": list(rows),
+        "translate": _translate_if_needed(content),
+    }
+
+
+def _build_empty_file_analyse_data_sources(content: str = "") -> List[Dict[str, Any]]:
+    return [
+        _build_file_analyse_data_source(
+            content=content,
+            source="",
+            file_name="",
+            rows=[],
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -761,10 +822,15 @@ def _query_input_field(
     if not vs_results:
         logger.info("字段 [%s] 向量搜索无匹配，使用空来源", field_name)
         filled["analyseData"] = ""
-        filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+        analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
+        filled["analyseDataSource"] = (
+            _build_empty_file_analyse_data_sources()
+            if analyse_mode == "2"
+            else _build_analyse_data_sources([], text_response="")
+        )
         return filled
 
-    analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "1").strip()
+    analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
 
     if analyse_mode == "2":
         # 模式 2：按文件聚合
@@ -824,12 +890,13 @@ def _query_input_field(
 
             # 组装针对文件的 data_source，此时 translate 为 content 的翻译
             original_source_name = _resolve_original_source_name(file_name, retrieval_context)
-            mapped_source = {
-                "content": text_response,
-                "source": original_source_name,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "translate": _translate_if_needed(text_response),
-            }
+            hashed_file_name = _resolve_hashed_source_name(file_name, retrieval_context)
+            mapped_source = _build_file_analyse_data_source(
+                content=text_response,
+                source=original_source_name,
+                file_name=hashed_file_name,
+                rows=chunks,
+            )
             data_sources.append(mapped_source)
             
             if not first_valid_content:
@@ -838,7 +905,7 @@ def _query_input_field(
         if not data_sources:
             logger.info("字段 [%s] (模式2) 提取成功: 所有相关文件均未能提取出有效信息", field_name)
             filled["analyseData"] = ""
-            filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
+            filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
             return filled
 
         preview_text = first_valid_content.replace('\n', ' ')
@@ -1135,19 +1202,35 @@ def _table_row_identity(row: Dict[str, str], column_defs: List[Dict[str, Any]], 
     return f"row-{fallback_index}"
 
 
-def _build_table_cell_source(value: str, source_name: str) -> Dict[str, Any]:
-    return {
-        "content": value,
-        "source": source_name,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "translate": _translate_if_needed(value),
-    }
+def _build_table_cell_source(
+    value: str,
+    source_name: str,
+    file_name: str,
+    rows: List[str],
+) -> Dict[str, Any]:
+    return _build_file_analyse_data_source(
+        content=value,
+        source=source_name,
+        file_name=file_name,
+        rows=rows,
+    )
 
 
 def _append_unique_source(sources: List[Dict[str, Any]], source: Dict[str, Any]) -> None:
-    source_key = (source.get("content", ""), source.get("source", ""))
+    source_key = (
+        source.get("content", ""),
+        source.get("source", ""),
+        source.get("fileName", ""),
+        tuple(source.get("rows") or []),
+    )
     for existing in sources:
-        if (existing.get("content", ""), existing.get("source", "")) == source_key:
+        existing_key = (
+            existing.get("content", ""),
+            existing.get("source", ""),
+            existing.get("fileName", ""),
+            tuple(existing.get("rows") or []),
+        )
+        if existing_key == source_key:
             return
     sources.append(source)
 
@@ -1168,6 +1251,8 @@ def _merge_table_rows(row_results: List[Dict[str, Any]], column_defs: List[Dict[
             merged.append(item)
 
         source_name = str(row_result.get("source") or "")
+        file_name = str(row_result.get("fileName") or "")
+        rows = list(row_result.get("rows") or [])
         for column in column_defs:
             column_name = str(column.get("fieldName") or "").strip()
             if not column_name:
@@ -1179,7 +1264,7 @@ def _merge_table_rows(row_results: List[Dict[str, Any]], column_defs: List[Dict[
                 item["values"][column_name] = value
             _append_unique_source(
                 item["sources"][column_name],
-                _build_table_cell_source(value, source_name),
+                _build_table_cell_source(value, source_name, file_name, rows),
             )
 
     return merged[:MAX_TABLE_ROWS]
@@ -1197,7 +1282,7 @@ def _assemble_table_rows(merged_rows: List[Dict[str, Any]], column_defs: List[Di
             value = str(merged_row.get("values", {}).get(column_name) or "")
             sources = list(merged_row.get("sources", {}).get(column_name) or [])
             cell["analyseData"] = value
-            cell["analyseDataSource"] = sources if sources else _build_analyse_data_sources([], text_response="")
+            cell["analyseDataSource"] = sources if sources else _build_empty_file_analyse_data_sources()
             row.append(cell)
         if any(str(cell.get("analyseData") or "").strip() for cell in row):
             assembled_rows.append(row)
@@ -1309,11 +1394,14 @@ def _query_table_field(
             continue
 
         original_source_name = _resolve_original_source_name(file_name, retrieval_context)
+        hashed_file_name = _resolve_hashed_source_name(file_name, retrieval_context)
         for row in rows:
             row_results.append(
                 {
                     "row": row,
                     "source": original_source_name,
+                    "fileName": hashed_file_name,
+                    "rows": chunks,
                     "score": file_max_score[file_name],
                 }
             )

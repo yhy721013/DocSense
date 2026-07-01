@@ -20,6 +20,7 @@ from app.services.llm_service.weaponry_service import (
     _query_input_field,
     _query_table_field,
     _restore_target_workspace_terms,
+    _resolve_hashed_source_name,
     _resolve_original_source_name,
 )
 
@@ -166,7 +167,14 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
                 "custom-documents/hash-name-doc.json": "尼米兹级资料.pdf",
                 "hash-name-doc.json": "尼米兹级资料.pdf",
             },
+            source_file_names={
+                "hash-name.pdf": "hash-name.pdf",
+                "尼米兹级资料.pdf": "hash-name.pdf",
+                "custom-documents/hash-name-doc.json": "hash-name.pdf",
+                "hash-name-doc.json": "hash-name.pdf",
+            },
             single_target_original_name="尼米兹级资料.pdf",
+            single_target_file_name="hash-name.pdf",
         )
 
         self.assertEqual(
@@ -185,6 +193,15 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             _resolve_original_source_name("term_rule_0005_中文型号.md", context),
             "term_rule_0005_中文型号.md",
         )
+        self.assertEqual(
+            _resolve_hashed_source_name("尼米兹级资料.pdf", context),
+            "hash-name.pdf",
+        )
+        self.assertEqual(
+            _resolve_hashed_source_name("custom-documents/hash-name-doc.json", context),
+            "hash-name.pdf",
+        )
+        self.assertEqual(_resolve_hashed_source_name("", context), "hash-name.pdf")
 
     def test_format_terms_rule_context_uses_only_term_sources(self):
         chunks = [
@@ -231,6 +248,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
                         "text": "<document_metadata>\nsourceDocument: JFS_3526-JFS_-16-Aug-2023.pdf\n</document_metadata>\nNimitz (CVN 68) class",
                         "score": 0.1,
                     },
+                    {
+                        "metadata": {"title": "JFS_3526-JFS_-16-Aug-2023.pdf"},
+                        "text": "<document_metadata>\nsourceDocument: JFS_3526-JFS_-16-Aug-2023.pdf\n</document_metadata>\nThe class serves in the United States Navy.",
+                        "score": 0.08,
+                    },
                 ]
             return [
                 {
@@ -247,7 +269,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             source_original_names={
                 "jfs_3526-jfs_-16-aug-2023.pdf": "尼米兹级资料.pdf",
             },
+            source_file_names={
+                "jfs_3526-jfs_-16-aug-2023.pdf": "3199b401658d49e781469534e8613913.pdf",
+            },
             single_target_original_name="尼米兹级资料.pdf",
+            single_target_file_name="3199b401658d49e781469534e8613913.pdf",
             terms_workspace_slug="terms-ws",
         )
 
@@ -266,6 +292,14 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
 
         self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
         self.assertEqual(result["analyseDataSource"][0]["source"], "尼米兹级资料.pdf")
+        self.assertEqual(
+            result["analyseDataSource"][0]["fileName"],
+            "3199b401658d49e781469534e8613913.pdf",
+        )
+        self.assertEqual(
+            result["analyseDataSource"][0]["rows"],
+            ["Nimitz (CVN 68) class", "The class serves in the United States Navy."],
+        )
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
         self.assertIn("术语规则参考开始", client.prompts[0])
         self.assertIn("中文型号规则", client.prompts[0])
@@ -309,7 +343,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             source_original_names={
                 "jfs_3526-jfs_-16-aug-2023.pdf": "尼米兹级资料.pdf",
             },
+            source_file_names={
+                "jfs_3526-jfs_-16-aug-2023.pdf": "3199b401658d49e781469534e8613913.pdf",
+            },
             single_target_original_name="尼米兹级资料.pdf",
+            single_target_file_name="3199b401658d49e781469534e8613913.pdf",
             terms_workspace_slug="terms-ws",
         )
 
@@ -328,6 +366,11 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
 
         self.assertEqual(result["analyseData"], "Nimitz (CVN 68) class")
         self.assertEqual(result["analyseDataSource"][0]["source"], "尼米兹级资料.pdf")
+        self.assertEqual(
+            result["analyseDataSource"][0]["fileName"],
+            "3199b401658d49e781469534e8613913.pdf",
+        )
+        self.assertEqual(result["analyseDataSource"][0]["rows"], ["Nimitz (CVN 68) class"])
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
         self.assertNotIn("术语规则参考开始", client.prompts[0])
         self.assertNotIn("中文型号规则", client.prompts[0])
@@ -381,6 +424,10 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
 
         self.assertEqual(context.terms_workspace_slug, "terms-ws")
         self.assertEqual(context.target_file_names, {"JFS_3526-JFS_-16-Aug-2023.pdf"})
+        self.assertEqual(
+            context.source_file_names["jfs_3526-jfs_-16-aug-2023.pdf"],
+            "JFS_3526-JFS_-16-Aug-2023.pdf",
+        )
         self.assertEqual(
             context.target_workspace_term_doc_paths,
             ["custom-documents/term_rule_0005_中文型号.md.json"],
@@ -536,7 +583,9 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
             target_file_names={"carrier-radars.pdf"},
             target_doc_paths=set(),
             source_original_names={"carrier-radars.pdf": "航母雷达资料.pdf"},
+            source_file_names={"carrier-radars.pdf": "3199b401658d49e781469534e8613913.pdf"},
             single_target_original_name="航母雷达资料.pdf",
+            single_target_file_name="3199b401658d49e781469534e8613913.pdf",
         )
 
         with patch("app.services.llm_service.weaponry_service._vector_search_with_top_n", side_effect=fake_vector_search):
@@ -559,6 +608,14 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
         self.assertEqual(first_row[1]["analyseData"], "S波段")
         self.assertEqual(first_row[2]["analyseData"], "约320公里")
         self.assertEqual(first_row[0]["analyseDataSource"][0]["source"], "航母雷达资料.pdf")
+        self.assertEqual(
+            first_row[0]["analyseDataSource"][0]["fileName"],
+            "3199b401658d49e781469534e8613913.pdf",
+        )
+        self.assertEqual(
+            first_row[0]["analyseDataSource"][0]["rows"],
+            ["The carrier carries AN/SPY-1D S-band radar and AN/SPS-49 L-band radar."],
+        )
         self.assertEqual(second_row[0]["analyseData"], "AN/SPS-49")
 
 
