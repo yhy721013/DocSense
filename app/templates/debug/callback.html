@@ -26,6 +26,33 @@
       margin-bottom: 24px;
     }
 
+    .header-actions {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .record-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: min(460px, 100%);
+      color: #475569;
+      font-size: 13px;
+    }
+
+    .record-select {
+      min-height: 40px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: #fff;
+      color: #1f2937;
+      padding: 8px 12px;
+      max-width: 460px;
+    }
+
     .panel {
       background: #fff;
       border: 1px solid #dbe3f0;
@@ -117,7 +144,13 @@
         <p>DocSense Local Debug</p>
         <h1>回调结果调试页</h1>
       </div>
-      <button id="refresh-button" class="button" type="button">刷新</button>
+      <div class="header-actions">
+        <label class="record-picker" for="record-select">
+          <span>历史记录</span>
+          <select id="record-select" class="record-select" aria-label="历史记录"></select>
+        </label>
+        <button id="refresh-button" class="button" type="button">刷新</button>
+      </div>
     </header>
 
     <section id="page-message" class="banner">等待加载...</section>
@@ -133,14 +166,16 @@
   <script>
     const API_URL = "/debug/api/callback";
     const refreshButton = document.getElementById("refresh-button");
+    const recordSelect = document.getElementById("record-select");
     const pageMessage = document.getElementById("page-message");
     const summary = document.getElementById("callback-summary");
     const structured = document.getElementById("structured-content");
     const previews = document.getElementById("preview-sections");
     const rawJson = document.getElementById("raw-json");
 
-    refreshButton.addEventListener("click", loadPayload);
-    window.addEventListener("DOMContentLoaded", loadPayload);
+    refreshButton.addEventListener("click", () => loadPayload(recordSelect.value));
+    recordSelect.addEventListener("change", () => loadPayload(recordSelect.value));
+    window.addEventListener("DOMContentLoaded", () => loadPayload(""));
 
     function statusText(businessType, status) {
       if (businessType === "file" && status === "2") return "解析成功";
@@ -236,6 +271,46 @@
       summary.innerHTML = "";
       structured.innerHTML = "";
       previews.innerHTML = "";
+    }
+
+    function buildApiUrl(recordId) {
+      if (!recordId) {
+        return API_URL;
+      }
+      return `${API_URL}?record=${encodeURIComponent(recordId)}`;
+    }
+
+    function formatRecordLabel(record) {
+      const name = record.fileName || record.id || "未命名回调";
+      const modifiedAt = record.modifiedAt ? ` · ${record.modifiedAt}` : "";
+      return `${name}${modifiedAt}`;
+    }
+
+    function renderRecordOptions(records, selectedRecord, requestedRecordId) {
+      const recordList = Array.isArray(records) ? records : [];
+      recordSelect.replaceChildren();
+
+      const latestOption = document.createElement("option");
+      latestOption.value = "";
+      latestOption.textContent = recordList.length ? "最新回调记录" : "暂无历史记录";
+      recordSelect.appendChild(latestOption);
+
+      recordList.forEach((record) => {
+        const option = document.createElement("option");
+        option.value = record.id;
+        option.textContent = formatRecordLabel(record);
+        recordSelect.appendChild(option);
+      });
+
+      if (requestedRecordId && selectedRecord && !recordList.some((record) => record.id === selectedRecord.id)) {
+        const option = document.createElement("option");
+        option.value = selectedRecord.id;
+        option.textContent = formatRecordLabel(selectedRecord);
+        recordSelect.appendChild(option);
+      }
+
+      recordSelect.disabled = recordList.length === 0;
+      recordSelect.value = requestedRecordId && selectedRecord ? selectedRecord.id : "";
     }
 
     function renderSummaryItems(items) {
@@ -575,8 +650,10 @@
       ]);
     }
 
-    function renderResponse(result) {
-      pageMessage.textContent = result.message;
+    function renderResponse(result, requestedRecordId) {
+      renderRecordOptions(result.records, result.selectedRecord, requestedRecordId);
+      const selectedName = result.selectedRecord ? `当前记录：${result.selectedRecord.fileName}` : "";
+      pageMessage.textContent = selectedName ? `${result.message}。${selectedName}` : result.message;
       rawJson.textContent = result.payload ? JSON.stringify(result.payload, null, 2) : "暂无内容";
       resetPanels();
 
@@ -602,11 +679,11 @@
       renderUnsupportedPayload(result.payload);
     }
 
-    async function loadPayload() {
+    async function loadPayload(recordId) {
       try {
-        const response = await fetch(API_URL, { cache: "no-store" });
+        const response = await fetch(buildApiUrl(recordId), { cache: "no-store" });
         const result = await response.json();
-        renderResponse(result);
+        renderResponse(result, recordId);
       } catch (error) {
         resetPanels();
         pageMessage.textContent = `加载失败：${error.message}`;
