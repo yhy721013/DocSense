@@ -52,7 +52,7 @@ ENV MINERU_GLOBAL_CONFIG_PATH=/root/mineru.json \
     USE_MODELSCOPE_HUB=0
 
 # ── 6. 创建运行时目录 ────────────────────────────────────────
-RUN mkdir -p .runtime uploads mineru_output
+RUN mkdir -p runtime uploads mineru_output
 
 EXPOSE 5001
 

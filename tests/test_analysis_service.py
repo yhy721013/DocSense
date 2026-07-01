@@ -987,6 +987,83 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(callback_payload["msg"], "解析失败")
         self.assertEqual(callback_payload["data"]["status"], "3")
 
+    @patch("app.services.llm_service.analysis_service.AnythingLLMClient")
+    @patch(
+        "app.services.llm_service.analysis_service.enrich_with_translations",
+        side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result,
+    )
+    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag")
+    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm", side_effect=lambda path: path)
+    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
+    def test_run_file_analysis_task_persists_interaction_before_deleting_temporary_workspace(
+        self,
+        mock_download,
+        _mock_normalize,
+        mock_rag,
+        _mock_enrich,
+        MockClient,
+    ):
+        with workspace_tempdir() as tmp:
+            sample = Path(tmp) / "sample.txt"
+            sample.write_text("sample", encoding="utf-8")
+            mock_download.return_value = str(sample)
+            response = '{"summary":"摘要","language":"中文","score":3.6}'
+
+            def fake_rag(**kwargs):
+                details = kwargs["execution_details"]
+                details.workspace_name = kwargs["workspace_name"]
+                details.workspace_slug = "llm-file-temp"
+                details.thread_slug = "analysis-sample"
+                details.workspace_created = True
+                details.text_response = response
+                details.sources = [{"title": "sample.txt", "text": "sample chunk"}]
+                return response
+
+            mock_rag.side_effect = fake_rag
+            client = MockClient.return_value
+            client.delete_workspace.return_value = True
+            client.upload_document.return_value = None
+
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "sample.txt",
+                        "filePath": "http://127.0.0.1:8000/sample.txt",
+                        "enableFullTranslation": False,
+                        "country": [],
+                        "channel": [],
+                        "maturity": [],
+                        "format": [],
+                        "architectureList": [],
+                    }
+                ],
+            }
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task("sample.txt", request_payload)
+            kb_service = Mock()
+            kb_service.get_workspace_slug.return_value = "architectureid-1"
+
+            from app.services.llm_service.analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                kb_service=kb_service,
+                progress_hub=LLMProgressHub(),
+                request_payload=request_payload,
+                download_root=tmp,
+                callback_url="",
+                callback_timeout=5,
+            )
+
+            interactions = task_service.get_llm_interactions("file", "sample.txt")
+
+        self.assertEqual(len(interactions), 1)
+        self.assertEqual(interactions[0]["response"], response)
+        self.assertEqual(interactions[0]["sources"][0]["text"], "sample chunk")
+        self.assertEqual(interactions[0]["workspace_cleanup_status"], "deleted")
+        client.delete_workspace.assert_called_once_with("llm-file-temp", user_id=1)
+
     @patch("app.services.llm_service.analysis_service.run_file_analysis_task")
     def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):
         with workspace_tempdir() as tmp:

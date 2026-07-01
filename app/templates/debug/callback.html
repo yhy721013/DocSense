@@ -527,6 +527,8 @@
           `content: ${displayValue(item.content)}`,
           `source: ${displayValue(item.source)}`,
           `time: ${displayValue(item.time)}`,
+          `fileName: ${displayValue(item.fileName)}`,
+          `rows: ${Array.isArray(item.rows) && item.rows.length ? JSON.stringify(item.rows, null, 2) : "暂无内容"}`,
           `translate: ${displayValue(item.translate)}`,
         ].join("\n");
         wrapper.appendChild(block);

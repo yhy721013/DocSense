@@ -136,8 +136,10 @@ class CallbackDebugRouteTests(unittest.TestCase):
                         "analyseDataSource": [
                             {
                                 "content": "舰级名称为尼米兹级",
-                                "source": "CVN 文档片段",
+                                "source": "CVN 装备资料.pdf",
                                 "time": "2026-04-07 12:00:00",
+                                "fileName": "3199b401658d49e781469534e8613913.pdf",
+                                "rows": ["CVN 文档片段"],
                                 "translate": "舰级名称为尼米兹级",
                             }
                         ],
@@ -155,6 +157,10 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["payload"]["businessType"], "weaponry")
         self.assertEqual(data["payload"]["data"]["architectureId"], 10502)
+        source = data["payload"]["data"]["weaponryTemplateFieldList"][0]["analyseDataSource"][0]
+        self.assertEqual(source["source"], "CVN 装备资料.pdf")
+        self.assertEqual(source["fileName"], "3199b401658d49e781469534e8613913.pdf")
+        self.assertEqual(source["rows"], ["CVN 文档片段"])
 
     def test_callback_api_rejects_invalid_or_missing_record_parameter(self):
         self.write_callback_record(
@@ -274,5 +280,7 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertIn("function renderWeaponrySources(sources)", html)
         self.assertIn("function renderWeaponryField(field)", html)
         self.assertIn("function renderWeaponryPayload(payload)", html)
+        self.assertIn("displayValue(item.fileName)", html)
+        self.assertIn("JSON.stringify(item.rows, null, 2)", html)
         self.assertIn('if (result.payload.businessType === "weaponry")', html)
         self.assertIn("renderWeaponryPayload(result.payload)", html)

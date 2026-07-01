@@ -142,6 +142,129 @@ class LLMRouteValidationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    @patch("app.blueprints.llm.threading.Thread")
+    @patch("app.blueprints.llm.kb_service")
+    def test_weaponry_normalizes_selected_file_urls_and_preserves_original_request(
+        self,
+        mock_kb_service,
+        mock_thread,
+    ):
+        mock_kb_service.get_document_record.return_value = {
+            "file_name": "abc123.pdf",
+            "architecture_id": 10502,
+            "doc_path": "custom-documents/abc123.json",
+        }
+        original_file_paths = [
+            "https://host/download/abc%31%32%33.pdf?token=secret#page=2",
+            "abc123.pdf",
+        ]
+
+        response = self.client.post(
+            "/llm/weaponry",
+            json={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "filePathList": original_file_paths,
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 202)
+        mock_kb_service.get_document_record.assert_called_once_with("abc123.pdf")
+        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
+        self.assertEqual(worker_kwargs["selected_file_names"], ["abc123.pdf"])
+        task = self.task_service.get_task("weaponry", "10502")
+        self.assertEqual(task["request_payload"]["params"]["filePathList"], original_file_paths)
+
+    @patch("app.blueprints.llm.threading.Thread")
+    @patch("app.blueprints.llm.kb_service")
+    def test_weaponry_empty_file_path_list_keeps_full_category_scope(
+        self,
+        mock_kb_service,
+        mock_thread,
+    ):
+        response = self.client.post(
+            "/llm/weaponry",
+            json={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "filePathList": [],
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 202)
+        mock_kb_service.get_document_record.assert_not_called()
+        self.assertEqual(mock_thread.call_args.kwargs["kwargs"]["selected_file_names"], [])
+
+    def test_weaponry_rejects_invalid_file_path_list_type(self):
+        response = self.client.post(
+            "/llm/weaponry",
+            json={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "filePathList": "abc123.pdf",
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("filePathList必须为数组", response.get_json()["error"])
+
+    @patch("app.blueprints.llm.kb_service")
+    def test_weaponry_rejects_unknown_selected_file(self, mock_kb_service):
+        mock_kb_service.get_document_record.return_value = None
+        response = self.client.post(
+            "/llm/weaponry",
+            json={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "filePathList": ["missing.pdf"],
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("app.blueprints.llm.kb_service")
+    def test_weaponry_rejects_selected_file_from_another_category(self, mock_kb_service):
+        mock_kb_service.get_document_record.return_value = {
+            "file_name": "abc123.pdf",
+            "architecture_id": 99999,
+        }
+        response = self.client.post(
+            "/llm/weaponry",
+            json={
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 10502,
+                    "filePathList": ["abc123.pdf"],
+                    "weaponryTemplateFieldList": [
+                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("不属于当前类别", response.get_json()["error"])
+
     @patch("app.blueprints.llm.kb_service")
     def test_reassign_rejects_invalid_business_type(self, mock_kb_service):
         response = self.client.post("/llm/reassign", json={"businessType": "wrong", "params": {}})

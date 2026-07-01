@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 from typing import Optional, List, Dict, Tuple
 from .core import HYMTTranslator
 from .chunk_processor import ChunkProcessor
@@ -7,6 +8,9 @@ from .MinerUConverter import MinerUConverter
 import markdown
 import shutil
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 class MarkdownHandler:
     """Markdown 文档处理器 - 翻译 Markdown 并转为 HTML"""
@@ -41,9 +45,7 @@ class MarkdownHandler:
         :param output_dir: 输出根目录（可选，默认使用 MinerUConverter 的默认目录）
         :return: Markdown 文件路径
         """
-        print(f"\n{'=' * 50}")
-        print(f"Step 1: Convert document to Markdown via MinerU")
-        print(f"{'=' * 50}")
+        logger.info("Step 1: Convert document to Markdown via MinerU")
 
         if output_dir:
             original_output_dir = self.mineru_converter.output_dir
@@ -85,14 +87,14 @@ class MarkdownHandler:
                 with open(new_md_path, 'w', encoding='utf-8') as f:
                     f.write(md_content)
                 
-                print(f"[MinerU] MD 文件已复制到: {new_md_path}")
+                logger.info("MinerU MD 文件已复制到: %s", new_md_path)
                 md_path = str(new_md_path)
             else:
                 md_path = str(original_md_path)
         else:
             md_path = str(original_md_path)
 
-        print(f"MinerU done, Markdown: {md_path}")
+        logger.info("MinerU done, Markdown: %s", md_path)
         return md_path
 
     def process(
@@ -116,7 +118,7 @@ class MarkdownHandler:
             base, _ = os.path.splitext(markdown_path)
             output_path = f"{base}_translated.txt"
 
-        print(f"\nProcessing Markdown: {markdown_path}")
+        logger.info("Processing Markdown: %s", markdown_path)
 
         # 读取 Markdown 文件
         with open(markdown_path, 'r', encoding='utf-8') as f:
@@ -131,7 +133,7 @@ class MarkdownHandler:
 
         # 根据是否启用快速翻译选择翻译策略
         if fast_translate:
-            print(f"\n[Markdown 处理] 使用快速翻译模式（ArgoTranslate），共 {paras_to_process} 个段落...")
+            logger.info("Markdown 使用快速翻译模式（Argos Translate），共 %d 个段落", paras_to_process)
             translated_paragraphs = self._translate_paragraphs_one_by_one(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -139,7 +141,7 @@ class MarkdownHandler:
                 fast_translate=True
             )
         else:
-            print(f"\n[Markdown 处理] 使用大模型批量翻译模式，共 {paras_to_process} 个段落...")
+            logger.info("Markdown 使用大模型批量翻译模式，共 %d 个段落", paras_to_process)
             translated_paragraphs = self._batch_translate_paragraphs(
                 paragraphs[:paras_to_process],
                 target_lang,
@@ -160,7 +162,7 @@ class MarkdownHandler:
             f.write("".join(results))
 
         tracker.mark_completed()
-        print(f"\nTXT saved to: {output_path}")
+        logger.info("TXT saved to: %s", output_path)
         return output_path
 
     def convert_to_html(
@@ -182,10 +184,7 @@ class MarkdownHandler:
         """
         os.makedirs(output_dir, exist_ok=True)
 
-        print(f"\n{'=' * 50}")
-        print(f"步骤 2: 将 Markdown 转换为 HTML 并翻译")
-        print(f"{'=' * 50}")
-        print(f"Processing Markdown to HTML: {markdown_path}")
+        logger.info("步骤 2: 将 Markdown 转换为 HTML 并翻译: %s", markdown_path)
 
         # 读取 Markdown 文件
         with open(markdown_path, 'r', encoding='utf-8') as f:
@@ -224,8 +223,8 @@ class MarkdownHandler:
             f.write(monolingual_html_content)
 
         tracker.mark_completed()
-        print(f"双语 HTML 已保存至：{bilingual_output_path}")
-        print(f"单语 HTML 已保存至：{monolingual_output_path}")
+        logger.info("双语 HTML 已保存至：%s", bilingual_output_path)
+        logger.info("单语 HTML 已保存至：%s", monolingual_output_path)
         return bilingual_output_path, monolingual_output_path
 
     def _convert_bilingual_to_monolingual(self, bilingual_html: str) -> str:
@@ -347,7 +346,7 @@ class MarkdownHandler:
 
         tracker.set_file_info("Markdown HTML", total_frags, "paragraph")
 
-        print(f"\n[HTML 翻译] 开始翻译 HTML 内容，共 {total_frags} 个文本片段...\n")
+        logger.info("HTML 翻译开始，共 %d 个文本片段", total_frags)
 
         for idx, fragment in enumerate(fragments):
             # 跳过空片段和纯空白
@@ -373,9 +372,13 @@ class MarkdownHandler:
                     # 中文文本：只显示原文（因为原文=译文）
                     bilingual_fragment = f'<span class="original-text">{self._escape_html(original_text)}</span>'
                     translated_fragments.append(bilingual_fragment)
-                    print(
-                        f"\r[{progress_bar}] {current_progress:.1f}% | 片段 {processed + 1}/{total_frags} [中文跳过]",
-                        end="", flush=True)
+                    logger.debug(
+                        "HTML 翻译进度 [%s] %.1f%% | 片段 %d/%d [中文跳过]",
+                        progress_bar,
+                        current_progress,
+                        processed + 1,
+                        total_frags,
+                    )
                 else:
                     # 非中文：需要翻译
                     translated_text = self.translator.translate_text(
@@ -392,22 +395,27 @@ class MarkdownHandler:
                         bilingual_fragment = f'<span class="translated-text">{self._escape_html(translated_text)}</span>'
 
                     translated_fragments.append(bilingual_fragment)
-                    print(
-                        f"\r[{progress_bar}] {current_progress:.1f}% | 片段 {processed + 1}/{total_frags} ✓ {len(translated_text)}字",
-                        end="", flush=True)
+                    logger.debug(
+                        "HTML 翻译进度 [%s] %.1f%% | 片段 %d/%d 已翻译 %d 字",
+                        progress_bar,
+                        current_progress,
+                        processed + 1,
+                        total_frags,
+                        len(translated_text),
+                    )
 
                 processed += 1
                 tracker.update_paragraph(processed)
 
             except Exception as e:
-                print(f"\n\r  [翻译失败] 片段 {idx}: {e}")
+                logger.warning("HTML 翻译失败，片段 %d: %s", idx, e)
                 # 失败时保留原文
                 translated_fragments.append(f'<span class="original-text">{self._escape_html(fragment)}</span>')
                 processed += 1
                 tracker.update_paragraph(processed)
 
         # 【新增】换行，避免覆盖最后的进度信息
-        print(f"\n[完成] HTML 内容翻译完毕，共处理 {processed} 个片段\n")
+        logger.info("HTML 内容翻译完毕，共处理 %d 个片段", processed)
 
         # 重新组合 HTML
         result_html = ""
@@ -439,7 +447,7 @@ class MarkdownHandler:
         # 【新增】统计图片数量
         img_matches = re.findall(img_pattern, html_content)
         if img_matches:
-            print(f"\n[图片处理] 发现 {len(img_matches)} 张图片，开始转换为 Base64 编码...\n")
+            logger.info("发现 %d 张图片，开始转换为 Base64 编码", len(img_matches))
 
         def replace_img_with_base64(match):
             img_tag = match.group(0)
@@ -482,12 +490,12 @@ class MarkdownHandler:
 
                         img_name = os.path.basename(img_src)
                         img_size_kb = len(img_data) / 1024
-                        print(f"  ✓ [图片] 已转换：{img_name} ({img_size_kb:.2f} KB)")
+                        logger.debug("图片已转换：%s (%.2f KB)", img_name, img_size_kb)
 
                         return new_img_tag
 
                     except Exception as e:
-                        print(f"  ✗ [图片转换失败] {os.path.basename(img_src)}: {e}")
+                        logger.warning("图片转换失败 %s: %s", os.path.basename(img_src), e)
                         return img_tag
 
             # 对于网络图片或已经是 data URI 的图片，保持不变
@@ -497,7 +505,7 @@ class MarkdownHandler:
         processed_html = re.sub(img_pattern, replace_img_with_base64, html_content)
 
         if img_matches:
-            print(f"\n[完成] 图片 Base64 编码处理完毕\n")
+            logger.info("图片 Base64 编码处理完毕")
 
         return processed_html
 
@@ -554,9 +562,9 @@ class MarkdownHandler:
         for idx, para in enumerate(paragraphs):
             if not para.strip():
                 translated_paragraphs.append("")
-                print(f"  [空段落] 段落 {idx + 1}")
+                logger.debug("空段落：%d", idx + 1)
             elif self._is_chinese_text(para):
-                print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                logger.debug("段落 %d 为中文，跳过翻译", idx + 1)
                 translated_paragraphs.append(para)
             else:
                 try:
@@ -566,15 +574,14 @@ class MarkdownHandler:
                         fast_translate=fast_translate
                     )
                     translated_paragraphs.append(translated_para)
-                    print(f"  ✓ 段落 {idx + 1}: {len(translated_para)} 字")
+                    logger.debug("段落 %d 翻译完成：%d 字", idx + 1, len(translated_para))
                     tracker.update_paragraph(idx + 1)
                 except Exception as e:
                     fallback_text = f"[翻译失败：{str(e)}]"
                     translated_paragraphs.append(fallback_text)
-                    print(f"  ✗ 段落 {idx + 1}: {fallback_text}")
+                    logger.warning("段落 %d 翻译失败：%s", idx + 1, fallback_text)
                     tracker.update_paragraph(idx + 1)
 
-        print("\n")  # 换行
         return translated_paragraphs
 
     def _batch_translate_paragraphs(
@@ -603,7 +610,7 @@ class MarkdownHandler:
             if not para.strip():
                 processed_paragraphs.append("")
             elif self._is_chinese_text(para):
-                print(f"[跳过] 段落 {idx + 1} 为中文，已跳过翻译")
+                logger.debug("段落 %d 为中文，跳过翻译", idx + 1)
                 processed_paragraphs.append(para)
             else:
                 processed_paragraphs.append(None)  # 占位，稍后填充
@@ -618,7 +625,7 @@ class MarkdownHandler:
             target_lang
         )
 
-        print(f"\n[批量翻译] 共 {len(translation_needed)} 段需要翻译，分为 {len(chunks)} 个批次")
+        logger.info("批量翻译：%d 段，分为 %d 个批次", len(translation_needed), len(chunks))
 
         # 3. 逐批翻译
         translated_idx = 0
@@ -626,8 +633,13 @@ class MarkdownHandler:
             # 显示进度条
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
-            print(f"\r[{progress_bar}] {current_progress:.1f}% | 批次 {chunk_idx + 1}/{len(chunks)}", end="",
-                  flush=True)
+            logger.debug(
+                "批量翻译进度 [%s] %.1f%% | 批次 %d/%d",
+                progress_bar,
+                current_progress,
+                chunk_idx + 1,
+                len(chunks),
+            )
 
             try:
                 # 调用翻译（一次性翻译整个 chunk）
@@ -650,18 +662,18 @@ class MarkdownHandler:
                     if para_local_idx < len(translated_paras):
                         translated_para = translated_paras[para_local_idx]
                         processed_paragraphs[original_idx] = translated_para
-                        print(f"  ✓ 段落 {original_idx + 1}: {len(translated_para)} 字")
+                        logger.debug("段落 %d 翻译完成：%d 字", original_idx + 1, len(translated_para))
                     else:
                         # 段落数量确实不匹配时的容错
                         fallback_text = f"[部分翻译失败：期望{len(chunk['paragraph_indices'])}段，实际{len(translated_paras)}段]"
                         processed_paragraphs[original_idx] = fallback_text
-                        print(f"  ✗ 段落 {original_idx + 1}: {fallback_text}")
+                        logger.warning("段落 %d 部分翻译失败：%s", original_idx + 1, fallback_text)
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
             except Exception as e:
-                print(f"\n[错误] 批次 {chunk_idx + 1} 翻译失败：{e}")
+                logger.warning("批次 %d 翻译失败，改为逐段回退：%s", chunk_idx + 1, e)
                 # 失败回退：逐段翻译
                 for para_local_idx, global_para_idx in enumerate(chunk["paragraph_indices"]):
                     original_idx, _ = translation_needed[global_para_idx]
@@ -673,16 +685,15 @@ class MarkdownHandler:
                             fast_translate=False
                         )
                         processed_paragraphs[original_idx] = translated_para
-                        print(f"  ✓ 段落 {original_idx + 1} (回退): {len(translated_para)} 字")
+                        logger.debug("段落 %d 回退翻译完成：%d 字", original_idx + 1, len(translated_para))
                     except Exception as e2:
                         fallback_text = f"[翻译失败：{str(e2)}]"
                         processed_paragraphs[original_idx] = fallback_text
-                        print(f"  ✗ 段落 {original_idx + 1} (回退): {fallback_text}")
+                        logger.warning("段落 %d 回退翻译失败：%s", original_idx + 1, fallback_text)
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
-        print("\n")  # 换行
         return processed_paragraphs
 
     def _generate_paragraph_html(self, original: str, translated: str, show_bilingual: bool) -> str:

@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import MagicMock
 
@@ -6,6 +7,33 @@ from app.services.utils.anythingllm_client import AnythingLLMClient
 
 
 class AnythingLLMClientStreamTests(unittest.TestCase):
+    def test_send_prompt_returns_cleaned_and_raw_response(self):
+        client = AnythingLLMClient(
+            AnythingLLMConfig(
+                base_url="http://anythingllm.local",
+                api_key="test-key",
+                timeout=30,
+                storage_root=None,
+            )
+        )
+        raw_answer = '<think>reasoning</think>```json\n{"summary":"摘要"}\n```'
+        mock_response = MagicMock()
+        mock_response.ok = True
+        final_event = {
+            "type": "textResponse",
+            "textResponse": raw_answer,
+            "close": True,
+        }
+        mock_response.iter_lines.return_value = iter([
+            f"data: {json.dumps(final_event, ensure_ascii=False)}",
+        ])
+        client.session.post = MagicMock(return_value=mock_response)
+
+        result = client.send_prompt_to_thread("workspace-1", "thread-1", "提取摘要")
+
+        self.assertEqual(result["textResponse"], '{"summary":"摘要"}')
+        self.assertEqual(result["rawTextResponse"], raw_answer)
+
     def test_stream_chat_to_thread_targets_stream_chat_endpoint_and_sets_utf8(self):
         client = AnythingLLMClient(
             AnythingLLMConfig(
