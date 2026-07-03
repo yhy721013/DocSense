@@ -1,0 +1,37 @@
+"""应用层的供应商无关端口。
+
+该包只导出业务 DTO、稳定异常和 Protocol。业务服务通过这些类型表达意图，具体第三方
+系统的协议、认证、资源字段和错误对象只能出现在适配器层，测试替身也不进入生产包。
+"""
+
+from .knowledge_index import (
+    CollectionRef,
+    IndexedDocument,
+    KnowledgeIndexPort,
+    OperationResult,
+)
+from .rag import (
+    CleanupResult,
+    DocumentRagPort,
+    DocumentRagSession,
+    RagAttempt,
+    RagExecutionTrace,
+    RagOperationError,
+    RagResult,
+    RagSource,
+)
+
+__all__ = [
+    "CleanupResult",
+    "CollectionRef",
+    "DocumentRagPort",
+    "DocumentRagSession",
+    "IndexedDocument",
+    "KnowledgeIndexPort",
+    "OperationResult",
+    "RagAttempt",
+    "RagExecutionTrace",
+    "RagOperationError",
+    "RagResult",
+    "RagSource",
+]
