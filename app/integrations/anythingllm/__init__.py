@@ -12,15 +12,33 @@ from app.integrations.anythingllm.errors import (
     AnythingLLMTransportClosedError,
     AnythingLLMTransportError,
 )
+from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.models import (
+    AnythingLLMAnswer,
+    AnythingLLMDocument,
+    AnythingLLMSource,
+    AnythingLLMThread,
+    AnythingLLMWorkspace,
+)
+from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport, SSEEvent
+from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 
 __all__ = [
+    "AnythingLLMAnswer",
     "AnythingLLMConnectionError",
+    "AnythingLLMDocument",
+    "AnythingLLMDocumentClient",
     "AnythingLLMHTTPError",
     "AnythingLLMProtocolError",
+    "AnythingLLMSource",
+    "AnythingLLMThread",
+    "AnythingLLMThreadClient",
     "AnythingLLMTimeoutError",
     "AnythingLLMTransport",
     "AnythingLLMTransportClosedError",
     "AnythingLLMTransportError",
+    "AnythingLLMWorkspace",
+    "AnythingLLMWorkspaceClient",
     "SSEEvent",
 ]

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from types import TracebackType
@@ -32,6 +33,9 @@ from app.integrations.anythingllm.errors import (
     AnythingLLMTimeoutError,
     AnythingLLMTransportClosedError,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # 使用显式白名单约束当前传输层支持的 JSON 方法，避免调用方绕过公共接口发起任意请求。
@@ -161,6 +165,7 @@ class AnythingLLMTransport:
         if self._closed:
             return
         self._closed = True
+        logger.debug("关闭 AnythingLLM 任务级 HTTP 会话")
         self._session.close()
 
     def get_json(
@@ -267,6 +272,51 @@ class AnythingLLMTransport:
             allow_empty=allow_empty,
         )
 
+    def delete_status(
+        self,
+        path: str,
+        payload: Any = None,
+        *,
+        user_id: Optional[int] = None,
+        params: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """发送只以 HTTP 状态码判断成功的 DELETE 请求。
+
+        参数:
+            path: 相对于 ``base_url`` 的安全请求路径。
+            payload: 可选 JSON 请求体；为 ``None`` 时不发送请求体，也不声明 JSON
+                内容类型。
+            user_id: 可选 AnythingLLM 用户标识。
+            params: 可选查询参数映射。
+
+        返回:
+            成功时固定返回 ``None``。响应正文无论为空、JSON 或纯文本都会被忽略，底层
+            ``Response`` 始终在方法返回前关闭。
+
+        异常:
+            AnythingLLMTransportError: 请求超时、连接失败、非 2xx 状态或对象关闭时
+                抛出对应子类。
+            ValueError: 请求路径不符合安全约束时抛出。
+
+        该方法只适用于上游契约明确声明“响应正文没有业务语义”的删除接口。例如部分
+        AnythingLLM 版本删除成功后返回纯文本 ``OK``。它与 ``delete_json`` 分离，避免
+        为兼容单个端点而削弱其他 JSON 接口的协议校验。
+        """
+        url = self._build_url(path)
+        request_kwargs: dict[str, Any] = {
+            "headers": self._headers(
+                user_id=user_id,
+                content_type="application/json" if payload is not None else None,
+                accept="*/*",
+            ),
+            "params": params,
+        }
+        if payload is not None:
+            request_kwargs["json"] = payload
+
+        response = self._request_response("DELETE", url, **request_kwargs)
+        response.close()
+
     def post_multipart(
         self,
         path: str,
@@ -319,6 +369,7 @@ class AnythingLLMTransport:
         *,
         user_id: Optional[int] = None,
         params: Optional[Mapping[str, Any]] = None,
+        allow_json_lines: bool = False,
     ) -> Iterator[SSEEvent]:
         """发送 JSON 请求并逐个产出通用 SSE 事件。
 
@@ -327,6 +378,9 @@ class AnythingLLMTransport:
             payload: 作为 POST 请求体发送的 JSON 可序列化对象。
             user_id: 可选 AnythingLLM 用户标识。
             params: 可选查询参数映射。
+            allow_json_lines: 是否把没有 ``data:`` 前缀、但以 ``{`` 或 ``[`` 开头的行
+                作为独立 data 事件产出。默认关闭，仅供明确存在 NDJSON 兼容需求的
+                供应商适配层启用。
 
         产出:
             按服务端到达顺序生成 ``SSEEvent``。连续 ``data`` 行会以换行符合并；
@@ -344,7 +398,8 @@ class AnythingLLMTransport:
             ValueError: 请求路径不符合安全约束时抛出。
 
         本方法只负责 SSE 协议分帧，不解析事件 ``data`` 的 JSON 内容，也不根据事件名
-        触发 AnythingLLM 业务逻辑。
+        触发 AnythingLLM 业务逻辑。``allow_json_lines`` 只识别 JSON 外形并保留原文本，
+        实际 JSON 解码仍由上层完成。
         """
         url = self._build_url(path)
         response = self._request_response(
@@ -401,6 +456,29 @@ class AnythingLLMTransport:
                     # 冒号开头的是心跳或注释，不属于业务事件字段。
                     continue
 
+                if allow_json_lines and line.lstrip().startswith(("{", "[")):
+                    # 部分流式接口使用 NDJSON 而不是标准 SSE。显式开启兼容时，每个原始
+                    # JSON 行都作为独立事件产出，避免被误解为 SSE 字段名后静默丢弃。
+                    logger.debug(
+                        "按 NDJSON 兼容模式解析 AnythingLLM 流式响应: "
+                        "url=%s line_chars=%d",
+                        self._safe_url(url),
+                        len(line),
+                    )
+                    pending_event = build_event()
+                    if pending_event is not None:
+                        yield pending_event
+                    yield SSEEvent(
+                        data=line.strip(),
+                        event=event_name,
+                        event_id=event_id,
+                        retry=retry,
+                    )
+                    data_lines = []
+                    event_name = None
+                    retry = None
+                    continue
+
                 # 仅按首个冒号分隔，确保 data 内容中包含 URL、时间等冒号时不被破坏。
                 field, separator, value = line.partition(":")
                 if separator and value.startswith(" "):
@@ -424,6 +502,10 @@ class AnythingLLMTransport:
                 yield event
         except requests.Timeout as exc:
             safe_url = self._safe_url(url)
+            logger.warning(
+                "AnythingLLM 流式响应读取超时: method=POST url=%s",
+                safe_url,
+            )
             raise AnythingLLMTimeoutError(
                 f"AnythingLLM 流式响应超时：POST {safe_url}",
                 method="POST",
@@ -431,6 +513,11 @@ class AnythingLLMTransport:
             ) from exc
         except requests.RequestException as exc:
             safe_url = self._safe_url(url)
+            logger.warning(
+                "AnythingLLM 流式响应读取中断: method=POST url=%s error_type=%s",
+                safe_url,
+                type(exc).__name__,
+            )
             raise AnythingLLMConnectionError(
                 f"AnythingLLM 流式响应中断：POST {safe_url}",
                 method="POST",
@@ -512,6 +599,21 @@ class AnythingLLMTransport:
         网络库错误文本中的认证信息进入常规日志。
         """
         self._ensure_open(method=method, url=url)
+        safe_url = self._safe_url(url)
+        request_headers = kwargs.get("headers")
+        has_user_context = bool(
+            isinstance(request_headers, Mapping)
+            and request_headers.get("X-AnythingLLM-User-Id") is not None
+        )
+        logger.debug(
+            "发起 AnythingLLM HTTP 请求: method=%s url=%s stream=%s "
+            "has_user_context=%s timeout_configured=%s",
+            method,
+            safe_url,
+            bool(kwargs.get("stream")),
+            has_user_context,
+            self._timeout is not None,
+        )
         try:
             response = self._session.request(
                 method,
@@ -520,14 +622,23 @@ class AnythingLLMTransport:
                 **kwargs,
             )
         except requests.Timeout as exc:
-            safe_url = self._safe_url(url)
+            logger.warning(
+                "AnythingLLM HTTP 请求超时: method=%s url=%s",
+                method,
+                safe_url,
+            )
             raise AnythingLLMTimeoutError(
                 f"AnythingLLM 请求超时：{method} {safe_url}",
                 method=method,
                 url=safe_url,
             ) from exc
         except requests.RequestException as exc:
-            safe_url = self._safe_url(url)
+            logger.warning(
+                "AnythingLLM HTTP 连接失败: method=%s url=%s error_type=%s",
+                method,
+                safe_url,
+                type(exc).__name__,
+            )
             raise AnythingLLMConnectionError(
                 f"AnythingLLM 请求失败：{method} {safe_url}",
                 method=method,
@@ -535,9 +646,22 @@ class AnythingLLMTransport:
             ) from exc
 
         status_code = int(getattr(response, "status_code", 0) or 0)
+        logger.debug(
+            "收到 AnythingLLM HTTP 响应: method=%s url=%s status_code=%d",
+            method,
+            safe_url,
+            status_code,
+        )
         if not 200 <= status_code < 300:
             summary = self._safe_response_summary(response)
-            safe_url = self._safe_url(url)
+            logger.warning(
+                "AnythingLLM HTTP 状态异常: method=%s url=%s status_code=%d "
+                "response_summary_chars=%d",
+                method,
+                safe_url,
+                status_code,
+                len(summary),
+            )
             # 错误响应不会再交给外层处理，因此必须在构造异常前就释放连接。
             response.close()
             message = f"AnythingLLM 返回 HTTP {status_code}：{method} {safe_url}"
@@ -580,6 +704,14 @@ class AnythingLLMTransport:
         except (TypeError, ValueError) as exc:
             summary = self._safe_response_summary(response)
             safe_url = self._safe_url(url)
+            logger.warning(
+                "AnythingLLM JSON 响应解析失败: method=%s url=%s status_code=%d "
+                "response_summary_chars=%d",
+                method,
+                safe_url,
+                int(getattr(response, "status_code", 0) or 0),
+                len(summary),
+            )
             message = f"AnythingLLM 返回无效 JSON：{method} {safe_url}"
             if summary:
                 message = f"{message}；响应摘要={summary}"

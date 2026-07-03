@@ -131,6 +131,32 @@ class AnythingLLMTransportTests(unittest.TestCase):
         response.json.assert_not_called()
         response.close.assert_called_once_with()
 
+    def test_delete_status_accepts_plain_text_success_body(self) -> None:
+        """状态码型 DELETE 应接受 2xx 纯文本 OK，且不得尝试 JSON 解码。"""
+        response = _response(
+            status_code=200,
+            text="OK",
+            json_error=ValueError("not json"),
+        )
+        self.session.request.return_value = response
+
+        result = self.transport.delete_status("workspace/temporary", user_id=7)
+
+        self.assertIsNone(result)
+        self.session.request.assert_called_once_with(
+            "DELETE",
+            "http://anythingllm.local/api/v1/workspace/temporary",
+            timeout=30,
+            headers={
+                "Accept": "*/*",
+                "Authorization": "Bearer super-secret-key",
+                "X-AnythingLLM-User-Id": "7",
+            },
+            params=None,
+        )
+        response.json.assert_not_called()
+        response.close.assert_called_once_with()
+
     def test_successful_non_json_response_is_protocol_error(self) -> None:
         """2xx 只代表 HTTP 成功；无效 JSON 必须转换为带摘要的协议异常。"""
         response = _response(
@@ -140,8 +166,12 @@ class AnythingLLMTransportTests(unittest.TestCase):
         )
         self.session.request.return_value = response
 
-        with self.assertRaises(AnythingLLMProtocolError) as caught:
-            self.transport.get_json("health")
+        with self.assertLogs(
+            "app.integrations.anythingllm.transport",
+            level="WARNING",
+        ):
+            with self.assertRaises(AnythingLLMProtocolError) as caught:
+                self.transport.get_json("health")
 
         self.assertEqual(caught.exception.status_code, 200)
         self.assertEqual(caught.exception.response_summary, "upstream returned html")
@@ -171,8 +201,12 @@ class AnythingLLMTransportTests(unittest.TestCase):
                     max_error_body_chars=128,
                 )
                 try:
-                    with self.assertRaises(AnythingLLMHTTPError) as caught:
-                        transport.get_json("failure?token=query-secret")
+                    with self.assertLogs(
+                        "app.integrations.anythingllm.transport",
+                        level="WARNING",
+                    ) as captured_logs:
+                        with self.assertRaises(AnythingLLMHTTPError) as caught:
+                            transport.get_json("failure?token=query-secret")
                 finally:
                     transport.close()
 
@@ -184,6 +218,9 @@ class AnythingLLMTransportTests(unittest.TestCase):
                 self.assertNotIn("query-secret", rendered)
                 self.assertIn("<redacted>", rendered)
                 self.assertLessEqual(len(error.response_summary), 142)
+                logs = "\n".join(captured_logs.output)
+                self.assertNotIn("super-secret-key", logs)
+                self.assertNotIn("query-secret", logs)
                 response.close.assert_called_once_with()
 
     def test_timeout_is_translated_without_leaking_original_exception(self) -> None:
@@ -192,18 +229,27 @@ class AnythingLLMTransportTests(unittest.TestCase):
             "Bearer super-secret-key should not escape"
         )
 
-        with self.assertRaises(AnythingLLMTimeoutError) as caught:
-            self.transport.get_json("slow")
+        with self.assertLogs(
+            "app.integrations.anythingllm.transport",
+            level="WARNING",
+        ) as captured_logs:
+            with self.assertRaises(AnythingLLMTimeoutError) as caught:
+                self.transport.get_json("slow")
 
         self.assertEqual(caught.exception.code, "timeout")
         self.assertNotIn("super-secret-key", str(caught.exception))
+        self.assertNotIn("super-secret-key", "\n".join(captured_logs.output))
 
     def test_request_exception_is_translated_to_connection_error(self) -> None:
         """非超时请求异常应映射为连接异常并保留安全的方法上下文。"""
         self.session.request.side_effect = requests.ConnectionError("connection refused")
 
-        with self.assertRaises(AnythingLLMConnectionError) as caught:
-            self.transport.get_json("health")
+        with self.assertLogs(
+            "app.integrations.anythingllm.transport",
+            level="WARNING",
+        ):
+            with self.assertRaises(AnythingLLMConnectionError) as caught:
+                self.transport.get_json("health")
 
         self.assertEqual(caught.exception.code, "connection_error")
         self.assertEqual(caught.exception.method, "GET")
@@ -293,8 +339,12 @@ class AnythingLLMTransportTests(unittest.TestCase):
         response.iter_lines.side_effect = requests.Timeout("stream timeout")
         self.session.request.return_value = response
 
-        with self.assertRaises(AnythingLLMTimeoutError) as caught:
-            list(self.transport.stream_sse("events", {"message": "hello"}))
+        with self.assertLogs(
+            "app.integrations.anythingllm.transport",
+            level="WARNING",
+        ):
+            with self.assertRaises(AnythingLLMTimeoutError) as caught:
+                list(self.transport.stream_sse("events", {"message": "hello"}))
 
         self.assertEqual(caught.exception.method, "POST")
         response.close.assert_called_once_with()

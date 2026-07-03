@@ -1,0 +1,202 @@
+"""AnythingLLM 文档原子客户端的离线契约测试。
+
+测试只使用 Fake Transport 和临时文件，不建立网络连接。覆盖上传 DTO 归一化、必填字段
+校验、Document Processor 有限重试以及元数据响应的业务失败识别。
+"""
+
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.errors import (
+    AnythingLLMHTTPError,
+    AnythingLLMProtocolError,
+)
+from app.integrations.anythingllm.models import AnythingLLMDocument, AnythingLLMSource
+
+
+class AnythingLLMDocumentClientTests(unittest.TestCase):
+    """验证文档客户端只处理上传和元数据两个原子接口。"""
+
+    def setUp(self) -> None:
+        """创建传输替身与测试文件，避免依赖真实 Document Processor。"""
+        self.transport = MagicMock()
+        self.sleep = MagicMock()
+        self.client = AnythingLLMDocumentClient(
+            self.transport,
+            sleep=self.sleep,
+        )
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.file_path = Path(self.temp_directory.name) / "示例.txt"
+        self.file_path.write_text("测试内容", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        """删除单元测试创建的临时文件目录。"""
+        self.temp_directory.cleanup()
+
+    def test_upload_returns_normalized_document_from_real_response_fields(self) -> None:
+        """上传必须使用响应真实 ID/location，并统一历史字段别名与路径分隔符。"""
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {
+                    "docId": "doc-1",
+                    "docpath": r"C:\storage\documents\custom-documents\示例.txt-doc-1.json",
+                    "title": "示例.txt",
+                }
+            ]
+        }
+
+        with self.assertLogs(
+            "app.integrations.anythingllm.documents",
+            level="INFO",
+        ) as captured_logs:
+            document = self.client.upload_document(str(self.file_path), user_id=7)
+
+        self.assertEqual(document.id, "doc-1")
+        self.assertEqual(
+            document.location,
+            "custom-documents/示例.txt-doc-1.json",
+        )
+        self.assertEqual(
+            document.document_ref,
+            "name:示例.txt",
+        )
+        request = self.transport.post_multipart.call_args
+        self.assertEqual(request.args[0], "document/upload")
+        self.assertEqual(request.kwargs["user_id"], 7)
+        self.assertEqual(request.kwargs["files"]["file"][0], "示例.txt")
+        logs = "\n".join(captured_logs.output)
+        self.assertIn("开始上传 AnythingLLM 文档", logs)
+        self.assertIn("AnythingLLM 文档上传完成", logs)
+        self.assertNotIn("测试内容", logs)
+
+    def test_upload_rejects_missing_id_or_location_without_guessing(self) -> None:
+        """上传响应缺少 ID 或位置时必须协议失败，不能根据文件名构造内部路径。"""
+        invalid_documents = (
+            {"location": "custom-documents/a.json"},
+            {"id": "doc-1"},
+        )
+        for invalid_document in invalid_documents:
+            with self.subTest(invalid_document=invalid_document):
+                self.transport.post_multipart.return_value = {
+                    "documents": [invalid_document]
+                }
+                with self.assertRaises(AnythingLLMProtocolError):
+                    self.client.upload_document(str(self.file_path))
+
+    def test_real_windows_source_url_matches_uploaded_document_identity(self) -> None:
+        """真实 Windows file URL、来源标题和上传 location 应生成同一非空身份。"""
+        document_id = "b40936e4-6d24-496c-8d23-bcb4c4d7e8b7"
+        file_name = "JUMV0235-JUMV-07-Jun-2024 - hash.pdf"
+        document = AnythingLLMDocument.from_payload(
+            {
+                "id": document_id,
+                "location": f"custom-documents/{file_name}-{document_id}.json",
+                "title": file_name,
+            }
+        )
+        source = AnythingLLMSource.from_payload(
+            {
+                "id": document_id,
+                "title": file_name,
+                "url": (
+                    "file://C:\\Users\\dev\\AppData\\Roaming\\anythingllm-desktop"
+                    f"\\storage\\hotdir\\{file_name}"
+                ),
+                "text": "证据片段",
+            }
+        )
+
+        self.assertEqual(document.document_ref, f"name:{file_name.casefold()}")
+        self.assertEqual(source.document_ref, document.document_ref)
+        self.assertTrue(source.document_ref)
+
+    def test_windows_file_url_without_title_still_generates_reference(self) -> None:
+        """来源缺少标题时，非标准 Windows file URL 仍应回退到完整文件名。"""
+        source = AnythingLLMSource.from_payload(
+            {
+                "url": r"file://C:\Users\dev\storage\hotdir\example.pdf",
+                "text": "证据片段",
+            }
+        )
+
+        self.assertEqual(source.document_ref, "name:example.pdf")
+
+    def test_upload_retries_only_known_processor_outage_with_backoff(self) -> None:
+        """已识别的 Processor 500 故障应指数退避，成功后停止继续重试。"""
+        temporary_error = AnythingLLMHTTPError(
+            "处理器离线",
+            status_code=500,
+            response_summary="Document processing API is not online",
+        )
+        self.transport.post_multipart.side_effect = [
+            temporary_error,
+            temporary_error,
+            {
+                "documents": [
+                    {
+                        "id": "doc-2",
+                        "location": "custom-documents/b.json",
+                        "title": "b.txt",
+                    }
+                ]
+            },
+        ]
+
+        with self.assertLogs(
+            "app.integrations.anythingllm.documents",
+            level="WARNING",
+        ) as captured_logs:
+            document = self.client.upload_document(str(self.file_path))
+
+        self.assertEqual(document.id, "doc-2")
+        self.assertEqual(self.transport.post_multipart.call_count, 3)
+        self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [3.0, 6.0])
+        logs = "\n".join(captured_logs.output)
+        self.assertIn("attempt=1/4", logs)
+        self.assertIn("delay_seconds=3.0", logs)
+
+    def test_upload_does_not_retry_unrecognized_http_error(self) -> None:
+        """非白名单 HTTP 错误必须立即抛出，避免自动重放未知副作用请求。"""
+        self.transport.post_multipart.side_effect = AnythingLLMHTTPError(
+            "服务器错误",
+            status_code=500,
+            response_summary="unexpected failure",
+        )
+
+        with self.assertRaises(AnythingLLMHTTPError):
+            self.client.upload_document(str(self.file_path))
+
+        self.transport.post_multipart.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_update_metadata_sends_copy_and_rejects_explicit_failure(self) -> None:
+        """元数据更新应发送独立字典，并把 2xx 中的 success=false 视为协议失败。"""
+        metadata = {"file_name": "示例.txt"}
+        self.transport.post_json.return_value = {"success": True}
+
+        self.client.update_metadata(
+            "custom-documents/a.json",
+            metadata,
+            user_id=3,
+        )
+
+        self.transport.post_json.assert_called_once_with(
+            "document/meta",
+            {
+                "location": "custom-documents/a.json",
+                "metadata": {"file_name": "示例.txt"},
+            },
+            user_id=3,
+        )
+        self.transport.post_json.return_value = {"success": False}
+        with self.assertRaises(AnythingLLMProtocolError):
+            self.client.update_metadata("custom-documents/a.json", metadata)
+
+
+if __name__ == "__main__":
+    unittest.main()
