@@ -113,6 +113,61 @@ class AnythingLLMClientFacadeTests(unittest.TestCase):
         self.assertEqual(result["location"], "custom-documents/example.json")
         self.assertEqual(result["docpath"], "custom-documents/example.json")
 
+    def test_vector_search_delegates_top_n_and_preserves_retrieval_fields(self) -> None:
+        """Facade 应传递 top_n，并保留 weaponry 使用的 metadata 与 distance。"""
+        self.client.workspaces.vector_search.return_value = [
+            AnythingLLMSource(
+                document_ref="name:example.pdf",
+                text="检索片段",
+                id="chunk-1",
+                title="example.pdf",
+                score=0.9,
+                distance=0.1,
+                metadata={"title": "example.pdf", "category": "demo"},
+            )
+        ]
+
+        results = self.client.vector_search(
+            "workspace-1",
+            "检索问题",
+            user_id=5,
+            top_n=8,
+        )
+
+        self.client.workspaces.vector_search.assert_called_once_with(
+            "workspace-1",
+            "检索问题",
+            top_n=8,
+            user_id=5,
+        )
+        self.assertEqual(results[0]["metadata"]["category"], "demo")
+        self.assertEqual(results[0]["distance"], 0.1)
+        self.assertEqual(results[0]["document_ref"], "name:example.pdf")
+
+    def test_list_workspace_documents_returns_legacy_aliases(self) -> None:
+        """公开文档列表接口应委托 Workspace Client 并提供旧字段别名。"""
+        self.client.workspaces.list_documents.return_value = [
+            AnythingLLMDocument(
+                id="doc-1",
+                location="custom-documents/example.pdf-doc-1.json",
+                title="example.pdf",
+                document_ref="name:example.pdf",
+            )
+        ]
+
+        documents = self.client.list_workspace_documents("workspace-1", user_id=6)
+
+        self.client.workspaces.list_documents.assert_called_once_with(
+            "workspace-1",
+            user_id=6,
+        )
+        self.assertEqual(documents[0]["id"], "doc-1")
+        self.assertEqual(documents[0]["docId"], "doc-1")
+        self.assertEqual(
+            documents[0]["docpath"],
+            "custom-documents/example.pdf-doc-1.json",
+        )
+
     def test_update_embeddings_keeps_legacy_best_effort_follow_up(self) -> None:
         """加入文档成功后应委托 Pin 和元数据；后两步失败不改变旧成功语义。"""
         self.client.workspaces.update_embeddings.return_value = AnythingLLMWorkspace(

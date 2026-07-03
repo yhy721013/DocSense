@@ -260,17 +260,50 @@ class AnythingLLMClient:
         workspace_slug: str,
         query: str,
         user_id: Optional[int] = None,
+        *,
+        top_n: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """兼容旧接口：执行向量检索并返回来源字典，失败时返回空列表。"""
+        """执行向量检索并返回兼容来源字典，失败时返回空列表。
+
+        ``top_n`` 是阶段 3 新增的公开参数，用于替代 weaponry 业务层自行拼接
+        ``/vector-search`` 请求。参数会原样委托给 Workspace Client，由适配层负责转换
+        为 AnythingLLM 的 ``topN`` 字段。
+        """
         try:
             sources = self.workspaces.vector_search(
                 workspace_slug,
                 query,
+                top_n=top_n,
                 user_id=user_id,
             )
             return [self._source_dict(source) for source in sources]
         except Exception as exc:
             logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, exc)
+            return []
+
+    def list_workspace_documents(
+        self,
+        workspace_slug: str,
+        user_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """获取工作区文档并返回兼容字段字典，失败时返回空列表。
+
+        该公开方法用于替代业务层直接访问 Workspace HTTP 详情接口。返回结果同时包含
+        ``id/docId`` 与 ``location/docpath``，使迁移中的旧调用方无需继续解析供应商字段
+        别名；新代码应优先直接使用 Workspace Client 返回的 DTO。
+        """
+        try:
+            documents = self.workspaces.list_documents(
+                workspace_slug,
+                user_id=user_id,
+            )
+            return [self._document_dict(document) for document in documents]
+        except Exception as exc:
+            logger.error(
+                "获取工作区文档列表时出现异常 workspace=%s: %s",
+                workspace_slug,
+                exc,
+            )
             return []
 
     def upload_document(
