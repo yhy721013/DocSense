@@ -20,10 +20,7 @@ from app.integrations.anythingllm.models import (
     AnythingLLMThread,
     AnythingLLMWorkspace,
 )
-from app.integrations.anythingllm.rag_gateway import (
-    AnythingLLMRagGateway,
-    AnythingLLMRagSession,
-)
+from app.integrations.anythingllm.rag_gateway import AnythingLLMRagGateway
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport, SSEEvent
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
@@ -36,7 +33,6 @@ __all__ = [
     "AnythingLLMHTTPError",
     "AnythingLLMProtocolError",
     "AnythingLLMRagGateway",
-    "AnythingLLMRagSession",
     "AnythingLLMSource",
     "AnythingLLMThread",
     "AnythingLLMThreadClient",

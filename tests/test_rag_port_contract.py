@@ -19,6 +19,7 @@ from app.ports import (
     DocumentRagSession,
     IndexedDocument,
     KnowledgeIndexPort,
+    PreparedDocumentRef,
     RagOperationError,
     RagSource,
 )
@@ -147,13 +148,14 @@ class DocumentRagPortContractTests(unittest.TestCase):
             conversation_name="analysis",
         )
 
-        first = session.close()
-        second = session.close()
+        first = session.close(retain_document=True)
+        second = session.close(retain_document=False)
 
         self.assertTrue(first.success)
         self.assertFalse(first.already_closed)
         self.assertTrue(second.success)
         self.assertTrue(second.already_closed)
+        self.assertTrue(session.retain_document_on_close)
         with self.assertRaises(RagOperationError) as raised:
             session.analyse("sample.pdf", "分析文件")
         self.assertEqual("session_closed", raised.exception.trace.failure_stage)
@@ -165,14 +167,15 @@ class DocumentRagPortContractTests(unittest.TestCase):
             conversation_name="analysis",
         )
 
-        first = session.close()
-        second = session.close()
+        first = session.close(retain_document=False)
+        second = session.close(retain_document=True)
 
         self.assertFalse(first.success)
         self.assertFalse(first.already_closed)
         self.assertFalse(second.success)
         self.assertTrue(second.already_closed)
         self.assertEqual("删除隔离资源失败", second.error_message)
+        self.assertFalse(session.retain_document_on_close)
 
     def test_sources_can_be_optional_for_explicit_non_rag_query(self) -> None:
         """调用方显式关闭来源要求时，无来源但有文本的回答可以成功。"""
@@ -228,10 +231,11 @@ class RagOpeningRollbackContractTests(unittest.TestCase):
         self.assertIsNotNone(trace.context_ref)
         self.assertIsNone(trace.conversation_ref)
         self.assertEqual(
-            ["open_context", "open_conversation", "rollback_context"],
-            [attempt.operation for attempt in trace.attempts],
+            ["context_create", "conversation_create", "context_rollback"],
+            [event.operation for event in trace.lifecycle_events],
         )
-        self.assertIsNone(trace.attempts[-1].failure_stage)
+        self.assertEqual((), trace.attempts)
+        self.assertIsNone(trace.lifecycle_events[-1].failure_stage)
         self.assertEqual(0, len(port.sessions))
 
     def test_rollback_failure_preserves_reference_and_cleanup_error(self) -> None:
@@ -249,8 +253,11 @@ class RagOpeningRollbackContractTests(unittest.TestCase):
 
         trace = raised.exception.trace
         self.assertIsNotNone(trace.context_ref)
-        self.assertEqual("cleanup", trace.attempts[-1].failure_stage)
-        self.assertEqual("上下文删除失败", trace.attempts[-1].error_message)
+        self.assertEqual("cleanup", trace.lifecycle_events[-1].failure_stage)
+        self.assertEqual(
+            "上下文删除失败",
+            trace.lifecycle_events[-1].error_message,
+        )
         self.assertIn("回滚失败", trace.error_message or "")
 
 
@@ -311,6 +318,26 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         self.assertIsNone(
             port.reconcile_document(collection, idempotency_key="sha256:abc")
         )
+
+    def test_store_prepared_document_preserves_rag_document_identity(self) -> None:
+        """长期知识库登记必须复用 RAG 已上传文档，不得生成第二个外部位置。"""
+        port = FakeKnowledgeIndexPort()
+        collection = port.ensure_collection("architecture-prepared")
+        prepared = PreparedDocumentRef(
+            document_ref="document:prepared",
+            external_location="external:prepared",
+        )
+
+        stored = port.store_prepared_document(
+            collection,
+            prepared,
+            {"file_name": "sample.pdf"},
+            idempotency_key="sha256:prepared",
+        )
+
+        self.assertEqual(prepared.document_ref, stored.document_ref)
+        self.assertEqual(prepared.external_location, stored.external_location)
+        self.assertTrue(stored.created)
 
     def test_same_idempotency_key_is_scoped_to_collection(self) -> None:
         """不同业务集合可以安全使用相同幂等键而不会错误复用文档。"""

@@ -13,8 +13,11 @@ from typing import Optional, Sequence
 from app.ports import (
     CleanupResult,
     DocumentRagSession,
+    MAX_RAG_QUERY_ATTEMPTS,
+    PreparedDocumentRef,
     RagAttempt,
     RagExecutionTrace,
+    RagLifecycleEvent,
     RagOperationError,
     RagResult,
     RagSource,
@@ -57,6 +60,7 @@ class FakeDocumentRagSession:
         analyse_outcomes: Optional[Sequence[FakeRagOutcome]] = None,
         ask_outcomes: Optional[Sequence[FakeRagOutcome]] = None,
         cleanup_error_message: str = "",
+        lifecycle_events: Optional[Sequence[RagLifecycleEvent]] = None,
     ) -> None:
         """创建测试会话，并复制全部预设结果队列和清理失败配置。"""
         self._context_name = self._required_text(context_name, name="context_name")
@@ -77,9 +81,11 @@ class FakeDocumentRagSession:
         )
         self._cleanup_error_message = str(cleanup_error_message or "")
         self._attempts: list[RagAttempt] = []
+        self._lifecycle_events = list(lifecycle_events or ())
         self._analyse_started = False
         self._analyse_succeeded = False
         self._closed = False
+        self._retain_document_on_close: Optional[bool] = None
         self._first_cleanup_result: Optional[CleanupResult] = None
         self._failure_stage: Optional[str] = None
         self._error_message: Optional[str] = None
@@ -101,6 +107,7 @@ class FakeDocumentRagSession:
             )
         self._required_text(file_path, name="file_path")
         self._required_text(prompt, name="prompt")
+        self._validate_max_attempts(max_attempts)
         self._analyse_started = True
         result = self._execute(
             operation="analyse",
@@ -122,6 +129,7 @@ class FakeDocumentRagSession:
         """在 analyse 成功后消费 ask 预设队列，并记录全部尝试。"""
         self._ensure_open()
         self._required_text(prompt, name="prompt")
+        self._validate_max_attempts(max_attempts)
         if not self._analyse_succeeded:
             raise self._operation_error(
                 "ask 必须在 analyse 成功后调用",
@@ -140,8 +148,19 @@ class FakeDocumentRagSession:
         """返回不会随测试替身后续执行而变化的轨迹快照。"""
         return self._trace()
 
-    def close(self) -> CleanupResult:
-        """记录一次逻辑清理，并保证后续调用不重复执行外部删除语义。"""
+    @property
+    def retain_document_on_close(self) -> Optional[bool]:
+        """返回首次关闭时记录的文档处置选择；尚未关闭时返回 ``None``。"""
+        return self._retain_document_on_close
+
+    def close(self, *, retain_document: bool) -> CleanupResult:
+        """记录一次逻辑清理和文档处置选择，并保证后续调用保持幂等。
+
+        Fake 不拥有真实全局文档，因此不会执行删除；保存该参数是为了让业务服务测试可以
+        断言成功路径明确保留文档、失败路径明确请求补偿删除。
+        """
+        if not isinstance(retain_document, bool):
+            raise TypeError("retain_document 必须是 bool")
         if self._closed:
             previous = self._first_cleanup_result or CleanupResult(
                 success=False,
@@ -155,6 +174,7 @@ class FakeDocumentRagSession:
             )
 
         self._closed = True
+        self._retain_document_on_close = retain_document
         result = CleanupResult(
             success=not bool(self._cleanup_error_message),
             already_closed=False,
@@ -173,8 +193,7 @@ class FakeDocumentRagSession:
         max_attempts: int,
     ) -> RagResult:
         """执行有限次预设调用，并按正式端口契约生成结果或轨迹异常。"""
-        if max_attempts < 1:
-            raise ValueError("max_attempts 必须大于 0")
+        self._validate_max_attempts(max_attempts)
 
         last_failure_stage = "outcomes_exhausted"
         last_error_message = "测试替身未配置足够的调用结果"
@@ -218,6 +237,14 @@ class FakeDocumentRagSession:
                 return RagResult(
                     text=str(outcome.text),
                     sources=outcome.sources,
+                    prepared_document=PreparedDocumentRef(
+                        document_ref=(
+                            outcome.sources[0].document_ref
+                            if outcome.sources
+                            else "document:fake"
+                        ),
+                        external_location="external:fake-document",
+                    ),
                     trace=self._trace(),
                 )
 
@@ -251,6 +278,7 @@ class FakeDocumentRagSession:
             attempts=tuple(self._attempts),
             failure_stage=self._failure_stage,
             error_message=self._error_message,
+            lifecycle_events=tuple(self._lifecycle_events),
         )
 
     @staticmethod
@@ -260,6 +288,14 @@ class FakeDocumentRagSession:
         if not normalized:
             raise ValueError(f"{name} 不能为空")
         return normalized
+
+    @staticmethod
+    def _validate_max_attempts(max_attempts: int) -> None:
+        """使用与生产 Gateway 相同的模型查询次数硬上限。"""
+        if not 1 <= max_attempts <= MAX_RAG_QUERY_ATTEMPTS:
+            raise ValueError(
+                f"max_attempts 必须介于 1 和 {MAX_RAG_QUERY_ATTEMPTS} 之间"
+            )
 
 
 class FakeDocumentRagPort:
@@ -306,16 +342,16 @@ class FakeDocumentRagPort:
         normalized_context_name = self._required_text(context_name, name="context_name")
         self._required_text(conversation_name, name="conversation_name")
         self._open_count += 1
-        attempts: list[RagAttempt] = []
+        lifecycle_events: list[RagLifecycleEvent] = []
 
         if self._open_failure_stage == "context_create":
-            attempts.append(
-                RagAttempt(
-                    operation="open_context",
+            lifecycle_events.append(
+                RagLifecycleEvent(
+                    sequence_no=1,
+                    operation="context_create",
                     attempt=1,
-                    prompt_kind="lifecycle",
-                    raw_response=None,
-                    sources=(),
+                    success=False,
+                    external_ref=None,
                     failure_stage="context_create",
                     error_message="创建隔离上下文失败",
                 )
@@ -324,44 +360,45 @@ class FakeDocumentRagPort:
                 context_name=normalized_context_name,
                 context_ref=None,
                 conversation_ref=None,
-                attempts=tuple(attempts),
+                attempts=(),
                 failure_stage="context_create",
                 error_message="创建隔离上下文失败",
+                lifecycle_events=tuple(lifecycle_events),
             )
             raise RagOperationError("创建隔离上下文失败", trace)
 
         context_ref = f"context:{self._open_count}"
-        attempts.append(
-            RagAttempt(
-                operation="open_context",
+        lifecycle_events.append(
+            RagLifecycleEvent(
+                sequence_no=1,
+                operation="context_create",
                 attempt=1,
-                prompt_kind="lifecycle",
-                raw_response=None,
-                sources=(),
+                success=True,
+                external_ref=context_ref,
                 failure_stage=None,
                 error_message=None,
             )
         )
         if self._open_failure_stage == "conversation_create":
-            attempts.append(
-                RagAttempt(
-                    operation="open_conversation",
+            lifecycle_events.append(
+                RagLifecycleEvent(
+                    sequence_no=2,
+                    operation="conversation_create",
                     attempt=1,
-                    prompt_kind="lifecycle",
-                    raw_response=None,
-                    sources=(),
+                    success=False,
+                    external_ref=None,
                     failure_stage="conversation_create",
                     error_message="创建隔离对话失败",
                 )
             )
             rollback_failed = bool(self._rollback_error_message)
-            attempts.append(
-                RagAttempt(
-                    operation="rollback_context",
+            lifecycle_events.append(
+                RagLifecycleEvent(
+                    sequence_no=3,
+                    operation="context_rollback",
                     attempt=1,
-                    prompt_kind="lifecycle",
-                    raw_response=None,
-                    sources=(),
+                    success=not rollback_failed,
+                    external_ref=context_ref,
                     failure_stage="cleanup" if rollback_failed else None,
                     error_message=self._rollback_error_message or None,
                 )
@@ -373,19 +410,33 @@ class FakeDocumentRagPort:
                 context_name=normalized_context_name,
                 context_ref=context_ref,
                 conversation_ref=None,
-                attempts=tuple(attempts),
+                attempts=(),
                 failure_stage="conversation_create",
                 error_message=error_message,
+                lifecycle_events=tuple(lifecycle_events),
             )
             raise RagOperationError(error_message, trace)
 
+        conversation_ref = f"conversation:{self._open_count}"
+        lifecycle_events.append(
+            RagLifecycleEvent(
+                sequence_no=2,
+                operation="conversation_create",
+                attempt=1,
+                success=True,
+                external_ref=conversation_ref,
+                failure_stage=None,
+                error_message=None,
+            )
+        )
         session = FakeDocumentRagSession(
             context_name=normalized_context_name,
             context_ref=context_ref,
-            conversation_ref=f"conversation:{self._open_count}",
+            conversation_ref=conversation_ref,
             analyse_outcomes=self._analyse_outcomes,
             ask_outcomes=self._ask_outcomes,
             cleanup_error_message=self._cleanup_error_message,
+            lifecycle_events=lifecycle_events,
         )
         self._sessions.append(session)
         return session

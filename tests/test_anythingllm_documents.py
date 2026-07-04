@@ -1,7 +1,7 @@
 """AnythingLLM 文档原子客户端的离线契约测试。
 
 测试只使用 Fake Transport 和临时文件，不建立网络连接。覆盖上传 DTO 归一化、必填字段
-校验、Document Processor 有限重试以及元数据响应的业务失败识别。
+校验、Document Processor 有限重试、全局文档永久删除以及元数据响应的业务失败识别。
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from app.integrations.anythingllm.models import AnythingLLMDocument, AnythingLLM
 
 
 class AnythingLLMDocumentClientTests(unittest.TestCase):
-    """验证文档客户端只处理上传和元数据两个原子接口。"""
+    """验证文档客户端只处理上传、永久删除和元数据更新原子接口。"""
 
     def setUp(self) -> None:
         """创建传输替身与测试文件，避免依赖真实 Document Processor。"""
@@ -173,6 +173,56 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
 
         self.transport.post_multipart.assert_called_once()
         self.sleep.assert_not_called()
+
+    def test_upload_retry_count_rejects_value_above_hard_cap(self) -> None:
+        """上传额外重试次数超过三次时必须在构造阶段失败。"""
+        with self.assertRaises(ValueError):
+            AnythingLLMDocumentClient(
+                self.transport,
+                upload_max_retries=4,
+                sleep=self.sleep,
+            )
+
+    def test_delete_document_uses_official_global_purge_endpoint(self) -> None:
+        """永久删除必须使用上传返回的 location 调用官方全局清理接口。"""
+        self.transport.delete_json.return_value = {
+            "success": True,
+            "message": "Documents removed successfully",
+        }
+
+        self.client.delete_document(
+            r"C:\storage\documents\custom-documents\示例.txt-doc-1.json",
+            user_id=7,
+        )
+
+        self.transport.delete_json.assert_called_once_with(
+            "system/remove-documents",
+            {"names": ["custom-documents/示例.txt-doc-1.json"]},
+            user_id=7,
+        )
+
+    def test_delete_document_rejects_untrusted_or_parent_paths(self) -> None:
+        """删除接口不得接受全局文档目录之外或包含父目录跳转的位置。"""
+        invalid_locations = (
+            "",
+            "other-documents/a.json",
+            "custom-documents/../a.json",
+            "custom-documents",
+        )
+        for location in invalid_locations:
+            with self.subTest(location=location):
+                with self.assertRaises(ValueError):
+                    self.client.delete_document(location)
+
+        self.transport.delete_json.assert_not_called()
+
+    def test_delete_document_requires_explicit_success_confirmation(self) -> None:
+        """2xx 响应缺少 success=true 时仍应视为协议失败，不能假定删除完成。"""
+        for response in ({}, {"success": False}, {"error": "failed"}):
+            with self.subTest(response=response):
+                self.transport.delete_json.return_value = response
+                with self.assertRaises(AnythingLLMProtocolError):
+                    self.client.delete_document("custom-documents/a.json")
 
     def test_update_metadata_sends_copy_and_rejects_explicit_failure(self) -> None:
         """元数据更新应发送独立字典，并把 2xx 中的 success=false 视为协议失败。"""

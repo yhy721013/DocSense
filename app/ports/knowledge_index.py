@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
+from .rag import PreparedDocumentRef
+
 
 @dataclass(frozen=True)
 class CollectionRef:
@@ -91,6 +93,21 @@ class KnowledgeIndexPort(Protocol):
         idempotency_key: str,
     ) -> IndexedDocument:
         """按幂等键保存文档；重复请求必须复用首次写入的逻辑文档。"""
+        ...
+
+    def store_prepared_document(
+        self,
+        collection: CollectionRef,
+        document: PreparedDocumentRef,
+        metadata: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> IndexedDocument:
+        """把 RAG 已准备的同一文档登记到长期集合，不得再次上传文件。
+
+        ``document`` 的两个引用均为不透明值。具体适配器负责验证该句柄是否属于自己管理
+        的供应商，并完成集合绑定和元数据更新；业务层只负责传递和持久化返回结果。
+        """
         ...
 
     def remove_document(

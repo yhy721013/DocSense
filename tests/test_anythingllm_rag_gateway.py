@@ -124,6 +124,14 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         self.assertEqual("name:sample.pdf", result.sources[0].document_ref)
         self.assertEqual("目标证据", result.sources[0].text)
         self.assertEqual(
+            harness.document.document_ref,
+            result.prepared_document.document_ref,
+        )
+        self.assertEqual(
+            harness.document.location,
+            result.prepared_document.external_location,
+        )
+        self.assertEqual(
             [
                 "create_context",
                 "create_conversation",
@@ -260,6 +268,19 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
                     "embedding_protocol",
                     raised.exception.trace.failure_stage,
                 )
+                self.assertEqual((), raised.exception.trace.attempts)
+                self.assertEqual(
+                    [
+                        "context_create",
+                        "conversation_create",
+                        "document_upload",
+                        "document_bind",
+                    ],
+                    [
+                        event.operation
+                        for event in raised.exception.trace.lifecycle_events
+                    ],
+                )
                 harness.workspace_client.update_pin.assert_not_called()
 
     def test_transient_embedding_gateway_error_is_retried_without_sleep(self) -> None:
@@ -293,13 +314,22 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
         harness.workspace_client.update_pin.side_effect = AnythingLLMProtocolError(
             "Pin 响应不是合法 JSON"
         )
+        session = harness.open_session()
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse("sample.pdf", "分析文档")
+            session.analyse("sample.pdf", "分析文档")
 
         self.assertEqual("pin_protocol", raised.exception.trace.failure_stage)
         self.assertEqual(1, harness.workspace_client.update_embeddings.call_count)
         self.assertEqual(1, harness.workspace_client.update_pin.call_count)
+        harness.document_client.delete_document.assert_not_called()
+
+        session.close(retain_document=False)
+
+        harness.document_client.delete_document.assert_called_once_with(
+            harness.document.location,
+            user_id=7,
+        )
 
     def test_first_pin_404_rebinds_once_then_succeeds(self) -> None:
         """首次 Pin 404 时重新加入文档一次，随后只重试一次 Pin。"""
@@ -372,6 +402,23 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         self.assertEqual("分析结果", result.text)
         self.assertEqual("query", result.trace.attempts[0].failure_stage)
         self.assertIsNone(result.trace.attempts[1].failure_stage)
+
+    def test_unknown_query_exception_is_audited_without_retry(self) -> None:
+        """未知编程异常必须形成一次失败 attempt，但不得作为暂态故障自动重放。"""
+        harness = _GatewayHarness()
+        harness.thread_client.ask.side_effect = RuntimeError("内部实现异常")
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse("sample.pdf", "分析文档", max_attempts=3)
+
+        self.assertEqual(1, harness.thread_client.ask.call_count)
+        self.assertEqual(1, len(raised.exception.trace.attempts))
+        self.assertEqual("query", raised.exception.trace.failure_stage)
+        self.assertNotIn(
+            "内部实现异常",
+            raised.exception.trace.error_message or "",
+        )
 
     def test_retry_exhaustion_preserves_all_attempts(self) -> None:
         """重试耗尽后异常轨迹必须保存每次原始回答和失败阶段。"""
@@ -491,10 +538,11 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         self.assertEqual("context-ref", trace.context_ref)
         self.assertIsNone(trace.conversation_ref)
         self.assertEqual(
-            ["open_context", "open_conversation", "rollback_context"],
-            [attempt.operation for attempt in trace.attempts],
+            ["context_create", "conversation_create", "context_rollback"],
+            [event.operation for event in trace.lifecycle_events],
         )
-        self.assertIsNone(trace.attempts[-1].failure_stage)
+        self.assertEqual((), trace.attempts)
+        self.assertIsNone(trace.lifecycle_events[-1].failure_stage)
         harness.workspace_client.delete_workspace.assert_called_once_with(
             "context-ref",
             user_id=7,
@@ -511,7 +559,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
 
         trace = raised.exception.trace
         self.assertEqual("context-ref", trace.context_ref)
-        self.assertEqual("cleanup", trace.attempts[-1].failure_stage)
+        self.assertEqual("cleanup", trace.lifecycle_events[-1].failure_stage)
         self.assertIn("回滚失败", trace.error_message or "")
 
     def test_close_is_idempotent_and_deletes_only_context(self) -> None:
@@ -519,8 +567,8 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         harness = _GatewayHarness()
         session = harness.open_session()
 
-        first = session.close()
-        second = session.close()
+        first = session.close(retain_document=True)
+        second = session.close(retain_document=False)
 
         self.assertTrue(first.success)
         self.assertFalse(first.already_closed)
@@ -531,6 +579,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
             user_id=7,
         )
         harness.thread_client.delete_thread.assert_not_called()
+        harness.document_client.delete_document.assert_not_called()
 
     def test_cleanup_failure_is_not_replayed(self) -> None:
         """首次删除失败后重复 close 返回原错误，但不得再次发送删除请求。"""
@@ -538,8 +587,8 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         harness.workspace_client.delete_workspace.side_effect = _http_error(503)
         session = harness.open_session()
 
-        first = session.close()
-        second = session.close()
+        first = session.close(retain_document=True)
+        second = session.close(retain_document=False)
 
         self.assertFalse(first.success)
         self.assertFalse(first.already_closed)
@@ -547,6 +596,79 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         self.assertTrue(second.already_closed)
         self.assertEqual(first.error_message, second.error_message)
         self.assertEqual(1, harness.workspace_client.delete_workspace.call_count)
+
+    def test_failed_preparation_deletes_global_document_only_when_closed(self) -> None:
+        """嵌入失败后先保留审计现场，审计成功触发 close 时再永久删除全局文档。"""
+        harness = _GatewayHarness()
+        harness.workspace_client.update_embeddings.side_effect = _http_error(400)
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError):
+            session.analyse("sample.pdf", "分析文档")
+
+        harness.document_client.delete_document.assert_not_called()
+        cleanup = session.close(retain_document=True)
+
+        self.assertTrue(cleanup.success)
+        harness.document_client.delete_document.assert_called_once_with(
+            harness.document.location,
+            user_id=7,
+        )
+        delete_events = [
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "global_document_delete"
+        ]
+        self.assertEqual(1, len(delete_events))
+        self.assertTrue(delete_events[0].success)
+
+    def test_business_failure_can_explicitly_delete_successful_analysis_document(self) -> None:
+        """RAG 成功但后续业务契约失败时，关闭策略必须允许删除已上传全局文档。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+        session.analyse("sample.pdf", "分析文档")
+
+        cleanup = session.close(retain_document=False)
+
+        self.assertTrue(cleanup.success)
+        harness.document_client.delete_document.assert_called_once_with(
+            harness.document.location,
+            user_id=7,
+        )
+
+    def test_successful_analysis_retains_global_document(self) -> None:
+        """全部业务成功时显式保留文档，关闭只删除临时工作区。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+        session.analyse("sample.pdf", "分析文档")
+
+        cleanup = session.close(retain_document=True)
+
+        self.assertTrue(cleanup.success)
+        harness.document_client.delete_document.assert_not_called()
+        harness.workspace_client.delete_workspace.assert_called_once_with(
+            "context-ref",
+            user_id=7,
+        )
+
+    def test_global_document_delete_failure_does_not_skip_workspace_cleanup(self) -> None:
+        """补偿删除失败必须被汇总，但仍应尽力删除临时工作区并暴露失败结果。"""
+        harness = _GatewayHarness()
+        harness.document_client.delete_document.side_effect = _http_error(503)
+        session = harness.open_session()
+        session.analyse("sample.pdf", "分析文档")
+
+        cleanup = session.close(retain_document=False)
+        repeated_cleanup = session.close(retain_document=False)
+
+        self.assertFalse(cleanup.success)
+        self.assertTrue(cleanup.error_message)
+        self.assertTrue(repeated_cleanup.already_closed)
+        self.assertEqual(1, harness.document_client.delete_document.call_count)
+        harness.workspace_client.delete_workspace.assert_called_once_with(
+            "context-ref",
+            user_id=7,
+        )
 
     def test_invalid_attempt_limit_fails_before_upload(self) -> None:
         """无效重试参数必须在产生上传副作用前被拒绝。"""
@@ -557,6 +679,28 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
             session.analyse("sample.pdf", "分析文档", max_attempts=0)
 
         harness.document_client.upload_document.assert_not_called()
+
+    def test_attempt_limit_above_hard_cap_fails_before_upload(self) -> None:
+        """超过端口硬上限的查询次数必须在上传前失败，防止错误配置制造无界调用。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+
+        with self.assertRaises(ValueError):
+            session.analyse("sample.pdf", "分析文档", max_attempts=4)
+
+        harness.document_client.upload_document.assert_not_called()
+
+    def test_embedding_attempt_limit_above_hard_cap_is_rejected(self) -> None:
+        """嵌入总调用次数超过三次时必须在 Gateway 构造阶段失败。"""
+        harness = _GatewayHarness()
+
+        with self.assertRaises(ValueError):
+            AnythingLLMRagGateway(
+                harness.document_client,
+                harness.workspace_client,
+                harness.thread_client,
+                embedding_max_attempts=4,
+            )
 
 
 class AnythingLLMRagGatewayBoundaryTests(unittest.TestCase):

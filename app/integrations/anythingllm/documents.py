@@ -1,8 +1,8 @@
 """AnythingLLM 全局文档接口的原子客户端。
 
-该客户端只负责文档上传和元数据更新，不负责把文档加入工作区、固定文档或创建会话。
-重试范围严格限制为已识别的 Document Processor 暂时不可用错误，避免自动重放其他
-可能产生副作用的失败请求。
+该客户端只负责全局文档上传、永久删除和元数据更新，不负责把文档加入工作区、固定文档
+或创建会话。重试范围严格限制为已识别的 Document Processor 暂时不可用错误，避免自动
+重放其他可能产生副作用的失败请求。
 """
 
 from __future__ import annotations
@@ -17,7 +17,11 @@ from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
 )
-from app.integrations.anythingllm.models import AnythingLLMDocument, require_mapping
+from app.integrations.anythingllm.models import (
+    AnythingLLMDocument,
+    normalize_document_path,
+    require_mapping,
+)
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 
 
@@ -35,6 +39,7 @@ class AnythingLLMDocumentClient:
         "Document processing API is not online",
         "fetch failed",
     )
+    _MAX_UPLOAD_RETRIES = 3
 
     def __init__(
         self,
@@ -49,8 +54,10 @@ class AnythingLLMDocumentClient:
         ``upload_max_retries`` 表示首次请求之后允许的重试次数，因此默认最多发起四次
         上传。``sleep`` 可在测试中注入，保证指数退避测试不产生真实等待。
         """
-        if upload_max_retries < 0:
-            raise ValueError("upload_max_retries 不得小于 0")
+        if not 0 <= upload_max_retries <= self._MAX_UPLOAD_RETRIES:
+            raise ValueError(
+                f"upload_max_retries 必须介于 0 和 {self._MAX_UPLOAD_RETRIES} 之间"
+            )
         if upload_retry_base_delay < 0:
             raise ValueError("upload_retry_base_delay 不得小于 0")
         self._transport = transport
@@ -131,6 +138,56 @@ class AnythingLLMDocumentClient:
 
         # 循环的最后一次失败必定在 except 分支重新抛出，该分支仅用于类型检查完整性。
         raise AssertionError("上传重试循环异常结束")
+
+    def delete_document(
+        self,
+        location: str,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        """永久删除一次上传产生的全局文档及其所有关联。
+
+        AnythingLLM 开发者 API 的 ``DELETE system/remove-documents`` 接收 ``names`` 数组。
+        上游 ``purgeDocument`` 会删除源文档、向量缓存，并从全部 Workspace 移除该文档。
+        因此本方法具有全局破坏性，只接受上传接口返回且可归一化到 ``custom-documents``
+        的位置。部分部署会返回包含宿主前缀的绝对路径，本方法会先剥离该前缀；归一化后
+        仍不允许任意目录、父目录片段、查询串或控制字符。
+
+        本操作不自动重试。虽然上游删除设计为幂等，网络超时仍无法证明服务器是否已经
+        执行成功；重试或补偿决策必须由持有完整业务上下文的 Gateway 明确控制。
+        """
+        normalized_location = normalize_document_path(location)
+        path_parts = tuple(part for part in normalized_location.split("/") if part)
+        has_control_character = any(ord(char) < 32 for char in normalized_location)
+        if (
+            not normalized_location.startswith("custom-documents/")
+            or any(part in {".", ".."} for part in path_parts)
+            or len(path_parts) < 2
+            or has_control_character
+            or "?" in normalized_location
+            or "#" in normalized_location
+        ):
+            raise ValueError("只能删除有效的 custom-documents 全局文档位置")
+
+        logger.info(
+            "开始永久删除 AnythingLLM 全局文档: location=%s "
+            "has_user_context=%s",
+            normalized_location,
+            user_id is not None,
+        )
+        body = self._transport.delete_json(
+            "system/remove-documents",
+            {"names": [normalized_location]},
+            user_id=user_id,
+        )
+        payload = require_mapping(body, context="永久删除文档响应")
+        if payload.get("error") or payload.get("success") is not True:
+            raise AnythingLLMProtocolError("AnythingLLM 未确认全局文档已永久删除")
+        logger.info(
+            "AnythingLLM 全局文档永久删除完成: location=%s has_user_context=%s",
+            normalized_location,
+            user_id is not None,
+        )
 
     def update_metadata(
         self,

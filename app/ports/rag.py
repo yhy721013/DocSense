@@ -11,6 +11,14 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
 
+MAX_RAG_QUERY_ATTEMPTS = 3
+"""单次 analyse 或 ask 允许的模型查询次数硬上限。
+
+该上限属于应用层成本与资源保护契约，生产适配器和测试替身必须共同遵守。调用方可以在
+1 到该值之间选择更小次数，但不得通过配置错误或参数透传制造无界模型调用。
+"""
+
+
 @dataclass(frozen=True)
 class RagSource:
     """一次模型回答引用的供应商无关来源证据。
@@ -39,10 +47,10 @@ class RagSource:
 
 @dataclass(frozen=True)
 class RagAttempt:
-    """一次外部模型调用或生命周期操作的可审计记录。
+    """一次模型调用的可审计记录。
 
     属性:
-        operation: 稳定操作名，例如 ``analyse``、``ask`` 或资源回滚操作。
+        operation: 稳定模型操作名，例如 ``analyse``、``ask`` 或结构修复。
         attempt: 当前操作内从 1 开始的尝试序号。
         prompt_kind: 提示词用途分类，只记录类型，不记录完整 Prompt。
         raw_response: 可选原始回答，用于后续交互审计。
@@ -67,7 +75,47 @@ class RagAttempt:
             raise ValueError("RagAttempt.attempt 必须从 1 开始")
         if not str(self.prompt_kind or "").strip():
             raise ValueError("RagAttempt.prompt_kind 不能为空")
+        if self.failure_stage and not str(self.error_message or "").strip():
+            raise ValueError("失败的 RagAttempt 必须包含 error_message")
+        if not self.failure_stage and self.error_message:
+            raise ValueError("成功的 RagAttempt 不得包含 error_message")
         object.__setattr__(self, "sources", tuple(self.sources))
+
+
+@dataclass(frozen=True)
+class RagLifecycleEvent:
+    """一次外部资源生命周期操作的供应商无关审计事件。
+
+    模型交互和资源操作具有不同的数据含义：前者需要保存回答与来源，后者需要保存资源
+    引用、执行顺序和补偿结果。本 DTO 专门描述 Context 创建、文档上传、绑定、Pin、回滚
+    及失败补偿等操作，避免使用空 ``raw_response`` 伪装成模型调用。
+
+    ``sequence_no`` 是整个 Session 内从 1 开始的全局发生顺序；``attempt`` 是同名操作内
+    从 1 开始的尝试序号。成功事件不得携带失败信息，失败事件必须明确 ``failure_stage``。
+    """
+
+    sequence_no: int
+    operation: str
+    attempt: int
+    success: bool
+    external_ref: Optional[str]
+    failure_stage: Optional[str]
+    error_message: Optional[str]
+
+    def __post_init__(self) -> None:
+        """校验事件顺序、操作名称以及成功状态与失败字段的一致性。"""
+        if self.sequence_no < 1:
+            raise ValueError("RagLifecycleEvent.sequence_no 必须从 1 开始")
+        if self.attempt < 1:
+            raise ValueError("RagLifecycleEvent.attempt 必须从 1 开始")
+        if not str(self.operation or "").strip():
+            raise ValueError("RagLifecycleEvent.operation 不能为空")
+        if self.success and (self.failure_stage or self.error_message):
+            raise ValueError("成功的 RagLifecycleEvent 不得包含失败信息")
+        if not self.success and not str(self.failure_stage or "").strip():
+            raise ValueError("失败的 RagLifecycleEvent 必须包含 failure_stage")
+        if not self.success and not str(self.error_message or "").strip():
+            raise ValueError("失败的 RagLifecycleEvent 必须包含 error_message")
 
 
 @dataclass(frozen=True)
@@ -75,8 +123,8 @@ class RagExecutionTrace:
     """一个隔离 RAG 会话从创建到当前时刻的完整审计快照。
 
     ``context_ref`` 和 ``conversation_ref`` 是不透明外部引用。字段允许为 ``None``，用于
-    精确表达资源创建过程中的部分成功。``attempts`` 按真实发生顺序保存，调用方不得根据
-    operation 重新排序。
+    精确表达资源创建过程中的部分成功。``attempts`` 只保存模型调用，
+    ``lifecycle_events`` 保存资源状态机；两个序列均按真实发生顺序保留。
     """
 
     context_name: str
@@ -85,26 +133,59 @@ class RagExecutionTrace:
     attempts: tuple[RagAttempt, ...]
     failure_stage: Optional[str]
     error_message: Optional[str]
+    lifecycle_events: tuple[RagLifecycleEvent, ...] = ()
 
     def __post_init__(self) -> None:
-        """冻结尝试序列并保证上下文名称可用于审计关联。"""
+        """冻结模型调用和生命周期序列，并保证上下文名称可用于审计关联。"""
         if not str(self.context_name or "").strip():
             raise ValueError("RagExecutionTrace.context_name 不能为空")
         object.__setattr__(self, "attempts", tuple(self.attempts))
+        object.__setattr__(self, "lifecycle_events", tuple(self.lifecycle_events))
+        sequence_numbers = tuple(
+            event.sequence_no for event in self.lifecycle_events
+        )
+        expected_sequence = tuple(range(1, len(self.lifecycle_events) + 1))
+        if sequence_numbers != expected_sequence:
+            raise ValueError(
+                "RagExecutionTrace.lifecycle_events 必须按从 1 开始的连续顺序排列"
+            )
+
+
+@dataclass(frozen=True)
+class PreparedDocumentRef:
+    """RAG 准备完成后可转交长期知识库的不透明文档句柄。
+
+    ``document_ref`` 用于来源精确匹配，``external_location`` 用于后续索引登记和补偿。
+    两个字段都只能作为不可拆解的引用传递、比较和持久化；业务层不得根据其文本格式推导
+    供应商目录、HTTP 路径或资源类型。
+    """
+
+    document_ref: str
+    external_location: str
+
+    def __post_init__(self) -> None:
+        """拒绝无法被可靠审计或转交长期知识库的空引用。"""
+        if not str(self.document_ref or "").strip():
+            raise ValueError("PreparedDocumentRef.document_ref 不能为空")
+        if not str(self.external_location or "").strip():
+            raise ValueError("PreparedDocumentRef.external_location 不能为空")
 
 
 @dataclass(frozen=True)
 class RagResult:
-    """一次成功 RAG 调用的文本、来源和会话轨迹快照。"""
+    """一次成功 RAG 调用的文本、来源、目标文档句柄和会话轨迹快照。"""
 
     text: str
     sources: tuple[RagSource, ...]
+    prepared_document: PreparedDocumentRef
     trace: RagExecutionTrace
 
     def __post_init__(self) -> None:
         """拒绝空成功结果，并冻结来源集合。"""
         if not str(self.text or "").strip():
             raise ValueError("RagResult.text 不能为空")
+        if not isinstance(self.prepared_document, PreparedDocumentRef):
+            raise TypeError("RagResult.prepared_document 类型无效")
         object.__setattr__(self, "sources", tuple(self.sources))
 
 
@@ -160,8 +241,16 @@ class DocumentRagSession(Protocol):
         """返回截至当前时刻的不可变执行轨迹快照。"""
         ...
 
-    def close(self) -> CleanupResult:
-        """幂等关闭隔离资源并返回稳定清理结果。"""
+    def close(self, *, retain_document: bool) -> CleanupResult:
+        """幂等关闭隔离资源，并显式决定是否保留本次上传的全局文档。
+
+        ``retain_document=True`` 只能用于文件分析的全部业务步骤已经成功、该文档需要转交
+        永久知识库继续使用的路径。RAG 准备、模型调用或后续业务契约任一失败时，调用方
+        必须传入 ``False``，由适配器在删除临时上下文之前补偿删除全局文档。
+
+        审计失败时不得调用本方法。该限制使上层能够保留完整外部现场，并避免在审计记录
+        尚未可靠落库时提前执行不可逆删除。
+        """
         ...
 
 

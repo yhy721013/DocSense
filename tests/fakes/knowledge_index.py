@@ -6,7 +6,12 @@ from dataclasses import dataclass, replace
 from threading import RLock
 from typing import Any, Mapping, Optional
 
-from app.ports import CollectionRef, IndexedDocument, OperationResult
+from app.ports import (
+    CollectionRef,
+    IndexedDocument,
+    OperationResult,
+    PreparedDocumentRef,
+)
 
 
 @dataclass(frozen=True)
@@ -18,7 +23,7 @@ class _StoredDocument:
     """
 
     result: IndexedDocument
-    file_path: str
+    source_ref: str
     metadata: Mapping[str, Any]
 
 
@@ -88,10 +93,52 @@ class FakeKnowledgeIndexPort:
             )
             self._documents_by_key[lookup_key] = _StoredDocument(
                 result=result,
-                file_path=normalized_path,
+                source_ref=normalized_path,
                 metadata=metadata_snapshot,
             )
-            self._keys_by_location[(known_collection.ref, result.external_location)] = lookup_key
+            self._keys_by_location[
+                (known_collection.ref, result.external_location)
+            ] = lookup_key
+            return result
+
+    def store_prepared_document(
+        self,
+        collection: CollectionRef,
+        document: PreparedDocumentRef,
+        metadata: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> IndexedDocument:
+        """登记 RAG 已准备的文档，并原样保留其不透明身份和外部位置。"""
+        normalized_key = self._required_text(idempotency_key, name="idempotency_key")
+        document_ref = self._required_text(document.document_ref, name="document_ref")
+        external_location = self._required_text(
+            document.external_location,
+            name="external_location",
+        )
+        metadata_snapshot = dict(metadata)
+
+        with self._lock:
+            known_collection = self._require_collection(collection)
+            lookup_key = (known_collection.ref, normalized_key)
+            existing = self._documents_by_key.get(lookup_key)
+            if existing is not None:
+                return replace(existing.result, created=False, reused=True)
+
+            result = IndexedDocument(
+                collection_ref=known_collection.ref,
+                document_ref=document_ref,
+                external_location=external_location,
+                idempotency_key=normalized_key,
+                created=True,
+                reused=False,
+            )
+            self._documents_by_key[lookup_key] = _StoredDocument(
+                result=result,
+                source_ref=external_location,
+                metadata=metadata_snapshot,
+            )
+            self._keys_by_location[(known_collection.ref, external_location)] = lookup_key
             return result
 
     def remove_document(
