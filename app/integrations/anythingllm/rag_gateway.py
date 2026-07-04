@@ -4,16 +4,18 @@
 隔离工作区、线程、上传、嵌入、Pin、查询和来源校验，不解析业务 JSON，也不判断
 architecture 等领域规则。
 
-状态机严格禁止通过工作区详情接口反查文档 ID，查询时也不发送文件列表。模型是否真正
-使用目标文档，只通过原子 Client 已归一化的 ``document_ref`` 做精确来源确认。任何失败
-都会转换为携带不可变执行轨迹的 ``RagOperationError``，便于上层在清理前完成审计。
+状态机严格禁止通过工作区详情接口反查文档 ID，查询时也不发送文件列表。来源归属使用
+Session 上传时写入的随机 ``docsense_ref`` 与单文档隔离上下文双重确认，不依赖 title、
+URL、sourceDocument、分片 ID 或其他展示字段。任何失败都会转换为携带不可变执行轨迹的
+``RagOperationError``，便于上层在清理前完成审计。
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
 from app.integrations.anythingllm.errors import (
@@ -26,13 +28,18 @@ from app.integrations.anythingllm.models import (
     AnythingLLMSource,
     AnythingLLMThread,
     AnythingLLMWorkspace,
+    DOCSENSE_SOURCE_MARKER_PREFIX,
+    normalize_source_marker,
+)
+from app.integrations.anythingllm.policies import (
+    DEFAULT_EMBEDDING_ATTEMPTS,
+    validate_embedding_max_attempts,
 )
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.ports import (
     CleanupResult,
     DocumentRagSession,
-    MAX_RAG_QUERY_ATTEMPTS,
     PreparedDocumentRef,
     RagAttempt,
     RagExecutionTrace,
@@ -40,13 +47,20 @@ from app.ports import (
     RagOperationError,
     RagResult,
     RagSource,
+    validate_rag_query_max_attempts,
 )
 
 
 logger = logging.getLogger(__name__)
 
-_MAX_EMBEDDING_ATTEMPTS = 3
-"""工作区嵌入调用次数硬上限，包含首次调用。"""
+
+def _generate_source_marker() -> str:
+    """生成一次 Session 独占的 128 bit 来源关联标记。
+
+    标记不是认证凭据，但必须具有足够熵，避免并发任务、同名文件或相同发布时间造成碰撞。
+    它只写入 AnythingLLM 结构化 ``docSource`` 元数据，不写入正文，也不输出到普通日志。
+    """
+    return f"{DOCSENSE_SOURCE_MARKER_PREFIX}{secrets.token_hex(16)}"
 
 
 class AnythingLLMRagGateway:
@@ -65,25 +79,28 @@ class AnythingLLMRagGateway:
         *,
         user_id: int | None = None,
         workspace_settings: Optional[Mapping[str, Any]] = None,
-        embedding_max_attempts: int = 2,
+        embedding_max_attempts: int = DEFAULT_EMBEDDING_ATTEMPTS,
+        source_marker_factory: Callable[[], str] = _generate_source_marker,
     ) -> None:
         """保存任务级依赖并固定嵌入重试上限。
 
         ``embedding_max_attempts`` 包含首次调用。只对标准暂态网关状态码执行重试，且不在
         Gateway 内休眠，以避免后台线程出现不可观察的固定等待。上传的指数退避仍由
-        Document Client 负责。
+        Document Client 负责。``source_marker_factory`` 是纯离线测试接缝；生产环境使用
+        密码学安全随机源，并在创建任何外部资源之前校验返回格式。
         """
-        if not 1 <= embedding_max_attempts <= _MAX_EMBEDDING_ATTEMPTS:
-            raise ValueError(
-                "embedding_max_attempts 必须介于 1 和 "
-                f"{_MAX_EMBEDDING_ATTEMPTS} 之间"
-            )
+        validated_embedding_attempts = validate_embedding_max_attempts(
+            embedding_max_attempts
+        )
+        if not callable(source_marker_factory):
+            raise TypeError("source_marker_factory 必须可调用")
         self._document_client = document_client
         self._workspace_client = workspace_client
         self._thread_client = thread_client
         self._user_id = user_id
         self._workspace_settings = dict(workspace_settings or {})
-        self._embedding_max_attempts = embedding_max_attempts
+        self._embedding_max_attempts = validated_embedding_attempts
+        self._source_marker_factory = source_marker_factory
 
     def open_isolated_session(
         self,
@@ -102,6 +119,11 @@ class AnythingLLMRagGateway:
             conversation_name,
             name="conversation_name",
         )
+        source_marker = normalize_source_marker(self._source_marker_factory())
+        if not source_marker:
+            raise ValueError(
+                "source_marker_factory 必须返回 docsense_ref: 加 32 位小写十六进制值"
+            )
         try:
             workspace = self._workspace_client.create_workspace(
                 normalized_context_name,
@@ -192,6 +214,7 @@ class AnythingLLMRagGateway:
             user_id=self._user_id,
             embedding_max_attempts=self._embedding_max_attempts,
             lifecycle_events=lifecycle_events,
+            source_marker=source_marker,
         )
 
     def _rollback_open_failure(
@@ -344,8 +367,9 @@ class _AnythingLLMRagSession:
         user_id: int | None,
         embedding_max_attempts: int,
         lifecycle_events: Sequence[RagLifecycleEvent],
+        source_marker: str,
     ) -> None:
-        """校验完整资源状态后保存任务级原子 Client，不执行外部操作。"""
+        """校验完整资源和来源标记后保存任务级依赖，不执行外部操作。"""
         normalized_context_name = str(context_name or "").strip()
         context_ref = str(getattr(workspace, "slug", "") or "").strip()
         conversation_ref = str(getattr(thread, "slug", "") or "").strip()
@@ -355,11 +379,12 @@ class _AnythingLLMRagSession:
             raise ValueError("workspace.slug 不能为空")
         if not conversation_ref:
             raise ValueError("thread.slug 不能为空")
-        if not 1 <= embedding_max_attempts <= _MAX_EMBEDDING_ATTEMPTS:
-            raise ValueError(
-                "embedding_max_attempts 必须介于 1 和 "
-                f"{_MAX_EMBEDDING_ATTEMPTS} 之间"
-            )
+        validated_embedding_attempts = validate_embedding_max_attempts(
+            embedding_max_attempts
+        )
+        normalized_source_marker = normalize_source_marker(source_marker)
+        if not normalized_source_marker:
+            raise ValueError("source_marker 格式无效")
         self._document_client = document_client
         self._workspace_client = workspace_client
         self._thread_client = thread_client
@@ -367,11 +392,14 @@ class _AnythingLLMRagSession:
         self._context_ref = context_ref
         self._conversation_ref = conversation_ref
         self._user_id = user_id
-        self._embedding_max_attempts = embedding_max_attempts
+        self._embedding_max_attempts = validated_embedding_attempts
+        self._source_marker = normalized_source_marker
         self._attempts: list[RagAttempt] = []
         self._lifecycle_events = list(lifecycle_events)
         self._document_ref: Optional[str] = None
         self._uploaded_document: Optional[AnythingLLMDocument] = None
+        self._bound_locations: set[str] = set()
+        self._pinned_location: Optional[str] = None
         self._global_document_cleanup_required = False
         self._analyse_started = False
         self._analyse_succeeded = False
@@ -563,11 +591,17 @@ class _AnythingLLMRagSession:
         return result
 
     def _upload_document(self, file_path: str) -> AnythingLLMDocument:
-        """上传文档并防御性校验原子 Client 返回的三个关键身份字段。"""
+        """携带会话来源标记上传文档，并校验三个关键身份字段。
+
+        ``docSource`` 是 AnythingLLM 上传接口允许的结构化元数据。将随机标记放在该字段，
+        可以让标记随文档进入向量分片来源；禁止把标记写进 title、文件名或正文，否则
+        source 中出现相同文本不能证明它来自受控元数据链路。
+        """
         try:
             document = self._document_client.upload_document(
                 file_path,
                 user_id=self._user_id,
+                metadata={"docSource": self._source_marker},
             )
         except AnythingLLMProtocolError as exc:
             error_message = self._safe_error(
@@ -663,6 +697,7 @@ class _AnythingLLMRagSession:
                     success=True,
                     external_ref=location,
                 )
+                self._bound_locations.add(location)
                 logger.info(
                     "anythingllm.embedding.accepted: operation=analyse context_ref=%s "
                     "attempt=%d location=%s",
@@ -759,6 +794,7 @@ class _AnythingLLMRagSession:
                     success=True,
                     external_ref=location,
                 )
+                self._pinned_location = location
                 logger.info(
                     "anythingllm.document.pinned: operation=analyse context_ref=%s "
                     "attempt=%d location=%s",
@@ -836,7 +872,9 @@ class _AnythingLLMRagSession:
         """执行有限次同线程查询，并记录每一次回答或异常。
 
         本方法故意不向 ``ThreadClient.ask`` 传入 ``document_ids``，从调用边界保证请求体
-        不会生成 ``files`` 字段。来源验证只比较原子 Client 已归一化的稳定引用。
+        不会生成 ``files`` 字段，并显式传入 ``mode="query"``，避免 Thread Client 的
+        legacy ``chat`` 默认值扩大知识边界。来源只有同时返回本 Session 的随机标记时才
+        能映射到目标 ``document_ref``；title、URL 和 legacy document_ref 均不参与判定。
         """
         target_ref = self._document_ref
         uploaded_document = self._uploaded_document
@@ -848,6 +886,7 @@ class _AnythingLLMRagSession:
                 "当前会话缺少目标文档引用或外部位置",
                 failure_stage="session_not_prepared",
             )
+        self._ensure_isolated_source_context(external_location)
 
         last_stage = "query"
         last_error = "模型查询失败"
@@ -858,26 +897,62 @@ class _AnythingLLMRagSession:
                     self._conversation_ref,
                     prompt,
                     user_id=self._user_id,
+                    mode="query",
                 )
                 text = str(getattr(answer, "text", "") or "").strip()
                 raw_response = str(
                     getattr(answer, "raw_text", "") or text
                 )
-                sources, unresolved_count = self._adapt_sources(
-                    getattr(answer, "sources", ()),
+                raw_sources = tuple(getattr(answer, "sources", ()) or ())
+                sources, missing_marker_count, mismatched_marker_count = self._adapt_sources(
+                    raw_sources,
+                    target_ref=target_ref,
                 )
-                matched = any(source.document_ref == target_ref for source in sources)
+                source_count = len(raw_sources)
+                sources_verified = (
+                    source_count > 0
+                    and not missing_marker_count
+                    and not mismatched_marker_count
+                    and len(sources) == source_count
+                )
+                source_log_level = (
+                    logging.INFO
+                    if sources_verified
+                    else logging.WARNING if require_sources else logging.DEBUG
+                )
+                logger.log(
+                    source_log_level,
+                    "anythingllm.sources.verified: operation=%s context_ref=%s "
+                    "conversation_ref=%s attempt=%d source_count=%d "
+                    "verified_source_count=%d missing_marker_count=%d "
+                    "mismatched_marker_count=%d verified=%s",
+                    operation,
+                    self._context_ref,
+                    self._conversation_ref,
+                    attempt_number,
+                    source_count,
+                    len(sources),
+                    missing_marker_count,
+                    mismatched_marker_count,
+                    sources_verified,
+                )
                 failure_stage: Optional[str] = None
                 error_message: Optional[str] = None
                 if not text:
                     failure_stage = "query"
                     error_message = "模型返回空文本"
-                elif require_sources and not sources:
+                elif require_sources and source_count == 0:
                     failure_stage = "sources"
-                    error_message = "模型回答缺少可识别来源"
-                elif require_sources and not matched:
+                    error_message = "模型回答缺少来源"
+                elif require_sources and missing_marker_count:
                     failure_stage = "sources"
-                    error_message = "模型来源未匹配目标文档"
+                    error_message = "模型来源缺少会话关联标记"
+                elif require_sources and mismatched_marker_count:
+                    failure_stage = "sources"
+                    error_message = "模型来源关联标记与目标文档不一致"
+                elif require_sources and not sources_verified:
+                    failure_stage = "sources"
+                    error_message = "模型来源未通过完整归属校验"
 
                 self._attempts.append(
                     RagAttempt(
@@ -905,7 +980,8 @@ class _AnythingLLMRagSession:
                     logger.info(
                         "anythingllm.query.completed: operation=%s context_ref=%s "
                         "conversation_ref=%s attempt=%d response_length=%d "
-                        "sources_count=%d unresolved_sources_count=%d "
+                        "sources_count=%d missing_marker_count=%d "
+                        "mismatched_marker_count=%d "
                         "matched_document_ref=%s",
                         operation,
                         self._context_ref,
@@ -913,8 +989,9 @@ class _AnythingLLMRagSession:
                         attempt_number,
                         len(text),
                         len(sources),
-                        unresolved_count,
-                        target_ref if matched else "",
+                        missing_marker_count,
+                        mismatched_marker_count,
+                        target_ref if sources_verified else "",
                     )
                     return result
                 last_stage = failure_stage
@@ -969,25 +1046,75 @@ class _AnythingLLMRagSession:
 
         raise self._operation_error(last_error, failure_stage=last_stage)
 
-    @staticmethod
-    def _adapt_sources(
-        sources: Sequence[AnythingLLMSource],
-    ) -> tuple[tuple[RagSource, ...], int]:
-        """把供应商来源 DTO 转为业务 DTO，并统计无法识别身份的来源。
+    def _ensure_isolated_source_context(self, external_location: str) -> None:
+        """在每次查询前验证单文档隔离上下文仍满足本地状态机不变量。
 
-        ``RagSource`` 要求 ``document_ref`` 非空，因此无法归一化身份的供应商来源不会伪造
-        引用，而是从业务来源集合中排除。调用方仍可通过计数日志发现上游字段漂移。
+        Gateway 不通过 GET Workspace 反查远端文档列表，因为该接口正是旧流程产生路径和
+        时序误判的来源。可信边界由本对象独占的状态机建立：Context/Conversation 必须由
+        open_session 成功创建，唯一成功绑定位置必须是当前上传位置，且同一位置已经 Pin。
+
+        随机关联标记负责验证真实返回的每个 source；本方法负责验证调用方没有绕过准备
+        顺序或在一个 Session 中绑定第二份文档。两项证据缺一不可。
+        """
+        successful_context_events = [
+            event
+            for event in self._lifecycle_events
+            if event.operation == "context_create" and event.success
+        ]
+        successful_conversation_events = [
+            event
+            for event in self._lifecycle_events
+            if event.operation == "conversation_create" and event.success
+        ]
+        context_isolated = (
+            len(successful_context_events) == 1
+            and len(successful_conversation_events) == 1
+            and self._bound_locations == {external_location}
+            and self._pinned_location == external_location
+        )
+        if not context_isolated:
+            raise self._operation_error(
+                "隔离上下文不满足单文档来源校验条件",
+                failure_stage="sources",
+            )
+
+    def _adapt_sources(
+        self,
+        sources: Sequence[AnythingLLMSource],
+        *,
+        target_ref: str,
+    ) -> tuple[tuple[RagSource, ...], int, int]:
+        """只转换通过随机标记验证的来源，并分类统计失败原因。
+
+        新 Gateway 明确忽略供应商来源的 legacy ``document_ref``：该值可能由 title、URL、
+        sourceDocument 或分片 ID 推导，不能证明来源属于本次上传。只有结构化
+        ``source_marker`` 与 Session 标记使用常量时间比较完全一致时，才把当前上传文档的
+        ``target_ref`` 赋给业务 ``RagSource``。
+
+        未通过验证的来源不会被包装成带有目标引用的业务 DTO，避免审计记录把未知来源
+        伪装成可信来源。调用方仍会在 attempt 的失败原因和结构化计数日志中看到缺失与
+        冲突数量，原始模型文本则保留在 ``raw_response``。
         """
         adapted: list[RagSource] = []
-        unresolved_count = 0
+        missing_marker_count = 0
+        mismatched_marker_count = 0
         for source in tuple(sources or ()):
-            document_ref = str(getattr(source, "document_ref", "") or "").strip()
-            if not document_ref:
-                unresolved_count += 1
+            raw_source_marker = str(
+                getattr(source, "source_marker", "") or ""
+            ).strip()
+            if not raw_source_marker:
+                missing_marker_count += 1
+                continue
+            source_marker = normalize_source_marker(raw_source_marker)
+            if not source_marker:
+                mismatched_marker_count += 1
+                continue
+            if not secrets.compare_digest(source_marker, self._source_marker):
+                mismatched_marker_count += 1
                 continue
             adapted.append(
                 RagSource(
-                    document_ref=document_ref,
+                    document_ref=target_ref,
                     text=str(getattr(source, "text", "") or ""),
                     id=getattr(source, "id", None),
                     title=getattr(source, "title", None),
@@ -995,7 +1122,7 @@ class _AnythingLLMRagSession:
                     score=getattr(source, "score", None),
                 )
             )
-        return tuple(adapted), unresolved_count
+        return tuple(adapted), missing_marker_count, mismatched_marker_count
 
     def _schedule_failed_document_cleanup(
         self,
@@ -1003,7 +1130,7 @@ class _AnythingLLMRagSession:
     ) -> None:
         """标记失败流程的全局文档必须在审计成功后的 close 中删除。
 
-        本方法不立即执行外部删除。阶段 7 的业务编排必须先持久化失败 trace，审计成功后
+        本方法不立即执行外部删除。阶段 9 的业务编排必须先持久化失败 trace，审计成功后
         才调用 ``close``；若审计失败则不调用 close，从而保留完整上游现场。
         """
         self._uploaded_document = document
@@ -1150,7 +1277,4 @@ class _AnythingLLMRagSession:
     @staticmethod
     def _validate_max_attempts(max_attempts: int) -> None:
         """在产生任何外部副作用前校验模型调用次数上限。"""
-        if not 1 <= max_attempts <= MAX_RAG_QUERY_ATTEMPTS:
-            raise ValueError(
-                f"max_attempts 必须介于 1 和 {MAX_RAG_QUERY_ATTEMPTS} 之间"
-            )
+        validate_rag_query_max_attempts(max_attempts)

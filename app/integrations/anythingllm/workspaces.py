@@ -263,7 +263,8 @@ class AnythingLLMWorkspaceClient:
         """更新文档 Pin 状态，并严格校验 2xx JSON 中的成功消息。
 
         Pin 只证明工作区文档记录的固定状态已更新，不证明模型回答实际使用了该文档。
-        Gateway 后续仍必须通过 ``sources`` 的 ``document_ref`` 验证来源身份。
+        Gateway 后续仍必须校验 sources 的 Session 随机标记，并验证单文档隔离状态；不得
+        使用 title、URL 或 legacy ``document_ref`` 代替来源证明。
         """
         normalized_location = normalize_document_path(location)
         if not normalized_location:

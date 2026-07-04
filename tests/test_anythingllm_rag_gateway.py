@@ -32,6 +32,8 @@ from app.ports import DocumentRagPort, DocumentRagSession, RagOperationError
 class _GatewayHarness:
     """为每个测试创建相互独立的原子 Client Mock 和标准成功响应。"""
 
+    SOURCE_MARKER = "docsense_ref:0123456789abcdef0123456789abcdef"
+
     def __init__(self, *, embedding_max_attempts: int = 2) -> None:
         """初始化默认可完成整个状态机的 Mock 组合。"""
         self.document_client = Mock(spec=AnythingLLMDocumentClient)
@@ -47,11 +49,12 @@ class _GatewayHarness:
             id="document-id",
             location="custom-documents/sample.pdf-document-id.json",
             title="sample.pdf",
-            document_ref="name:sample.pdf",
+            document_ref="document:document-id",
         )
         self.source = AnythingLLMSource(
             document_ref=self.document.document_ref,
             text="目标证据",
+            source_marker=self.SOURCE_MARKER,
         )
         self.answer = AnythingLLMAnswer(
             text="分析结果",
@@ -70,6 +73,7 @@ class _GatewayHarness:
             self.thread_client,
             user_id=7,
             embedding_max_attempts=embedding_max_attempts,
+            source_marker_factory=lambda: self.SOURCE_MARKER,
         )
 
     def open_session(self) -> DocumentRagSession:
@@ -102,6 +106,24 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         self.assertIsInstance(harness.gateway, DocumentRagPort)
         self.assertIsInstance(session, DocumentRagSession)
 
+    def test_invalid_source_marker_factory_fails_before_context_creation(self) -> None:
+        """测试接缝返回弱标记时不得创建任何外部 Workspace。"""
+        harness = _GatewayHarness()
+        gateway = AnythingLLMRagGateway(
+            harness.document_client,
+            harness.workspace_client,
+            harness.thread_client,
+            source_marker_factory=lambda: "docsense_ref:too-short",
+        )
+
+        with self.assertRaises(ValueError):
+            gateway.open_isolated_session(
+                context_name="analysis-context",
+                conversation_name="analysis-conversation",
+            )
+
+        harness.workspace_client.create_workspace.assert_not_called()
+
     def test_analyse_executes_pure_b_sequence_and_maps_sources(self) -> None:
         """成功分析必须按创建、上传、加入、Pin、查询顺序完成并返回业务 DTO。"""
         harness = _GatewayHarness()
@@ -121,7 +143,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             result = session.analyse("sample.pdf", "分析文档")
 
         self.assertEqual("分析结果", result.text)
-        self.assertEqual("name:sample.pdf", result.sources[0].document_ref)
+        self.assertEqual("document:document-id", result.sources[0].document_ref)
         self.assertEqual("目标证据", result.sources[0].text)
         self.assertEqual(
             harness.document.document_ref,
@@ -144,14 +166,22 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         )
         query_kwargs = harness.thread_client.ask.call_args.kwargs
         self.assertNotIn("document_ids", query_kwargs)
+        self.assertEqual("query", query_kwargs["mode"])
+        upload_kwargs = harness.document_client.upload_document.call_args.kwargs
+        self.assertEqual(
+            {"docSource": harness.SOURCE_MARKER},
+            upload_kwargs["metadata"],
+        )
         log_text = "\n".join(captured.output)
         self.assertIn("anythingllm.document.uploaded", log_text)
         self.assertIn("anythingllm.embedding.accepted", log_text)
         self.assertIn("anythingllm.document.pinned", log_text)
+        self.assertIn("anythingllm.sources.verified", log_text)
         self.assertIn("anythingllm.query.completed", log_text)
+        self.assertNotIn(harness.SOURCE_MARKER, log_text)
 
     def test_source_optional_fields_can_be_absent(self) -> None:
-        """来源只有稳定身份和文本时仍可转换，不得要求供应商返回所有可选字段。"""
+        """来源只有随机标记和文本时仍可转换，不得要求展示型可选字段。"""
         harness = _GatewayHarness()
         harness.thread_client.ask.return_value = AnythingLLMAnswer(
             text="分析结果",
@@ -160,6 +190,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
                 AnythingLLMSource(
                     document_ref=harness.document.document_ref,
                     text="最小来源",
+                    source_marker=harness.SOURCE_MARKER,
                 ),
             ),
         )
@@ -440,12 +471,35 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         self.assertEqual(2, len(trace.attempts))
         self.assertEqual(["原始一", "原始二"], [item.raw_response for item in trace.attempts])
 
-    def test_wrong_document_reference_is_rejected_by_exact_match(self) -> None:
-        """名称相似但不相等的来源不能被宽松匹配为目标文档。"""
+    def test_legacy_document_reference_does_not_participate_in_trusted_match(self) -> None:
+        """展示型引用即使错误，只要结构化随机标记正确也不影响可信归属。"""
+        harness = _GatewayHarness()
+        source_with_untrusted_legacy_ref = AnythingLLMSource(
+            document_ref="name:sample.pdf.backup",
+            text="目标文档证据",
+            source_marker=harness.SOURCE_MARKER,
+        )
+        harness.thread_client.ask.return_value = AnythingLLMAnswer(
+            text="可信来源回答",
+            raw_text="可信来源回答",
+            sources=(source_with_untrusted_legacy_ref,),
+        )
+
+        result = harness.open_session().analyse(
+            "sample.pdf",
+            "分析文档",
+            max_attempts=1,
+        )
+
+        self.assertEqual(harness.document.document_ref, result.sources[0].document_ref)
+
+    def test_mismatched_source_marker_is_rejected(self) -> None:
+        """其他 Session 的合法格式标记不得被归属于当前上传文档。"""
         harness = _GatewayHarness()
         wrong_source = AnythingLLMSource(
-            document_ref="name:sample.pdf.backup",
-            text="错误文档证据",
+            document_ref=harness.document.document_ref,
+            text="其他文档证据",
+            source_marker="docsense_ref:ffffffffffffffffffffffffffffffff",
         )
         harness.thread_client.ask.return_value = AnythingLLMAnswer(
             text="错误来源回答",
@@ -454,25 +508,44 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         )
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse(
-                "sample.pdf",
-                "分析文档",
-                max_attempts=1,
-            )
+            harness.open_session().analyse("sample.pdf", "分析文档", max_attempts=1)
 
         self.assertEqual("sources", raised.exception.trace.failure_stage)
-        self.assertEqual(
-            "name:sample.pdf.backup",
-            raised.exception.trace.attempts[0].sources[0].document_ref,
+        self.assertEqual((), raised.exception.trace.attempts[0].sources)
+
+    def test_mixed_verified_and_unmarked_sources_are_rejected(self) -> None:
+        """存在一个可信来源也不能掩盖同一回答中的无标记来源。"""
+        harness = _GatewayHarness()
+        unmarked_source = AnythingLLMSource(
+            document_ref="name:untrusted.pdf",
+            text="身份未知的附加证据",
+        )
+        harness.thread_client.ask.return_value = AnythingLLMAnswer(
+            text="混合来源回答",
+            raw_text="混合来源回答",
+            sources=(harness.source, unmarked_source),
         )
 
+        with self.assertRaises(RagOperationError) as raised:
+            harness.open_session().analyse("sample.pdf", "分析文档", max_attempts=1)
+
+        attempt = raised.exception.trace.attempts[0]
+        self.assertEqual("sources", attempt.failure_stage)
+        self.assertEqual(1, len(attempt.sources))
+        self.assertEqual(harness.document.document_ref, attempt.sources[0].document_ref)
+
     def test_unresolved_source_is_not_given_a_guessed_reference(self) -> None:
-        """无法归一化身份的供应商来源必须被排除，不能由 Gateway 猜测路径。"""
+        """缺少随机标记的来源必须被排除，不能回退到展示型引用或路径。"""
         harness = _GatewayHarness()
         harness.thread_client.ask.return_value = AnythingLLMAnswer(
             text="身份不明回答",
             raw_text="身份不明回答",
-            sources=(AnythingLLMSource(document_ref="", text="未知证据"),),
+            sources=(
+                AnythingLLMSource(
+                    document_ref=harness.document.document_ref,
+                    text="未知证据",
+                ),
+            ),
         )
 
         with self.assertRaises(RagOperationError) as raised:

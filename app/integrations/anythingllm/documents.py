@@ -7,11 +7,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
@@ -21,6 +22,12 @@ from app.integrations.anythingllm.models import (
     AnythingLLMDocument,
     normalize_document_path,
     require_mapping,
+)
+from app.integrations.anythingllm.policies import (
+    DEFAULT_UPLOAD_RETRIES,
+    DEFAULT_UPLOAD_RETRY_BASE_DELAY_SECONDS,
+    validate_upload_max_retries,
+    validate_upload_retry_base_delay,
 )
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 
@@ -39,14 +46,12 @@ class AnythingLLMDocumentClient:
         "Document processing API is not online",
         "fetch failed",
     )
-    _MAX_UPLOAD_RETRIES = 3
-
     def __init__(
         self,
         transport: AnythingLLMTransport,
         *,
-        upload_max_retries: int = 3,
-        upload_retry_base_delay: float = 3.0,
+        upload_max_retries: int = DEFAULT_UPLOAD_RETRIES,
+        upload_retry_base_delay: float = DEFAULT_UPLOAD_RETRY_BASE_DELAY_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """创建文档原子客户端并校验上传重试参数。
@@ -54,15 +59,15 @@ class AnythingLLMDocumentClient:
         ``upload_max_retries`` 表示首次请求之后允许的重试次数，因此默认最多发起四次
         上传。``sleep`` 可在测试中注入，保证指数退避测试不产生真实等待。
         """
-        if not 0 <= upload_max_retries <= self._MAX_UPLOAD_RETRIES:
-            raise ValueError(
-                f"upload_max_retries 必须介于 0 和 {self._MAX_UPLOAD_RETRIES} 之间"
-            )
-        if upload_retry_base_delay < 0:
-            raise ValueError("upload_retry_base_delay 不得小于 0")
+        validated_upload_max_retries = validate_upload_max_retries(
+            upload_max_retries
+        )
+        validated_retry_base_delay = validate_upload_retry_base_delay(
+            upload_retry_base_delay
+        )
         self._transport = transport
-        self._upload_max_retries = upload_max_retries
-        self._upload_retry_base_delay = upload_retry_base_delay
+        self._upload_max_retries = validated_upload_max_retries
+        self._upload_retry_base_delay = validated_retry_base_delay
         self._sleep = sleep
 
     def upload_document(
@@ -70,18 +75,25 @@ class AnythingLLMDocumentClient:
         file_path: str,
         *,
         user_id: int | None = None,
+        metadata: Optional[Mapping[str, Any]] = None,
     ) -> AnythingLLMDocument:
-        """上传本地文件并返回包含真实 ID 和位置的统一文档 DTO。
+        """上传本地文件及可选元数据，并返回真实 ID 和位置。
 
         参数:
             file_path: 待上传的本地普通文件路径。
             user_id: 可选 AnythingLLM 用户标识。
+            metadata: 随 multipart 请求提交的文档元数据。AnythingLLM 要求 multipart 中的
+                ``metadata`` 是 JSON 字符串；本方法在第一次请求前完成独立拷贝和序列化，
+                后续有限重试复用同一不可变字符串，避免调用方并发修改 Mapping 导致一次
+                逻辑上传在不同尝试中携带不同身份信息。
 
         返回:
             由上传响应中真实 ``id/docId`` 和 ``location/docpath`` 构造的文档 DTO。
 
         异常:
             FileNotFoundError: 路径不存在或不是普通文件时抛出。
+            TypeError: metadata 不是 Mapping 时抛出。
+            ValueError: metadata 包含无法 JSON 序列化的值时抛出。
             AnythingLLMProtocolError: 响应缺少 documents、ID 或位置时抛出。
             AnythingLLMTransportError: HTTP 或网络请求失败时抛出对应子类。
 
@@ -92,23 +104,31 @@ class AnythingLLMDocumentClient:
         if not path.is_file():
             raise FileNotFoundError(f"待上传文件不存在或不是普通文件：{path}")
 
+        serialized_metadata, metadata_keys = self._serialize_upload_metadata(metadata)
+
         file_size = path.stat().st_size
         logger.info(
             "开始上传 AnythingLLM 文档: file_name=%s file_size=%d "
-            "max_attempts=%d has_user_context=%s",
+            "max_attempts=%d metadata_keys=%s has_user_context=%s",
             path.name,
             file_size,
             self._upload_max_retries + 1,
+            metadata_keys,
             user_id is not None,
         )
 
         for attempt in range(self._upload_max_retries + 1):
             try:
                 with path.open("rb") as file_object:
+                    request_kwargs: dict[str, Any] = {
+                        "files": {"file": (os.path.basename(path), file_object)},
+                        "user_id": user_id,
+                    }
+                    if serialized_metadata is not None:
+                        request_kwargs["data"] = {"metadata": serialized_metadata}
                     body = self._transport.post_multipart(
                         "document/upload",
-                        files={"file": (os.path.basename(path), file_object)},
-                        user_id=user_id,
+                        **request_kwargs,
                     )
                 document = self._parse_upload_response(body)
                 logger.info(
@@ -138,6 +158,40 @@ class AnythingLLMDocumentClient:
 
         # 循环的最后一次失败必定在 except 分支重新抛出，该分支仅用于类型检查完整性。
         raise AssertionError("上传重试循环异常结束")
+
+    @staticmethod
+    def _serialize_upload_metadata(
+        metadata: Optional[Mapping[str, Any]],
+    ) -> tuple[Optional[str], tuple[str, ...]]:
+        """防御性复制并序列化上传元数据，且不在日志中暴露元数据值。
+
+        空 Mapping 与 ``None`` 都表示不发送 multipart ``metadata`` 字段，以保持旧调用方
+        的请求结构不变。键必须是非空字符串，禁止把不同类型的键静默转成同名字符串；
+        日志只记录排序后的键名，值保持原始 JSON 类型。序列化失败在打开文件和发起 HTTP
+        前抛出，确保配置错误不会产生外部上传副作用。
+        """
+        if metadata is None:
+            return None, ()
+        if not isinstance(metadata, Mapping):
+            raise TypeError("metadata 必须是 Mapping 或 None")
+
+        metadata_copy: dict[str, Any] = {}
+        for key, value in metadata.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("metadata 的键必须是非空字符串")
+            metadata_copy[key] = value
+        if not metadata_copy:
+            return None, ()
+        try:
+            serialized = json.dumps(
+                metadata_copy,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("metadata 必须只包含可 JSON 序列化的值") from exc
+        return serialized, tuple(sorted(metadata_copy))
 
     def delete_document(
         self,

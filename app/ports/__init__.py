@@ -7,11 +7,13 @@
 from .knowledge_index import (
     CollectionRef,
     IndexedDocument,
+    KnowledgeIndexFactory,
     KnowledgeIndexPort,
     OperationResult,
 )
 from .rag import (
     CleanupResult,
+    DocumentRagFactory,
     DocumentRagPort,
     DocumentRagSession,
     MAX_RAG_QUERY_ATTEMPTS,
@@ -22,14 +24,17 @@ from .rag import (
     RagOperationError,
     RagResult,
     RagSource,
+    validate_rag_query_max_attempts,
 )
 
 __all__ = [
     "CleanupResult",
     "CollectionRef",
+    "DocumentRagFactory",
     "DocumentRagPort",
     "DocumentRagSession",
     "IndexedDocument",
+    "KnowledgeIndexFactory",
     "KnowledgeIndexPort",
     "MAX_RAG_QUERY_ATTEMPTS",
     "OperationResult",
@@ -40,4 +45,5 @@ __all__ = [
     "RagOperationError",
     "RagResult",
     "RagSource",
+    "validate_rag_query_max_attempts",
 ]

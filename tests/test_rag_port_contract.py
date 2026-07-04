@@ -15,6 +15,7 @@ import unittest
 import app.ports as port_module
 from app.ports import (
     CollectionRef,
+    DocumentRagFactory,
     DocumentRagPort,
     DocumentRagSession,
     IndexedDocument,
@@ -22,8 +23,14 @@ from app.ports import (
     PreparedDocumentRef,
     RagOperationError,
     RagSource,
+    validate_rag_query_max_attempts,
 )
-from tests.fakes import FakeDocumentRagPort, FakeKnowledgeIndexPort, FakeRagOutcome
+from tests.fakes import (
+    FakeDocumentRagFactory,
+    FakeDocumentRagPort,
+    FakeKnowledgeIndexPort,
+    FakeRagOutcome,
+)
 
 
 class RagDtoContractTests(unittest.TestCase):
@@ -70,6 +77,15 @@ class RagDtoContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RagSource(document_ref="", text="无法归属的证据")
 
+    def test_query_attempt_limit_rejects_boolean_and_float(self) -> None:
+        """供应商无关查询策略不得把布尔值或浮点数解释为模型调用次数。"""
+        for invalid_value in (True, 1.0):
+            with self.subTest(value=invalid_value):
+                with self.assertRaises(ValueError):
+                    validate_rag_query_max_attempts(  # type: ignore[arg-type]
+                        invalid_value
+                    )
+
 
 class DocumentRagPortContractTests(unittest.TestCase):
     """验证隔离 RAG 会话的调用顺序、重试轨迹和清理语义。"""
@@ -84,6 +100,20 @@ class DocumentRagPortContractTests(unittest.TestCase):
 
         self.assertIsInstance(port, DocumentRagPort)
         self.assertIsInstance(session, DocumentRagSession)
+
+    def test_factory_creates_independent_task_scopes(self) -> None:
+        """每次进入 Factory 租约都必须产生独立 Port，并在退出时归零活动计数。"""
+        factory = FakeDocumentRagFactory()
+
+        with factory.create() as first_port:
+            self.assertIsInstance(factory, DocumentRagFactory)
+            self.assertEqual(1, factory.active_leases)
+        with factory.create() as second_port:
+            self.assertEqual(1, factory.active_leases)
+            self.assertIsNot(first_port, second_port)
+
+        self.assertEqual(0, factory.active_leases)
+        self.assertEqual(2, len(factory.ports))
 
     def test_analyse_retry_and_follow_up_are_recorded_in_order(self) -> None:
         """首次失败、重试成功和后续追问必须按真实发生顺序保留。"""
@@ -404,6 +434,7 @@ class PortBoundaryTests(unittest.TestCase):
     def test_production_port_package_does_not_export_test_fakes(self) -> None:
         """生产抽象包不得反向依赖或导出测试目录中的具体替身。"""
         self.assertFalse(hasattr(port_module, "FakeDocumentRagPort"))
+        self.assertFalse(hasattr(port_module, "FakeDocumentRagFactory"))
         self.assertFalse(hasattr(port_module, "FakeKnowledgeIndexPort"))
 
     def test_port_source_does_not_contain_supplier_protocol_terms(self) -> None:

@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 class AnythingLLMThreadClient:
     """提供不依赖工作区客户端或文档客户端的线程原子操作。"""
 
+    _ALLOWED_CHAT_MODES = frozenset({"chat", "query"})
+    """AnythingLLM 线程 API 允许的模式白名单。"""
+
     def __init__(self, transport: AnythingLLMTransport) -> None:
         """绑定任务级传输对象，但不拥有其关闭职责。"""
         self._transport = transport
@@ -90,11 +93,14 @@ class AnythingLLMThreadClient:
         thread_slug: str,
         prompt: str,
         *,
+        mode: str,
         user_id: int | None = None,
         document_ids: Optional[Sequence[str]] = None,
-        mode: str = "chat",
     ) -> AnythingLLMAnswer:
         """向线程发送提示词并汇总 SSE 为一次完整回答。
+
+        ``mode`` 是必填关键字参数，调用方必须明确选择 ``chat`` 或 ``query``，不能依赖
+        原子 Client 猜测业务知识边界。
 
         仅当 ``document_ids`` 显式包含非空值时才发送 ``files`` 字段。纯方案 B 不传该
         参数，使模型是否使用目标文档只能由工作区 Pin 和后续 sources 校验决定。
@@ -163,9 +169,10 @@ class AnythingLLMThreadClient:
         )
         sources = tuple(AnythingLLMSource.from_payload(item) for item in sources_value)
         unresolved_source_count = sum(not source.document_ref for source in sources)
+        marked_source_count = sum(bool(source.source_marker) for source in sources)
         if unresolved_source_count:
             logger.warning(
-                "AnythingLLM 线程回答存在无法识别身份的来源: workspace_slug=%s "
+                "AnythingLLM 线程回答存在无法生成 legacy 展示引用的来源: workspace_slug=%s "
                 "thread_slug=%s source_count=%d unresolved_source_count=%d",
                 workspace_slug,
                 thread_slug,
@@ -174,12 +181,13 @@ class AnythingLLMThreadClient:
             )
         logger.info(
             "AnythingLLM 线程问答完成: workspace_slug=%s thread_slug=%s "
-            "text_chars=%d raw_text_chars=%d source_count=%d",
+            "text_chars=%d raw_text_chars=%d source_count=%d marked_source_count=%d",
             workspace_slug,
             thread_slug,
             len(cleaned_text),
             len(raw_text),
             len(sources),
+            marked_source_count,
         )
         return AnythingLLMAnswer(
             text=cleaned_text,
@@ -193,11 +201,14 @@ class AnythingLLMThreadClient:
         thread_slug: str,
         message: str,
         *,
+        mode: str,
         user_id: int | None = None,
-        mode: str = "query",
         document_ids: Optional[Sequence[str]] = None,
     ) -> Iterator[str]:
         """向线程发送流式消息并依次产出可显示的文本片段。
+
+        ``mode`` 与同步问答一致为必填关键字参数，确保流式和非流式接口不会产生不同的
+        隐式默认行为。
 
         本方法保持 AnythingLLM 的事件顺序，不拼接或清理文本。调用方提前结束消费时应
         关闭生成器，关闭动作会继续传递到传输层并释放上游响应。
@@ -364,10 +375,16 @@ class AnythingLLMThreadClient:
         document_ids: Optional[Sequence[str]],
         user_id: int | None,
     ) -> dict[str, Any]:
-        """构造问答请求体，并避免为空文件列表生成 ``files`` 字段。"""
+        """构造经过模式白名单校验的问答请求体。
+
+        ``chat`` 与 ``query`` 在 AnythingLLM 中具有不同知识边界。调用方拼写错误时静默
+        回退会改变 RAG 语义，因此这里只接受两个明确值；允许去除首尾空白和大小写归一，
+        但拒绝 ``None``、空串及其他字符串。文件列表仍只在存在非空 ID 时发送。
+        """
+        normalized_mode = AnythingLLMThreadClient._normalize_mode(mode)
         payload: dict[str, Any] = {
             "message": message,
-            "mode": str(mode or "chat").strip() or "chat",
+            "mode": normalized_mode,
         }
         files = [str(item).strip() for item in document_ids or () if str(item).strip()]
         if files:
@@ -375,6 +392,16 @@ class AnythingLLMThreadClient:
         if user_id is not None:
             payload["userId"] = user_id
         return payload
+
+    @staticmethod
+    def _normalize_mode(mode: str) -> str:
+        """规范化并校验 AnythingLLM 问答模式，禁止隐式默认和未知模式透传。"""
+        if not isinstance(mode, str):
+            raise ValueError("mode 必须是 chat 或 query")
+        normalized = mode.strip().casefold()
+        if normalized not in AnythingLLMThreadClient._ALLOWED_CHAT_MODES:
+            raise ValueError("mode 必须是 chat 或 query")
+        return normalized
 
     @classmethod
     def _thread_collection_path(cls, workspace_slug: str) -> str:

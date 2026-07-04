@@ -42,6 +42,7 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
 
     def test_ask_cleans_answer_normalizes_sources_and_omits_empty_files(self) -> None:
         """同步问答应保留原文、清理代码块、统一来源，且默认不发送 files。"""
+        marker = "docsense_ref:0123456789abcdef0123456789abcdef"
         raw_answer = '<think>推理</think>```json\n{"summary":"摘要"}\n```'
         self.transport.stream_sse.return_value = _event_stream(
             SSEEvent(
@@ -49,6 +50,7 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
                     '{"type":"textResponse","textResponse":'
                     '"<think>推理</think>```json\\n{\\"summary\\":\\"摘要\\"}\\n```",'
                     '"sources":[{"text":"证据",'
+                    f'"docSource":"{marker}",'
                     '"sourceDocument":"custom-documents/%E7%A4%BA%E4%BE%8B.json"}],'
                     '"close":true}'
                 )
@@ -63,15 +65,18 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
                 "workspace-a",
                 "thread-a",
                 "提取摘要",
+                mode="chat",
                 user_id=8,
             )
 
         self.assertEqual(answer.text, '{"summary":"摘要"}')
         self.assertEqual(answer.raw_text, raw_answer)
         self.assertEqual(answer.sources[0].document_ref, "name:示例.json")
+        self.assertEqual(answer.sources[0].source_marker, marker)
         request_payload = self.transport.stream_sse.call_args.args[1]
         self.assertNotIn("files", request_payload)
         self.assertEqual(request_payload["userId"], 8)
+        self.assertEqual(request_payload["mode"], "chat")
         logs = "\n".join(captured_logs.output)
         self.assertIn("prompt_chars=4", logs)
         self.assertIn("source_count=1", logs)
@@ -93,11 +98,49 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
             "workspace-a",
             "thread-a",
             "问题",
+            mode="chat",
             document_ids=["doc-1", "", " doc-2 "],
         )
 
         request_payload = self.transport.stream_sse.call_args.args[1]
         self.assertEqual(request_payload["files"], ["doc-1", "doc-2"])
+
+    def test_ask_explicit_query_mode_is_sent_without_files(self) -> None:
+        """Document RAG 显式传入 query 时，请求体必须保持该模式且不生成 files。"""
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(
+                data=(
+                    '{"type":"textResponse","textResponse":"完成",'
+                    '"sources":[],"close":true}'
+                )
+            )
+        )
+
+        self.client.ask(
+            "workspace-a",
+            "thread-a",
+            "问题",
+            mode=" query ",
+        )
+
+        request_payload = self.transport.stream_sse.call_args.args[1]
+        self.assertEqual("query", request_payload["mode"])
+        self.assertNotIn("files", request_payload)
+
+    def test_ask_rejects_unknown_mode_before_http(self) -> None:
+        """模式拼写错误不得静默回退为 chat 或被透传到 AnythingLLM。"""
+        invalid_modes = ("", "search", "query-mode", None, True)
+        for mode in invalid_modes:
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    self.client.ask(
+                        "workspace-a",
+                        "thread-a",
+                        "问题",
+                        mode=mode,  # type: ignore[arg-type]
+                    )
+
+        self.transport.stream_sse.assert_not_called()
 
     def test_ask_uses_accumulated_chunks_when_final_event_is_missing(self) -> None:
         """连接在最终事件前结束但已有文本片段时，应形成可审计回答而非静默丢失。"""
@@ -110,7 +153,12 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
             ),
         )
 
-        answer = self.client.ask("workspace-a", "thread-a", "问候")
+        answer = self.client.ask(
+            "workspace-a",
+            "thread-a",
+            "问候",
+            mode="chat",
+        )
 
         self.assertEqual(answer.text, "你好")
         self.assertEqual(answer.raw_text, "你好")
@@ -124,7 +172,7 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
         )
 
         with self.assertRaises(AnythingLLMProtocolError):
-            self.client.ask("workspace-a", "thread-a", "问题")
+            self.client.ask("workspace-a", "thread-a", "问题", mode="chat")
 
     def test_ask_accepts_consecutive_data_lines_without_blank_separator(self) -> None:
         """真实 Transport 合并非标准连续 data 行后，线程层仍应逐行恢复 JSON 消息。"""
@@ -149,7 +197,12 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
         )
         client = AnythingLLMThreadClient(transport)
         try:
-            answer = client.ask("workspace-a", "thread-a", "问候")
+            answer = client.ask(
+                "workspace-a",
+                "thread-a",
+                "问候",
+                mode="chat",
+            )
         finally:
             transport.close()
 
@@ -180,7 +233,12 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
         )
         client = AnythingLLMThreadClient(transport)
         try:
-            answer = client.ask("workspace-a", "thread-a", "问候")
+            answer = client.ask(
+                "workspace-a",
+                "thread-a",
+                "问候",
+                mode="chat",
+            )
         finally:
             transport.close()
 
@@ -202,7 +260,12 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
             )
         )
 
-        answer = self.client.ask("workspace-a", "thread-a", "问题")
+        answer = self.client.ask(
+            "workspace-a",
+            "thread-a",
+            "问题",
+            mode="chat",
+        )
 
         self.assertEqual(answer.text, "完成")
 
@@ -222,12 +285,31 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
                 closed.append(True)
 
         self.transport.stream_sse.return_value = events()
-        stream = self.client.stream("workspace-a", "thread-a", "问题")
+        stream = self.client.stream(
+            "workspace-a",
+            "thread-a",
+            "问题",
+            mode="query",
+        )
 
         self.assertEqual(next(stream), "第一段")
         stream.close()
 
         self.assertEqual(closed, [True])
+
+    def test_stream_rejects_unknown_mode_before_creating_generator(self) -> None:
+        """流式入口必须复用同步问答的相同模式白名单。"""
+        stream = self.client.stream(
+            "workspace-a",
+            "thread-a",
+            "问题",
+            mode="invalid",
+        )
+
+        with self.assertRaises(ValueError):
+            next(stream)
+
+        self.transport.stream_sse.assert_not_called()
 
     def test_history_requires_object_items_and_returns_mappings(self) -> None:
         """历史响应必须是对象数组，合法记录保持字段内容返回。"""

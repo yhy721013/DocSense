@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
@@ -125,4 +126,13 @@ class KnowledgeIndexPort(Protocol):
         idempotency_key: str,
     ) -> Optional[IndexedDocument]:
         """按幂等键查询既有文档；不存在时返回 ``None``。"""
+        ...
+
+
+@runtime_checkable
+class KnowledgeIndexFactory(Protocol):
+    """为单个任务创建并托管长期知识库端口的应用层工厂契约。"""
+
+    def create(self) -> AbstractContextManager[KnowledgeIndexPort]:
+        """创建一次任务独占的知识库端口租约。"""
         ...

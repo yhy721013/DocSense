@@ -7,13 +7,13 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Iterator, Optional, Sequence
 
 from app.ports import (
     CleanupResult,
     DocumentRagSession,
-    MAX_RAG_QUERY_ATTEMPTS,
     PreparedDocumentRef,
     RagAttempt,
     RagExecutionTrace,
@@ -21,6 +21,7 @@ from app.ports import (
     RagOperationError,
     RagResult,
     RagSource,
+    validate_rag_query_max_attempts,
 )
 
 
@@ -292,10 +293,7 @@ class FakeDocumentRagSession:
     @staticmethod
     def _validate_max_attempts(max_attempts: int) -> None:
         """使用与生产 Gateway 相同的模型查询次数硬上限。"""
-        if not 1 <= max_attempts <= MAX_RAG_QUERY_ATTEMPTS:
-            raise ValueError(
-                f"max_attempts 必须介于 1 和 {MAX_RAG_QUERY_ATTEMPTS} 之间"
-            )
+        validate_rag_query_max_attempts(max_attempts)
 
 
 class FakeDocumentRagPort:
@@ -448,3 +446,39 @@ class FakeDocumentRagPort:
         if not normalized:
             raise ValueError(f"{name} 不能为空")
         return normalized
+
+
+class FakeDocumentRagFactory:
+    """按任务创建独立 Fake Port 的可观察工厂。
+
+    工厂保存每次已经进入上下文的 Port，便于路由和业务服务测试断言任务之间没有复用
+    有状态对象。退出上下文不会主动关闭尚未创建的 Session；Session 仍由业务编排按照
+    审计契约显式关闭，Factory 只模拟生产实现对底层 Transport 的托管边界。
+    """
+
+    def __init__(self, **port_options: Any) -> None:
+        """保存后续每个 Fake Port 都要使用的独立配置快照。"""
+        self._port_options = dict(port_options)
+        self._ports: list[FakeDocumentRagPort] = []
+        self._active_leases = 0
+
+    @property
+    def ports(self) -> tuple[FakeDocumentRagPort, ...]:
+        """返回已经实际进入任务作用域的 Fake Port 快照。"""
+        return tuple(self._ports)
+
+    @property
+    def active_leases(self) -> int:
+        """返回当前尚未退出的任务租约数量。"""
+        return self._active_leases
+
+    @contextmanager
+    def create(self) -> Iterator[FakeDocumentRagPort]:
+        """为一次任务创建独立 Fake Port，并准确维护活动租约计数。"""
+        port = FakeDocumentRagPort(**self._port_options)
+        self._ports.append(port)
+        self._active_leases += 1
+        try:
+            yield port
+        finally:
+            self._active_leases -= 1

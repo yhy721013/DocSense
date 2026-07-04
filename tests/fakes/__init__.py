@@ -5,9 +5,15 @@
 """
 
 from .knowledge_index import FakeKnowledgeIndexPort
-from .rag import FakeDocumentRagPort, FakeDocumentRagSession, FakeRagOutcome
+from .rag import (
+    FakeDocumentRagFactory,
+    FakeDocumentRagPort,
+    FakeDocumentRagSession,
+    FakeRagOutcome,
+)
 
 __all__ = [
+    "FakeDocumentRagFactory",
     "FakeDocumentRagPort",
     "FakeDocumentRagSession",
     "FakeKnowledgeIndexPort",

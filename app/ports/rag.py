@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
@@ -17,6 +18,24 @@ MAX_RAG_QUERY_ATTEMPTS = 3
 该上限属于应用层成本与资源保护契约，生产适配器和测试替身必须共同遵守。调用方可以在
 1 到该值之间选择更小次数，但不得通过配置错误或参数透传制造无界模型调用。
 """
+
+
+def validate_rag_query_max_attempts(value: int) -> int:
+    """校验并返回单次 analyse/ask 允许的模型查询总次数。
+
+    该校验属于供应商无关的应用契约，因此与硬上限共同保留在 Port。生产 Gateway 和测试
+    Fake 必须调用同一函数，避免两种实现对布尔值、浮点数或边界值产生不同解释。
+    """
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_RAG_QUERY_ATTEMPTS
+    ):
+        raise ValueError(
+            "max_attempts 必须是 1 到 "
+            f"{MAX_RAG_QUERY_ATTEMPTS} 之间的整数"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -265,4 +284,18 @@ class DocumentRagPort(Protocol):
         conversation_name: str,
     ) -> DocumentRagSession:
         """创建隔离会话；部分成功必须由实现内部回滚后再抛出异常。"""
+        ...
+
+
+@runtime_checkable
+class DocumentRagFactory(Protocol):
+    """为单个后台任务创建并托管文档 RAG 端口的应用层工厂契约。
+
+    返回上下文管理器而不是裸 ``DocumentRagPort``，是为了把端口背后的网络连接、认证
+    会话和原子 Client 生命周期绑定到任务作用域。调用方必须使用 ``with``；退出时无论
+    业务成功还是异常，具体实现都必须关闭自己创建的传输资源。
+    """
+
+    def create(self) -> AbstractContextManager[DocumentRagPort]:
+        """创建一次不可跨任务、不可跨线程复用的 RAG 端口租约。"""
         ...

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import threading
 import logging
+import threading
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
@@ -10,14 +10,13 @@ from urllib.parse import unquote, urlparse
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
-from app.services.core.config import load_anythingllm_config, load_llm_integration_config
-from app.services.llm_service.analysis_service import run_file_analysis_batch_task, run_file_analysis_task
-from app.services.core.progress_hub import LLMProgressHub
+from app.container import ApplicationServices, get_application_services
+from app.services.llm_service.analysis_service import (
+    run_file_analysis_batch_task,
+    run_file_analysis_task,
+)
 from app.services.llm_service.report_service import run_report_task
-from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.weaponry_service import run_weaponry_task
-from app.services.core.settings import LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH, CHAT_DB_PATH
-from app.services.core.database import DatabaseService, ChatDatabaseService
 from app.services.llm_service.chat_service import (
     handle_chat_stream,
     get_chat_history,
@@ -29,27 +28,13 @@ from app.services.utils.anythingllm_client import AnythingLLMClient
 
 llm_bp = Blueprint("llm", __name__)
 sock = Sock()
-task_service = LLMTaskService(str(LLM_TASK_DB_PATH))
-kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
-chat_db = ChatDatabaseService(str(CHAT_DB_PATH))
-llm_config = load_llm_integration_config()
-anythingllm_config = load_anythingllm_config()
-progress_hub = LLMProgressHub()
-
-# 全局信号量：同一时刻只允许 1 个文档上传类任务（analysis / report）执行，
-# 避免并发上传压垮 AnythingLLM 的 Document Processor。
-_upload_semaphore = threading.Semaphore(1)
 
 logger = logging.getLogger(__name__)
 
 
-def _with_upload_semaphore(fn, **kwargs):
-    """在获取 _upload_semaphore 后执行 fn，结束后自动释放。"""
-    _upload_semaphore.acquire()
-    try:
-        fn(**kwargs)
-    finally:
-        _upload_semaphore.release()
+def _services() -> ApplicationServices:
+    """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
+    return get_application_services()
 
 
 def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
@@ -173,17 +158,35 @@ def _build_progress_snapshot(business_type: str, business_key: str, task: Option
     return {"businessType": business_type, "data": data}
 
 
-def _send_latest_progress(send_message, business_type: str, business_key: str) -> None:
-    latest = progress_hub.get_latest(business_type, business_key)
+def _send_latest_progress(
+    send_message,
+    business_type: str,
+    business_key: str,
+    *,
+    services: ApplicationServices,
+) -> None:
+    """从显式应用依赖读取并发送任务最新进度或数据库快照。"""
+    latest = services.progress_hub.get_latest(business_type, business_key)
     if latest is not None:
         send_message(latest)
         return
 
-    current_task = task_service.get_task(business_type, business_key)
+    current_task = services.task_service.get_task(business_type, business_key)
     send_message(_build_progress_snapshot(business_type, business_key, current_task))
 
 
-def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], Any], command: Dict[str, Any], *, emit_ack: bool) -> None:
+def _handle_progress_command(
+    send_message,
+    subscriptions: dict[tuple[str, str], Any],
+    command: Dict[str, Any],
+    *,
+    emit_ack: bool,
+    services: Optional[ApplicationServices] = None,
+) -> None:
+    """执行进度订阅命令，并允许纯函数测试显式注入应用依赖。"""
+    resolved_services = services or _services()
+    progress_hub = resolved_services.progress_hub
+    task_service = resolved_services.task_service
     action = command["action"]
     keys = command["keys"]
 
@@ -202,7 +205,12 @@ def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], 
                     send_message(_build_progress_snapshot(business_type, business_key, current_task))
                 continue
 
-            _send_latest_progress(send_message, business_type, business_key)
+            _send_latest_progress(
+                send_message,
+                business_type,
+                business_key,
+                services=resolved_services,
+            )
 
         if emit_ack:
             send_message({"type": "ack", "action": action, "count": len(keys)})
@@ -210,7 +218,12 @@ def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], 
 
     if action == "query":
         for business_type, business_key in keys:
-            _send_latest_progress(send_message, business_type, business_key)
+            _send_latest_progress(
+                send_message,
+                business_type,
+                business_key,
+                services=resolved_services,
+            )
 
         if emit_ack:
             send_message({"type": "ack", "action": action, "count": len(keys)})
@@ -227,6 +240,11 @@ def _handle_progress_command(send_message, subscriptions: dict[tuple[str, str], 
 
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
+    services = _services()
+    task_service = services.task_service
+    kb_service = services.kb_service
+    progress_hub = services.progress_hub
+    llm_config = services.llm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "file":
@@ -299,9 +317,12 @@ def llm_analysis():
         "download_root": llm_config.download_dir,
         "callback_url": llm_config.callback_url or "",
         "callback_timeout": llm_config.callback_timeout,
+        # 阶段 6 只注入供应商无关 Factory；阶段 7 的分析服务将在任务线程内部进入
+        # Factory 租约并使用 DocumentRagPort，当前 legacy 分支不会提前创建网络会话。
+        "document_rag_factory": services.document_rag_factory,
     }
     worker = threading.Thread(
-        target=_with_upload_semaphore,
+        target=services.upload_task_limiter.run,
         args=(_task_fn,),
         kwargs=_task_kwargs,
         daemon=True,
@@ -315,6 +336,10 @@ def llm_analysis():
 
 @llm_bp.post("/llm/generate-report")
 def llm_generate_report():
+    services = _services()
+    task_service = services.task_service
+    progress_hub = services.progress_hub
+    llm_config = services.llm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到报告生成请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "report":
@@ -362,7 +387,7 @@ def llm_generate_report():
         "callback_timeout": llm_config.callback_timeout,
     }
     worker = threading.Thread(
-        target=_with_upload_semaphore,
+        target=services.upload_task_limiter.run,
         args=(run_report_task,),
         kwargs=_report_kwargs,
         daemon=True,
@@ -374,6 +399,11 @@ def llm_generate_report():
 
 @llm_bp.post("/llm/weaponry")
 def llm_weaponry():
+    services = _services()
+    task_service = services.task_service
+    kb_service = services.kb_service
+    progress_hub = services.progress_hub
+    llm_config = services.llm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到武器装备提取请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "weaponry":
@@ -500,6 +530,9 @@ def llm_weaponry():
 
 @llm_bp.post("/llm/check-task")
 def llm_check_task():
+    services = _services()
+    task_service = services.task_service
+    llm_config = services.llm_config
     payload = request.get_json(silent=True) or {}
     business_type = payload.get("businessType")
     if business_type not in {"file", "report", "weaponry"}:
@@ -599,6 +632,9 @@ def llm_check_task():
 
 @llm_bp.post("/llm/reassign")
 def llm_reassign():
+    services = _services()
+    kb_service = services.kb_service
+    anythingllm_config = services.anythingllm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到文档分类变更请求: payload_keys=%s", list(payload.keys()))
 
@@ -737,6 +773,8 @@ def llm_reassign():
 
 @sock.route("/llm/progress")
 def llm_progress(ws):
+    services = _services()
+    progress_hub = services.progress_hub
     subscriptions: dict[tuple[str, str], Any] = {}
     try:
         while True:
@@ -770,6 +808,7 @@ def llm_progress(ws):
                 subscriptions,
                 command,
                 emit_ack="action" in payload,
+                services=services,
             )
     finally:
         for (business_type, business_key), callback in list(subscriptions.items()):
@@ -782,6 +821,10 @@ def llm_progress(ws):
 
 @llm_bp.post("/llm/chat")
 def llm_chat():
+    services = _services()
+    kb_service = services.kb_service
+    chat_db = services.chat_db
+    anythingllm_config = services.anythingllm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到文件对话请求: payload_keys=%s", list(payload.keys()))
 
@@ -867,6 +910,9 @@ def llm_chat():
 
 @llm_bp.get("/llm/chat/history")
 def llm_chat_history():
+    services = _services()
+    chat_db = services.chat_db
+    anythingllm_config = services.anythingllm_config
     chat_id = request.args.get("chatId", "").strip()
     if not chat_id:
         logger.warning("对话历史请求被拒绝: chatId为空")
@@ -882,6 +928,9 @@ def llm_chat_history():
 
 @llm_bp.post("/llm/chat/delete")
 def llm_chat_delete():
+    services = _services()
+    chat_db = services.chat_db
+    anythingllm_config = services.anythingllm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到删除对话请求: payload_keys=%s", list(payload.keys()))
 

@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable
 
 import fitz
 
+from app.ports import DocumentRagFactory
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_anythingllm_config, load_ocr_config
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
@@ -929,7 +930,15 @@ def run_file_analysis_task(
         download_root: str,
         callback_url: str,
         callback_timeout: float,
+        document_rag_factory: DocumentRagFactory | None = None,
 ) -> None:
+    """执行单文件分析任务。
+
+    ``document_rag_factory`` 是阶段 6 建立的任务级注入接缝。当前阶段仍执行 legacy RAG
+    流程，因此只接收但不进入 Factory 租约，确保改造期间不会创建一套未使用的 Transport。
+    阶段 7 将把该参数改为必需依赖，并在本任务函数内部使用 ``with factory.create()``
+    完成纯方案 B 迁移。
+    """
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
     original_name = _as_text(params.get("originalFileName")) or file_name
@@ -941,6 +950,11 @@ def run_file_analysis_task(
     rag_details = RAGExecutionDetails()
 
     logger.info("开始执行文件分析任务: file_name=%s", file_name)
+    logger.debug(
+        "文件分析任务依赖已装配: file_name=%s document_rag_factory_injected=%s",
+        file_name,
+        document_rag_factory is not None,
+    )
 
     try:
         task_service.update_task_progress("file", file_name, progress=0.15, message="正在下载文件", status="1")
@@ -1178,7 +1192,9 @@ def run_file_analysis_batch_task(
         download_root: str,
         callback_url: str,
         callback_timeout: float,
+        document_rag_factory: DocumentRagFactory | None = None,
 ) -> None:
+    """按请求顺序执行批量文件分析，并向每个子任务传递同一无状态 Factory。"""
     params_list = request_payload.get("params", [])
     for index, params in enumerate(params_list):
         if not isinstance(params, dict):
@@ -1199,4 +1215,5 @@ def run_file_analysis_batch_task(
             download_root=download_root,
             callback_url=callback_url,
             callback_timeout=callback_timeout,
+            document_rag_factory=document_rag_factory,
         )

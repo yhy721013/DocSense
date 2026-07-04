@@ -13,6 +13,7 @@ from app.integrations.anythingllm.errors import (
     AnythingLLMTransportError,
 )
 from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.factory import AnythingLLMGatewayFactory
 from app.integrations.anythingllm.models import (
     AnythingLLMAnswer,
     AnythingLLMDocument,
@@ -31,6 +32,7 @@ __all__ = [
     "AnythingLLMDocument",
     "AnythingLLMDocumentClient",
     "AnythingLLMHTTPError",
+    "AnythingLLMGatewayFactory",
     "AnythingLLMProtocolError",
     "AnythingLLMRagGateway",
     "AnythingLLMSource",
