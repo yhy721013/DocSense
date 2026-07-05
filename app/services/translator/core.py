@@ -1,9 +1,15 @@
 import logging
-logger = logging.getLogger(__name__)
-import requests
 import os
 import time
-from .utils import build_prompt, clean_output, ProgressTracker
+
+import requests
+
+from app.services.core.logging import apply_third_party_log_levels
+
+from .utils import ProgressTracker, build_prompt, clean_output
+
+
+logger = logging.getLogger(__name__)
 
 
 class HYMTTranslator:
@@ -179,6 +185,10 @@ class HYMTTranslator:
             from argostranslate import package, translate
             import argostranslate.sbd
 
+            # Argos Translate 会在延迟导入 utils 模块时把自身 logger 重置为 INFO。必须在
+            # 导入完成后重新应用应用级策略，确保待翻译原文和分句过程不会进入生产日志。
+            apply_third_party_log_levels()
+
             # --- Monkey patch StanzaSentencizer to fallback to simple split on error ---
             if not getattr(argostranslate.sbd.StanzaSentencizer, '_is_patched', False):
                 original_split_sentences = argostranslate.sbd.StanzaSentencizer.split_sentences
@@ -270,6 +280,10 @@ class HYMTTranslator:
         try:
             from argostranslate import package, translate
             import argostranslate.settings
+
+            # 自动安装路径同样会触发 Argos 模块初始化，因此也必须在任何包查询或下载
+            # 日志产生前重新应用统一级别，避免构造翻译器时泄漏 INFO 级详细信息。
+            apply_third_party_log_levels()
 
             logger.info("[ArgoTranslate] 检查并安装翻译包...")
 
