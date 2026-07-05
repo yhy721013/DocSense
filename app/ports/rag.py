@@ -21,6 +21,22 @@ MAX_RAG_QUERY_ATTEMPTS = 3
 """
 
 
+def normalize_rag_prompt(value: str) -> str:
+    """返回模型调用、摘要计算和审计持久化共同使用的规范 Prompt。
+
+    规范只处理跨平台表示差异：把 ``CRLF`` 和单独 ``CR`` 统一为 ``LF``，并移除首尾
+    空白；Prompt 正文内部的换行、缩进和空格保持不变，避免改变结构化指令语义。调用方
+    必须把本函数返回的同一个字符串同时用于外部请求与审计，禁止各层自行采用不同的
+    ``strip`` 或换行转换规则。
+    """
+    if not isinstance(value, str):
+        raise TypeError("prompt 必须是 str")
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        raise ValueError("prompt 不能为空")
+    return normalized
+
+
 class RagPromptKind(str, Enum):
     """文档 RAG 模型调用的稳定用途分类。
 
@@ -99,8 +115,8 @@ class RagAttempt:
         operation: 稳定模型操作名，例如 ``analyse``、``ask`` 或结构修复。
         attempt: 当前操作内从 1 开始的尝试序号。
         prompt_kind: 提示词用途分类。
-        prompt_digest: 完整 Prompt 的 SHA-256 摘要，用于证明主审计记录与本次调用对应；
-            普通日志不得输出完整 Prompt。
+        prompt_digest: ``normalize_rag_prompt`` 返回的规范 Prompt 的 SHA-256 摘要，用于
+            证明主审计记录与实际模型调用对应；普通日志不得输出完整 Prompt。
         query_mode: 文档 RAG 固定为 ``query``，防止适配器回退为无来源约束的对话模式。
         raw_response: 可选原始回答，用于后续交互审计。
         sources: 本次回答携带的来源快照。
@@ -425,7 +441,7 @@ class DocumentRagSession(Protocol):
         require_sources: bool = True,
         max_attempts: int = 2,
     ) -> RagResult:
-        """准备目标文档并完成首次查询；同一 Session 只允许调用一次。"""
+        """准备目标文档并完成首次查询；Prompt 按公共契约规范化且只允许调用一次。"""
         ...
 
     def ask(
@@ -436,7 +452,7 @@ class DocumentRagSession(Protocol):
         require_sources: bool = True,
         max_attempts: int = 1,
     ) -> RagResult:
-        """在已准备会话中按显式用途继续查询，不重复上传或建立文档上下文。"""
+        """在已准备会话中按显式用途和规范 Prompt 查询，不重复准备文档。"""
         ...
 
     @property

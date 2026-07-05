@@ -17,6 +17,24 @@ from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 from .rag import PreparedDocumentRef
 
 
+def _freeze_json(value: Any) -> Any:
+    """递归冻结严格 JSON 值，阻止嵌套容器绕过 frozen dataclass。"""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: Any) -> Any:
+    """把冻结 JSON 值复制为可安全序列化的独立普通容器。"""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
 def build_document_idempotency_key(
     *,
     file_name: str,
@@ -60,6 +78,17 @@ class KnowledgeIndexConflictError(KnowledgeIndexError):
 
 class KnowledgeIndexRecoveryRequiredError(KnowledgeIndexError):
     """外部结果或补偿结果不确定，必须人工或专用恢复流程介入。"""
+
+
+class KnowledgeIndexDocumentReleasedError(KnowledgeIndexError):
+    """永久索引确认未接管文档，RAG 会话可以安全执行全局删除。
+
+    该异常不是普通的“写入失败”标记，而是 Gateway 已经完成外部解绑并把补偿成功状态
+    持久化后的确定性凭据。文件分析编排只能在捕获此异常时使用
+    ``close(retain_document=False)``；未知异常一律不能据此推断文档尚未被永久集合引用。
+    """
+
+    retain_document_required = False
 
 
 class KnowledgeIndexRetentionRequiredError(KnowledgeIndexRecoveryRequiredError):
@@ -137,7 +166,11 @@ class KnowledgeDocumentMetadata:
             raise TypeError("KnowledgeDocumentMetadata.attributes 必须序列化为 JSON 对象")
         object.__setattr__(self, "file_name", normalized_file_name)
         object.__setattr__(self, "original_name", normalized_original_name)
-        object.__setattr__(self, "attributes", MappingProxyType(snapshot))
+        object.__setattr__(self, "attributes", _freeze_json(snapshot))
+
+    def attributes_dict(self) -> dict[str, Any]:
+        """返回与内部不可变快照完全隔离的普通 JSON 对象。"""
+        return _thaw_json(self.attributes)
 
 
 @dataclass(frozen=True)

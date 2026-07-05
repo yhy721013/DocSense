@@ -103,6 +103,7 @@ class KnowledgeCollectionReservation:
     owner_token: str
     owns_reservation: bool
     last_error: str
+    policy_version: int
 
 
 class KnowledgeIndexOperationService:
@@ -136,7 +137,7 @@ class KnowledgeIndexOperationService:
                     last_execution_id TEXT NOT NULL,
                     business_type TEXT NOT NULL,
                     business_key TEXT NOT NULL,
-                    source_kind TEXT NOT NULL,
+                    source_kind TEXT NOT NULL CHECK (source_kind IN ('upload', 'prepared')),
                     source_digest TEXT NOT NULL DEFAULT '',
                     document_ref TEXT NOT NULL DEFAULT '',
                     external_document_id TEXT NOT NULL DEFAULT '',
@@ -144,7 +145,12 @@ class KnowledgeIndexOperationService:
                     superseded_location TEXT NOT NULL DEFAULT '',
                     source_marker TEXT NOT NULL DEFAULT '',
                     metadata_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN (
+                        'pending', 'uploading', 'document_ready',
+                        'external_succeeded', 'replacement_cleanup_pending',
+                        'committed', 'superseded', 'detaching',
+                        'external_detached', 'compensated', 'compensation_failed'
+                    )),
                     last_error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -167,18 +173,60 @@ class KnowledgeIndexOperationService:
                     architecture_id INTEGER PRIMARY KEY,
                     collection_name TEXT NOT NULL,
                     workspace_slug TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('creating', 'ready')),
                     owner_token TEXT NOT NULL DEFAULT '',
+                    policy_version INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_collection_schema(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_knowledge_operations_status
                 ON knowledge_index_operations (status, updated_at)
+                """
+            )
+            duplicate_workspace = connection.execute(
+                """
+                SELECT 1 FROM knowledge_index_collections
+                WHERE workspace_slug != ''
+                GROUP BY workspace_slug HAVING COUNT(*) > 1
+                LIMIT 1
+                """
+            ).fetchone()
+            if duplicate_workspace is not None:
+                raise KnowledgeIndexConflictError(
+                    "集合协调表存在重复 Workspace 映射，必须先人工修复"
+                )
+            duplicate_document = connection.execute(
+                """
+                SELECT 1 FROM knowledge_index_operations
+                WHERE external_location != ''
+                  AND status NOT IN ('compensated', 'superseded')
+                GROUP BY collection_ref, external_location HAVING COUNT(*) > 1
+                LIMIT 1
+                """
+            ).fetchone()
+            if duplicate_document is not None:
+                raise KnowledgeIndexConflictError(
+                    "知识库协调表存在重复活动文档位置，必须先人工修复"
+                )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_collection_workspace
+                ON knowledge_index_collections (workspace_slug)
+                WHERE workspace_slug != ''
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_active_document_location
+                ON knowledge_index_operations (collection_ref, external_location)
+                WHERE external_location != ''
+                  AND status NOT IN ('compensated', 'superseded')
                 """
             )
 
@@ -200,6 +248,21 @@ class KnowledgeIndexOperationService:
             connection.execute(
                 "ALTER TABLE knowledge_index_operations "
                 "ADD COLUMN superseded_location TEXT NOT NULL DEFAULT ''"
+            )
+
+    @staticmethod
+    def _ensure_collection_schema(connection: sqlite3.Connection) -> None:
+        """为阶段 8 早期集合协调表补充可重试的 Workspace 策略版本。"""
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(knowledge_index_collections)"
+            ).fetchall()
+        }
+        if "policy_version" not in columns:
+            connection.execute(
+                "ALTER TABLE knowledge_index_collections "
+                "ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 0"
             )
 
     @staticmethod
@@ -325,35 +388,40 @@ class KnowledgeIndexOperationService:
                 (normalized_collection, normalized_key),
             ).fetchone()
             if existing is None:
-                connection.execute(
-                    """
-                    INSERT INTO knowledge_index_operations (
-                        collection_ref, idempotency_key, execution_id,
-                        last_execution_id, business_type, business_key,
-                        source_kind, source_digest, document_ref,
-                        external_document_id, external_location, source_marker,
-                        metadata_json, status, last_error, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
-                    """,
-                    (
-                        normalized_collection,
-                        normalized_key,
-                        operation_context.execution_id,
-                        operation_context.execution_id,
-                        operation_context.business_type,
-                        operation_context.business_key,
-                        normalized_source_kind,
-                        normalized_digest,
-                        normalized_document_ref,
-                        normalized_external_document_id,
-                        normalized_location,
-                        normalized_marker,
-                        metadata_json,
-                        STATUS_PENDING,
-                        now,
-                        now,
-                    ),
-                )
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO knowledge_index_operations (
+                            collection_ref, idempotency_key, execution_id,
+                            last_execution_id, business_type, business_key,
+                            source_kind, source_digest, document_ref,
+                            external_document_id, external_location, source_marker,
+                            metadata_json, status, last_error, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                        """,
+                        (
+                            normalized_collection,
+                            normalized_key,
+                            operation_context.execution_id,
+                            operation_context.execution_id,
+                            operation_context.business_type,
+                            operation_context.business_key,
+                            normalized_source_kind,
+                            normalized_digest,
+                            normalized_document_ref,
+                            normalized_external_document_id,
+                            normalized_location,
+                            normalized_marker,
+                            metadata_json,
+                            STATUS_PENDING,
+                            now,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise KnowledgeIndexConflictError(
+                        "同一永久集合中的文档位置已经由其他幂等操作占用"
+                    ) from exc
             else:
                 immutable_matches = (
                     existing["business_type"] == operation_context.business_type
@@ -567,24 +635,29 @@ class KnowledgeIndexOperationService:
                 if external_location is None
                 else str(external_location).strip()
             )
-            connection.execute(
-                """
-                UPDATE knowledge_index_operations
-                SET document_ref = ?, external_document_id = ?, external_location = ?, status = ?,
-                    last_error = ?, updated_at = ?
-                WHERE collection_ref = ? AND idempotency_key = ?
-                """,
-                (
-                    next_document_ref,
-                    next_external_document_id,
-                    next_location,
-                    target_status,
-                    str(last_error or "").strip() if last_error is not None else "",
-                    now,
-                    normalized_collection,
-                    normalized_key,
-                ),
-            )
+            try:
+                connection.execute(
+                    """
+                    UPDATE knowledge_index_operations
+                    SET document_ref = ?, external_document_id = ?,
+                        external_location = ?, status = ?, last_error = ?, updated_at = ?
+                    WHERE collection_ref = ? AND idempotency_key = ?
+                    """,
+                    (
+                        next_document_ref,
+                        next_external_document_id,
+                        next_location,
+                        target_status,
+                        str(last_error or "").strip() if last_error is not None else "",
+                        now,
+                        normalized_collection,
+                        normalized_key,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise KnowledgeIndexConflictError(
+                    "目标外部文档位置已经由其他活动操作占用"
+                ) from exc
             updated = connection.execute(
                 """
                 SELECT * FROM knowledge_index_operations
@@ -888,6 +961,7 @@ class KnowledgeIndexOperationService:
                     owner_token=owner_token,
                     owns_reservation=True,
                     last_error="",
+                    policy_version=0,
                 )
             if row["collection_name"].casefold() != normalized_name.casefold():
                 raise KnowledgeIndexConflictError(
@@ -907,6 +981,7 @@ class KnowledgeIndexOperationService:
                 owner_token="",
                 owns_reservation=False,
                 last_error=row["last_error"],
+                policy_version=int(row["policy_version"]),
             )
 
     def register_existing_collection(
@@ -915,8 +990,8 @@ class KnowledgeIndexOperationService:
         architecture_id: int,
         collection_name: str,
         workspace_slug: str,
-    ) -> None:
-        """把已有本地权威映射登记为可复用集合，不执行远程创建。"""
+    ) -> int:
+        """登记已有本地权威映射，并返回已经成功应用的策略版本。"""
         if (
             isinstance(architecture_id, bool)
             or not isinstance(architecture_id, int)
@@ -934,49 +1009,97 @@ class KnowledgeIndexOperationService:
             ).fetchone()
             if row is not None and row["workspace_slug"] not in {"", normalized_slug}:
                 raise KnowledgeIndexConflictError("永久集合协调映射与本地权威映射冲突")
-            connection.execute(
-                """
-                INSERT INTO knowledge_index_collections (
-                    architecture_id, collection_name, workspace_slug, status,
-                    owner_token, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, 'ready', '', '', ?, ?)
-                ON CONFLICT(architecture_id) DO UPDATE SET
-                    collection_name = excluded.collection_name,
-                    workspace_slug = excluded.workspace_slug,
-                    status = 'ready', owner_token = '', last_error = '',
-                    updated_at = excluded.updated_at
-                """,
-                (architecture_id, normalized_name, normalized_slug, now, now),
-            )
+            current_policy_version = int(row["policy_version"]) if row else 0
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_index_collections (
+                        architecture_id, collection_name, workspace_slug, status,
+                        owner_token, last_error, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'ready', '', '', ?, ?)
+                    ON CONFLICT(architecture_id) DO UPDATE SET
+                        collection_name = excluded.collection_name,
+                        workspace_slug = excluded.workspace_slug,
+                        status = 'ready', owner_token = '', last_error = '',
+                        updated_at = excluded.updated_at
+                    """,
+                    (architecture_id, normalized_name, normalized_slug, now, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise KnowledgeIndexConflictError(
+                    "AnythingLLM Workspace 已经映射到其他 architecture"
+                ) from exc
+        return current_policy_version
 
     def complete_collection_reservation(
         self,
         *,
         reservation: KnowledgeCollectionReservation,
         workspace_slug: str,
+        policy_version: int,
     ) -> None:
         """由持有者提交 Workspace 创建结果，拒绝其他进程冒充完成。"""
         if not reservation.owns_reservation or not reservation.owner_token:
             raise ValueError("reservation 不持有集合创建权")
         normalized_slug = self._required_text(workspace_slug, name="workspace_slug")
+        if isinstance(policy_version, bool) or not isinstance(policy_version, int) or policy_version < 1:
+            raise ValueError("policy_version 必须是正整数")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE knowledge_index_collections
+                    SET workspace_slug = ?, status = 'ready', owner_token = '',
+                        policy_version = ?, last_error = '', updated_at = ?
+                    WHERE architecture_id = ? AND status = 'creating' AND owner_token = ?
+                    """,
+                    (
+                        normalized_slug,
+                        policy_version,
+                        _utc_now_iso(),
+                        reservation.architecture_id,
+                        reservation.owner_token,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise KnowledgeIndexConflictError(
+                    "AnythingLLM Workspace 已经映射到其他 architecture"
+                ) from exc
+            if cursor.rowcount != 1:
+                raise KnowledgeIndexConflictError("永久集合创建预留已经失效")
+
+    def mark_collection_policy_applied(
+        self,
+        *,
+        architecture_id: int,
+        workspace_slug: str,
+        policy_version: int,
+    ) -> None:
+        """在远程 Workspace 更新成功后提交已应用策略版本。"""
+        normalized_slug = self._required_text(workspace_slug, name="workspace_slug")
+        if (
+            isinstance(policy_version, bool)
+            or not isinstance(policy_version, int)
+            or policy_version < 1
+        ):
+            raise ValueError("policy_version 必须是正整数")
+        with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE knowledge_index_collections
-                SET workspace_slug = ?, status = 'ready', owner_token = '',
-                    last_error = '', updated_at = ?
-                WHERE architecture_id = ? AND status = 'creating' AND owner_token = ?
+                SET policy_version = ?, updated_at = ?
+                WHERE architecture_id = ? AND workspace_slug = ? AND status = 'ready'
                 """,
                 (
-                    normalized_slug,
+                    policy_version,
                     _utc_now_iso(),
-                    reservation.architecture_id,
-                    reservation.owner_token,
+                    architecture_id,
+                    normalized_slug,
                 ),
             )
             if cursor.rowcount != 1:
-                raise KnowledgeIndexConflictError("永久集合创建预留已经失效")
+                raise KnowledgeIndexConflictError("永久集合策略版本提交目标不存在")
 
     def list_recovery_required(self) -> list[KnowledgeIndexOperationRecord]:
         """列出必须人工核查的上传、补偿和解绑操作，供巡检脚本使用。"""
@@ -1016,6 +1139,7 @@ class KnowledgeIndexOperationService:
                 owner_token="",
                 owns_reservation=False,
                 last_error=row["last_error"],
+                policy_version=int(row["policy_version"]),
             )
             for row in rows
         ]

@@ -1,8 +1,8 @@
-"""AnythingLLM 集成层共享的重试与调用次数策略。
+"""AnythingLLM 集成层共享的重试、调用次数与 Workspace 行为策略。
 
-本模块只保存多个 AnythingLLM 适配器共同遵守的执行策略，不收纳 URL、密钥或通用业务
-常量。硬上限用于保护外部服务和任务成本，默认值用于生产装配；两者即使当前数值相同，
-也必须保持独立命名，避免调整默认行为时意外放宽安全边界。
+本模块只保存多个 AnythingLLM 适配器共同遵守的执行策略，不收纳 URL、密钥或无关业务
+常量。硬上限用于保护外部服务和任务成本，Workspace 策略用于保证新旧链路迁移期间行为
+一致；每次都返回独立配置副本，避免跨任务共享可变对象。
 """
 
 from __future__ import annotations
@@ -22,6 +22,9 @@ MAX_EMBEDDING_ATTEMPTS = 3
 
 DEFAULT_EMBEDDING_ATTEMPTS = 2
 """单次文档绑定操作默认总调用次数，包含首次调用。"""
+
+DOCUMENT_RAG_WORKSPACE_POLICY_VERSION = 1
+"""文档 RAG Workspace 策略版本；配置语义变化时必须递增。"""
 
 
 def document_rag_workspace_settings() -> dict[str, object]:

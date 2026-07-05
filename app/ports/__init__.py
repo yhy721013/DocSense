@@ -10,6 +10,7 @@ from .knowledge_index import (
     IndexedDocument,
     KnowledgeDocumentMetadata,
     KnowledgeIndexConflictError,
+    KnowledgeIndexDocumentReleasedError,
     KnowledgeIndexError,
     KnowledgeOperationContext,
     KnowledgeIndexFactory,
@@ -33,6 +34,7 @@ from .rag import (
     RagPromptKind,
     RagResult,
     RagSource,
+    normalize_rag_prompt,
     validate_rag_prompt_kind,
     validate_rag_query_max_attempts,
 )
@@ -47,6 +49,7 @@ __all__ = [
     "IndexedDocument",
     "KnowledgeDocumentMetadata",
     "KnowledgeIndexConflictError",
+    "KnowledgeIndexDocumentReleasedError",
     "KnowledgeIndexError",
     "KnowledgeIndexFactory",
     "KnowledgeIndexPort",
@@ -64,6 +67,7 @@ __all__ = [
     "RagPromptKind",
     "RagResult",
     "RagSource",
+    "normalize_rag_prompt",
     "validate_rag_prompt_kind",
     "validate_rag_query_max_attempts",
 ]

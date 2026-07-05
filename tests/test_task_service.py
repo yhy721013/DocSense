@@ -262,6 +262,25 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertEqual([item["sequence_no"] for item in events], [1, 2])
             self.assertEqual(interactions[0]["audit_schema_version"], 2)
 
+    def test_atomic_audit_uses_same_canonical_prompt_as_rag_attempt(self):
+        """首尾换行和 CRLF 不得再次制造主审计与实际模型调用摘要不一致。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+
+            result = service.create_llm_interaction_with_trace(
+                business_type="file",
+                business_key="demo.pdf",
+                execution_id=task["execution_id"],
+                prompt="\r\n提取文档字段\r\n",
+                trace=_successful_trace(),
+                status="succeeded",
+            )
+
+            interaction = service.get_llm_interactions("file", "demo.pdf")[0]
+            self.assertEqual(result.audit_status, "succeeded")
+            self.assertEqual(interaction["prompt"], "提取文档字段")
+
     def test_atomic_audit_reuses_same_execution_and_rejects_conflicting_trace(self):
         """相同执行的完全一致重放幂等复用，内容变化则拒绝覆盖。"""
         with workspace_tempdir() as tmp:

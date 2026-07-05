@@ -51,6 +51,7 @@ from app.ports import (
     RagPromptKind,
     RagResult,
     RagSource,
+    normalize_rag_prompt,
     validate_rag_prompt_kind,
     validate_rag_query_max_attempts,
 )
@@ -434,7 +435,7 @@ class _AnythingLLMRagSession:
                 failure_stage="analyse_repeated",
             )
         normalized_file_path = self._required_text(file_path, name="file_path")
-        normalized_prompt = self._required_text(prompt, name="prompt")
+        normalized_prompt = normalize_rag_prompt(prompt)
         self._validate_max_attempts(max_attempts)
         self._analyse_started = True
 
@@ -475,7 +476,7 @@ class _AnythingLLMRagSession:
     ) -> RagResult:
         """在已准备的线程中继续查询，不重复任何文档准备操作。"""
         self._ensure_open()
-        normalized_prompt = self._required_text(prompt, name="prompt")
+        normalized_prompt = normalize_rag_prompt(prompt)
         validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
         if not self._analyse_succeeded or not self._document_ref:

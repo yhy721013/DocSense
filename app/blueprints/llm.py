@@ -311,15 +311,15 @@ def llm_analysis():
     _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
     _task_kwargs = {
         "task_service": task_service,
-        "kb_service": kb_service,
         "progress_hub": progress_hub,
         "request_payload": payload if len(tasks) > 1 else {"businessType": "file", "params": [params_list[0]]},
         "download_root": llm_config.download_dir,
         "callback_url": llm_config.callback_url or "",
         "callback_timeout": llm_config.callback_timeout,
-        # 阶段 6 只注入供应商无关 Factory；阶段 7 的分析服务将在任务线程内部进入
-        # Factory 租约并使用 DocumentRagPort，当前 legacy 分支不会提前创建网络会话。
+        # Factory 本身只保存不可变配置和线程安全协调依赖。真正持有网络 Session 的
+        # Gateway 在后台任务线程内部按文件创建，批量任务也不会跨文件共享有状态对象。
         "document_rag_factory": services.document_rag_factory,
+        "knowledge_index_factory": services.knowledge_index_factory,
     }
     worker = threading.Thread(
         target=services.upload_task_limiter.run,

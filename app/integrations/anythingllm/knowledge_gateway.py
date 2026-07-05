@@ -12,16 +12,16 @@ import logging
 import re
 import secrets
 import shutil
-import threading
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, ContextManager, Mapping, Optional
 
 from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
 from app.integrations.anythingllm.models import (
     DOCSENSE_SOURCE_MARKER_PREFIX,
     AnythingLLMDocument,
 )
+from app.integrations.anythingllm.policies import DOCUMENT_RAG_WORKSPACE_POLICY_VERSION
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.ports import (
     CollectionRef,
@@ -29,6 +29,7 @@ from app.ports import (
     IndexedDocument,
     KnowledgeDocumentMetadata,
     KnowledgeIndexConflictError,
+    KnowledgeIndexDocumentReleasedError,
     KnowledgeIndexError,
     KnowledgeIndexRecoveryRequiredError,
     KnowledgeIndexRetentionRequiredError,
@@ -67,7 +68,8 @@ class AnythingLLMKnowledgeGateway:
         operation_service: KnowledgeIndexOperationService,
         database_service: DatabaseService,
         *,
-        operation_lock: threading.RLock,
+        operation_lock: ContextManager[object] | None = None,
+        operation_lock_factory: Callable[[str], ContextManager[object]] | None = None,
         user_id: int | None = 1,
         workspace_settings: Optional[Mapping[str, Any]] = None,
     ) -> None:
@@ -76,11 +78,16 @@ class AnythingLLMKnowledgeGateway:
             raise TypeError("operation_service 类型无效")
         if not isinstance(database_service, DatabaseService):
             raise TypeError("database_service 类型无效")
-        if not (
-            hasattr(operation_lock, "__enter__")
-            and hasattr(operation_lock, "__exit__")
-        ):
-            raise TypeError("operation_lock 必须是上下文管理锁")
+        if operation_lock_factory is None:
+            if operation_lock is None or not (
+                hasattr(operation_lock, "__enter__")
+                and hasattr(operation_lock, "__exit__")
+            ):
+                raise TypeError("必须提供 operation_lock 或 operation_lock_factory")
+            fixed_operation_lock = operation_lock
+            operation_lock_factory = lambda _key: fixed_operation_lock
+        elif not callable(operation_lock_factory):
+            raise TypeError("operation_lock_factory 必须可调用")
         if user_id is not None and (
             isinstance(user_id, bool)
             or not isinstance(user_id, int)
@@ -91,7 +98,7 @@ class AnythingLLMKnowledgeGateway:
         self._workspace_client = workspace_client
         self._operation_service = operation_service
         self._database_service = database_service
-        self._operation_lock = operation_lock
+        self._operation_lock_factory = operation_lock_factory
         self._user_id = user_id
         self._workspace_settings = dict(workspace_settings or {})
         self._known_collections: dict[str, CollectionRef] = {}
@@ -105,7 +112,7 @@ class AnythingLLMKnowledgeGateway:
         """
         if not isinstance(spec, CollectionSpec):
             raise TypeError("spec 必须是 CollectionSpec")
-        with self._operation_lock:
+        with self._operation_lock_factory(f"architecture:{spec.architecture_id}"):
             cached = next(
                 (collection for collection in self._known_collections.values()
                  if collection.architecture_id == spec.architecture_id),
@@ -119,8 +126,9 @@ class AnythingLLMKnowledgeGateway:
                 return cached
 
             mapped_slug = self._database_service.get_workspace_slug(spec.architecture_id)
+            current_policy_version = DOCUMENT_RAG_WORKSPACE_POLICY_VERSION
             if mapped_slug:
-                self._operation_service.register_existing_collection(
+                current_policy_version = self._operation_service.register_existing_collection(
                     architecture_id=spec.architecture_id,
                     collection_name=spec.name,
                     workspace_slug=mapped_slug,
@@ -135,6 +143,7 @@ class AnythingLLMKnowledgeGateway:
                     architecture_id=spec.architecture_id,
                     collection_name=spec.name,
                 )
+                current_policy_version = reservation.policy_version
                 if reservation.owns_reservation:
                     workspace = self._workspace_client.create_workspace(
                         spec.name,
@@ -144,6 +153,7 @@ class AnythingLLMKnowledgeGateway:
                     self._operation_service.complete_collection_reservation(
                         reservation=reservation,
                         workspace_slug=workspace.slug,
+                        policy_version=DOCUMENT_RAG_WORKSPACE_POLICY_VERSION,
                     )
                     reused = False
                 else:
@@ -157,11 +167,20 @@ class AnythingLLMKnowledgeGateway:
                     workspace.slug,
                 )
 
-            if reused and self._workspace_settings:
+            if (
+                reused
+                and current_policy_version < DOCUMENT_RAG_WORKSPACE_POLICY_VERSION
+                and self._workspace_settings
+            ):
                 workspace = self._workspace_client.update_workspace(
                     workspace.slug,
                     self._workspace_settings,
                     user_id=self._user_id,
+                )
+                self._operation_service.mark_collection_policy_applied(
+                    architecture_id=spec.architecture_id,
+                    workspace_slug=workspace.slug,
+                    policy_version=DOCUMENT_RAG_WORKSPACE_POLICY_VERSION,
                 )
 
             collection = CollectionRef(
@@ -216,7 +235,9 @@ class AnythingLLMKnowledgeGateway:
             with snapshot_path.open("rb"):
                 pass
 
-            with self._operation_lock:
+            with self._operation_lock_factory(
+                f"architecture:{known_collection.architecture_id}"
+            ):
                 existing = self._operation_service.get(
                     known_collection.ref,
                     normalized_key,
@@ -294,7 +315,9 @@ class AnythingLLMKnowledgeGateway:
         )
         source_digest = document.content_sha256
 
-        with self._operation_lock:
+        with self._operation_lock_factory(
+            f"architecture:{known_collection.architecture_id}"
+        ):
             existing = self._operation_service.get(
                 known_collection.ref,
                 normalized_key,
@@ -329,7 +352,9 @@ class AnythingLLMKnowledgeGateway:
         if not isinstance(operation_context, KnowledgeOperationContext):
             raise TypeError("operation_context 必须是 KnowledgeOperationContext")
         normalized_key = self._required_text(idempotency_key, name="idempotency_key")
-        with self._operation_lock:
+        with self._operation_lock_factory(
+            f"architecture:{known_collection.architecture_id}"
+        ):
             record = self._operation_service.get(
                 known_collection.ref,
                 normalized_key,
@@ -382,7 +407,9 @@ class AnythingLLMKnowledgeGateway:
             external_location,
             name="external_location",
         )
-        with self._operation_lock:
+        with self._operation_lock_factory(
+            f"architecture:{known_collection.architecture_id}"
+        ):
             try:
                 detach_stage = self._operation_service.begin_detach(
                     collection_ref=known_collection.ref,
@@ -484,6 +511,10 @@ class AnythingLLMKnowledgeGateway:
                 raise KnowledgeIndexRetentionRequiredError(
                     "替换准备失败且补偿结果不确定，必须保留全局文档"
                 ) from exc
+            if compensated and record.source_kind == "prepared":
+                raise KnowledgeIndexDocumentReleasedError(
+                    "替换准备失败，但永久集合变更已经完成补偿"
+                ) from exc
             raise
 
         try:
@@ -533,6 +564,10 @@ class AnythingLLMKnowledgeGateway:
                 if not compensated and record.source_kind == "prepared":
                     raise KnowledgeIndexRetentionRequiredError(
                         "永久知识库补偿未完成，必须保留全局文档"
+                    ) from exc
+                if compensated and record.source_kind == "prepared":
+                    raise KnowledgeIndexDocumentReleasedError(
+                        "永久知识库写入失败，但集合绑定已经完成补偿"
                     ) from exc
             raise
 
@@ -603,6 +638,22 @@ class AnythingLLMKnowledgeGateway:
                 "AnythingLLM 未在永久知识集合中返回刚绑定的文档"
             )
         if verified.document_ref != record.document_ref:
+            logger.error(
+                "永久知识集合文档身份校验失败: collection_ref=%s "
+                "idempotency_key=%s expected_document_ref=%s "
+                "actual_document_ref=%s external_location=%s verified_location=%s "
+                "verified_document_id=%s verified_raw_document_id=%s "
+                "verified_identity_source=%s",
+                collection.ref,
+                record.idempotency_key,
+                record.document_ref,
+                verified.document_ref,
+                record.external_location,
+                verified.location,
+                verified.id,
+                verified.raw_document_id,
+                verified.identity_source,
+            )
             raise KnowledgeIndexError(
                 "永久知识集合中的文档身份与协调记录不一致"
             )
@@ -924,7 +975,7 @@ class AnythingLLMKnowledgeGateway:
         return {
             "file_name": metadata.file_name,
             "original_name": metadata.original_name,
-            "attributes": dict(metadata.attributes),
+            "attributes": metadata.attributes_dict(),
         }
 
     @staticmethod

@@ -95,6 +95,33 @@ class AnythingLLMWorkspaceClientTests(unittest.TestCase):
         missing = self.client.find_document("ws-1", "custom-documents/示例-副本.json")
         self.assertIsNone(missing)
 
+    def test_find_document_derives_identity_from_exact_location_uuid(self) -> None:
+        """工作区返回本地行 ID 时，精确 location 匹配仍应恢复全局上传文档身份。"""
+        document_id = "bbeea606-4f61-443e-b74a-737c6fad18f3"
+        location = f"custom-documents/sample-hash6.txt-{document_id}.json"
+        self.transport.get_json.return_value = {
+            "workspace": {
+                "id": "architectureid-942",
+                "slug": "architectureid-942",
+                "documents": [
+                    {
+                        "id": 942,
+                        "docId": "17",
+                        "docpath": location,
+                        "title": "sample-hash6.txt",
+                    }
+                ],
+            }
+        }
+
+        document = self.client.find_document("architectureid-942", location)
+
+        self.assertIsNotNone(document)
+        self.assertEqual(document_id, document.id)
+        self.assertEqual(f"document:{document_id}", document.document_ref)
+        self.assertEqual("17", document.raw_document_id)
+        self.assertEqual("location_uuid", document.identity_source)
+
     def test_update_embeddings_normalizes_paths_and_validates_workspace(self) -> None:
         """嵌入响应必须包含目标 workspace，且请求路径统一为相对文档位置。"""
         self.transport.post_json.return_value = {

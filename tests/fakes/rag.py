@@ -23,6 +23,7 @@ from app.ports import (
     RagPromptKind,
     RagResult,
     RagSource,
+    normalize_rag_prompt,
     validate_rag_prompt_kind,
     validate_rag_query_max_attempts,
 )
@@ -122,7 +123,7 @@ class FakeDocumentRagSession:
         self._content_sha256 = hashlib.sha256(
             normalized_file_path.encode("utf-8")
         ).hexdigest()
-        normalized_prompt = self._required_text(prompt, name="prompt")
+        normalized_prompt = normalize_rag_prompt(prompt)
         self._validate_max_attempts(max_attempts)
         self._analyse_started = True
         result = self._execute(
@@ -146,7 +147,7 @@ class FakeDocumentRagSession:
     ) -> RagResult:
         """在 analyse 成功后消费 ask 预设队列，并记录全部尝试。"""
         self._ensure_open()
-        normalized_prompt = self._required_text(prompt, name="prompt")
+        normalized_prompt = normalize_rag_prompt(prompt)
         validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
         if not self._analyse_succeeded:
@@ -174,10 +175,11 @@ class FakeDocumentRagSession:
         return self._retain_document_on_close
 
     def close(self, *, retain_document: bool) -> CleanupResult:
-        """记录一次逻辑清理和文档处置选择，并保证后续调用保持幂等。
+        """记录清理选择和关闭事件，并保证后续调用保持幂等。
 
-        Fake 不拥有真实全局文档，因此不会执行删除；保存该参数是为了让业务服务测试可以
-        断言成功路径明确保留文档、失败路径明确请求补偿删除。
+        Fake 不拥有真实全局文档，但仍生成与生产 Session 同构的生命周期事件，使业务
+        测试能够验证“初始 trace 原子审计、close 事件后置追加”的完整顺序，而不是为
+        测试替身绕过正式审计契约。
         """
         if not isinstance(retain_document, bool):
             raise TypeError("retain_document 必须是 bool")
@@ -195,8 +197,34 @@ class FakeDocumentRagSession:
 
         self._closed = True
         self._retain_document_on_close = retain_document
+        next_sequence = len(self._lifecycle_events) + 1
+        if self._analyse_started and not retain_document:
+            self._lifecycle_events.append(
+                RagLifecycleEvent(
+                    sequence_no=next_sequence,
+                    operation="global_document_delete",
+                    attempt=1,
+                    success=True,
+                    external_ref=f"external:{self._context_ref}",
+                    failure_stage=None,
+                    error_message=None,
+                )
+            )
+            next_sequence += 1
+        cleanup_failed = bool(self._cleanup_error_message)
+        self._lifecycle_events.append(
+            RagLifecycleEvent(
+                sequence_no=next_sequence,
+                operation="context_delete",
+                attempt=1,
+                success=not cleanup_failed,
+                external_ref=self._context_ref,
+                failure_stage="cleanup" if cleanup_failed else None,
+                error_message=self._cleanup_error_message or None,
+            )
+        )
         result = CleanupResult(
-            success=not bool(self._cleanup_error_message),
+            success=not cleanup_failed,
             already_closed=False,
             error_message=self._cleanup_error_message,
         )
@@ -271,7 +299,7 @@ class FakeDocumentRagSession:
                             if outcome.sources
                             else "document:fake"
                         ),
-                        external_location="external:fake-document",
+                        external_location=f"external:{self._context_ref}",
                         content_sha256=self._content_sha256,
                     ),
                     trace=self._trace(),

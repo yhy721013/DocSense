@@ -105,6 +105,27 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
         request_payload = self.transport.stream_sse.call_args.args[1]
         self.assertEqual(request_payload["files"], ["doc-1", "doc-2"])
 
+    def test_ask_sends_canonical_prompt_without_changing_internal_layout(self) -> None:
+        """线程请求必须发送公共契约生成的规范 Prompt，而不是自行采用另一套裁剪规则。"""
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(
+                data=(
+                    '{"type":"textResponse","textResponse":"完成",'
+                    '"sources":[],"close":true}'
+                )
+            )
+        )
+
+        self.client.ask(
+            "workspace-a",
+            "thread-a",
+            "\r\n第一行\r\n  第二行\r\n",
+            mode="query",
+        )
+
+        request_payload = self.transport.stream_sse.call_args.args[1]
+        self.assertEqual(request_payload["message"], "第一行\n  第二行")
+
     def test_ask_explicit_query_mode_is_sent_without_files(self) -> None:
         """Document RAG 显式传入 query 时，请求体必须保持该模式且不生成 files。"""
         self.transport.stream_sse.return_value = _event_stream(

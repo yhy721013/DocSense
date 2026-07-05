@@ -8,10 +8,14 @@ Context、Conversation 和全局文档引用保存在内存 Trace 中无法抵�
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -60,7 +64,9 @@ class RagResourceLeaseService:
                     conversation_ref TEXT NOT NULL DEFAULT '',
                     document_ref TEXT NOT NULL DEFAULT '',
                     external_location TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('planned', 'active', 'audit_failed', 'audited', 'closed')
+                    ),
                     interaction_id INTEGER,
                     last_error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -184,7 +190,11 @@ class RagResourceLeaseService:
     ) -> None:
         """记录审计成功凭据或失败原因，失败租约保持可恢复开放状态。"""
         normalized_execution = self._required_text(execution_id, name="execution_id")
-        succeeded = isinstance(interaction_id, int) and not isinstance(interaction_id, bool) and interaction_id > 0
+        succeeded = (
+            isinstance(interaction_id, int)
+            and not isinstance(interaction_id, bool)
+            and interaction_id > 0
+        )
         normalized_error = str(error_message or "").strip()
         if not succeeded and not normalized_error:
             raise ValueError("审计失败租约必须包含 error_message")
@@ -218,6 +228,15 @@ class RagResourceLeaseService:
             )
             if cursor.rowcount != 1:
                 raise ValueError("RAG 资源租约不存在或已经关闭")
+        logger.log(
+            logging.INFO if succeeded else logging.ERROR,
+            "RAG 资源租约审计状态已更新: execution_id=%s status=%s "
+            "interaction_id=%s error=%s",
+            normalized_execution,
+            "audited" if succeeded else "audit_failed",
+            interaction_id if succeeded else None,
+            "" if succeeded else normalized_error,
+        )
 
     def mark_closed(
         self,
@@ -250,6 +269,38 @@ class RagResourceLeaseService:
             )
             if cursor.rowcount != 1:
                 raise ValueError("RAG 资源租约关闭失败")
+
+    def record_cleanup_failure(
+        self,
+        *,
+        execution_id: str,
+        error_message: str,
+    ) -> None:
+        """记录审计成功后的关闭失败，并保持租约处于可巡检开放状态。
+
+        ``session.close`` 失败意味着外部 Context 或全局文档可能仍然存在，不能把租约推进
+        到 ``closed``。本方法只允许更新 ``audited`` 租约的错误信息，使 ``list_open`` 继续
+        返回该记录，供补偿任务或人工恢复处理。
+        """
+        normalized_execution = self._required_text(execution_id, name="execution_id")
+        normalized_error = self._required_text(error_message, name="error_message")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE rag_resource_leases
+                SET last_error = ?, updated_at = ?
+                WHERE execution_id = ? AND status = 'audited'
+                """,
+                (normalized_error, _utc_now_iso(), normalized_execution),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("只有审计成功且尚未关闭的租约可以记录清理失败")
+        logger.warning(
+            "RAG 资源租约记录清理失败: execution_id=%s status=audited error=%s",
+            normalized_execution,
+            normalized_error,
+        )
 
     def list_open(self) -> list[RagResourceLease]:
         """按更新时间列出仍需审计、清理或人工恢复的资源租约。"""

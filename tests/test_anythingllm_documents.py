@@ -103,6 +103,23 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
         self.assertEqual("global-document-id", document.id)
         self.assertEqual("document:global-document-id", document.document_ref)
 
+    def test_document_identity_prefers_location_uuid_over_ambiguous_doc_id(self) -> None:
+        """location 携带上传 UUID 时，不得把工作区本地行 ID 当作全局文档身份。"""
+        document_id = "bbeea606-4f61-443e-b74a-737c6fad18f3"
+        document = AnythingLLMDocument.from_payload(
+            {
+                "id": 942,
+                "docId": "17",
+                "docpath": f"custom-documents/sample-hash6.txt-{document_id}.json",
+                "title": "sample-hash6.txt",
+            }
+        )
+
+        self.assertEqual(document_id, document.id)
+        self.assertEqual(f"document:{document_id}", document.document_ref)
+        self.assertEqual("17", document.raw_document_id)
+        self.assertEqual("location_uuid", document.identity_source)
+
     def test_upload_serializes_source_marker_as_structured_metadata(self) -> None:
         """来源标记必须放入 multipart metadata，不能污染文件名或正文。"""
         marker = "docsense_ref:0123456789abcdef0123456789abcdef"

@@ -23,6 +23,7 @@ from app.ports import (
     KnowledgeDocumentMetadata,
     KnowledgeIndexConflictError,
     KnowledgeIndexRecoveryRequiredError,
+    KnowledgeIndexDocumentReleasedError,
     KnowledgeIndexRetentionRequiredError,
     KnowledgeOperationContext,
     PreparedDocumentRef,
@@ -190,6 +191,36 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 user_id=1,
             )
             self.assertEqual(1, harness.workspace_client.create_workspace.call_count)
+
+    def test_workspace_policy_update_failure_is_retried(self):
+        """远程策略更新失败时不得提前标记版本，下一任务必须继续应用。"""
+        with workspace_tempdir() as tmp:
+            harness = _KnowledgeGatewayHarness(Path(tmp))
+            with sqlite3.connect(harness.task_service.db_path) as connection:
+                connection.execute(
+                    "UPDATE knowledge_index_collections SET policy_version = 0"
+                )
+            harness.workspace_client.update_workspace.side_effect = [
+                RuntimeError("workspace update failed"),
+                harness.workspace,
+            ]
+            gateway = AnythingLLMKnowledgeGateway(
+                harness.document_client,
+                harness.workspace_client,
+                harness.task_service.knowledge_index_operations,
+                harness.database_service,
+                operation_lock=threading.RLock(),
+                user_id=1,
+                workspace_settings={"chatMode": "query", "topN": 6},
+            )
+            spec = CollectionSpec(architecture_id=100, name="architectureId-100")
+
+            with self.assertRaisesRegex(RuntimeError, "workspace update failed"):
+                gateway.ensure_collection(spec)
+            collection = gateway.ensure_collection(spec)
+
+            self.assertEqual("architectureid-100", collection.ref)
+            self.assertEqual(2, harness.workspace_client.update_workspace.call_count)
 
     def test_prepared_document_is_transferred_without_upload_or_metadata_api(self):
         """RAG 预备文档只执行绑定和本地登记，不得产生第二次上传。"""
@@ -433,8 +464,8 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
             operation = operations.get(harness.collection.ref, "final-transition")
             self.assertEqual(STATUS_EXTERNAL_SUCCEEDED, operation.status)
 
-    def test_prepared_document_compensation_never_performs_global_delete(self):
-        """预备文档仍由 RAG Session 持有，全局删除只能由 Session.close 决定。"""
+    def test_prepared_document_compensation_allows_session_global_delete(self):
+        """集合解绑及状态提交成功后，应明确通知 Session 可以执行全局删除。"""
         with workspace_tempdir() as tmp:
             harness = _KnowledgeGatewayHarness(Path(tmp))
             prepared = harness.register_prepared_document()
@@ -449,7 +480,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 return original_update(*args, **kwargs)
 
             harness.workspace_client.update_embeddings.side_effect = fail_add_once
-            with self.assertRaises(KnowledgeIndexRetentionRequiredError):
+            with self.assertRaises(KnowledgeIndexDocumentReleasedError) as raised:
                 harness.gateway.store_prepared_document(
                     harness.collection,
                     prepared,
@@ -458,6 +489,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                     idempotency_key="prepared-failure",
                 )
 
+            self.assertFalse(raised.exception.retain_document_required)
             harness.document_client.delete_document.assert_not_called()
             operation = harness.task_service.knowledge_index_operations.get(
                 harness.collection.ref,

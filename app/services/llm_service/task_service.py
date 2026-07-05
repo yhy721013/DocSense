@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Sequence
 from uuid import uuid4
 
-from app.ports.rag import RagExecutionTrace, RagLifecycleEvent, RagSource
+from app.ports.rag import (
+    RagExecutionTrace,
+    RagLifecycleEvent,
+    RagSource,
+    normalize_rag_prompt,
+)
 from app.services.llm_service.interaction_audit_service import (
     AUDIT_SCHEMA_VERSION,
     AUDIT_STATUS_SUCCEEDED,
@@ -451,6 +456,34 @@ class LLMTaskService:
             "score": source.score,
         }
 
+    @staticmethod
+    def _initial_cleanup_state(trace: RagExecutionTrace) -> tuple[str, str]:
+        """根据 Session 打开阶段的回滚证据确定初始 cleanup 状态。
+
+        正常打开的 Session 保持 ``pending``，等待初始审计提交后由业务层调用 close 并
+        追加关闭事件。若 Context 根本未创建，或 Conversation 创建失败时 Gateway 已经
+        完成回滚，则上层拿不到可再次关闭的 Session；此时必须在同一原子审计事务直接
+        保存 cleanup 终态，避免崩溃窗口留下虚假的待清理记录。
+        """
+        rollback_events = tuple(
+            event
+            for event in trace.lifecycle_events
+            if event.operation == "context_rollback"
+        )
+        if rollback_events:
+            rollback = rollback_events[-1]
+            if rollback.success:
+                return "deleted", ""
+            return "failed", rollback.error_message or "隔离上下文回滚失败"
+        context_create_events = tuple(
+            event
+            for event in trace.lifecycle_events
+            if event.operation == "context_create"
+        )
+        if context_create_events and not any(event.success for event in context_create_events):
+            return "deleted", ""
+        return "pending", ""
+
     def create_llm_interaction_with_trace(
         self,
         *,
@@ -500,7 +533,7 @@ class LLMTaskService:
             raise ValueError("失败审计必须包含 error_message")
 
         final_attempt = trace.attempts[-1] if trace.attempts else None
-        normalized_prompt = str(prompt or "")
+        normalized_prompt = normalize_rag_prompt(prompt)
         if len(normalized_prompt) > MAX_AUDIT_PROMPT_CHARS:
             raise InteractionAuditError("交互审计失败：Prompt 超出持久化安全上限")
         if final_attempt and not final_attempt.prompt_digest:
@@ -603,6 +636,7 @@ class LLMTaskService:
             raise InteractionAuditError("交互审计失败：完整执行轨迹超出安全上限")
         trace_digest = hashlib.sha256(serialized_trace.encode("utf-8")).hexdigest()
         now = _utc_now_iso()
+        initial_cleanup_status, initial_cleanup_error = self._initial_cleanup_state(trace)
 
         def _write(conn: sqlite3.Connection) -> tuple[int, bool]:
             task = conn.execute(
@@ -651,8 +685,7 @@ class LLMTaskService:
                     error_message, workspace_cleanup_status,
                     workspace_cleanup_error, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        'pending', '', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_business_type,
@@ -669,6 +702,8 @@ class LLMTaskService:
                     serialized_main_sources,
                     status,
                     normalized_error if status == "failed" else "",
+                    initial_cleanup_status,
+                    initial_cleanup_error,
                     now,
                     now,
                 ),

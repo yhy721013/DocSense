@@ -246,11 +246,11 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 self.assertNotIn(constructor, blueprint_source)
 
     @patch("app.blueprints.llm.threading.Thread")
-    def test_analysis_route_injects_factory_without_entering_lease(
+    def test_analysis_route_injects_factories_without_entering_leases(
         self,
         thread_type: MagicMock,
     ) -> None:
-        """路由只把无状态 Factory 交给线程，不在请求线程创建 Gateway 或 Transport。"""
+        """路由只把两个无状态 Factory 交给线程，不在请求线程创建 Gateway 或 Transport。"""
         app = create_app(services=self.services)
 
         response = app.test_client().post(
@@ -272,12 +272,17 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             self.document_rag_factory,
             task_kwargs["document_rag_factory"],
         )
+        self.assertIs(
+            self.knowledge_index_factory,
+            task_kwargs["knowledge_index_factory"],
+        )
         target = thread_type.call_args.kwargs["target"]
         self.assertIs(
             self.services.upload_task_limiter,
             target.__self__,
         )
         self.assertEqual(0, len(self.document_rag_factory.ports))
+        self.assertEqual(0, len(self.knowledge_index_factory.ports))
 
 
 if __name__ == "__main__":

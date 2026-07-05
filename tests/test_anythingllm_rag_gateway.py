@@ -1,15 +1,22 @@
-"""AnythingLLM 纯方案 B RAG Gateway 的离线状态机测试。
+﻿"""AnythingLLM 纯方案 B RAG Gateway 的离线状态机测试。
 
-测试使用带接口约束的 Mock 原子 Client，不创建 HTTP Transport，也不要求测试文件真实
-存在。重点验证跨 Client 编排、稳定失败阶段、来源身份、调用轨迹和资源生命周期。
+测试使用带接口约束的 Mock 原子 Client 和任务私有临时文件，不创建 HTTP Transport。
+重点验证跨 Client 编排、不可变上传副本、稳定失败阶段、来源身份、调用轨迹和资源生命周期。
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
+
+
+_TEST_DIRECTORY = tempfile.TemporaryDirectory(prefix="docsense-rag-tests-")
+_SAMPLE_FILE_PATH = Path(_TEST_DIRECTORY.name) / "sample.pdf"
+_SAMPLE_FILE_PATH.write_bytes(b"offline rag test document")
 
 from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
 from app.integrations.anythingllm.errors import (
@@ -145,7 +152,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             level="INFO",
         ) as captured:
             session = harness.open_session()
-            result = session.analyse("sample.pdf", "分析文档")
+            result = session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("分析结果", result.text)
         self.assertEqual("document:document-id", result.sources[0].document_ref)
@@ -157,6 +164,10 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         self.assertEqual(
             harness.document.location,
             result.prepared_document.external_location,
+        )
+        self.assertEqual(
+            hashlib.sha256(_SAMPLE_FILE_PATH.read_bytes()).hexdigest(),
+            result.prepared_document.content_sha256,
         )
         self.assertEqual(
             [
@@ -200,7 +211,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             ),
         )
 
-        result = harness.open_session().analyse("sample.pdf", "分析文档")
+        result = harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         source = result.sources[0]
         self.assertIsNone(source.id)
@@ -212,7 +223,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         """后续 ask 只能追加线程查询，不得重新上传、嵌入或 Pin。"""
         harness = _GatewayHarness()
         session = harness.open_session()
-        session.analyse("sample.pdf", "分析文档")
+        session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
         harness.thread_client.ask.return_value = AnythingLLMAnswer(
             text="修复结果",
             raw_text="修复结果",
@@ -240,7 +251,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         """未知提示词用途不得先产生一次真实线程问答再在审计构造阶段失败。"""
         harness = _GatewayHarness()
         session = harness.open_session()
-        session.analyse("sample.pdf", "分析文档")
+        session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
         query_count_before_invalid_call = harness.thread_client.ask.call_count
 
         with self.assertRaises(TypeError):
@@ -264,7 +275,7 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         )
 
         result = harness.open_session().analyse(
-            "sample.pdf",
+            str(_SAMPLE_FILE_PATH),
             "执行非检索检查",
             require_sources=False,
             max_attempts=1,
@@ -291,7 +302,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
                 session = harness.open_session()
 
                 with self.assertRaises(RagOperationError) as raised:
-                    session.analyse("sample.pdf", "分析文档")
+                    session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
                 self.assertEqual("upload_protocol", raised.exception.trace.failure_stage)
                 harness.workspace_client.update_embeddings.assert_not_called()
@@ -304,7 +315,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
         )
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse("sample.pdf", "分析文档")
+            harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("upload_protocol", raised.exception.trace.failure_stage)
 
@@ -321,7 +332,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
                 harness.workspace_client.update_embeddings.return_value = result
 
                 with self.assertRaises(RagOperationError) as raised:
-                    harness.open_session().analyse("sample.pdf", "分析文档")
+                    harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
                 self.assertEqual(
                     "embedding_protocol",
@@ -350,7 +361,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
             harness.workspace,
         ]
 
-        result = harness.open_session().analyse("sample.pdf", "分析文档")
+        result = harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("分析结果", result.text)
         self.assertEqual(2, harness.workspace_client.update_embeddings.call_count)
@@ -362,7 +373,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
         harness.workspace_client.update_embeddings.side_effect = _http_error(400)
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse("sample.pdf", "分析文档")
+            harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("embedding", raised.exception.trace.failure_stage)
         self.assertEqual(1, harness.workspace_client.update_embeddings.call_count)
@@ -376,7 +387,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
         session = harness.open_session()
 
         with self.assertRaises(RagOperationError) as raised:
-            session.analyse("sample.pdf", "分析文档")
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("pin_protocol", raised.exception.trace.failure_stage)
         self.assertEqual(1, harness.workspace_client.update_embeddings.call_count)
@@ -395,7 +406,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
         harness = _GatewayHarness()
         harness.workspace_client.update_pin.side_effect = [_http_error(404), None]
 
-        result = harness.open_session().analyse("sample.pdf", "分析文档")
+        result = harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("分析结果", result.text)
         self.assertEqual(2, harness.workspace_client.update_embeddings.call_count)
@@ -412,7 +423,7 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
         ]
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse("sample.pdf", "分析文档")
+            harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("pin_not_found", raised.exception.trace.failure_stage)
         self.assertEqual(2, harness.workspace_client.update_embeddings.call_count)
@@ -431,7 +442,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         ]
 
         result = harness.open_session().analyse(
-            "sample.pdf",
+            str(_SAMPLE_FILE_PATH),
             "分析文档",
             max_attempts=2,
         )
@@ -453,7 +464,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         ]
 
         result = harness.open_session().analyse(
-            "sample.pdf",
+            str(_SAMPLE_FILE_PATH),
             "分析文档",
             max_attempts=2,
         )
@@ -469,7 +480,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         session = harness.open_session()
 
         with self.assertRaises(RagOperationError) as raised:
-            session.analyse("sample.pdf", "分析文档", max_attempts=3)
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档", max_attempts=3)
 
         self.assertEqual(1, harness.thread_client.ask.call_count)
         self.assertEqual(1, len(raised.exception.trace.attempts))
@@ -489,7 +500,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
 
         with self.assertRaises(RagOperationError) as raised:
             harness.open_session().analyse(
-                "sample.pdf",
+                str(_SAMPLE_FILE_PATH),
                 "分析文档",
                 max_attempts=2,
             )
@@ -514,7 +525,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         )
 
         result = harness.open_session().analyse(
-            "sample.pdf",
+            str(_SAMPLE_FILE_PATH),
             "分析文档",
             max_attempts=1,
         )
@@ -536,7 +547,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         )
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse("sample.pdf", "分析文档", max_attempts=1)
+            harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档", max_attempts=1)
 
         self.assertEqual("sources", raised.exception.trace.failure_stage)
         self.assertEqual((), raised.exception.trace.attempts[0].sources)
@@ -555,7 +566,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         )
 
         with self.assertRaises(RagOperationError) as raised:
-            harness.open_session().analyse("sample.pdf", "分析文档", max_attempts=1)
+            harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档", max_attempts=1)
 
         attempt = raised.exception.trace.attempts[0]
         self.assertEqual("sources", attempt.failure_stage)
@@ -578,7 +589,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
 
         with self.assertRaises(RagOperationError) as raised:
             harness.open_session().analyse(
-                "sample.pdf",
+                str(_SAMPLE_FILE_PATH),
                 "分析文档",
                 max_attempts=1,
             )
@@ -602,7 +613,7 @@ class AnythingLLMRagGatewayQueryContractTests(unittest.TestCase):
         ) as captured:
             with self.assertRaises(RagOperationError):
                 harness.open_session().analyse(
-                    "sample.pdf",
+                    str(_SAMPLE_FILE_PATH),
                     secret_prompt,
                     max_attempts=1,
                 )
@@ -705,7 +716,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         session = harness.open_session()
 
         with self.assertRaises(RagOperationError):
-            session.analyse("sample.pdf", "分析文档")
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         harness.document_client.delete_document.assert_not_called()
         cleanup = session.close(retain_document=True)
@@ -727,7 +738,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         """RAG 成功但后续业务契约失败时，关闭策略必须允许删除已上传全局文档。"""
         harness = _GatewayHarness()
         session = harness.open_session()
-        session.analyse("sample.pdf", "分析文档")
+        session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         cleanup = session.close(retain_document=False)
 
@@ -741,7 +752,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         """全部业务成功时显式保留文档，关闭只删除临时工作区。"""
         harness = _GatewayHarness()
         session = harness.open_session()
-        session.analyse("sample.pdf", "分析文档")
+        session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         cleanup = session.close(retain_document=True)
 
@@ -757,7 +768,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         harness = _GatewayHarness()
         harness.document_client.delete_document.side_effect = _http_error(503)
         session = harness.open_session()
-        session.analyse("sample.pdf", "分析文档")
+        session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         cleanup = session.close(retain_document=False)
         repeated_cleanup = session.close(retain_document=False)
@@ -777,7 +788,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         session = harness.open_session()
 
         with self.assertRaises(ValueError):
-            session.analyse("sample.pdf", "分析文档", max_attempts=0)
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档", max_attempts=0)
 
         harness.document_client.upload_document.assert_not_called()
 
@@ -787,7 +798,7 @@ class AnythingLLMRagGatewayLifecycleTests(unittest.TestCase):
         session = harness.open_session()
 
         with self.assertRaises(ValueError):
-            session.analyse("sample.pdf", "分析文档", max_attempts=4)
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档", max_attempts=4)
 
         harness.document_client.upload_document.assert_not_called()
 

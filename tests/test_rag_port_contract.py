@@ -30,6 +30,7 @@ from app.ports import (
     RagPromptKind,
     RagSource,
     build_document_idempotency_key,
+    normalize_rag_prompt,
     validate_rag_query_max_attempts,
 )
 from tests.fakes import (
@@ -93,6 +94,18 @@ class RagDtoContractTests(unittest.TestCase):
                     validate_rag_query_max_attempts(  # type: ignore[arg-type]
                         invalid_value
                     )
+
+    def test_prompt_normalization_unifies_line_endings_and_boundary_whitespace(self) -> None:
+        """Prompt 只统一跨平台表示，正文内部的换行和缩进必须保持不变。"""
+        raw_prompt = "\r\n  第一行\r\n    第二行  \r第三行\t\r\n"
+
+        normalized = normalize_rag_prompt(raw_prompt)
+
+        self.assertEqual("第一行\n    第二行  \n第三行", normalized)
+        with self.assertRaises(ValueError):
+            normalize_rag_prompt(" \r\n\t ")
+        with self.assertRaises(TypeError):
+            normalize_rag_prompt(123)  # type: ignore[arg-type]
 
 
 class DocumentRagPortContractTests(unittest.TestCase):
@@ -369,6 +382,21 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_fake_implements_runtime_checkable_protocol(self) -> None:
         """知识库 Fake 必须可直接注入只依赖 Protocol 的业务服务。"""
         self.assertIsInstance(FakeKnowledgeIndexPort(), KnowledgeIndexPort)
+
+    def test_document_metadata_deeply_freezes_nested_json(self) -> None:
+        """调用方不得通过嵌套字典或列表修改已建立的幂等快照。"""
+        source = {"nested": {"values": [1, 2]}}
+        metadata = KnowledgeDocumentMetadata(
+            file_name="sample.pdf",
+            original_name="sample.pdf",
+            attributes=source,
+        )
+        source["nested"]["values"].append(3)
+
+        snapshot = metadata.attributes_dict()
+        self.assertEqual({"nested": {"values": [1, 2]}}, snapshot)
+        with self.assertRaises(TypeError):
+            metadata.attributes["nested"]["new"] = True
 
     def test_default_idempotency_key_changes_with_collection_or_content(self) -> None:
         """同名文件的新内容或不同存储 architecture 必须得到不同默认键。"""

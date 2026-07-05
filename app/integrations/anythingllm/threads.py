@@ -24,6 +24,7 @@ from app.integrations.anythingllm.models import (
     require_sequence,
 )
 from app.integrations.anythingllm.transport import AnythingLLMTransport, SSEEvent
+from app.ports import normalize_rag_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -108,9 +109,7 @@ class AnythingLLMThreadClient:
         回答中的 ``<think>`` 与 Markdown JSON 代码块只从 ``text`` 中移除，原始文本原样
         保存在 ``raw_text``，以便审计记录模型真实输出。
         """
-        normalized_prompt = str(prompt or "").strip()
-        if not normalized_prompt:
-            raise ValueError("prompt 不能为空")
+        normalized_prompt = normalize_rag_prompt(prompt)
         payload = self._chat_payload(
             normalized_prompt,
             mode=mode,
@@ -213,9 +212,9 @@ class AnythingLLMThreadClient:
         本方法保持 AnythingLLM 的事件顺序，不拼接或清理文本。调用方提前结束消费时应
         关闭生成器，关闭动作会继续传递到传输层并释放上游响应。
         """
-        normalized_message = str(message or "").strip()
-        if not normalized_message:
-            raise ValueError("流式消息不能为空")
+        # 同步与流式问答必须共享同一文本规范，避免同一业务 Prompt 仅因传输方式不同而
+        # 产生不同摘要或跨平台换行。异常信息沿用公共契约的 prompt 命名。
+        normalized_message = normalize_rag_prompt(message)
         payload = self._chat_payload(
             normalized_message,
             mode=mode,

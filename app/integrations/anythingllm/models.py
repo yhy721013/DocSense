@@ -30,6 +30,14 @@ DOCSENSE_SOURCE_MARKER_PREFIX = "docsense_ref:"
 _DOCSENSE_SOURCE_MARKER_PATTERN = re.compile(
     rf"^{re.escape(DOCSENSE_SOURCE_MARKER_PREFIX)}[0-9a-f]{{32}}$"
 )
+_DOCUMENT_UUID_SUFFIX_PATTERN = re.compile(
+    r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.json$|$)"
+)
+"""匹配 AnythingLLM 上传路径末尾的文档 UUID。
+
+真实上传位置通常形如 ``custom-documents/<文件名>-<uuid>.json``。该 UUID 与上传接口
+返回的全局文档 ID 保持一致，可信度高于工作区文档列表中可能出现的本地行 ID。
+"""
 
 
 def _protocol_error(message: str) -> AnythingLLMProtocolError:
@@ -103,6 +111,59 @@ def normalize_document_path(value: str) -> str:
     return normalized.lstrip("/")
 
 
+def _path_value_from_reference(value: str) -> str:
+    """把普通路径或 ``file://`` URL 转换为待规范化的路径文本。
+
+    AnythingLLM 的不同接口可能返回普通相对路径、宿主机绝对路径、百分号编码路径或
+    Windows 风格 ``file://C:/...`` URL。身份比较必须先消除这些表现形式差异，否则同一
+    个文档会因为路径外观不同而被误判为未绑定。
+    """
+    decoded_value = unquote(str(value or "").strip()).replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", decoded_value):
+        return decoded_value
+
+    parsed = urlsplit(decoded_value)
+    if parsed.scheme.casefold() == "file":
+        # Windows 常见的 file://C:/path 会把盘符解析为 netloc，必须与 path 重新合并。
+        return f"{parsed.netloc}{parsed.path}"
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return parsed.path
+    return decoded_value
+
+
+def normalize_document_location_key(value: str) -> str:
+    """生成用于可信身份比较的完整文档位置键。
+
+    与 ``normalize_document_ref`` 不同，本函数不会把路径折叠成 ``name:<文件名>``，也
+    不会移除上传 UUID 后缀。永久知识库转交、工作区绑定确认和补偿删除必须比较完整
+    ``custom-documents/...`` 路径，才能区分同名但不同上传批次的全局文档。
+    """
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+
+    normalized = unicodedata.normalize("NFKC", _path_value_from_reference(raw_value))
+    normalized = normalize_document_path(normalized).rstrip("/")
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    return normalized
+
+
+def _document_id_from_location(value: str) -> str:
+    """从完整上传位置中提取 AnythingLLM 全局文档 UUID。
+
+    工作区详情接口中的 ``id``/``docId`` 在部分版本里表示工作区文档关联行，而不是全局
+    上传文档。只要 ``location`` 携带上传 UUID，就应优先使用该 UUID 构造稳定
+    ``document_ref``，避免把本地行 ID 写入业务协调记录。
+    """
+    location_key = normalize_document_location_key(value)
+    file_name = location_key.rsplit("/", 1)[-1]
+    matched = _DOCUMENT_UUID_SUFFIX_PATTERN.search(file_name)
+    if not matched:
+        return ""
+    return matched.group(1).lower()
+
+
 def normalize_document_ref(
     value: str,
     *,
@@ -129,23 +190,7 @@ def normalize_document_ref(
     if not raw_value:
         return ""
 
-    decoded_value = unquote(raw_value).replace("\\", "/")
-    if re.match(r"^[A-Za-z]:/", decoded_value):
-        path_value = decoded_value
-    else:
-        parsed = urlsplit(decoded_value)
-        if parsed.scheme.casefold() == "file":
-            # Windows 常见的 file://C:/path 会把盘符解析为 netloc，必须与 path 重新合并。
-            path_value = f"{parsed.netloc}{parsed.path}"
-        elif parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
-            path_value = parsed.path
-        else:
-            path_value = decoded_value
-
-    normalized = unicodedata.normalize("NFKC", path_value)
-    normalized = normalize_document_path(normalized).rstrip("/")
-    while "//" in normalized:
-        normalized = normalized.replace("//", "/")
+    normalized = normalize_document_location_key(raw_value)
     file_name = normalized.rsplit("/", 1)[-1].strip()
     if not file_name:
         return ""
@@ -175,13 +220,17 @@ class AnythingLLMDocument:
     location: str
     title: str
     document_ref: str
+    raw_document_id: str = ""
+    identity_source: str = "payload_id"
 
     @classmethod
     def from_payload(cls, value: Any) -> "AnythingLLMDocument":
         """从上传结果或工作区文档记录解析统一 DTO。"""
         payload = require_mapping(value, context="文档记录")
-        # Workspace 文档记录可能同时包含本地行 ID 与全局 docId。后者才是跨 Workspace
-        # 稳定的文档身份，因此优先级必须高于通用 ``id``；上传响应只有 ``id`` 时仍兼容。
+        # Workspace 文档记录里的 ``id``/``docId`` 字段在不同 AnythingLLM 版本中含义不
+        # 稳定：有的版本返回全局上传文档 ID，有的版本返回工作区关联行 ID。这里先按历
+        # 史优先级读取一个“原始 ID”，随后如果 location 携带上传 UUID，则以路径 UUID
+        # 作为最终稳定身份，避免阶段 9 的永久知识库转交把本地行 ID 误判为文档不一致。
         document_id = first_text(payload, "docId", "documentId", "id")
         location = first_text(payload, "location", "docpath", "docPath")
         if not document_id:
@@ -195,12 +244,16 @@ class AnythingLLMDocument:
         normalized_document_id = unicodedata.normalize("NFKC", document_id).strip()
         if not normalized_document_id:
             raise _protocol_error("AnythingLLM 文档 ID 无法生成稳定 document_ref")
-        document_ref = f"document:{normalized_document_id}"
+        location_document_id = _document_id_from_location(normalized_location)
+        stable_document_id = location_document_id or normalized_document_id
+        document_ref = f"document:{stable_document_id}"
         return cls(
-            id=document_id,
+            id=stable_document_id,
             location=normalized_location,
             title=title,
             document_ref=document_ref,
+            raw_document_id=document_id,
+            identity_source="location_uuid" if location_document_id else "payload_id",
         )
 
 

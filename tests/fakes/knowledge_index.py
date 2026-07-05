@@ -37,7 +37,7 @@ class _FakeKnowledgeIndexState:
 
     def __init__(self) -> None:
         self.lock = RLock()
-        self.collections_by_name: dict[str, CollectionRef] = {}
+        self.collections_by_architecture: dict[int, CollectionRef] = {}
         self.collections_by_ref: dict[str, CollectionRef] = {}
         self.documents_by_key: dict[tuple[str, str], _StoredDocument] = {}
         self.keys_by_location: dict[tuple[str, str], tuple[str, str]] = {}
@@ -57,7 +57,7 @@ class FakeKnowledgeIndexPort:
         """绑定共享后端；直接构造时仍创建独立状态以兼容单元测试。"""
         self._state = state or _FakeKnowledgeIndexState()
         self._lock = self._state.lock
-        self._collections_by_name = self._state.collections_by_name
+        self._collections_by_architecture = self._state.collections_by_architecture
         self._collections_by_ref = self._state.collections_by_ref
         self._documents_by_key = self._state.documents_by_key
         self._keys_by_location = self._state.keys_by_location
@@ -68,7 +68,7 @@ class FakeKnowledgeIndexPort:
             raise TypeError("spec 必须是 CollectionSpec")
         normalized_name = spec.name
         with self._lock:
-            existing = self._collections_by_name.get(str(spec.architecture_id))
+            existing = self._collections_by_architecture.get(spec.architecture_id)
             if existing is not None:
                 if existing.name.casefold() != normalized_name.casefold():
                     raise ValueError("同一 architecture_id 不能对应不同集合名称")
@@ -80,7 +80,7 @@ class FakeKnowledgeIndexPort:
                 name=normalized_name,
                 architecture_id=spec.architecture_id,
             )
-            self._collections_by_name[str(spec.architecture_id)] = collection
+            self._collections_by_architecture[spec.architecture_id] = collection
             self._collections_by_ref[collection.ref] = collection
             return collection
 
@@ -282,7 +282,7 @@ class FakeKnowledgeIndexPort:
             {
                 "file_name": metadata.file_name,
                 "original_name": metadata.original_name,
-                "attributes": dict(metadata.attributes),
+                "attributes": metadata.attributes_dict(),
             },
             ensure_ascii=False,
             sort_keys=True,

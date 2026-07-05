@@ -16,8 +16,8 @@ from app.integrations.anythingllm.models import (
     AnythingLLMDocument,
     AnythingLLMSource,
     AnythingLLMWorkspace,
+    normalize_document_location_key,
     normalize_document_path,
-    normalize_document_ref,
     require_mapping,
     require_sequence,
 )
@@ -171,30 +171,35 @@ class AnythingLLMWorkspaceClient:
         *,
         user_id: int | None = None,
     ) -> AnythingLLMDocument | None:
-        """按规范化后的完整 ``document_ref`` 精确查找工作区文档。
+        """按完整规范化 ``location`` 精确查找工作区文档。
 
-        优先比较调用方位置与工作区记录位置的精确规范化结果，以兼容上传后带文档 ID
-        后缀的内部路径；随后才比较逻辑文件身份。本方法不使用文件名子串或模糊包含
-        关系，避免相似文档名称产生错误命中。
+        该方法服务于永久知识库绑定确认和解绑补偿，必须证明“目标集合中确实存在调用方
+        指定的那一次上传”。因此这里只比较完整 ``custom-documents/...`` 位置键，不再
+        使用 legacy ``document_ref`` 或 ``name:<文件名>`` 展示引用兜底。后两者无法区
+        分同名文件，也可能被工作区本地行 ID 污染，不能作为可信所有权证明。
         """
-        target_ref = normalize_document_ref(location)
-        if not target_ref:
+        target_location_key = normalize_document_location_key(location)
+        if not target_location_key:
             return None
         for document in self.list_documents(workspace_slug, user_id=user_id):
-            stored_location_ref = normalize_document_ref(document.location)
-            if stored_location_ref == target_ref or document.document_ref == target_ref:
+            stored_location_key = normalize_document_location_key(document.location)
+            if stored_location_key == target_location_key:
                 logger.debug(
                     "AnythingLLM 工作区文档精确匹配: workspace_slug=%s "
-                    "document_id=%s document_ref=%s",
+                    "location=%s document_id=%s document_ref=%s "
+                    "raw_document_id=%s identity_source=%s",
                     workspace_slug,
+                    document.location,
                     document.id,
                     document.document_ref,
+                    document.raw_document_id,
+                    document.identity_source,
                 )
                 return document
         logger.debug(
-            "AnythingLLM 工作区文档未匹配: workspace_slug=%s target_ref=%s",
+            "AnythingLLM 工作区文档未匹配: workspace_slug=%s target_location=%s",
             workspace_slug,
-            target_ref,
+            target_location_key,
         )
         return None
 
