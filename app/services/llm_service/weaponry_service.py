@@ -1654,6 +1654,9 @@ def run_weaponry_task(
             else:
                 task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
                 logger.warning("回调结果提交失败: architectureId=%s", architecture_id)
+        else:
+            # 未配置回调时将终态记录为 skipped，防止后续巡检把它识别成待重放任务。
+            task_service.mark_callback_skipped("weaponry", architecture_id_str)
 
     except Exception as e:
         logger.exception("武器装备提取任务异常: architectureId=%s, error=%s", architecture_id, e)
@@ -1720,3 +1723,6 @@ def _fail_task(
             task_service.mark_callback_success("weaponry", architecture_id_str)
         else:
             task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
+    else:
+        # 失败结果已经落库但没有外部接收方，显式记录无需回调且不增加尝试次数。
+        task_service.mark_callback_skipped("weaponry", architecture_id_str)

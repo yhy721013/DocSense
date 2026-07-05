@@ -1092,6 +1092,10 @@ def run_file_analysis_task(
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
                 logger.warning("回调结果提交失败: file_name=%s", file_name)
+        else:
+            # 任务已经进入终态且没有配置回调地址，必须显式结束回调状态机。继续保留
+            # pending 会让运维侧误判为仍有一条待发送回调，并触发无意义的补偿扫描。
+            task_service.mark_callback_skipped("file", file_name)
 
         logger.info("文件分析任务完成: file_name=%s", file_name)
 
@@ -1118,6 +1122,10 @@ def run_file_analysis_task(
             else:
                 task_service.mark_callback_failed("file", file_name, "callback failed")
                 logger.warning("失败回调提交失败: file_name=%s", file_name)
+        else:
+            # 失败结果同样属于已经确定的业务终态；未配置回调不等于回调失败，也不应
+            # 长期停留在 pending，因此使用 skipped 精确表达“无需执行外部调用”。
+            task_service.mark_callback_skipped("file", file_name)
     finally:
         is_temporary_workspace = (
             rag_details.workspace_created

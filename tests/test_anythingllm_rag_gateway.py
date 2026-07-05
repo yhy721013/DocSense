@@ -26,7 +26,12 @@ from app.integrations.anythingllm.models import (
 from app.integrations.anythingllm.rag_gateway import AnythingLLMRagGateway
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
-from app.ports import DocumentRagPort, DocumentRagSession, RagOperationError
+from app.ports import (
+    DocumentRagPort,
+    DocumentRagSession,
+    RagOperationError,
+    RagPromptKind,
+)
 
 
 class _GatewayHarness:
@@ -214,7 +219,10 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             sources=(harness.source,),
         )
 
-        result = session.ask("修复结构")
+        result = session.ask(
+            "修复结构",
+            prompt_kind=RagPromptKind.JSON_REPAIR,
+        )
 
         self.assertEqual("修复结果", result.text)
         self.assertEqual(1, harness.document_client.upload_document.call_count)
@@ -224,6 +232,26 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         self.assertEqual(
             ["analyse", "ask"],
             [attempt.operation for attempt in session.trace.attempts],
+        )
+        self.assertEqual("json_repair", session.trace.attempts[-1].prompt_kind)
+        self.assertEqual("query", session.trace.attempts[-1].query_mode)
+
+    def test_invalid_prompt_kind_is_rejected_before_external_query(self) -> None:
+        """未知提示词用途不得先产生一次真实线程问答再在审计构造阶段失败。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+        session.analyse("sample.pdf", "分析文档")
+        query_count_before_invalid_call = harness.thread_client.ask.call_count
+
+        with self.assertRaises(TypeError):
+            session.ask(
+                "修复结构",
+                prompt_kind="json_repair",  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(
+            query_count_before_invalid_call,
+            harness.thread_client.ask.call_count,
         )
 
     def test_explicit_non_source_query_can_succeed_without_sources(self) -> None:

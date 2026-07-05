@@ -1,6 +1,9 @@
+import json
+import logging
 import sqlite3
 import threading
-import logging
+from collections.abc import Mapping
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,8 @@ class DatabaseService:
                         original_name TEXT NOT NULL DEFAULT '',
                         architecture_id INTEGER NOT NULL,
                         anything_doc_id TEXT NOT NULL,
-                        doc_path TEXT
+                        doc_path TEXT,
+                        metadata_json TEXT NOT NULL DEFAULT '{}'
                     )
                 """)
                 self._ensure_documents_schema(conn)
@@ -49,6 +53,13 @@ class DatabaseService:
             conn.execute("ALTER TABLE documents ADD COLUMN doc_path TEXT")
             logger.info("已为 documents 表补充 doc_path 列: %s", self.db_path)
 
+        if "metadata_json" not in columns:
+            conn.execute(
+                "ALTER TABLE documents "
+                "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+            )
+            logger.info("已为 documents 表补充 metadata_json 列: %s", self.db_path)
+
         conn.execute(
             """
             UPDATE documents
@@ -62,32 +73,100 @@ class DatabaseService:
     def get_workspace_slug(self, architecture_id: int) -> str | None:
         """根据类别ID寻找对应的 AnythingLLM 工作区slug"""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT workspace_slug FROM workspaces WHERE architecture_id = ?", (architecture_id,))
+            cursor = conn.execute(
+                "SELECT workspace_slug FROM workspaces WHERE architecture_id = ?",
+                (architecture_id,),
+            )
             row = cursor.fetchone()
             return row[0] if row else None
 
     def add_workspace(self, architecture_id: int, workspace_slug: str):
-        """新增一个类别和工作区的对应关系"""
+        """新增类别与工作区映射，并拒绝被静默忽略的冲突。
+
+        相同 architecture 与相同 slug 的重复调用按幂等成功处理；任一侧已经绑定到其他值
+        都表示本地记录和外部资源发生冲突，必须显式失败交给协调流程处理。
+        """
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
-                # 若存在则忽略，防止并发时重复插入报错
-                conn.execute("""
-                    INSERT OR IGNORE INTO workspaces (architecture_id, workspace_slug)
-                    VALUES (?, ?)
-                """, (architecture_id, workspace_slug))
-                conn.commit()
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO workspaces (architecture_id, workspace_slug)
+                        VALUES (?, ?)
+                        """,
+                        (architecture_id, workspace_slug),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    # 唯一约束冲突既可能是同一映射的幂等重放，也可能是 architecture 或
+                    # slug 被另一条记录占用。必须读取冲突后的权威行进行区分，不能使用
+                    # INSERT OR IGNORE 把两类结果都伪装成成功。
+                    row = conn.execute(
+                        """
+                        SELECT architecture_id, workspace_slug
+                        FROM workspaces
+                        WHERE architecture_id = ? OR workspace_slug = ?
+                        """,
+                        (architecture_id, workspace_slug),
+                    ).fetchone()
+                    if row == (architecture_id, workspace_slug):
+                        return
+                    raise ValueError(
+                        "工作区映射冲突: "
+                        f"architecture_id={architecture_id}, workspace_slug={workspace_slug}"
+                    ) from exc
 
     # ================= Document 表的增删改查 =================
     
-    def save_document_record(self, file_name: str, architecture_id: int, anything_doc_id: str, doc_path: str = "", original_name: str = ""):
-        """文件解析成功后，将其信息存入表中"""
+    def save_document_record(
+        self,
+        file_name: str,
+        architecture_id: int,
+        anything_doc_id: str,
+        doc_path: str = "",
+        original_name: str = "",
+        metadata: Mapping[str, Any] | None = None,
+    ):
+        """使用显式 UPSERT 保存文档及本地权威业务元数据。
+
+        与 SQLite ``REPLACE`` 不同，``ON CONFLICT DO UPDATE`` 不会先删除旧行，因此不会
+        破坏未来外键关系。调用方负责在覆盖外部文档引用前完成阶段 8 的所有权协调；本方法
+        只保证本地行更新具有原子性。
+        """
+        if metadata is None:
+            metadata_payload: dict[str, Any] = {}
+        elif isinstance(metadata, Mapping):
+            metadata_payload = dict(metadata)
+        else:
+            raise TypeError("metadata 必须是 Mapping 或 None")
+        metadata_json = json.dumps(
+            metadata_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
-                # 用 REPLACE 防止同一个文件被多次解析时报主键冲突
                 conn.execute("""
-                    REPLACE INTO documents (file_name, original_name, architecture_id, anything_doc_id, doc_path)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (file_name, original_name or file_name, architecture_id, anything_doc_id, doc_path))
+                    INSERT INTO documents (
+                        file_name, original_name, architecture_id,
+                        anything_doc_id, doc_path, metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(file_name) DO UPDATE SET
+                        original_name = excluded.original_name,
+                        architecture_id = excluded.architecture_id,
+                        anything_doc_id = excluded.anything_doc_id,
+                        doc_path = excluded.doc_path,
+                        metadata_json = excluded.metadata_json
+                """, (
+                    file_name,
+                    original_name or file_name,
+                    architecture_id,
+                    anything_doc_id,
+                    doc_path,
+                    metadata_json,
+                ))
                 conn.commit()
 
     def get_document_record(self, file_name: str) -> dict | None:
@@ -96,7 +175,13 @@ class DatabaseService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute("SELECT * FROM documents WHERE file_name = ?", (file_name,))
             row = cursor.fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            result = dict(row)
+            result["metadata"] = self._deserialize_document_metadata(
+                result.pop("metadata_json")
+            )
+            return result
 
     def list_document_records(self) -> list[dict]:
         """按文件名升序返回全部文档记录。"""
@@ -104,12 +189,28 @@ class DatabaseService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT file_name, original_name, architecture_id, anything_doc_id, doc_path
+                SELECT file_name, original_name, architecture_id,
+                       anything_doc_id, doc_path, metadata_json
                 FROM documents
                 ORDER BY file_name ASC
                 """
             )
-            return [dict(row) for row in cursor.fetchall()]
+            records = []
+            for row in cursor.fetchall():
+                record = dict(row)
+                record["metadata"] = self._deserialize_document_metadata(
+                    record.pop("metadata_json")
+                )
+                records.append(record)
+            return records
+
+    @staticmethod
+    def _deserialize_document_metadata(value: str) -> dict:
+        """严格解析本地业务元数据，禁止以空对象掩盖数据库损坏。"""
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError("documents.metadata_json 必须是 JSON 对象")
+        return parsed
             
     def delete_document_record(self, file_name: str):
         """当文件需要删除时，从数据库抹掉该记录"""

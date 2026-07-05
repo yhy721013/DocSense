@@ -12,6 +12,7 @@ URL、sourceDocument、分片 ID 或其他展示字段。任何失败都会转�
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 from pathlib import Path
@@ -45,8 +46,10 @@ from app.ports import (
     RagExecutionTrace,
     RagLifecycleEvent,
     RagOperationError,
+    RagPromptKind,
     RagResult,
     RagSource,
+    validate_rag_prompt_kind,
     validate_rag_query_max_attempts,
 )
 
@@ -349,8 +352,8 @@ class _AnythingLLMRagSession:
     """一个文件分析任务独占的纯方案 B 会话。
 
     Session 在构造时已经拥有完整工作区和线程。``analyse`` 负责一次性完成上传、加入、
-    Pin 和首次查询；``ask`` 只在同一线程中追加查询。调用轨迹以不可变快照返回，清理则
-    只删除临时工作区并保证最多执行一次。
+    Pin 和首次查询；``ask`` 只在同一线程中追加查询。调用轨迹以不可变快照返回；清理会
+    按所有权状态决定是否补偿删除全局文档，并保证外部删除最多执行一次。
     """
 
     _TRANSIENT_EMBEDDING_STATUS_CODES = frozenset({502, 503, 504})
@@ -442,7 +445,7 @@ class _AnythingLLMRagSession:
             result = self._query(
                 prompt=normalized_prompt,
                 operation="analyse",
-                prompt_kind="analysis",
+                prompt_kind=RagPromptKind.ANALYSIS,
                 require_sources=require_sources,
                 max_attempts=max_attempts,
             )
@@ -462,12 +465,14 @@ class _AnythingLLMRagSession:
         self,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
         require_sources: bool = True,
         max_attempts: int = 1,
     ) -> RagResult:
         """在已准备的线程中继续查询，不重复任何文档准备操作。"""
         self._ensure_open()
         normalized_prompt = self._required_text(prompt, name="prompt")
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
         if not self._analyse_succeeded or not self._document_ref:
             raise self._operation_error(
@@ -478,7 +483,7 @@ class _AnythingLLMRagSession:
             return self._query(
                 prompt=normalized_prompt,
                 operation="ask",
-                prompt_kind="follow_up",
+                prompt_kind=validated_prompt_kind,
                 require_sources=require_sources,
                 max_attempts=max_attempts,
             )
@@ -865,7 +870,7 @@ class _AnythingLLMRagSession:
         *,
         prompt: str,
         operation: str,
-        prompt_kind: str,
+        prompt_kind: RagPromptKind,
         require_sources: bool,
         max_attempts: int,
     ) -> RagResult:
@@ -887,6 +892,7 @@ class _AnythingLLMRagSession:
                 failure_stage="session_not_prepared",
             )
         self._ensure_isolated_source_context(external_location)
+        prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
         last_stage = "query"
         last_error = "模型查询失败"
@@ -915,6 +921,14 @@ class _AnythingLLMRagSession:
                     and not mismatched_marker_count
                     and len(sources) == source_count
                 )
+                if source_count == 0:
+                    source_marker_status = "not_returned"
+                elif mismatched_marker_count:
+                    source_marker_status = "conflict"
+                elif missing_marker_count:
+                    source_marker_status = "missing"
+                else:
+                    source_marker_status = "matched"
                 source_log_level = (
                     logging.INFO
                     if sources_verified
@@ -963,6 +977,13 @@ class _AnythingLLMRagSession:
                         sources=sources,
                         failure_stage=failure_stage,
                         error_message=error_message,
+                        prompt_digest=prompt_digest,
+                        query_mode="query",
+                        source_count=source_count,
+                        verified_source_count=len(sources),
+                        missing_marker_count=missing_marker_count,
+                        mismatched_marker_count=mismatched_marker_count,
+                        source_marker_status=source_marker_status,
                     )
                 )
                 if failure_stage is None:
@@ -1010,6 +1031,11 @@ class _AnythingLLMRagSession:
                         sources=(),
                         failure_stage=last_stage,
                         error_message=last_error,
+                        prompt_digest=prompt_digest,
+                        query_mode="query",
+                        source_count=0,
+                        verified_source_count=0,
+                        source_marker_status="not_returned",
                     )
                 )
             except Exception as exc:
@@ -1026,6 +1052,11 @@ class _AnythingLLMRagSession:
                         sources=(),
                         failure_stage=last_stage,
                         error_message=last_error,
+                        prompt_digest=prompt_digest,
+                        query_mode="query",
+                        source_count=0,
+                        verified_source_count=0,
+                        source_marker_status="not_returned",
                     )
                 )
                 raise self._operation_error(

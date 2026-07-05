@@ -243,37 +243,6 @@ class AnythingLLMDocumentClient:
             user_id is not None,
         )
 
-    def update_metadata(
-        self,
-        location: str,
-        metadata: Mapping[str, Any],
-        *,
-        user_id: int | None = None,
-    ) -> None:
-        """更新全局文档元数据，并校验响应没有明确失败语义。
-
-        空位置会被拒绝，防止元数据意外写入未知文档。空元数据允许发送，以兼容上游
-        清空元数据的语义。成功时不返回供应商响应，避免原始字段泄漏到编排层。
-        """
-        normalized_location = str(location or "").strip()
-        if not normalized_location:
-            raise ValueError("文档 location 不能为空")
-        body = self._transport.post_json(
-            "document/meta",
-            {"location": normalized_location, "metadata": dict(metadata)},
-            user_id=user_id,
-        )
-        payload = require_mapping(body, context="文档元数据响应")
-        if payload.get("error") or payload.get("success") is False:
-            raise AnythingLLMProtocolError("AnythingLLM 明确拒绝文档元数据更新")
-        logger.info(
-            "AnythingLLM 文档元数据更新完成: location=%s metadata_keys=%s "
-            "has_user_context=%s",
-            normalized_location,
-            sorted(str(key) for key in metadata.keys()),
-            user_id is not None,
-        )
-
     def _parse_upload_response(self, value: Any) -> AnythingLLMDocument:
         """严格解析上传响应，不允许根据文件名猜测缺失的内部位置。"""
         payload = require_mapping(value, context="文档上传响应")

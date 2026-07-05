@@ -382,29 +382,5 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
                 with self.assertRaises(AnythingLLMProtocolError):
                     self.client.delete_document("custom-documents/a.json")
 
-    def test_update_metadata_sends_copy_and_rejects_explicit_failure(self) -> None:
-        """元数据更新应发送独立字典，并把 2xx 中的 success=false 视为协议失败。"""
-        metadata = {"file_name": "示例.txt"}
-        self.transport.post_json.return_value = {"success": True}
-
-        self.client.update_metadata(
-            "custom-documents/a.json",
-            metadata,
-            user_id=3,
-        )
-
-        self.transport.post_json.assert_called_once_with(
-            "document/meta",
-            {
-                "location": "custom-documents/a.json",
-                "metadata": {"file_name": "示例.txt"},
-            },
-            user_id=3,
-        )
-        self.transport.post_json.return_value = {"success": False}
-        with self.assertRaises(AnythingLLMProtocolError):
-            self.client.update_metadata("custom-documents/a.json", metadata)
-
-
 if __name__ == "__main__":
     unittest.main()

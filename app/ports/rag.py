@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional, Protocol, runtime_checkable
 
 
@@ -18,6 +19,32 @@ MAX_RAG_QUERY_ATTEMPTS = 3
 该上限属于应用层成本与资源保护契约，生产适配器和测试替身必须共同遵守。调用方可以在
 1 到该值之间选择更小次数，但不得通过配置错误或参数透传制造无界模型调用。
 """
+
+
+class RagPromptKind(str, Enum):
+    """文档 RAG 模型调用的稳定用途分类。
+
+    使用受控枚举而不是自由文本，可以让审计系统可靠区分首次分析、JSON 修复和领域分类
+    修复。``FOLLOW_UP`` 仅用于尚未迁移的通用追问；阶段 9 的文件分析修复必须使用更具体
+    的枚举值，不能继续把所有调用归类为 follow_up。
+    """
+
+    ANALYSIS = "analysis"
+    JSON_REPAIR = "json_repair"
+    ARCHITECTURE_REPAIR = "architecture_repair"
+    FOLLOW_UP = "follow_up"
+
+
+def validate_rag_prompt_kind(value: RagPromptKind) -> RagPromptKind:
+    """校验业务调用显式传入的提示词用途枚举。
+
+    ``ask`` 会产生真实模型费用和外部副作用，因此必须在发出请求之前拒绝自由文本、空值
+    和未知分类。审计 DTO 可以保存枚举序列化后的字符串，但业务调用边界只接受正式枚举，
+    以便类型检查和运行时校验共同约束调用方。
+    """
+    if not isinstance(value, RagPromptKind):
+        raise TypeError("prompt_kind 必须是 RagPromptKind")
+    return value
 
 
 def validate_rag_query_max_attempts(value: int) -> int:
@@ -71,7 +98,10 @@ class RagAttempt:
     属性:
         operation: 稳定模型操作名，例如 ``analyse``、``ask`` 或结构修复。
         attempt: 当前操作内从 1 开始的尝试序号。
-        prompt_kind: 提示词用途分类，只记录类型，不记录完整 Prompt。
+        prompt_kind: 提示词用途分类。
+        prompt_digest: 完整 Prompt 的 SHA-256 摘要，用于证明主审计记录与本次调用对应；
+            普通日志不得输出完整 Prompt。
+        query_mode: 文档 RAG 固定为 ``query``，防止适配器回退为无来源约束的对话模式。
         raw_response: 可选原始回答，用于后续交互审计。
         sources: 本次回答携带的来源快照。
         failure_stage: 失败阶段；成功尝试为 ``None``。
@@ -85,20 +115,109 @@ class RagAttempt:
     sources: tuple[RagSource, ...]
     failure_stage: Optional[str]
     error_message: Optional[str]
+    prompt_digest: str = ""
+    query_mode: str = "query"
+    source_count: int = -1
+    verified_source_count: int = -1
+    missing_marker_count: int = 0
+    mismatched_marker_count: int = 0
+    source_marker_status: str = ""
 
     def __post_init__(self) -> None:
         """冻结来源集合并校验审计记录的最小结构。"""
-        if not str(self.operation or "").strip():
+        normalized_operation = str(self.operation or "").strip()
+        if not normalized_operation:
             raise ValueError("RagAttempt.operation 不能为空")
-        if self.attempt < 1:
+        object.__setattr__(self, "operation", normalized_operation)
+        if (
+            isinstance(self.attempt, bool)
+            or not isinstance(self.attempt, int)
+            or self.attempt < 1
+        ):
             raise ValueError("RagAttempt.attempt 必须从 1 开始")
-        if not str(self.prompt_kind or "").strip():
-            raise ValueError("RagAttempt.prompt_kind 不能为空")
-        if self.failure_stage and not str(self.error_message or "").strip():
+        normalized_prompt_kind = (
+            self.prompt_kind.value
+            if isinstance(self.prompt_kind, RagPromptKind)
+            else str(self.prompt_kind or "").strip()
+        )
+        allowed_prompt_kinds = {kind.value for kind in RagPromptKind}
+        if normalized_prompt_kind not in allowed_prompt_kinds:
+            raise ValueError(
+                "RagAttempt.prompt_kind 必须是受支持的 RagPromptKind"
+            )
+        object.__setattr__(self, "prompt_kind", normalized_prompt_kind)
+        normalized_prompt_digest = str(self.prompt_digest or "").strip()
+        if normalized_prompt_digest and (
+            len(normalized_prompt_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in normalized_prompt_digest
+            )
+        ):
+            raise ValueError("RagAttempt.prompt_digest 必须是 SHA-256 小写十六进制摘要")
+        object.__setattr__(self, "prompt_digest", normalized_prompt_digest)
+        normalized_query_mode = str(self.query_mode or "").strip()
+        if normalized_query_mode != "query":
+            raise ValueError("文档 RagAttempt.query_mode 必须显式为 query")
+        object.__setattr__(self, "query_mode", normalized_query_mode)
+        normalized_failure_stage = str(self.failure_stage or "").strip() or None
+        normalized_error = str(self.error_message or "").strip() or None
+        if normalized_failure_stage and not normalized_error:
             raise ValueError("失败的 RagAttempt 必须包含 error_message")
-        if not self.failure_stage and self.error_message:
+        if not normalized_failure_stage and normalized_error:
             raise ValueError("成功的 RagAttempt 不得包含 error_message")
+        if not normalized_failure_stage and not str(self.raw_response or "").strip():
+            raise ValueError("成功的 RagAttempt 必须包含 raw_response")
+        object.__setattr__(self, "failure_stage", normalized_failure_stage)
+        object.__setattr__(self, "error_message", normalized_error)
         object.__setattr__(self, "sources", tuple(self.sources))
+        source_count = len(self.sources) if self.source_count < 0 else self.source_count
+        verified_count = (
+            len(self.sources)
+            if self.verified_source_count < 0
+            else self.verified_source_count
+        )
+        counts = {
+            "source_count": source_count,
+            "verified_source_count": verified_count,
+            "missing_marker_count": self.missing_marker_count,
+            "mismatched_marker_count": self.mismatched_marker_count,
+        }
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in counts.values()
+        ):
+            raise ValueError("RagAttempt 来源统计必须是非负整数")
+        if verified_count > source_count:
+            raise ValueError("verified_source_count 不能大于 source_count")
+        if len(self.sources) != verified_count:
+            raise ValueError("RagAttempt.sources 数量必须等于 verified_source_count")
+        if (
+            verified_count
+            + self.missing_marker_count
+            + self.mismatched_marker_count
+            != source_count
+        ):
+            raise ValueError("来源验证分类数量之和必须等于 source_count")
+        if source_count == 0:
+            expected_marker_status = "not_returned"
+        elif self.mismatched_marker_count:
+            expected_marker_status = "conflict"
+        elif self.missing_marker_count:
+            expected_marker_status = "missing"
+        else:
+            expected_marker_status = "matched"
+        marker_status = (
+            str(self.source_marker_status or "").strip()
+            or expected_marker_status
+        )
+        if marker_status != expected_marker_status:
+            raise ValueError(
+                "RagAttempt.source_marker_status 与来源验证统计不一致"
+            )
+        object.__setattr__(self, "source_count", source_count)
+        object.__setattr__(self, "verified_source_count", verified_count)
+        object.__setattr__(self, "source_marker_status", marker_status)
 
 
 @dataclass(frozen=True)
@@ -123,18 +242,34 @@ class RagLifecycleEvent:
 
     def __post_init__(self) -> None:
         """校验事件顺序、操作名称以及成功状态与失败字段的一致性。"""
-        if self.sequence_no < 1:
+        if (
+            isinstance(self.sequence_no, bool)
+            or not isinstance(self.sequence_no, int)
+            or self.sequence_no < 1
+        ):
             raise ValueError("RagLifecycleEvent.sequence_no 必须从 1 开始")
-        if self.attempt < 1:
+        if (
+            isinstance(self.attempt, bool)
+            or not isinstance(self.attempt, int)
+            or self.attempt < 1
+        ):
             raise ValueError("RagLifecycleEvent.attempt 必须从 1 开始")
-        if not str(self.operation or "").strip():
+        normalized_operation = str(self.operation or "").strip()
+        if not normalized_operation:
             raise ValueError("RagLifecycleEvent.operation 不能为空")
-        if self.success and (self.failure_stage or self.error_message):
+        object.__setattr__(self, "operation", normalized_operation)
+        if not isinstance(self.success, bool):
+            raise TypeError("RagLifecycleEvent.success 必须是 bool")
+        normalized_failure_stage = str(self.failure_stage or "").strip() or None
+        normalized_error = str(self.error_message or "").strip() or None
+        if self.success and (normalized_failure_stage or normalized_error):
             raise ValueError("成功的 RagLifecycleEvent 不得包含失败信息")
-        if not self.success and not str(self.failure_stage or "").strip():
+        if not self.success and not normalized_failure_stage:
             raise ValueError("失败的 RagLifecycleEvent 必须包含 failure_stage")
-        if not self.success and not str(self.error_message or "").strip():
+        if not self.success and not normalized_error:
             raise ValueError("失败的 RagLifecycleEvent 必须包含 error_message")
+        object.__setattr__(self, "failure_stage", normalized_failure_stage)
+        object.__setattr__(self, "error_message", normalized_error)
 
 
 @dataclass(frozen=True)
@@ -156,10 +291,29 @@ class RagExecutionTrace:
 
     def __post_init__(self) -> None:
         """冻结模型调用和生命周期序列，并保证上下文名称可用于审计关联。"""
-        if not str(self.context_name or "").strip():
+        normalized_context_name = str(self.context_name or "").strip()
+        if not normalized_context_name:
             raise ValueError("RagExecutionTrace.context_name 不能为空")
+        object.__setattr__(self, "context_name", normalized_context_name)
         object.__setattr__(self, "attempts", tuple(self.attempts))
         object.__setattr__(self, "lifecycle_events", tuple(self.lifecycle_events))
+        if any(not isinstance(attempt, RagAttempt) for attempt in self.attempts):
+            raise TypeError("RagExecutionTrace.attempts 只能包含 RagAttempt")
+        if any(
+            not isinstance(event, RagLifecycleEvent)
+            for event in self.lifecycle_events
+        ):
+            raise TypeError(
+                "RagExecutionTrace.lifecycle_events 只能包含 RagLifecycleEvent"
+            )
+        normalized_failure_stage = str(self.failure_stage or "").strip() or None
+        normalized_error = str(self.error_message or "").strip() or None
+        if normalized_failure_stage and not normalized_error:
+            raise ValueError("失败的 RagExecutionTrace 必须包含 error_message")
+        if not normalized_failure_stage and normalized_error:
+            raise ValueError("成功的 RagExecutionTrace 不得包含 error_message")
+        object.__setattr__(self, "failure_stage", normalized_failure_stage)
+        object.__setattr__(self, "error_message", normalized_error)
         sequence_numbers = tuple(
             event.sequence_no for event in self.lifecycle_events
         )
@@ -206,6 +360,13 @@ class RagResult:
         if not isinstance(self.prepared_document, PreparedDocumentRef):
             raise TypeError("RagResult.prepared_document 类型无效")
         object.__setattr__(self, "sources", tuple(self.sources))
+        if any(not isinstance(source, RagSource) for source in self.sources):
+            raise TypeError("RagResult.sources 只能包含 RagSource")
+        if any(
+            source.document_ref != self.prepared_document.document_ref
+            for source in self.sources
+        ):
+            raise ValueError("RagResult.sources 必须全部属于 prepared_document")
 
 
 @dataclass(frozen=True)
@@ -219,6 +380,19 @@ class CleanupResult:
     success: bool
     already_closed: bool
     error_message: str = ""
+
+    def __post_init__(self) -> None:
+        """保证清理结果的布尔状态和错误信息可以被审计系统无歧义解释。"""
+        if not isinstance(self.success, bool):
+            raise TypeError("CleanupResult.success 必须是 bool")
+        if not isinstance(self.already_closed, bool):
+            raise TypeError("CleanupResult.already_closed 必须是 bool")
+        normalized_error = str(self.error_message or "").strip()
+        if self.success and normalized_error:
+            raise ValueError("成功的 CleanupResult 不得包含 error_message")
+        if not self.success and not normalized_error:
+            raise ValueError("失败的 CleanupResult 必须包含 error_message")
+        object.__setattr__(self, "error_message", normalized_error)
 
 
 class RagOperationError(RuntimeError):
@@ -249,10 +423,11 @@ class DocumentRagSession(Protocol):
         self,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
         require_sources: bool = True,
         max_attempts: int = 1,
     ) -> RagResult:
-        """在已准备会话中继续查询，不重复上传或建立文档上下文。"""
+        """在已准备会话中按显式用途继续查询，不重复上传或建立文档上下文。"""
         ...
 
     @property

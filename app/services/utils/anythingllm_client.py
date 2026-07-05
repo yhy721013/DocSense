@@ -391,11 +391,12 @@ class AnythingLLMClient:
         user_id: Optional[int] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> bool:
-        """兼容旧复合操作：加入文档后尽力执行 Pin 和元数据更新。
+        """兼容旧复合操作：加入文档后尽力执行 Pin，并忽略供应商业务元数据回写。
 
         新 ``WorkspaceClient.update_embeddings`` 本身不会隐式编排其他客户端；这里的后续
-        两步仅为保持旧调用行为。加入文档失败会返回 ``False``，Pin 或元数据失败仍保持
-        旧版 best-effort 语义并记录警告。
+        Pin 仅为保持旧调用行为。加入文档失败会返回 ``False``，Pin 失败仍保持旧版
+        best-effort 语义并记录警告。``metadata`` 只保留签名兼容，不再发送不存在的
+        ``/document/meta`` 请求。
         """
         cleaned_path = normalize_document_path(doc_path)
         if not cleaned_path:
@@ -419,10 +420,15 @@ class AnythingLLMClient:
         except Exception as exc:
             logger.warning("固定文档 %s 失败: %s", cleaned_path, exc)
         if metadata:
-            try:
-                self.documents.update_metadata(cleaned_path, metadata, user_id=user_id)
-            except Exception as exc:
-                logger.warning("更新文档 %s 的元数据失败: %s", cleaned_path, exc)
+            # 当前 AnythingLLM Developer API 不提供上传后更新文档元数据的稳定端点。旧流程
+            # 继续接收该参数仅为保持调用签名兼容，但业务元数据必须由 DocSense 本地数据库
+            # 持久化；这里禁止再调用已确认返回 404 的 /document/meta。
+            logger.debug(
+                "跳过 AnythingLLM 上传后元数据更新，业务元数据由本地存储维护: "
+                "document=%s metadata_keys=%s",
+                cleaned_path,
+                sorted(str(key) for key in metadata.keys()),
+            )
         return True
 
     def update_embeddings_batch(

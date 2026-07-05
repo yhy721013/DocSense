@@ -15,6 +15,27 @@ from .rag import PreparedDocumentRef
 
 
 @dataclass(frozen=True)
+class KnowledgeOperationContext:
+    """一次长期知识库操作对应的供应商无关业务身份。
+
+    ``execution_id`` 区分同一业务键的主动重跑和同一次执行重试；业务类型与业务键用于
+    协调记录、审计关联和故障巡检。Gateway 不得从 metadata 或集合名称反向猜测这些字段。
+    """
+
+    execution_id: str
+    business_type: str
+    business_key: str
+
+    def __post_init__(self) -> None:
+        """拒绝无法建立协调记录的空业务身份。"""
+        for field_name in ("execution_id", "business_type", "business_key"):
+            normalized_value = str(getattr(self, field_name) or "").strip()
+            if not normalized_value:
+                raise ValueError(f"KnowledgeOperationContext.{field_name} 不能为空")
+            object.__setattr__(self, field_name, normalized_value)
+
+
+@dataclass(frozen=True)
 class CollectionRef:
     """业务层可安全持有的知识集合引用。
 
@@ -60,6 +81,8 @@ class IndexedDocument:
         for field_name, field_value in required_fields.items():
             if not str(field_value or "").strip():
                 raise ValueError(f"IndexedDocument.{field_name} 不能为空")
+        if not isinstance(self.created, bool) or not isinstance(self.reused, bool):
+            raise TypeError("IndexedDocument.created 与 reused 必须是 bool")
         if self.created == self.reused:
             raise ValueError("IndexedDocument.created 与 reused 必须且只能有一个为 True")
 
@@ -76,6 +99,21 @@ class OperationResult:
     already_applied: bool = False
     error_message: str = ""
 
+    def __post_init__(self) -> None:
+        """保证成功、幂等命中和错误信息之间不存在矛盾状态。"""
+        if not isinstance(self.success, bool):
+            raise TypeError("OperationResult.success 必须是 bool")
+        if not isinstance(self.already_applied, bool):
+            raise TypeError("OperationResult.already_applied 必须是 bool")
+        normalized_error = str(self.error_message or "").strip()
+        if self.already_applied and not self.success:
+            raise ValueError("already_applied=True 时 success 必须为 True")
+        if self.success and normalized_error:
+            raise ValueError("成功的 OperationResult 不得包含 error_message")
+        if not self.success and not normalized_error:
+            raise ValueError("失败的 OperationResult 必须包含 error_message")
+        object.__setattr__(self, "error_message", normalized_error)
+
 
 @runtime_checkable
 class KnowledgeIndexPort(Protocol):
@@ -91,6 +129,7 @@ class KnowledgeIndexPort(Protocol):
         file_path: str,
         metadata: Mapping[str, Any],
         *,
+        operation_context: KnowledgeOperationContext,
         idempotency_key: str,
     ) -> IndexedDocument:
         """按幂等键保存文档；重复请求必须复用首次写入的逻辑文档。"""
@@ -102,27 +141,36 @@ class KnowledgeIndexPort(Protocol):
         document: PreparedDocumentRef,
         metadata: Mapping[str, Any],
         *,
+        operation_context: KnowledgeOperationContext,
         idempotency_key: str,
     ) -> IndexedDocument:
         """把 RAG 已准备的同一文档登记到长期集合，不得再次上传文件。
 
         ``document`` 的两个引用均为不透明值。具体适配器负责验证该句柄是否属于自己管理
-        的供应商，并完成集合绑定和元数据更新；业务层只负责传递和持久化返回结果。
+        的供应商，并完成集合绑定和本地业务元数据登记；业务层只负责传递和持久化返回
+        结果。新链路不得调用未经验证的供应商文档元数据更新端点。
         """
         ...
 
-    def remove_document(
+    def detach_document(
         self,
         collection: CollectionRef,
         external_location: str,
+        *,
+        operation_context: KnowledgeOperationContext,
     ) -> OperationResult:
-        """按不透明外部位置幂等移除文档。"""
+        """只解除目标集合与文档的绑定，不永久删除全局文档。
+
+        全局删除属于未转交文档的补偿能力，由 ``DocumentRagSession.close`` 根据会话所有权
+        执行；本端口不得仅凭外部位置删除可能被其他集合共享的全局实体。
+        """
         ...
 
     def reconcile_document(
         self,
         collection: CollectionRef,
         *,
+        operation_context: KnowledgeOperationContext,
         idempotency_key: str,
     ) -> Optional[IndexedDocument]:
         """按幂等键查询既有文档；不存在时返回 ``None``。"""

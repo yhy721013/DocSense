@@ -7,6 +7,7 @@
 from .knowledge_index import (
     CollectionRef,
     IndexedDocument,
+    KnowledgeOperationContext,
     KnowledgeIndexFactory,
     KnowledgeIndexPort,
     OperationResult,
@@ -22,8 +23,10 @@ from .rag import (
     RagExecutionTrace,
     RagLifecycleEvent,
     RagOperationError,
+    RagPromptKind,
     RagResult,
     RagSource,
+    validate_rag_prompt_kind,
     validate_rag_query_max_attempts,
 )
 
@@ -36,6 +39,7 @@ __all__ = [
     "IndexedDocument",
     "KnowledgeIndexFactory",
     "KnowledgeIndexPort",
+    "KnowledgeOperationContext",
     "MAX_RAG_QUERY_ATTEMPTS",
     "OperationResult",
     "PreparedDocumentRef",
@@ -43,7 +47,9 @@ __all__ = [
     "RagExecutionTrace",
     "RagLifecycleEvent",
     "RagOperationError",
+    "RagPromptKind",
     "RagResult",
     "RagSource",
+    "validate_rag_prompt_kind",
     "validate_rag_query_max_attempts",
 ]

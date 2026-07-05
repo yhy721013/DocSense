@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,8 +20,10 @@ from app.ports import (
     RagExecutionTrace,
     RagLifecycleEvent,
     RagOperationError,
+    RagPromptKind,
     RagResult,
     RagSource,
+    validate_rag_prompt_kind,
     validate_rag_query_max_attempts,
 )
 
@@ -41,8 +44,16 @@ class FakeRagOutcome:
     error_message: Optional[str] = None
 
     def __post_init__(self) -> None:
-        """复制来源序列，防止测试代码在执行期间修改预设结果。"""
+        """复制来源序列，并提前拒绝无法形成确定调用结果的矛盾配置。"""
         object.__setattr__(self, "sources", tuple(self.sources))
+        if any(not isinstance(source, RagSource) for source in self.sources):
+            raise TypeError("FakeRagOutcome.sources 只能包含 RagSource")
+        normalized_failure_stage = str(self.failure_stage or "").strip()
+        normalized_error = str(self.error_message or "").strip()
+        if normalized_failure_stage and not normalized_error:
+            raise ValueError("失败的 FakeRagOutcome 必须包含 error_message")
+        if not normalized_failure_stage and normalized_error:
+            raise ValueError("成功的 FakeRagOutcome 不得包含 error_message")
 
 
 class FakeDocumentRagSession:
@@ -107,12 +118,13 @@ class FakeDocumentRagSession:
                 failure_stage="analyse_repeated",
             )
         self._required_text(file_path, name="file_path")
-        self._required_text(prompt, name="prompt")
+        normalized_prompt = self._required_text(prompt, name="prompt")
         self._validate_max_attempts(max_attempts)
         self._analyse_started = True
         result = self._execute(
+            prompt=normalized_prompt,
             operation="analyse",
-            prompt_kind="analysis",
+            prompt_kind=RagPromptKind.ANALYSIS,
             outcomes=self._analyse_outcomes,
             require_sources=require_sources,
             max_attempts=max_attempts,
@@ -124,12 +136,14 @@ class FakeDocumentRagSession:
         self,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
         require_sources: bool = True,
         max_attempts: int = 1,
     ) -> RagResult:
         """在 analyse 成功后消费 ask 预设队列，并记录全部尝试。"""
         self._ensure_open()
-        self._required_text(prompt, name="prompt")
+        normalized_prompt = self._required_text(prompt, name="prompt")
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
         if not self._analyse_succeeded:
             raise self._operation_error(
@@ -137,8 +151,9 @@ class FakeDocumentRagSession:
                 failure_stage="session_not_prepared",
             )
         return self._execute(
+            prompt=normalized_prompt,
             operation="ask",
-            prompt_kind="follow_up",
+            prompt_kind=validated_prompt_kind,
             outcomes=self._ask_outcomes,
             require_sources=require_sources,
             max_attempts=max_attempts,
@@ -187,8 +202,9 @@ class FakeDocumentRagSession:
     def _execute(
         self,
         *,
+        prompt: str,
         operation: str,
-        prompt_kind: str,
+        prompt_kind: RagPromptKind,
         outcomes: deque[FakeRagOutcome],
         require_sources: bool,
         max_attempts: int,
@@ -230,6 +246,13 @@ class FakeDocumentRagSession:
                     sources=outcome.sources,
                     failure_stage=failure_stage,
                     error_message=error_message,
+                    prompt_digest=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                    query_mode="query",
+                    source_count=len(outcome.sources),
+                    verified_source_count=len(outcome.sources),
+                    source_marker_status=(
+                        "matched" if outcome.sources else "not_returned"
+                    ),
                 )
             )
             if failure_stage is None:

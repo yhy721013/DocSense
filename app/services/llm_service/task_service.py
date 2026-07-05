@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
-import time
-from typing import Any, Callable, Dict, Iterator, Optional, Sequence, TypeVar
+from typing import Any, Dict, Iterator, Optional, Sequence
+from uuid import uuid4
 
 from app.ports.rag import RagExecutionTrace, RagLifecycleEvent, RagSource
+from app.services.llm_service.interaction_audit_service import (
+    AUDIT_SCHEMA_VERSION,
+    AUDIT_STATUS_SUCCEEDED,
+    InteractionAuditError,
+    InteractionAuditResult,
+    SQLiteAuditExecutor,
+)
 from app.services.utils.callback_client import post_callback_payload
 
 
@@ -20,48 +27,12 @@ def _utc_now_iso() -> str:
 logger = logging.getLogger(__name__)
 
 
-_AUDIT_WRITE_MAX_ATTEMPTS = 3
-"""交互审计 SQLite 写事务允许的总尝试次数硬上限。"""
-
-_AUDIT_RETRY_BASE_DELAY_SECONDS = 0.05
-"""SQLite 短暂锁冲突的首次退避时间；后续尝试按指数增长。"""
-
-_AUDIT_STATUS_SUCCEEDED = "succeeded"
-"""只有完整审计事务提交后才能向调用方返回的成功门禁状态。"""
-
-_T = TypeVar("_T")
-
-
-class InteractionAuditError(RuntimeError):
-    """交互审计无法完整提交时抛出的稳定应用异常。
-
-    该异常不会把 SQLite 原始错误文本暴露给上层协议。调用方只应依据固定的
-    ``stage`` 判断这是审计门禁失败，并终止永久入库、翻译和成功回调；底层异常仍通过
-    ``raise ... from`` 保留，供服务端日志和故障排查使用。
-    """
-
-    stage = "audit"
-
-
-@dataclass(frozen=True)
-class InteractionAuditResult:
-    """一次完整交互审计事务的提交凭据。
-
-    仅创建主记录并不能证明审计成功。只有主记录、全部模型调用和初始生命周期事件已经在
-    同一事务中提交，服务才会构造本对象。阶段 9 的业务编排必须检查 ``audit_status``，
-    不得根据非空 ``interaction_id`` 自行推断成功。
-    """
-
-    interaction_id: int
-    audit_status: str = _AUDIT_STATUS_SUCCEEDED
-
-    def __post_init__(self) -> None:
-        """防止无效记录 ID 或伪造状态绕过审计门禁。"""
-        if self.interaction_id < 1:
-            raise ValueError("interaction_id 必须是正整数")
-        if self.audit_status != _AUDIT_STATUS_SUCCEEDED:
-            raise ValueError("InteractionAuditResult 只能表示已提交的成功审计")
-
+_COMPLETED_TASK_STATUSES = {
+    "file": frozenset({"2", "3"}),
+    "report": frozenset({"1", "2"}),
+    "weaponry": frozenset({"2", "3"}),
+}
+"""允许进入回调终态的现有业务完成状态。"""
 
 class LLMTaskService:
     """持久化异步 LLM 任务、交互审计和回调状态。
@@ -75,6 +46,9 @@ class LLMTaskService:
         """初始化数据库路径并以向前兼容方式创建所需表和索引。"""
         self.db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._audit_executor = SQLiteAuditExecutor(
+            lambda timeout: self._connect(timeout_seconds=timeout)
+        )
         self._init_db()
 
     def _connect(self, *, timeout_seconds: float = 5.0) -> sqlite3.Connection:
@@ -102,6 +76,26 @@ class LLMTaskService:
         finally:
             conn.close()
 
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        """以只增不删方式补充 SQLite 列，兼容已有任务数据库。
+
+        表名、列名和定义全部由本模块内常量调用点提供，不接收外部输入，因此可以安全用于
+        SQLite 不支持参数化的 ``ALTER TABLE`` 标识符位置。
+        """
+        columns = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
     def _init_db(self) -> None:
         with self._connection() as conn:
             conn.execute(
@@ -109,6 +103,7 @@ class LLMTaskService:
                 CREATE TABLE IF NOT EXISTS llm_tasks (
                     business_type TEXT NOT NULL,
                     business_key TEXT NOT NULL,
+                    execution_id TEXT NOT NULL,
                     request_payload TEXT NOT NULL,
                     status TEXT NOT NULL,
                     progress REAL NOT NULL DEFAULT 0,
@@ -129,6 +124,10 @@ class LLMTaskService:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     business_type TEXT NOT NULL,
                     business_key TEXT NOT NULL,
+                    execution_id TEXT NOT NULL DEFAULT '',
+                    audit_schema_version INTEGER NOT NULL DEFAULT 1,
+                    audit_idempotency_key TEXT,
+                    trace_digest TEXT NOT NULL DEFAULT '',
                     workspace_name TEXT NOT NULL DEFAULT '',
                     workspace_slug TEXT NOT NULL DEFAULT '',
                     thread_slug TEXT NOT NULL DEFAULT '',
@@ -150,6 +149,63 @@ class LLMTaskService:
                 ON llm_interactions (business_type, business_key, created_at)
                 """
             )
+            self._ensure_column(
+                conn,
+                table="llm_tasks",
+                column="execution_id",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            conn.execute(
+                """
+                UPDATE llm_tasks
+                SET execution_id = 'legacy-task:' || lower(hex(randomblob(16)))
+                WHERE execution_id IS NULL OR execution_id = ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_tasks_execution_id
+                ON llm_tasks (execution_id)
+                """
+            )
+            self._ensure_column(
+                conn,
+                table="llm_interactions",
+                column="execution_id",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_interactions",
+                column="audit_schema_version",
+                definition="INTEGER NOT NULL DEFAULT 1",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_interactions",
+                column="audit_idempotency_key",
+                definition="TEXT",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_interactions",
+                column="trace_digest",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            conn.execute(
+                """
+                UPDATE llm_interactions
+                SET execution_id = 'legacy-interaction:' || id
+                WHERE execution_id IS NULL OR execution_id = ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_interactions_audit_key
+                ON llm_interactions (audit_idempotency_key)
+                WHERE audit_idempotency_key IS NOT NULL
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS llm_interaction_attempts (
@@ -159,8 +215,15 @@ class LLMTaskService:
                     operation TEXT NOT NULL,
                     attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
                     prompt_kind TEXT NOT NULL,
+                    prompt_digest TEXT NOT NULL DEFAULT '',
+                    query_mode TEXT NOT NULL DEFAULT 'query',
                     raw_response TEXT,
                     sources_json TEXT NOT NULL DEFAULT '[]',
+                    source_count INTEGER NOT NULL DEFAULT 0,
+                    verified_source_count INTEGER NOT NULL DEFAULT 0,
+                    missing_marker_count INTEGER NOT NULL DEFAULT 0,
+                    mismatched_marker_count INTEGER NOT NULL DEFAULT 0,
+                    source_marker_status TEXT NOT NULL DEFAULT 'not_returned',
                     failure_stage TEXT,
                     error_message TEXT,
                     FOREIGN KEY (interaction_id)
@@ -175,6 +238,21 @@ class LLMTaskService:
                 ON llm_interaction_attempts (interaction_id, sequence_no)
                 """
             )
+            for column, definition in (
+                ("prompt_digest", "TEXT NOT NULL DEFAULT ''"),
+                ("query_mode", "TEXT NOT NULL DEFAULT 'query'"),
+                ("source_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("verified_source_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("missing_marker_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("mismatched_marker_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("source_marker_status", "TEXT NOT NULL DEFAULT 'not_returned'"),
+            ):
+                self._ensure_column(
+                    conn,
+                    table="llm_interaction_attempts",
+                    column=column,
+                    definition=definition,
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS llm_interaction_lifecycle_events (
@@ -201,7 +279,13 @@ class LLMTaskService:
             )
 
     def _serialize(self, value: Any) -> str:
-        return json.dumps(value, ensure_ascii=False)
+        """生成严格 JSON，拒绝 SQLite 之外无法可靠交换的 NaN/Infinity。"""
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
 
     def _deserialize(self, value: Optional[str]) -> Any:
         if not value:
@@ -212,6 +296,7 @@ class LLMTaskService:
         return {
             "business_type": row["business_type"],
             "business_key": row["business_key"],
+            "execution_id": row["execution_id"],
             "request_payload": self._deserialize(row["request_payload"]),
             "status": row["status"],
             "progress": row["progress"],
@@ -224,19 +309,34 @@ class LLMTaskService:
             "updated_at": row["updated_at"],
         }
 
-    def _upsert_task(self, business_type: str, business_key: str, request_payload: Dict[str, Any], status: str) -> Dict[str, Any]:
+    def _upsert_task(
+        self,
+        business_type: str,
+        business_key: str,
+        request_payload: Dict[str, Any],
+        status: str,
+    ) -> Dict[str, Any]:
+        """创建一次新执行，并在同一事务内返回本次写入的任务快照。
+
+        即使业务键已存在，主动提交仍代表一次新执行，因此必须更新 ``execution_id`` 并
+        重置结果和回调状态。读取必须发生在写事务提交前；若提交后重新查询，并发重跑可能
+        已经覆盖同一业务键，调用方会错误拿到另一执行的身份。
+        """
         now = _utc_now_iso()
+        execution_id = uuid4().hex
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO llm_tasks (
-                    business_type, business_key, request_payload, status, progress, message,
+                    business_type, business_key, execution_id, request_payload,
+                    status, progress, message,
                     result_payload, callback_status, callback_attempts, last_callback_error,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_type, business_key) DO UPDATE SET
                     request_payload = excluded.request_payload,
+                    execution_id = excluded.execution_id,
                     status = excluded.status,
                     progress = excluded.progress,
                     message = excluded.message,
@@ -244,11 +344,13 @@ class LLMTaskService:
                     callback_status = excluded.callback_status,
                     callback_attempts = excluded.callback_attempts,
                     last_callback_error = excluded.last_callback_error,
+                    created_at = excluded.created_at,
                     updated_at = excluded.updated_at
                 """,
                 (
                     business_type,
                     business_key,
+                    execution_id,
                     self._serialize(request_payload),
                     status,
                     0.0,
@@ -261,9 +363,26 @@ class LLMTaskService:
                     now,
                 ),
             )
-        task = self.get_task(business_type, business_key)
-        assert task is not None
-        logger.info("创建/更新任务: type=%s, key=%s, status=%s", business_type, business_key, status)
+            row = conn.execute(
+                """
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message, result_payload, callback_status,
+                       callback_attempts, last_callback_error, created_at, updated_at
+                FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (business_type, business_key),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("任务写入完成后未能读取事务内快照")
+        task = self._row_to_task(row)
+        logger.info(
+            "创建/更新任务: type=%s key=%s execution_id=%s status=%s",
+            business_type,
+            business_key,
+            execution_id,
+            status,
+        )
         return task
 
     def create_file_task(self, file_name: str, request_payload: Dict[str, Any], status: str = "1") -> Dict[str, Any]:
@@ -279,7 +398,8 @@ class LLMTaskService:
         with self._connection() as conn:
             row = conn.execute(
                 """
-                SELECT business_type, business_key, request_payload, status, progress, message,
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message,
                        result_payload, callback_status, callback_attempts, last_callback_error,
                        created_at, updated_at
                 FROM llm_tasks
@@ -315,107 +435,17 @@ class LLMTaskService:
             "score": source.score,
         }
 
-    @staticmethod
-    def _is_retryable_audit_lock_error(error: sqlite3.OperationalError) -> bool:
-        """判断 SQLite 异常是否属于允许有限重试的锁竞争。
-
-        优先使用 Python 暴露的 SQLite 错误码；为兼容较旧运行时，再对规范化错误文本执行
-        精确短语判断。除 ``BUSY/LOCKED`` 外的磁盘只读、表缺失、SQL 错误等异常必须立即
-        失败，防止重试掩盖永久故障。
-        """
-        error_code = getattr(error, "sqlite_errorcode", None)
-        # Python 较旧版本可能尚未导出具名 SQLite 常量；数值 5 和 6 分别是 SQLite
-        # 稳定定义的 SQLITE_BUSY 与 SQLITE_LOCKED，仅作为运行时兼容回退。
-        busy_code = getattr(sqlite3, "SQLITE_BUSY", 5)
-        locked_code = getattr(sqlite3, "SQLITE_LOCKED", 6)
-        if error_code in {busy_code, locked_code}:
-            return True
-        normalized_message = str(error).casefold()
-        return (
-            "database is locked" in normalized_message
-            or "database table is locked" in normalized_message
-        )
-
-    def _run_audit_write(
-        self,
-        *,
-        operation: str,
-        writer: Callable[[sqlite3.Connection], _T],
-    ) -> _T:
-        """执行带锁冲突有限重试的原子审计写事务。
-
-        ``BEGIN IMMEDIATE`` 在写入任何审计行之前获取写锁，避免主记录插入后才发现锁冲突。
-        每次失败都显式回滚并关闭连接；只有事务完整提交后才返回 ``writer`` 的结果。
-        """
-        for attempt in range(1, _AUDIT_WRITE_MAX_ATTEMPTS + 1):
-            conn: sqlite3.Connection | None = None
-            try:
-                # 零等待连接把锁竞争立即交给本方法处理，确保总尝试次数和退避策略可证明、
-                # 可测试，而不是额外叠加 sqlite3 默认的隐式五秒等待。
-                conn = self._connect(timeout_seconds=0.0)
-                conn.execute("BEGIN IMMEDIATE")
-                result = writer(conn)
-                conn.commit()
-                return result
-            except sqlite3.OperationalError as exc:
-                if conn is not None:
-                    conn.rollback()
-                retryable = self._is_retryable_audit_lock_error(exc)
-                if retryable and attempt < _AUDIT_WRITE_MAX_ATTEMPTS:
-                    delay = _AUDIT_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-                    logger.warning(
-                        "交互审计写入遇到 SQLite 锁竞争，将有限重试: operation=%s "
-                        "attempt=%s max_attempts=%s delay_seconds=%.3f",
-                        operation,
-                        attempt,
-                        _AUDIT_WRITE_MAX_ATTEMPTS,
-                        delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                logger.error(
-                    "交互审计写入失败: operation=%s attempt=%s max_attempts=%s "
-                    "retryable_lock=%s error_type=%s",
-                    operation,
-                    attempt,
-                    _AUDIT_WRITE_MAX_ATTEMPTS,
-                    retryable,
-                    type(exc).__name__,
-                )
-                if retryable:
-                    raise InteractionAuditError(
-                        "交互审计写入失败：SQLite 锁重试已耗尽"
-                    ) from exc
-                raise InteractionAuditError("交互审计写入失败：SQLite 操作异常") from exc
-            except sqlite3.Error as exc:
-                if conn is not None:
-                    conn.rollback()
-                logger.error(
-                    "交互审计写入失败且不可重试: operation=%s error_type=%s",
-                    operation,
-                    type(exc).__name__,
-                )
-                raise InteractionAuditError("交互审计写入失败：SQLite 持久化异常") from exc
-            except Exception:
-                if conn is not None:
-                    conn.rollback()
-                raise
-            finally:
-                if conn is not None:
-                    conn.close()
-
-        # 循环的所有退出路径都应返回或抛出异常；保留防御性分支，避免未来修改破坏门禁。
-        raise InteractionAuditError("交互审计写入失败：未获得确定结果")
-
     def create_llm_interaction_with_trace(
         self,
         *,
         business_type: str,
         business_key: str,
+        execution_id: str,
         prompt: str,
         trace: RagExecutionTrace,
         status: str,
         error_message: str = "",
+        audit_idempotency_key: str | None = None,
     ) -> InteractionAuditResult:
         """原子持久化主交互、全部模型调用和初始资源生命周期事件。
 
@@ -432,10 +462,18 @@ class LLMTaskService:
 
         normalized_business_type = str(business_type or "").strip()
         normalized_business_key = str(business_key or "").strip()
+        normalized_execution_id = str(execution_id or "").strip()
         if not normalized_business_type:
             raise ValueError("business_type 不能为空")
         if not normalized_business_key:
             raise ValueError("business_key 不能为空")
+        if not normalized_execution_id:
+            raise ValueError("execution_id 不能为空")
+        normalized_audit_key = str(
+            audit_idempotency_key or f"audit:{normalized_execution_id}"
+        ).strip()
+        if not normalized_audit_key:
+            raise ValueError("audit_idempotency_key 不能为空")
         if status not in {"succeeded", "failed"}:
             raise ValueError("交互审计 status 只能是 succeeded 或 failed")
 
@@ -446,34 +484,165 @@ class LLMTaskService:
             raise ValueError("失败审计必须包含 error_message")
 
         final_attempt = trace.attempts[-1] if trace.attempts else None
+        normalized_prompt = str(prompt or "")
+        if final_attempt and not final_attempt.prompt_digest:
+            raise ValueError("新审计中的 RagAttempt 必须包含 prompt_digest")
+        if final_attempt:
+            supplied_prompt_digest = hashlib.sha256(
+                normalized_prompt.encode("utf-8")
+            ).hexdigest()
+            if supplied_prompt_digest != final_attempt.prompt_digest:
+                raise ValueError("主审计 prompt 必须与最后一次 RagAttempt 对应")
         main_response = final_attempt.raw_response if final_attempt else None
         main_sources = (
             [self._rag_source_payload(source) for source in final_attempt.sources]
             if final_attempt
             else []
         )
+        serialized_main_sources = self._serialize(main_sources)
+        attempt_rows: list[tuple[Any, ...]] = []
+        attempt_digest_payload: list[Dict[str, Any]] = []
+        for sequence_no, model_attempt in enumerate(trace.attempts, start=1):
+            attempt_sources = [
+                self._rag_source_payload(source)
+                for source in model_attempt.sources
+            ]
+            serialized_attempt_sources = self._serialize(attempt_sources)
+            attempt_row = (
+                sequence_no,
+                model_attempt.operation,
+                model_attempt.attempt,
+                model_attempt.prompt_kind,
+                model_attempt.prompt_digest,
+                model_attempt.query_mode,
+                model_attempt.raw_response,
+                serialized_attempt_sources,
+                model_attempt.source_count,
+                model_attempt.verified_source_count,
+                model_attempt.missing_marker_count,
+                model_attempt.mismatched_marker_count,
+                model_attempt.source_marker_status,
+                model_attempt.failure_stage,
+                model_attempt.error_message,
+            )
+            attempt_rows.append(attempt_row)
+            attempt_digest_payload.append(
+                {
+                    "sequence_no": sequence_no,
+                    "operation": model_attempt.operation,
+                    "attempt_no": model_attempt.attempt,
+                    "prompt_kind": model_attempt.prompt_kind,
+                    "prompt_digest": model_attempt.prompt_digest,
+                    "query_mode": model_attempt.query_mode,
+                    "raw_response": model_attempt.raw_response,
+                    "sources": attempt_sources,
+                    "source_count": model_attempt.source_count,
+                    "verified_source_count": model_attempt.verified_source_count,
+                    "missing_marker_count": model_attempt.missing_marker_count,
+                    "mismatched_marker_count": model_attempt.mismatched_marker_count,
+                    "source_marker_status": model_attempt.source_marker_status,
+                    "failure_stage": model_attempt.failure_stage,
+                    "error_message": model_attempt.error_message,
+                }
+            )
+        lifecycle_rows = tuple(
+            (
+                event.sequence_no,
+                event.operation,
+                event.attempt,
+                1 if event.success else 0,
+                event.external_ref,
+                event.failure_stage,
+                event.error_message,
+            )
+            for event in trace.lifecycle_events
+        )
+        trace_digest_payload = {
+            "business_type": normalized_business_type,
+            "business_key": normalized_business_key,
+            "execution_id": normalized_execution_id,
+            "context_name": trace.context_name,
+            "context_ref": trace.context_ref,
+            "conversation_ref": trace.conversation_ref,
+            "prompt": normalized_prompt,
+            "status": status,
+            "error_message": normalized_error if status == "failed" else "",
+            "attempts": attempt_digest_payload,
+            "lifecycle_events": lifecycle_rows,
+        }
+        serialized_trace = json.dumps(
+            trace_digest_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        trace_digest = hashlib.sha256(serialized_trace.encode("utf-8")).hexdigest()
         now = _utc_now_iso()
 
-        def _write(conn: sqlite3.Connection) -> int:
+        def _write(conn: sqlite3.Connection) -> tuple[int, bool]:
+            task = conn.execute(
+                """
+                SELECT execution_id
+                FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (normalized_business_type, normalized_business_key),
+            ).fetchone()
+            if task is None:
+                raise InteractionAuditError("交互审计失败：对应任务不存在")
+            if task["execution_id"] != normalized_execution_id:
+                raise InteractionAuditError("交互审计失败：任务执行身份已发生变化")
+
+            existing = conn.execute(
+                """
+                SELECT id, business_type, business_key, execution_id,
+                       audit_schema_version, trace_digest
+                FROM llm_interactions
+                WHERE audit_idempotency_key = ?
+                """,
+                (normalized_audit_key,),
+            ).fetchone()
+            if existing is not None:
+                identity_matches = (
+                    existing["business_type"] == normalized_business_type
+                    and existing["business_key"] == normalized_business_key
+                    and existing["execution_id"] == normalized_execution_id
+                    and existing["audit_schema_version"] == AUDIT_SCHEMA_VERSION
+                    and existing["trace_digest"] == trace_digest
+                )
+                if not identity_matches:
+                    raise InteractionAuditError(
+                        "交互审计失败：幂等键对应的已提交内容发生冲突"
+                    )
+                return int(existing["id"]), False
+
             cursor = conn.execute(
                 """
                 INSERT INTO llm_interactions (
-                    business_type, business_key, workspace_name, workspace_slug,
-                    thread_slug, prompt, response, sources_json, status,
+                    business_type, business_key, execution_id,
+                    audit_schema_version, audit_idempotency_key, trace_digest,
+                    workspace_name, workspace_slug, thread_slug,
+                    prompt, response, sources_json, status,
                     error_message, workspace_cleanup_status,
                     workspace_cleanup_error, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        'pending', '', ?, ?)
                 """,
                 (
                     normalized_business_type,
                     normalized_business_key,
+                    normalized_execution_id,
+                    AUDIT_SCHEMA_VERSION,
+                    normalized_audit_key,
+                    trace_digest,
                     trace.context_name,
                     trace.context_ref or "",
                     trace.conversation_ref or "",
-                    str(prompt or ""),
+                    normalized_prompt,
                     main_response,
-                    self._serialize(main_sources),
+                    serialized_main_sources,
                     status,
                     normalized_error if status == "failed" else "",
                     now,
@@ -482,34 +651,23 @@ class LLMTaskService:
             )
             interaction_id = int(cursor.lastrowid)
 
-            for sequence_no, model_attempt in enumerate(trace.attempts, start=1):
-                attempt_sources = [
-                    self._rag_source_payload(source)
-                    for source in model_attempt.sources
-                ]
+            for attempt_row in attempt_rows:
                 conn.execute(
                     """
                     INSERT INTO llm_interaction_attempts (
                         interaction_id, sequence_no, operation, attempt_no,
-                        prompt_kind, raw_response, sources_json,
+                        prompt_kind, prompt_digest, query_mode,
+                        raw_response, sources_json, source_count,
+                        verified_source_count, missing_marker_count,
+                        mismatched_marker_count, source_marker_status,
                         failure_stage, error_message
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        interaction_id,
-                        sequence_no,
-                        model_attempt.operation,
-                        model_attempt.attempt,
-                        model_attempt.prompt_kind,
-                        model_attempt.raw_response,
-                        self._serialize(attempt_sources),
-                        model_attempt.failure_stage,
-                        model_attempt.error_message,
-                    ),
+                    (interaction_id, *attempt_row),
                 )
 
-            for event in trace.lifecycle_events:
+            for lifecycle_row in lifecycle_rows:
                 conn.execute(
                     """
                     INSERT INTO llm_interaction_lifecycle_events (
@@ -518,28 +676,23 @@ class LLMTaskService:
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        interaction_id,
-                        event.sequence_no,
-                        event.operation,
-                        event.attempt,
-                        1 if event.success else 0,
-                        event.external_ref,
-                        event.failure_stage,
-                        event.error_message,
-                    ),
+                    (interaction_id, *lifecycle_row),
                 )
-            return interaction_id
+            return interaction_id, True
 
-        interaction_id = self._run_audit_write(
+        interaction_id, created = self._audit_executor.run(
             operation="create_interaction_with_trace",
             writer=_write,
         )
-        result = InteractionAuditResult(interaction_id=interaction_id)
+        result = InteractionAuditResult(
+            interaction_id=interaction_id,
+            created=created,
+            reused=not created,
+        )
         logger.info(
             "LLM交互原子审计已提交: interaction_id=%s business_type=%s "
             "business_key=%s status=%s attempts_count=%s lifecycle_count=%s "
-            "audit_status=%s",
+            "audit_status=%s created=%s reused=%s execution_id=%s",
             interaction_id,
             normalized_business_type,
             normalized_business_key,
@@ -547,6 +700,9 @@ class LLMTaskService:
             len(trace.attempts),
             len(trace.lifecycle_events),
             result.audit_status,
+            result.created,
+            result.reused,
+            normalized_execution_id,
         )
         return result
 
@@ -567,19 +723,33 @@ class LLMTaskService:
         """持久化一次模型交互，返回自增记录 ID。"""
         now = _utc_now_iso()
         with self._connection() as conn:
+            task = conn.execute(
+                """
+                SELECT execution_id FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (business_type, business_key),
+            ).fetchone()
+            legacy_execution_id = (
+                task["execution_id"]
+                if task is not None
+                else f"legacy-interaction:{uuid4().hex}"
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO llm_interactions (
-                    business_type, business_key, workspace_name, workspace_slug,
+                    business_type, business_key, execution_id,
+                    audit_schema_version, workspace_name, workspace_slug,
                     thread_slug, prompt, response, sources_json, status,
                     error_message, workspace_cleanup_status,
                     workspace_cleanup_error, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?, ?)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?, ?)
                 """,
                 (
                     business_type,
                     business_key,
+                    legacy_execution_id,
                     workspace_name,
                     workspace_slug,
                     thread_slug,
@@ -673,6 +843,16 @@ class LLMTaskService:
         incoming_sequences = tuple(event.sequence_no for event in normalized_events)
         if incoming_sequences != tuple(sorted(set(incoming_sequences))):
             raise ValueError("待追加生命周期事件必须按 sequence_no 严格递增且不重复")
+        cleanup_events = tuple(
+            event
+            for event in normalized_events
+            if event.operation in {"global_document_delete", "context_delete"}
+        )
+        if not cleanup_events:
+            raise ValueError("关闭阶段追加必须包含文档或上下文删除事件")
+        cleanup_has_failure = any(not event.success for event in cleanup_events)
+        if cleanup_has_failure != (normalized_cleanup_status == "failed"):
+            raise ValueError("cleanup_status 必须与删除事件的成功状态一致")
 
         def _write(conn: sqlite3.Connection) -> int:
             interaction = conn.execute(
@@ -750,6 +930,10 @@ class LLMTaskService:
             current_cleanup_status = interaction["workspace_cleanup_status"]
             current_cleanup_error = interaction["workspace_cleanup_error"]
             if current_cleanup_status == "pending":
+                if inserted_count == 0:
+                    raise ValueError(
+                        "首次提交清理结果必须同时新增关闭阶段生命周期事件"
+                    )
                 conn.execute(
                     """
                     UPDATE llm_interactions
@@ -773,7 +957,7 @@ class LLMTaskService:
                 )
             return inserted_count
 
-        inserted_count = self._run_audit_write(
+        inserted_count = self._audit_executor.run(
             operation="append_lifecycle_events",
             writer=_write,
         )
@@ -784,7 +968,7 @@ class LLMTaskService:
             len(normalized_events),
             inserted_count,
             normalized_cleanup_status,
-            _AUDIT_STATUS_SUCCEEDED,
+            AUDIT_STATUS_SUCCEEDED,
         )
         return inserted_count
 
@@ -794,7 +978,10 @@ class LLMTaskService:
             rows = conn.execute(
                 """
                 SELECT sequence_no, operation, attempt_no, prompt_kind,
-                       raw_response, sources_json, failure_stage, error_message
+                       prompt_digest, query_mode, raw_response, sources_json,
+                       source_count, verified_source_count,
+                       missing_marker_count, mismatched_marker_count,
+                       source_marker_status, failure_stage, error_message
                 FROM llm_interaction_attempts
                 WHERE interaction_id = ?
                 ORDER BY sequence_no ASC
@@ -841,6 +1028,8 @@ class LLMTaskService:
             rows = conn.execute(
                 """
                 SELECT id, business_type, business_key, workspace_name,
+                       execution_id, audit_schema_version,
+                       audit_idempotency_key, trace_digest,
                        workspace_slug, thread_slug, prompt, response,
                        sources_json, status, error_message,
                        workspace_cleanup_status, workspace_cleanup_error,
@@ -920,32 +1109,86 @@ class LLMTaskService:
                 tuple(params),
             )
 
-    def mark_callback_failed(self, business_type: str, business_key: str, error: str) -> None:
+    def _mark_callback_result(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        callback_status: str,
+        error: str,
+    ) -> None:
+        """以比较并交换方式提交一次真实回调结果。
+
+        只有 ``pending`` 或 ``failed`` 可以进入新的真实结果；``success`` 与 ``skipped``
+        都是不可覆盖的终态。每次允许的转换都代表一次已经发生的外部调用，因此尝试次数
+        精确增加一。
+        """
+        if callback_status not in {"success", "failed"}:
+            raise ValueError("callback_status 只能是 success 或 failed")
+        normalized_error = str(error or "").strip()
+        if callback_status == "failed" and not normalized_error:
+            raise ValueError("回调失败必须包含 error")
+        if callback_status == "success" and normalized_error:
+            raise ValueError("回调成功不得包含 error")
+        completed_statuses = _COMPLETED_TASK_STATUSES.get(business_type)
+        if not completed_statuses:
+            raise ValueError(f"未知 business_type: {business_type}")
+        status_placeholders = ", ".join("?" for _ in completed_statuses)
         now = _utc_now_iso()
         with self._connection() as conn:
-            conn.execute(
-                """
+            cursor = conn.execute(
+                f"""
                 UPDATE llm_tasks
                 SET callback_status = ?, callback_attempts = callback_attempts + 1,
                     last_callback_error = ?, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
+                  AND callback_status IN ('pending', 'failed')
+                  AND status IN ({status_placeholders})
                 """,
-                ("failed", error, now, business_type, business_key),
+                (
+                    callback_status,
+                    normalized_error,
+                    now,
+                    business_type,
+                    business_key,
+                    *sorted(completed_statuses),
+                ),
             )
+            if cursor.rowcount != 1:
+                task = conn.execute(
+                    """
+                    SELECT status, callback_status FROM llm_tasks
+                    WHERE business_type = ? AND business_key = ?
+                    """,
+                    (business_type, business_key),
+                ).fetchone()
+                if task is None:
+                    raise ValueError("待更新回调结果的任务不存在")
+                if task["status"] not in completed_statuses:
+                    raise ValueError("任务尚未完成，不能提交回调结果")
+                raise ValueError(
+                    "非法回调状态转换: "
+                    f"{task['callback_status']} -> {callback_status}"
+                )
+
+    def mark_callback_failed(self, business_type: str, business_key: str, error: str) -> None:
+        """记录一次实际失败的回调，禁止覆盖成功或无需回调终态。"""
+        self._mark_callback_result(
+            business_type,
+            business_key,
+            callback_status="failed",
+            error=error,
+        )
         logger.warning("回调失败: type=%s, key=%s, error=%s", business_type, business_key, error)
 
     def mark_callback_success(self, business_type: str, business_key: str) -> None:
-        now = _utc_now_iso()
-        with self._connection() as conn:
-            conn.execute(
-                """
-                UPDATE llm_tasks
-                SET callback_status = ?, callback_attempts = callback_attempts + 1,
-                    last_callback_error = '', updated_at = ?
-                WHERE business_type = ? AND business_key = ?
-                """,
-                ("success", now, business_type, business_key),
-            )
+        """记录一次实际成功的回调，成功后状态不可再次改写。"""
+        self._mark_callback_result(
+            business_type,
+            business_key,
+            callback_status="success",
+            error="",
+        )
         logger.info("回调成功: type=%s, key=%s", business_type, business_key)
 
     def mark_callback_skipped(self, business_type: str, business_key: str) -> bool:
@@ -956,23 +1199,33 @@ class LLMTaskService:
         覆盖真实外部交互结果。跳过不是一次回调尝试，因此不会增加 ``callback_attempts``。
         """
         now = _utc_now_iso()
+        completed_statuses = _COMPLETED_TASK_STATUSES.get(business_type)
+        if not completed_statuses:
+            raise ValueError(f"未知 business_type: {business_type}")
+        status_placeholders = ", ".join("?" for _ in completed_statuses)
         transition_succeeded = False
         current_status = ""
         with self._connection() as conn:
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE llm_tasks
                 SET callback_status = 'skipped', last_callback_error = '', updated_at = ?
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'skipped')
+                  AND status IN ({status_placeholders})
                 """,
-                (now, business_type, business_key),
+                (
+                    now,
+                    business_type,
+                    business_key,
+                    *sorted(completed_statuses),
+                ),
             )
             transition_succeeded = cursor.rowcount == 1
             if not transition_succeeded:
                 task = conn.execute(
                     """
-                    SELECT callback_status
+                    SELECT status, callback_status
                     FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
@@ -983,6 +1236,8 @@ class LLMTaskService:
                         "待跳过回调的任务不存在: "
                         f"business_type={business_type}, business_key={business_key}"
                     )
+                if task["status"] not in completed_statuses:
+                    raise ValueError("任务尚未完成，不能标记 callback_status=skipped")
                 current_status = task["callback_status"]
                 if current_status not in {"success", "failed"}:
                     raise ValueError(f"未知 callback_status: {current_status}")
@@ -1007,9 +1262,8 @@ class LLMTaskService:
         task = self.get_task(business_type, business_key)
         if not task:
             return False
-        completed_statuses = {"file": {"2", "3"}, "report": {"1", "2"}, "weaponry": {"2", "3"}}
         return (
-            task["status"] in completed_statuses.get(business_type, set())
+            task["status"] in _COMPLETED_TASK_STATUSES.get(business_type, frozenset())
             and task["callback_status"] in {"pending", "failed"}
         )
 
@@ -1042,8 +1296,31 @@ class LLMTaskService:
             context["architectureId"] = first_param.get("architectureId") or business_key
         return context
 
-    def replay_callback_if_needed(self, business_type: str, business_key: str, *, callback_url: str, timeout: float) -> bool:
-        if not callback_url or not self.should_replay_callback(business_type, business_key):
+    def replay_callback_if_needed(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        callback_url: str,
+        timeout: float,
+    ) -> bool:
+        """按当前回调配置补偿一次终态任务，并维护精确的回调状态。
+
+        空回调地址表示当前部署没有外部接收方。对于已经完成且仍处于 ``pending`` 的历史
+        任务，此时应幂等迁移到 ``skipped``，而不是悄悄返回并让任务永久表现为等待回调。
+        """
+        normalized_callback_url = str(callback_url or "").strip()
+        if not normalized_callback_url:
+            task = self.get_task(business_type, business_key)
+            if (
+                task
+                and task["status"]
+                in _COMPLETED_TASK_STATUSES.get(business_type, frozenset())
+                and task["callback_status"] == "pending"
+            ):
+                self.mark_callback_skipped(business_type, business_key)
+            return False
+        if not self.should_replay_callback(business_type, business_key):
             return False
 
         task = self.get_task(business_type, business_key)
@@ -1052,7 +1329,7 @@ class LLMTaskService:
 
         payload = task["result_payload"] or {}
         callback_ok = post_callback_payload(
-            callback_url,
+            normalized_callback_url,
             payload,
             timeout=timeout,
             callback_context=self._callback_context_for_task(task),

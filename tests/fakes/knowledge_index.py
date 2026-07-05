@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from threading import RLock
 from typing import Any, Mapping, Optional
@@ -9,6 +10,7 @@ from typing import Any, Mapping, Optional
 from app.ports import (
     CollectionRef,
     IndexedDocument,
+    KnowledgeOperationContext,
     OperationResult,
     PreparedDocumentRef,
 )
@@ -68,18 +70,22 @@ class FakeKnowledgeIndexPort:
         file_path: str,
         metadata: Mapping[str, Any],
         *,
+        operation_context: KnowledgeOperationContext,
         idempotency_key: str,
     ) -> IndexedDocument:
         """原子保存文档，重复幂等键返回同一文档的复用结果。"""
         normalized_path = self._required_text(file_path, name="file_path")
         normalized_key = self._required_text(idempotency_key, name="idempotency_key")
-        metadata_snapshot = dict(metadata)
+        metadata_snapshot = self._snapshot_metadata(metadata)
+        self._require_operation_context(operation_context)
 
         with self._lock:
             known_collection = self._require_collection(collection)
             lookup_key = (known_collection.ref, normalized_key)
             existing = self._documents_by_key.get(lookup_key)
             if existing is not None:
+                if dict(existing.metadata) != metadata_snapshot:
+                    raise ValueError("相同幂等键不能携带不同 metadata")
                 return replace(existing.result, created=False, reused=True)
 
             self._document_sequence += 1
@@ -107,6 +113,7 @@ class FakeKnowledgeIndexPort:
         document: PreparedDocumentRef,
         metadata: Mapping[str, Any],
         *,
+        operation_context: KnowledgeOperationContext,
         idempotency_key: str,
     ) -> IndexedDocument:
         """登记 RAG 已准备的文档，并原样保留其不透明身份和外部位置。"""
@@ -116,14 +123,27 @@ class FakeKnowledgeIndexPort:
             document.external_location,
             name="external_location",
         )
-        metadata_snapshot = dict(metadata)
+        metadata_snapshot = self._snapshot_metadata(metadata)
+        self._require_operation_context(operation_context)
 
         with self._lock:
             known_collection = self._require_collection(collection)
             lookup_key = (known_collection.ref, normalized_key)
             existing = self._documents_by_key.get(lookup_key)
             if existing is not None:
+                if dict(existing.metadata) != metadata_snapshot:
+                    raise ValueError("相同幂等键不能携带不同 metadata")
+                if (
+                    existing.result.document_ref != document_ref
+                    or existing.result.external_location != external_location
+                ):
+                    raise ValueError("相同幂等键不能指向不同的预备文档")
                 return replace(existing.result, created=False, reused=True)
+
+            location_key = (known_collection.ref, external_location)
+            location_owner = self._keys_by_location.get(location_key)
+            if location_owner is not None and location_owner != lookup_key:
+                raise ValueError("同一集合中的外部文档位置不能绑定多个幂等键")
 
             result = IndexedDocument(
                 collection_ref=known_collection.ref,
@@ -138,15 +158,18 @@ class FakeKnowledgeIndexPort:
                 source_ref=external_location,
                 metadata=metadata_snapshot,
             )
-            self._keys_by_location[(known_collection.ref, external_location)] = lookup_key
+            self._keys_by_location[location_key] = lookup_key
             return result
 
-    def remove_document(
+    def detach_document(
         self,
         collection: CollectionRef,
         external_location: str,
+        *,
+        operation_context: KnowledgeOperationContext,
     ) -> OperationResult:
-        """原子移除目标文档；目标已不存在时保持成功的幂等语义。"""
+        """原子解除集合绑定；目标已不存在时保持成功的幂等语义。"""
+        self._require_operation_context(operation_context)
         normalized_location = self._required_text(
             external_location,
             name="external_location",
@@ -165,10 +188,12 @@ class FakeKnowledgeIndexPort:
         self,
         collection: CollectionRef,
         *,
+        operation_context: KnowledgeOperationContext,
         idempotency_key: str,
     ) -> Optional[IndexedDocument]:
         """查询当前仍存在的文档，并把命中明确标记为复用结果。"""
         normalized_key = self._required_text(idempotency_key, name="idempotency_key")
+        self._require_operation_context(operation_context)
         with self._lock:
             known_collection = self._require_collection(collection)
             stored = self._documents_by_key.get((known_collection.ref, normalized_key))
@@ -185,6 +210,36 @@ class FakeKnowledgeIndexPort:
         if known is None or known != collection:
             raise ValueError("collection 不是当前知识库端口管理的有效集合引用")
         return known
+
+    @staticmethod
+    def _require_operation_context(
+        operation_context: KnowledgeOperationContext,
+    ) -> None:
+        """要求测试调用显式提供正式业务操作上下文。"""
+        if not isinstance(operation_context, KnowledgeOperationContext):
+            raise TypeError("operation_context 必须是 KnowledgeOperationContext")
+
+    @staticmethod
+    def _snapshot_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+        """生成 JSON 兼容的深复制快照，模拟阶段 8 本地权威记录约束。
+
+        浅复制无法隔离嵌套列表和字典，调用方在提交后修改原对象会悄悄改变 Fake 的幂等
+        比较结果。通过严格 JSON 往返既能切断可变引用，也会拒绝 NaN、集合和自定义对象等
+        无法写入真实协调表的值，使测试行为更接近生产持久化边界。
+        """
+        if not isinstance(metadata, Mapping):
+            raise TypeError("metadata 必须是 Mapping")
+        serialized = json.dumps(
+            dict(metadata),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        snapshot = json.loads(serialized)
+        if not isinstance(snapshot, dict):
+            raise TypeError("metadata 必须序列化为 JSON 对象")
+        return snapshot
 
     @staticmethod
     def _required_text(value: str, *, name: str) -> str:

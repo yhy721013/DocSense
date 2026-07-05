@@ -9,12 +9,15 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
 from app.integrations.anythingllm.models import (
     AnythingLLMAnswer,
     AnythingLLMDocument,
     AnythingLLMSource,
     AnythingLLMWorkspace,
 )
+from app.integrations.anythingllm.threads import AnythingLLMThreadClient
+from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.services.core.config import AnythingLLMConfig
 from app.services.utils.anythingllm_client import AnythingLLMClient
 
@@ -37,9 +40,9 @@ class AnythingLLMClientFacadeTests(unittest.TestCase):
     def setUp(self) -> None:
         """为每个用例创建任务独占 Facade，并替换三个原子客户端。"""
         self.client = _client()
-        self.client.documents = MagicMock()
-        self.client.workspaces = MagicMock()
-        self.client.threads = MagicMock()
+        self.client.documents = MagicMock(spec=AnythingLLMDocumentClient)
+        self.client.workspaces = MagicMock(spec=AnythingLLMWorkspaceClient)
+        self.client.threads = MagicMock(spec=AnythingLLMThreadClient)
 
     def tearDown(self) -> None:
         """关闭真实但从未联网的底层 Session。"""
@@ -169,14 +172,13 @@ class AnythingLLMClientFacadeTests(unittest.TestCase):
         )
 
     def test_update_embeddings_keeps_legacy_best_effort_follow_up(self) -> None:
-        """加入文档成功后应委托 Pin 和元数据；后两步失败不改变旧成功语义。"""
+        """加入文档成功后只委托 Pin，不再调用不存在的元数据更新端点。"""
         self.client.workspaces.update_embeddings.return_value = AnythingLLMWorkspace(
             id="1",
             slug="workspace-1",
             name="Workspace",
         )
         self.client.workspaces.update_pin.side_effect = RuntimeError("pin failed")
-        self.client.documents.update_metadata.side_effect = RuntimeError("meta failed")
 
         with self.assertLogs(
             "app.services.utils.anythingllm_client",
@@ -196,7 +198,7 @@ class AnythingLLMClientFacadeTests(unittest.TestCase):
             user_id=4,
         )
         self.client.workspaces.update_pin.assert_called_once()
-        self.client.documents.update_metadata.assert_called_once()
+        self.assertFalse(hasattr(AnythingLLMDocumentClient, "update_metadata"))
 
     def test_list_workspaces_converts_dto_and_failure_keeps_empty_list_contract(self) -> None:
         """列表 DTO 应转换为字典；原子客户端异常仍按旧契约返回空列表。"""

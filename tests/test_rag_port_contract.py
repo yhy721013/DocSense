@@ -20,8 +20,12 @@ from app.ports import (
     DocumentRagSession,
     IndexedDocument,
     KnowledgeIndexPort,
+    KnowledgeOperationContext,
+    OperationResult,
     PreparedDocumentRef,
+    RagAttempt,
     RagOperationError,
+    RagPromptKind,
     RagSource,
     validate_rag_query_max_attempts,
 )
@@ -131,7 +135,10 @@ class DocumentRagPortContractTests(unittest.TestCase):
         )
 
         analysis_result = session.analyse("sample.pdf", "分析文件", max_attempts=2)
-        follow_up_result = session.ask("修复字段")
+        follow_up_result = session.ask(
+            "修复字段",
+            prompt_kind=RagPromptKind.JSON_REPAIR,
+        )
 
         self.assertEqual("有效分析", analysis_result.text)
         self.assertEqual("有效追问", follow_up_result.text)
@@ -145,6 +152,49 @@ class DocumentRagPortContractTests(unittest.TestCase):
         )
         self.assertEqual("sources", session.trace.attempts[0].failure_stage)
         self.assertIsNone(session.trace.attempts[1].failure_stage)
+        self.assertEqual(
+            ["analysis", "analysis", "json_repair"],
+            [attempt.prompt_kind for attempt in session.trace.attempts],
+        )
+        self.assertTrue(all(attempt.query_mode == "query" for attempt in session.trace.attempts))
+        self.assertTrue(all(len(attempt.prompt_digest) == 64 for attempt in session.trace.attempts))
+
+    def test_invalid_prompt_kind_is_rejected_before_fake_call_is_consumed(self) -> None:
+        """非法用途分类不得消费一次预设模型结果，防止生产实现产生先调用后失败。"""
+        source = RagSource(document_ref="document:target", text="目标证据")
+        port = FakeDocumentRagPort(
+            ask_outcomes=[FakeRagOutcome(text="修复完成", sources=(source,))],
+        )
+        session = port.open_isolated_session(
+            context_name="file-task-prompt-kind",
+            conversation_name="analysis",
+        )
+        session.analyse("sample.pdf", "分析文件")
+
+        with self.assertRaises(TypeError):
+            session.ask("修复字段", prompt_kind="json_repair")  # type: ignore[arg-type]
+
+        result = session.ask(
+            "修复字段",
+            prompt_kind=RagPromptKind.JSON_REPAIR,
+        )
+        self.assertEqual("修复完成", result.text)
+
+    def test_attempt_rejects_source_status_that_conflicts_with_counts(self) -> None:
+        """来源总数为零时不能伪造 matched 状态绕过审计判定。"""
+        with self.assertRaisesRegex(ValueError, "来源验证统计不一致"):
+            RagAttempt(
+                operation="analyse",
+                attempt=1,
+                prompt_kind=RagPromptKind.ANALYSIS,
+                raw_response="无来源回答",
+                sources=(),
+                failure_stage="sources",
+                error_message="模型回答缺少来源",
+                source_count=0,
+                verified_source_count=0,
+                source_marker_status="matched",
+            )
 
     def test_analyse_can_only_be_called_once(self) -> None:
         """重复 analyse 会隐式重复文档准备，因此必须在端口边界被拒绝。"""
@@ -294,6 +344,15 @@ class RagOpeningRollbackContractTests(unittest.TestCase):
 class KnowledgeIndexPortContractTests(unittest.TestCase):
     """验证长期知识库 Port 的集合、幂等、删除和并发语义。"""
 
+    @staticmethod
+    def _operation_context(execution_id: str = "execution-001") -> KnowledgeOperationContext:
+        """构造显式业务操作上下文，避免测试通过 metadata 偷渡身份。"""
+        return KnowledgeOperationContext(
+            execution_id=execution_id,
+            business_type="file",
+            business_key="sample.pdf",
+        )
+
     def test_fake_implements_runtime_checkable_protocol(self) -> None:
         """知识库 Fake 必须可直接注入只依赖 Protocol 的业务服务。"""
         self.assertIsInstance(FakeKnowledgeIndexPort(), KnowledgeIndexPort)
@@ -311,21 +370,25 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         """保存重试复用原文档，删除可重复执行，对账反映当前真实状态。"""
         port = FakeKnowledgeIndexPort()
         collection = port.ensure_collection("architecture-2")
+        operation_context = self._operation_context()
 
         created = port.store_document(
             collection,
             "sample.pdf",
             {"file_name": "sample.pdf"},
+            operation_context=operation_context,
             idempotency_key="sha256:abc",
         )
         reused = port.store_document(
             collection,
             "another-path.pdf",
-            {"file_name": "changed.pdf"},
+            {"file_name": "sample.pdf"},
+            operation_context=operation_context,
             idempotency_key="sha256:abc",
         )
         reconciled = port.reconcile_document(
             collection,
+            operation_context=operation_context,
             idempotency_key="sha256:abc",
         )
 
@@ -338,15 +401,27 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         self.assertIsNotNone(reconciled)
         self.assertTrue(cast(IndexedDocument, reconciled).reused)
 
-        first_removal = port.remove_document(collection, created.external_location)
-        second_removal = port.remove_document(collection, created.external_location)
+        first_removal = port.detach_document(
+            collection,
+            created.external_location,
+            operation_context=operation_context,
+        )
+        second_removal = port.detach_document(
+            collection,
+            created.external_location,
+            operation_context=operation_context,
+        )
 
         self.assertTrue(first_removal.success)
         self.assertFalse(first_removal.already_applied)
         self.assertTrue(second_removal.success)
         self.assertTrue(second_removal.already_applied)
         self.assertIsNone(
-            port.reconcile_document(collection, idempotency_key="sha256:abc")
+            port.reconcile_document(
+                collection,
+                operation_context=operation_context,
+                idempotency_key="sha256:abc",
+            )
         )
 
     def test_store_prepared_document_preserves_rag_document_identity(self) -> None:
@@ -362,6 +437,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
             collection,
             prepared,
             {"file_name": "sample.pdf"},
+            operation_context=self._operation_context(),
             idempotency_key="sha256:prepared",
         )
 
@@ -374,17 +450,20 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         port = FakeKnowledgeIndexPort()
         first_collection = port.ensure_collection("architecture-3")
         second_collection = port.ensure_collection("architecture-4")
+        operation_context = self._operation_context()
 
         first = port.store_document(
             first_collection,
             "sample.pdf",
             {},
+            operation_context=operation_context,
             idempotency_key="shared-key",
         )
         second = port.store_document(
             second_collection,
             "sample.pdf",
             {},
+            operation_context=operation_context,
             idempotency_key="shared-key",
         )
 
@@ -402,6 +481,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
                 forged,
                 "sample.pdf",
                 {},
+                operation_context=self._operation_context(),
                 idempotency_key="key",
             )
 
@@ -409,13 +489,15 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         """并发提交相同幂等键时只能产生一个首次创建结果和一个文档身份。"""
         port = FakeKnowledgeIndexPort()
         collection = port.ensure_collection("architecture-5")
+        operation_context = self._operation_context()
 
         def store_once(index: int) -> IndexedDocument:
             """从工作线程提交同一逻辑文档，并返回稳定结果用于聚合断言。"""
             return port.store_document(
                 collection,
                 f"sample-{index}.pdf",
-                {"worker": index},
+                {"file_name": "sample.pdf"},
+                operation_context=operation_context,
                 idempotency_key="concurrent-key",
             )
 
@@ -426,6 +508,61 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         self.assertEqual(23, sum(result.reused for result in results))
         self.assertEqual(1, len({result.document_ref for result in results}))
         self.assertEqual(1, len({result.external_location for result in results}))
+
+    def test_same_idempotency_key_with_different_metadata_is_rejected(self) -> None:
+        """幂等重试不得用新 metadata 静默覆盖首次操作快照。"""
+        port = FakeKnowledgeIndexPort()
+        collection = port.ensure_collection("architecture-metadata")
+        operation_context = self._operation_context()
+        port.store_document(
+            collection,
+            "sample.pdf",
+            {"country": "美国"},
+            operation_context=operation_context,
+            idempotency_key="metadata-key",
+        )
+
+        with self.assertRaisesRegex(ValueError, "不同 metadata"):
+            port.store_document(
+                collection,
+                "sample.pdf",
+                {"country": "中国"},
+                operation_context=operation_context,
+                idempotency_key="metadata-key",
+            )
+
+    def test_prepared_document_identity_conflict_is_rejected(self) -> None:
+        """相同幂等键不得在重试时切换到另一份已上传文档。"""
+        port = FakeKnowledgeIndexPort()
+        collection = port.ensure_collection("architecture-prepared-conflict")
+        operation_context = self._operation_context()
+        port.store_prepared_document(
+            collection,
+            PreparedDocumentRef("document:first", "external:first"),
+            {},
+            operation_context=operation_context,
+            idempotency_key="prepared-key",
+        )
+
+        with self.assertRaisesRegex(ValueError, "不同的预备文档"):
+            port.store_prepared_document(
+                collection,
+                PreparedDocumentRef("document:second", "external:second"),
+                {},
+                operation_context=operation_context,
+                idempotency_key="prepared-key",
+            )
+
+    def test_operation_result_rejects_ambiguous_failure_state(self) -> None:
+        """失败结果必须带错误，且不能同时声明操作早已成功应用。"""
+        with self.assertRaises(ValueError):
+            OperationResult(success=False, already_applied=False)
+        with self.assertRaises(ValueError):
+            OperationResult(
+                success=False,
+                already_applied=True,
+                error_message="解除绑定失败",
+            )
 
 
 class PortBoundaryTests(unittest.TestCase):
