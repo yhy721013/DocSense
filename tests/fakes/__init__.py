@@ -4,7 +4,7 @@
 测试通过应用层 Protocol 注入这些对象，以验证业务编排而不是具体外部协议。
 """
 
-from .knowledge_index import FakeKnowledgeIndexPort
+from .knowledge_index import FakeKnowledgeIndexFactory, FakeKnowledgeIndexPort
 from .rag import (
     FakeDocumentRagFactory,
     FakeDocumentRagPort,
@@ -16,6 +16,7 @@ __all__ = [
     "FakeDocumentRagFactory",
     "FakeDocumentRagPort",
     "FakeDocumentRagSession",
+    "FakeKnowledgeIndexFactory",
     "FakeKnowledgeIndexPort",
     "FakeRagOutcome",
 ]

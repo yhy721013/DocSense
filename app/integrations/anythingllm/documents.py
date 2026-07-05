@@ -1,8 +1,8 @@
 """AnythingLLM 全局文档接口的原子客户端。
 
-该客户端只负责全局文档上传、永久删除和元数据更新，不负责把文档加入工作区、固定文档
-或创建会话。重试范围严格限制为已识别的 Document Processor 暂时不可用错误，避免自动
-重放其他可能产生副作用的失败请求。
+该客户端只负责全局文档上传和永久删除，不负责把文档加入工作区、固定文档、创建会话或
+调用当前部署不支持的上传后元数据更新端点。重试范围严格限制为已识别的 Document
+Processor 暂时不可用错误，避免自动重放其他可能产生副作用的失败请求。
 """
 
 from __future__ import annotations
@@ -188,6 +188,7 @@ class AnythingLLMDocumentClient:
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
+                allow_nan=False,
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("metadata 必须只包含可 JSON 序列化的值") from exc

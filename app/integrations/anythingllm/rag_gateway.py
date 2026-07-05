@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -400,6 +402,7 @@ class _AnythingLLMRagSession:
         self._attempts: list[RagAttempt] = []
         self._lifecycle_events = list(lifecycle_events)
         self._document_ref: Optional[str] = None
+        self._content_sha256: Optional[str] = None
         self._uploaded_document: Optional[AnythingLLMDocument] = None
         self._bound_locations: set[str] = set()
         self._pinned_location: Optional[str] = None
@@ -437,8 +440,9 @@ class _AnythingLLMRagSession:
 
         document: Optional[AnythingLLMDocument] = None
         try:
-            document = self._upload_document(normalized_file_path)
+            document, content_sha256 = self._upload_document(normalized_file_path)
             self._uploaded_document = document
+            self._content_sha256 = content_sha256
             self._bind_document(document.location)
             self._pin_document(document.location)
             self._document_ref = document.document_ref
@@ -595,19 +599,28 @@ class _AnythingLLMRagSession:
         )
         return result
 
-    def _upload_document(self, file_path: str) -> AnythingLLMDocument:
-        """携带会话来源标记上传文档，并校验三个关键身份字段。
+    def _upload_document(self, file_path: str) -> tuple[AnythingLLMDocument, str]:
+        """上传不可变文件快照，并返回文档及该快照的 SHA-256。
 
         ``docSource`` 是 AnythingLLM 上传接口允许的结构化元数据。将随机标记放在该字段，
         可以让标记随文档进入向量分片来源；禁止把标记写进 title、文件名或正文，否则
         source 中出现相同文本不能证明它来自受控元数据链路。
         """
         try:
-            document = self._document_client.upload_document(
-                file_path,
-                user_id=self._user_id,
-                metadata={"docSource": self._source_marker},
-            )
+            source_path = Path(file_path)
+            if not source_path.is_file():
+                raise FileNotFoundError(f"待分析文件不存在或不是普通文件: {source_path}")
+            # 摘要和 multipart 请求必须使用同一个任务私有副本。调用方即使在分析期间替换
+            # 原路径，也不会让后续永久知识库幂等键与 AnythingLLM 实际内容发生分叉。
+            with tempfile.TemporaryDirectory(prefix="docsense-rag-") as temporary_dir:
+                snapshot_path = Path(temporary_dir) / source_path.name
+                shutil.copyfile(source_path, snapshot_path)
+                content_sha256 = self._sha256_file(snapshot_path)
+                document = self._document_client.upload_document(
+                    str(snapshot_path),
+                    user_id=self._user_id,
+                    metadata={"docSource": self._source_marker},
+                )
         except AnythingLLMProtocolError as exc:
             error_message = self._safe_error(
                 exc,
@@ -674,7 +687,7 @@ class _AnythingLLMRagSession:
             document_ref,
             Path(file_path).name,
         )
-        return document
+        return document, content_sha256
 
     def _bind_document(self, location: str) -> None:
         """把真实上传位置加入工作区，并仅对标准暂态网关错误有限重试。"""
@@ -987,6 +1000,11 @@ class _AnythingLLMRagSession:
                     )
                 )
                 if failure_stage is None:
+                    if not self._content_sha256:
+                        raise self._operation_error(
+                            "成功查询缺少不可变上传内容摘要",
+                            failure_stage="document_identity",
+                        )
                     self._failure_stage = None
                     self._error_message = None
                     result = RagResult(
@@ -995,6 +1013,7 @@ class _AnythingLLMRagSession:
                         prepared_document=PreparedDocumentRef(
                             document_ref=target_ref,
                             external_location=external_location,
+                            content_sha256=self._content_sha256,
                         ),
                         trace=self._trace(),
                     )
@@ -1199,6 +1218,7 @@ class _AnythingLLMRagSession:
             )
             self._uploaded_document = None
             self._document_ref = None
+            self._content_sha256 = None
             self._global_document_cleanup_required = False
         except Exception as exc:
             cleanup_error = self._safe_error(
@@ -1296,6 +1316,15 @@ class _AnythingLLMRagSession:
     def _safe_error(error: Exception, *, fallback: str) -> str:
         """复用 Gateway 的安全错误规范，避免轨迹保存未知异常正文。"""
         return AnythingLLMRagGateway._safe_error_message(error, fallback=fallback)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        """流式计算不可变上传副本摘要，避免把大文件整体载入内存。"""
+        digest = hashlib.sha256()
+        with path.open("rb") as file_object:
+            for chunk in iter(lambda: file_object.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _required_text(value: str, *, name: str) -> str:

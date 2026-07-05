@@ -24,6 +24,36 @@ DEFAULT_EMBEDDING_ATTEMPTS = 2
 """单次文档绑定操作默认总调用次数，包含首次调用。"""
 
 
+def document_rag_workspace_settings() -> dict[str, object]:
+    """返回文档抽取与永久知识库共同遵守的 Workspace 策略。
+
+    返回新字典而不是公开可变模块常量，确保不同任务和 AnythingLLM Client 不能通过原地
+    修改影响其他请求。新旧链路在迁移期都调用该函数，避免阶段 9 切换后悄悄回退到
+    AnythingLLM 默认阈值、默认 Prompt 或默认检索数量。
+    """
+    return {
+        "similarityThreshold": 0.25,
+        "openAiTemp": 0.1,
+        "openAiHistory": 1,
+        "openAiPrompt": (
+            "你是一个文档信息抽取与判断系统。\n"
+            "【重要规则】\n"
+            "1. 你只能基于已提供的文档内容回答，不得使用常识或猜测。\n"
+            "2. 如果文档中不存在相关信息，必须返回 null。\n"
+            "3. 你必须只输出合法的 JSON，不得包含任何解释、注释、Markdown 或多余文本。\n"
+            "4. JSON 的字段名、层级和类型必须严格保持一致。\n"
+            "5. 不允许补充文档中未明确出现的信息。\n"
+        ),
+        "queryRefusalResponse": (
+            '{"outline":[],"security_level":"公开","category_confidence":0.1,'
+            '"category":null,"sub_category":null,"category_candidates":[],'
+            '"extract":{},"summary":"未能从文档中检索到足够信息"}'
+        ),
+        "chatMode": "query",
+        "topN": 6,
+    }
+
+
 def validate_upload_max_retries(value: int) -> int:
     """校验并返回全局文档上传的额外重试次数。
 

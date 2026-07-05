@@ -7,11 +7,137 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
 from .rag import PreparedDocumentRef
+
+
+def build_document_idempotency_key(
+    *,
+    file_name: str,
+    architecture_id: int,
+    content_sha256: str,
+) -> str:
+    """构造版本化、供应商无关的永久文档默认幂等键。
+
+    文件名区分业务对象，存储 architecture 区分永久集合，内容摘要区分同名文件的新版本。
+    最终只暴露固定长度摘要，避免把可能包含敏感信息的完整文件名写入协调索引和日志。
+    """
+    normalized_file_name = str(file_name or "").strip()
+    if not normalized_file_name:
+        raise ValueError("file_name 不能为空")
+    if (
+        isinstance(architecture_id, bool)
+        or not isinstance(architecture_id, int)
+        or architecture_id < 1
+    ):
+        raise ValueError("architecture_id 必须是正整数")
+    normalized_digest = str(content_sha256 or "").strip().casefold()
+    if (
+        len(normalized_digest) != 64
+        or any(character not in "0123456789abcdef" for character in normalized_digest)
+    ):
+        raise ValueError("content_sha256 必须是 64 位十六进制摘要")
+    canonical_identity = (
+        f"{normalized_file_name}\0{architecture_id}\0{normalized_digest}"
+    )
+    identity_digest = hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
+    return f"document:v1:{identity_digest}"
+
+
+class KnowledgeIndexError(RuntimeError):
+    """永久知识库操作未能安全完成时抛出的供应商无关基础异常。"""
+
+
+class KnowledgeIndexConflictError(KnowledgeIndexError):
+    """相同幂等身份携带不同业务内容或发生非法状态转换。"""
+
+
+class KnowledgeIndexRecoveryRequiredError(KnowledgeIndexError):
+    """外部结果或补偿结果不确定，必须人工或专用恢复流程介入。"""
+
+
+class KnowledgeIndexRetentionRequiredError(KnowledgeIndexRecoveryRequiredError):
+    """永久索引已经接管文档，调用方不得再执行全局删除。
+
+    该异常专门描述跨系统提交的部分成功：永久集合已经绑定文档，或本地权威记录已经提交，
+    但后续协调状态写入没有全部完成。调用方仍应把业务任务标记为失败，不过清理 RAG 会话
+    时必须使用 ``retain_document=True``，让后续对账继续复用同一全局文档。
+    """
+
+    retain_document_required = True
+
+
+@dataclass(frozen=True)
+class CollectionSpec:
+    """永久知识集合的稳定业务身份和显示名称。
+
+    ``architecture_id`` 是 DocSense 本地权威关系键，``name`` 只用于创建或展示外部
+    Workspace。适配器必须先按 architecture ID 解析本地映射，禁止根据显示名称反向猜测
+    业务身份，从而避免误接管同名 Workspace。
+    """
+
+    architecture_id: int
+    name: str
+
+    def __post_init__(self) -> None:
+        """规范化集合身份，并拒绝布尔值伪装成整数。"""
+        if (
+            isinstance(self.architecture_id, bool)
+            or not isinstance(self.architecture_id, int)
+            or self.architecture_id < 1
+        ):
+            raise ValueError("CollectionSpec.architecture_id 必须是正整数")
+        normalized_name = str(self.name or "").strip()
+        if not normalized_name:
+            raise ValueError("CollectionSpec.name 不能为空")
+        object.__setattr__(self, "name", normalized_name)
+
+
+@dataclass(frozen=True)
+class KnowledgeDocumentMetadata:
+    """永久索引文档的类型化本地权威元数据。
+
+    文件身份字段与可扩展业务属性分离，避免调用方把 ``architecture_id``、``file_name``
+    等控制字段混入任意 Mapping。``attributes`` 通过严格 JSON 往返生成深复制快照，既阻止
+    调用方在提交过程中修改嵌套对象，也保证该对象一定可以持久化到 SQLite。
+    """
+
+    file_name: str
+    original_name: str
+    attributes: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        """规范化文件名并冻结严格 JSON 业务属性。"""
+        normalized_file_name = str(self.file_name or "").strip()
+        if not normalized_file_name:
+            raise ValueError("KnowledgeDocumentMetadata.file_name 不能为空")
+        normalized_original_name = str(self.original_name or "").strip()
+        if not normalized_original_name:
+            normalized_original_name = normalized_file_name
+        if not isinstance(self.attributes, Mapping):
+            raise TypeError("KnowledgeDocumentMetadata.attributes 必须是 Mapping")
+        try:
+            serialized = json.dumps(
+                dict(self.attributes),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            snapshot = json.loads(serialized)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("KnowledgeDocumentMetadata.attributes 必须是严格 JSON 对象") from exc
+        if not isinstance(snapshot, dict):
+            raise TypeError("KnowledgeDocumentMetadata.attributes 必须序列化为 JSON 对象")
+        object.__setattr__(self, "file_name", normalized_file_name)
+        object.__setattr__(self, "original_name", normalized_original_name)
+        object.__setattr__(self, "attributes", MappingProxyType(snapshot))
 
 
 @dataclass(frozen=True)
@@ -45,13 +171,24 @@ class CollectionRef:
 
     ref: str
     name: str
+    architecture_id: int
 
     def __post_init__(self) -> None:
         """拒绝无法用于关联索引操作的空引用或空名称。"""
-        if not str(self.ref or "").strip():
+        normalized_ref = str(self.ref or "").strip()
+        normalized_name = str(self.name or "").strip()
+        if not normalized_ref:
             raise ValueError("CollectionRef.ref 不能为空")
-        if not str(self.name or "").strip():
+        if not normalized_name:
             raise ValueError("CollectionRef.name 不能为空")
+        if (
+            isinstance(self.architecture_id, bool)
+            or not isinstance(self.architecture_id, int)
+            or self.architecture_id < 1
+        ):
+            raise ValueError("CollectionRef.architecture_id 必须是正整数")
+        object.__setattr__(self, "ref", normalized_ref)
+        object.__setattr__(self, "name", normalized_name)
 
 
 @dataclass(frozen=True)
@@ -119,15 +256,15 @@ class OperationResult:
 class KnowledgeIndexPort(Protocol):
     """业务服务访问长期知识库索引的稳定端口。"""
 
-    def ensure_collection(self, name: str) -> CollectionRef:
-        """确保指定业务集合存在，并返回可重复使用的稳定引用。"""
+    def ensure_collection(self, spec: CollectionSpec) -> CollectionRef:
+        """按稳定业务身份确保集合存在，并返回可重复使用的引用。"""
         ...
 
     def store_document(
         self,
         collection: CollectionRef,
         file_path: str,
-        metadata: Mapping[str, Any],
+        metadata: KnowledgeDocumentMetadata,
         *,
         operation_context: KnowledgeOperationContext,
         idempotency_key: str,
@@ -139,7 +276,7 @@ class KnowledgeIndexPort(Protocol):
         self,
         collection: CollectionRef,
         document: PreparedDocumentRef,
-        metadata: Mapping[str, Any],
+        metadata: KnowledgeDocumentMetadata,
         *,
         operation_context: KnowledgeOperationContext,
         idempotency_key: str,

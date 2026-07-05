@@ -15,10 +15,12 @@ import unittest
 import app.ports as port_module
 from app.ports import (
     CollectionRef,
+    CollectionSpec,
     DocumentRagFactory,
     DocumentRagPort,
     DocumentRagSession,
     IndexedDocument,
+    KnowledgeDocumentMetadata,
     KnowledgeIndexPort,
     KnowledgeOperationContext,
     OperationResult,
@@ -27,11 +29,13 @@ from app.ports import (
     RagOperationError,
     RagPromptKind,
     RagSource,
+    build_document_idempotency_key,
     validate_rag_query_max_attempts,
 )
 from tests.fakes import (
     FakeDocumentRagFactory,
     FakeDocumentRagPort,
+    FakeKnowledgeIndexFactory,
     FakeKnowledgeIndexPort,
     FakeRagOutcome,
 )
@@ -353,36 +357,68 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
             business_key="sample.pdf",
         )
 
+    @staticmethod
+    def _metadata(**attributes: object) -> KnowledgeDocumentMetadata:
+        """构造类型化永久文档元数据，避免测试依赖适配器私有字段。"""
+        return KnowledgeDocumentMetadata(
+            file_name="sample.pdf",
+            original_name="sample.pdf",
+            attributes=attributes,
+        )
+
     def test_fake_implements_runtime_checkable_protocol(self) -> None:
         """知识库 Fake 必须可直接注入只依赖 Protocol 的业务服务。"""
         self.assertIsInstance(FakeKnowledgeIndexPort(), KnowledgeIndexPort)
+
+    def test_default_idempotency_key_changes_with_collection_or_content(self) -> None:
+        """同名文件的新内容或不同存储 architecture 必须得到不同默认键。"""
+        first = build_document_idempotency_key(
+            file_name="hash.pdf",
+            architecture_id=100,
+            content_sha256="a" * 64,
+        )
+        changed_content = build_document_idempotency_key(
+            file_name="hash.pdf",
+            architecture_id=100,
+            content_sha256="b" * 64,
+        )
+        changed_collection = build_document_idempotency_key(
+            file_name="hash.pdf",
+            architecture_id=101,
+            content_sha256="a" * 64,
+        )
+
+        self.assertTrue(first.startswith("document:v1:"))
+        self.assertNotEqual(first, changed_content)
+        self.assertNotEqual(first, changed_collection)
 
     def test_ensure_collection_is_idempotent(self) -> None:
         """相同集合名称必须返回同一个稳定引用。"""
         port = FakeKnowledgeIndexPort()
 
-        first = port.ensure_collection("architecture-1")
-        second = port.ensure_collection("architecture-1")
+        spec = CollectionSpec(architecture_id=1, name="architecture-1")
+        first = port.ensure_collection(spec)
+        second = port.ensure_collection(spec)
 
         self.assertEqual(first, second)
 
     def test_store_reconcile_and_remove_preserve_idempotency(self) -> None:
         """保存重试复用原文档，删除可重复执行，对账反映当前真实状态。"""
         port = FakeKnowledgeIndexPort()
-        collection = port.ensure_collection("architecture-2")
+        collection = port.ensure_collection(CollectionSpec(2, "architecture-2"))
         operation_context = self._operation_context()
 
         created = port.store_document(
             collection,
             "sample.pdf",
-            {"file_name": "sample.pdf"},
+            self._metadata(),
             operation_context=operation_context,
             idempotency_key="sha256:abc",
         )
         reused = port.store_document(
             collection,
             "another-path.pdf",
-            {"file_name": "sample.pdf"},
+            self._metadata(),
             operation_context=operation_context,
             idempotency_key="sha256:abc",
         )
@@ -427,16 +463,17 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_store_prepared_document_preserves_rag_document_identity(self) -> None:
         """长期知识库登记必须复用 RAG 已上传文档，不得生成第二个外部位置。"""
         port = FakeKnowledgeIndexPort()
-        collection = port.ensure_collection("architecture-prepared")
+        collection = port.ensure_collection(CollectionSpec(20, "architecture-prepared"))
         prepared = PreparedDocumentRef(
             document_ref="document:prepared",
             external_location="external:prepared",
+            content_sha256="a" * 64,
         )
 
         stored = port.store_prepared_document(
             collection,
             prepared,
-            {"file_name": "sample.pdf"},
+            self._metadata(),
             operation_context=self._operation_context(),
             idempotency_key="sha256:prepared",
         )
@@ -448,21 +485,21 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_same_idempotency_key_is_scoped_to_collection(self) -> None:
         """不同业务集合可以安全使用相同幂等键而不会错误复用文档。"""
         port = FakeKnowledgeIndexPort()
-        first_collection = port.ensure_collection("architecture-3")
-        second_collection = port.ensure_collection("architecture-4")
+        first_collection = port.ensure_collection(CollectionSpec(3, "architecture-3"))
+        second_collection = port.ensure_collection(CollectionSpec(4, "architecture-4"))
         operation_context = self._operation_context()
 
         first = port.store_document(
             first_collection,
             "sample.pdf",
-            {},
+            self._metadata(),
             operation_context=operation_context,
             idempotency_key="shared-key",
         )
         second = port.store_document(
             second_collection,
             "sample.pdf",
-            {},
+            self._metadata(),
             operation_context=operation_context,
             idempotency_key="shared-key",
         )
@@ -474,13 +511,13 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_forged_collection_reference_is_rejected(self) -> None:
         """结构相似但不属于当前端口实例的集合引用不得用于索引操作。"""
         port = FakeKnowledgeIndexPort()
-        forged = CollectionRef(ref="collection:999", name="forged")
+        forged = CollectionRef(ref="collection:999", name="forged", architecture_id=999)
 
         with self.assertRaises(ValueError):
             port.store_document(
                 forged,
                 "sample.pdf",
-                {},
+                self._metadata(),
                 operation_context=self._operation_context(),
                 idempotency_key="key",
             )
@@ -488,7 +525,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_concurrent_same_key_creates_only_one_document(self) -> None:
         """并发提交相同幂等键时只能产生一个首次创建结果和一个文档身份。"""
         port = FakeKnowledgeIndexPort()
-        collection = port.ensure_collection("architecture-5")
+        collection = port.ensure_collection(CollectionSpec(5, "architecture-5"))
         operation_context = self._operation_context()
 
         def store_once(index: int) -> IndexedDocument:
@@ -496,7 +533,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
             return port.store_document(
                 collection,
                 f"sample-{index}.pdf",
-                {"file_name": "sample.pdf"},
+                self._metadata(),
                 operation_context=operation_context,
                 idempotency_key="concurrent-key",
             )
@@ -512,12 +549,12 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_same_idempotency_key_with_different_metadata_is_rejected(self) -> None:
         """幂等重试不得用新 metadata 静默覆盖首次操作快照。"""
         port = FakeKnowledgeIndexPort()
-        collection = port.ensure_collection("architecture-metadata")
+        collection = port.ensure_collection(CollectionSpec(6, "architecture-metadata"))
         operation_context = self._operation_context()
         port.store_document(
             collection,
             "sample.pdf",
-            {"country": "美国"},
+            self._metadata(country="美国"),
             operation_context=operation_context,
             idempotency_key="metadata-key",
         )
@@ -526,7 +563,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
             port.store_document(
                 collection,
                 "sample.pdf",
-                {"country": "中国"},
+                self._metadata(country="中国"),
                 operation_context=operation_context,
                 idempotency_key="metadata-key",
             )
@@ -534,12 +571,14 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
     def test_prepared_document_identity_conflict_is_rejected(self) -> None:
         """相同幂等键不得在重试时切换到另一份已上传文档。"""
         port = FakeKnowledgeIndexPort()
-        collection = port.ensure_collection("architecture-prepared-conflict")
+        collection = port.ensure_collection(
+            CollectionSpec(7, "architecture-prepared-conflict")
+        )
         operation_context = self._operation_context()
         port.store_prepared_document(
             collection,
-            PreparedDocumentRef("document:first", "external:first"),
-            {},
+            PreparedDocumentRef("document:first", "external:first", "a" * 64),
+            self._metadata(),
             operation_context=operation_context,
             idempotency_key="prepared-key",
         )
@@ -547,8 +586,8 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不同的预备文档"):
             port.store_prepared_document(
                 collection,
-                PreparedDocumentRef("document:second", "external:second"),
-                {},
+                PreparedDocumentRef("document:second", "external:second", "b" * 64),
+                self._metadata(),
                 operation_context=operation_context,
                 idempotency_key="prepared-key",
             )
@@ -563,6 +602,33 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
                 already_applied=True,
                 error_message="解除绑定失败",
             )
+
+    def test_fake_factory_preserves_permanent_state_across_task_leases(self) -> None:
+        """任务级 Port 可以更换，但永久知识库状态必须跨租约共享。"""
+        factory = FakeKnowledgeIndexFactory()
+        spec = CollectionSpec(8, "architecture-shared")
+        context = self._operation_context()
+        with factory.create() as first_port:
+            collection = first_port.ensure_collection(spec)
+            created = first_port.store_document(
+                collection,
+                "sample.pdf",
+                self._metadata(),
+                operation_context=context,
+                idempotency_key="shared-across-leases",
+            )
+        with factory.create() as second_port:
+            same_collection = second_port.ensure_collection(spec)
+            reconciled = second_port.reconcile_document(
+                same_collection,
+                operation_context=self._operation_context("execution-002"),
+                idempotency_key="shared-across-leases",
+            )
+
+        self.assertIsNotNone(reconciled)
+        recovered = cast(IndexedDocument, reconciled)
+        self.assertEqual(created.document_ref, recovered.document_ref)
+        self.assertTrue(recovered.reused)
 
 
 class PortBoundaryTests(unittest.TestCase):

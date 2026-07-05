@@ -328,13 +328,15 @@ class RagExecutionTrace:
 class PreparedDocumentRef:
     """RAG 准备完成后可转交长期知识库的不透明文档句柄。
 
-    ``document_ref`` 用于来源精确匹配，``external_location`` 用于后续索引登记和补偿。
-    两个字段都只能作为不可拆解的引用传递、比较和持久化；业务层不得根据其文本格式推导
+    ``document_ref`` 用于来源精确匹配，``external_location`` 用于后续索引登记和补偿，
+    ``content_sha256`` 则来自实际上传的不可变副本，供永久知识库构造可信幂等身份。两个
+    外部引用只能作为不可拆解的值传递、比较和持久化；业务层不得根据其文本格式推导
     供应商目录、HTTP 路径或资源类型。
     """
 
     document_ref: str
     external_location: str
+    content_sha256: str
 
     def __post_init__(self) -> None:
         """拒绝无法被可靠审计或转交长期知识库的空引用。"""
@@ -342,6 +344,13 @@ class PreparedDocumentRef:
             raise ValueError("PreparedDocumentRef.document_ref 不能为空")
         if not str(self.external_location or "").strip():
             raise ValueError("PreparedDocumentRef.external_location 不能为空")
+        normalized_digest = str(self.content_sha256 or "").strip().casefold()
+        if (
+            len(normalized_digest) != 64
+            or any(character not in "0123456789abcdef" for character in normalized_digest)
+        ):
+            raise ValueError("PreparedDocumentRef.content_sha256 必须是 SHA-256 摘要")
+        object.__setattr__(self, "content_sha256", normalized_digest)
 
 
 @dataclass(frozen=True)

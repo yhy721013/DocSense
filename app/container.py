@@ -10,11 +10,15 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, ParamSpec, TypeVar
+from typing import Any, Callable, ParamSpec, TypeVar
 
 from flask import current_app
 
-from app.integrations.anythingllm.factory import AnythingLLMGatewayFactory
+from app.integrations.anythingllm.factory import (
+    AnythingLLMGatewayFactory,
+    AnythingLLMKnowledgeIndexFactory,
+)
+from app.integrations.anythingllm.policies import document_rag_workspace_settings
 from app.ports import DocumentRagFactory, KnowledgeIndexFactory
 from app.services.core.config import (
     AnythingLLMConfig,
@@ -81,13 +85,13 @@ class UploadTaskLimiter:
 class ApplicationServices:
     """Flask 应用内可安全共享的依赖集合。
 
-    ``knowledge_index_factory`` 在阶段 8 实现永久知识库 Gateway 前允许为 ``None``；其余
-    依赖均为当前路由已经使用的必需对象。该数据类冻结的是依赖引用，数据库服务和进度
-    Hub 自身仍按各自线程安全契约维护内部状态。
+    阶段 8 起两个 AnythingLLM Factory 都是必需能力，但只保存配置和线程安全协调依赖，
+    不持有网络 Session。该数据类冻结的是依赖引用，数据库服务和进度 Hub 自身仍按各自
+    线程安全契约维护内部状态。
     """
 
     document_rag_factory: DocumentRagFactory
-    knowledge_index_factory: Optional[KnowledgeIndexFactory]
+    knowledge_index_factory: KnowledgeIndexFactory
     task_service: LLMTaskService
     kb_service: DatabaseService
     chat_db: ChatDatabaseService
@@ -100,6 +104,7 @@ class ApplicationServices:
         """在应用启动时拒绝缺失关键依赖，避免请求到达后才出现空引用错误。"""
         required_dependencies: dict[str, Any] = {
             "document_rag_factory": self.document_rag_factory,
+            "knowledge_index_factory": self.knowledge_index_factory,
             "task_service": self.task_service,
             "kb_service": self.kb_service,
             "chat_db": self.chat_db,
@@ -113,7 +118,7 @@ class ApplicationServices:
             raise ValueError(f"ApplicationServices 缺少依赖：{', '.join(missing)}")
         if not isinstance(self.document_rag_factory, DocumentRagFactory):
             raise TypeError("document_rag_factory 必须实现 DocumentRagFactory")
-        if self.knowledge_index_factory is not None and not isinstance(
+        if not isinstance(
             self.knowledge_index_factory,
             KnowledgeIndexFactory,
         ):
@@ -124,13 +129,21 @@ def create_application_services() -> ApplicationServices:
     """根据环境配置创建生产应用容器，不创建 AnythingLLM 网络 Session。"""
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
+    task_service = LLMTaskService(llm_config.task_db_path)
+    kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     services = ApplicationServices(
-        document_rag_factory=AnythingLLMGatewayFactory(anythingllm_config),
-        # 阶段 8 将在此处装配正式 KnowledgeIndexFactory。显式 None 比注入一个运行时
-        # 必然失败的占位实现更安全，也让调用方必须先判断能力是否已经安装。
-        knowledge_index_factory=None,
-        task_service=LLMTaskService(llm_config.task_db_path),
-        kb_service=DatabaseService(str(KNOWLEDGE_BASE_DB_PATH)),
+        document_rag_factory=AnythingLLMGatewayFactory(
+            anythingllm_config,
+            workspace_settings=document_rag_workspace_settings(),
+        ),
+        knowledge_index_factory=AnythingLLMKnowledgeIndexFactory(
+            anythingllm_config,
+            task_service.knowledge_index_operations,
+            kb_service,
+            workspace_settings=document_rag_workspace_settings(),
+        ),
+        task_service=task_service,
+        kb_service=kb_service,
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),

@@ -16,7 +16,17 @@ from app.services.llm_service.interaction_audit_service import (
     AUDIT_STATUS_SUCCEEDED,
     InteractionAuditError,
     InteractionAuditResult,
+    MAX_AUDIT_PROMPT_CHARS,
+    MAX_AUDIT_RESPONSE_CHARS,
+    MAX_AUDIT_SOURCES_JSON_CHARS,
+    MAX_AUDIT_TRACE_JSON_CHARS,
     SQLiteAuditExecutor,
+)
+from app.services.llm_service.knowledge_index_operation_service import (
+    KnowledgeIndexOperationService,
+)
+from app.services.llm_service.rag_resource_lease_service import (
+    RagResourceLeaseService,
 )
 from app.services.utils.callback_client import post_callback_payload
 
@@ -50,6 +60,12 @@ class LLMTaskService:
             lambda timeout: self._connect(timeout_seconds=timeout)
         )
         self._init_db()
+        # 永久知识库协调记录与任务、交互审计共用同一 SQLite 文件，但由独立服务维护，
+        # 避免继续扩大 LLMTaskService 的职责。该服务只在构造期建表，不创建长期连接。
+        self.knowledge_index_operations = KnowledgeIndexOperationService(db_path)
+        # 资源租约必须先于阶段 9 的外部 Session 创建。即使最终交互审计失败，独立租约仍
+        # 提供 Context、Conversation 和全局文档的巡检入口，避免只依赖进程内 Trace。
+        self.rag_resource_leases = RagResourceLeaseService(db_path)
 
     def _connect(self, *, timeout_seconds: float = 5.0) -> sqlite3.Connection:
         """创建启用外键约束的独立 SQLite 连接。
@@ -485,6 +501,8 @@ class LLMTaskService:
 
         final_attempt = trace.attempts[-1] if trace.attempts else None
         normalized_prompt = str(prompt or "")
+        if len(normalized_prompt) > MAX_AUDIT_PROMPT_CHARS:
+            raise InteractionAuditError("交互审计失败：Prompt 超出持久化安全上限")
         if final_attempt and not final_attempt.prompt_digest:
             raise ValueError("新审计中的 RagAttempt 必须包含 prompt_digest")
         if final_attempt:
@@ -508,6 +526,10 @@ class LLMTaskService:
                 for source in model_attempt.sources
             ]
             serialized_attempt_sources = self._serialize(attempt_sources)
+            if len(str(model_attempt.raw_response or "")) > MAX_AUDIT_RESPONSE_CHARS:
+                raise InteractionAuditError("交互审计失败：模型原始响应超出安全上限")
+            if len(serialized_attempt_sources) > MAX_AUDIT_SOURCES_JSON_CHARS:
+                raise InteractionAuditError("交互审计失败：来源证据超出安全上限")
             attempt_row = (
                 sequence_no,
                 model_attempt.operation,
@@ -577,6 +599,8 @@ class LLMTaskService:
             separators=(",", ":"),
             allow_nan=False,
         )
+        if len(serialized_trace) > MAX_AUDIT_TRACE_JSON_CHARS:
+            raise InteractionAuditError("交互审计失败：完整执行轨迹超出安全上限")
         trace_digest = hashlib.sha256(serialized_trace.encode("utf-8")).hexdigest()
         now = _utc_now_iso()
 

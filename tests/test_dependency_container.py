@@ -1,4 +1,4 @@
-"""阶段 6 应用容器、任务级 Factory 与路由注入的离线测试。"""
+"""阶段 6/8 应用容器、任务级 Factory 与路由注入的离线测试。"""
 
 from __future__ import annotations
 
@@ -7,9 +7,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 from app import create_app
-from app.integrations.anythingllm.factory import AnythingLLMGatewayFactory
+from app.integrations.anythingllm.factory import (
+    AnythingLLMGatewayFactory,
+    AnythingLLMKnowledgeIndexFactory,
+)
 from app.integrations.anythingllm.transport import AnythingLLMTransport
-from app.ports import DocumentRagFactory, DocumentRagPort
+from app.ports import (
+    DocumentRagFactory,
+    DocumentRagPort,
+    KnowledgeIndexFactory,
+    KnowledgeIndexPort,
+)
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.container import (
     APPLICATION_SERVICES_EXTENSION,
@@ -20,7 +28,7 @@ from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
-from tests.fakes import FakeDocumentRagFactory
+from tests.fakes import FakeDocumentRagFactory, FakeKnowledgeIndexFactory
 
 
 class AnythingLLMGatewayFactoryTests(unittest.TestCase):
@@ -104,6 +112,41 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
                 self.fail("Transport 构造失败后不应进入任务作用域")
 
 
+class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
+    """验证永久知识库 Factory 同样保持惰性和任务级 Transport 生命周期。"""
+
+    def test_knowledge_factory_is_lazy_and_closes_transport(self) -> None:
+        """创建租约不联网，进入后返回 Port，退出时关闭本次独立 Transport。"""
+        with workspace_tempdir() as tmp:
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            database_service = DatabaseService(
+                db_path=f"{tmp}/knowledge.sqlite3"
+            )
+            transport = MagicMock(spec=AnythingLLMTransport)
+            transport_factory = Mock(return_value=transport)
+            factory = AnythingLLMKnowledgeIndexFactory(
+                AnythingLLMConfig(
+                    base_url="http://anythingllm.invalid/api/v1",
+                    api_key="test-key",
+                    timeout=5.0,
+                    storage_root=None,
+                ),
+                task_service.knowledge_index_operations,
+                database_service,
+                transport_factory=transport_factory,
+            )
+
+            lease = factory.create()
+            self.assertIsInstance(factory, KnowledgeIndexFactory)
+            transport_factory.assert_not_called()
+
+            with lease as gateway:
+                self.assertIsInstance(gateway, KnowledgeIndexPort)
+                transport.close.assert_not_called()
+
+            transport.close.assert_called_once_with()
+
+
 class UploadTaskLimiterTests(unittest.TestCase):
     """验证上传并发许可在异常路径也会归还。"""
 
@@ -125,9 +168,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self._temp_directory = workspace_tempdir()
         self.runtime_directory = self._temp_directory.__enter__()
         self.document_rag_factory = FakeDocumentRagFactory()
+        self.knowledge_index_factory = FakeKnowledgeIndexFactory()
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
-            knowledge_index_factory=None,
+            knowledge_index_factory=self.knowledge_index_factory,
             task_service=LLMTaskService(
                 db_path=f"{self.runtime_directory}/tasks.sqlite3"
             ),

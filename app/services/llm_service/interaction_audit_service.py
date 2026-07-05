@@ -28,6 +28,18 @@ AUDIT_STATUS_SUCCEEDED = "succeeded"
 AUDIT_SCHEMA_VERSION = 2
 """带执行身份、完整 trace 明细和摘要校验的当前审计结构版本。"""
 
+MAX_AUDIT_PROMPT_CHARS = 256_000
+"""单次审计允许保存的完整 Prompt 字符数硬上限。"""
+
+MAX_AUDIT_RESPONSE_CHARS = 2_000_000
+"""单次模型尝试允许保存的原始响应字符数硬上限。"""
+
+MAX_AUDIT_SOURCES_JSON_CHARS = 4_000_000
+"""单次模型尝试允许保存的来源 JSON 字符数硬上限。"""
+
+MAX_AUDIT_TRACE_JSON_CHARS = 12_000_000
+"""一次完整交互审计参与摘要计算的规范 JSON 字符数硬上限。"""
+
 _T = TypeVar("_T")
 
 

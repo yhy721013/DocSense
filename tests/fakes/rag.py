@@ -101,6 +101,7 @@ class FakeDocumentRagSession:
         self._first_cleanup_result: Optional[CleanupResult] = None
         self._failure_stage: Optional[str] = None
         self._error_message: Optional[str] = None
+        self._content_sha256 = hashlib.sha256(b"fake-document").hexdigest()
 
     def analyse(
         self,
@@ -117,7 +118,10 @@ class FakeDocumentRagSession:
                 "analyse 只能调用一次",
                 failure_stage="analyse_repeated",
             )
-        self._required_text(file_path, name="file_path")
+        normalized_file_path = self._required_text(file_path, name="file_path")
+        self._content_sha256 = hashlib.sha256(
+            normalized_file_path.encode("utf-8")
+        ).hexdigest()
         normalized_prompt = self._required_text(prompt, name="prompt")
         self._validate_max_attempts(max_attempts)
         self._analyse_started = True
@@ -268,6 +272,7 @@ class FakeDocumentRagSession:
                             else "document:fake"
                         ),
                         external_location="external:fake-document",
+                        content_sha256=self._content_sha256,
                     ),
                     trace=self._trace(),
                 )

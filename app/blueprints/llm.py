@@ -437,7 +437,10 @@ def llm_weaponry():
         return jsonify({"error": str(exc)}), 400
 
     for file_name in selected_file_names:
-        document_record = kb_service.get_document_record(file_name)
+        document_record = kb_service.get_document_record(
+            file_name,
+            architecture_id=int(architecture_id),
+        )
         if not document_record:
             logger.warning(
                 "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s fileName=%s",
@@ -684,7 +687,10 @@ def llm_reassign():
         )
         return jsonify({"error": "oldArchitectureId与newArchitectureId不能相同"}), 400
 
-    doc_record = kb_service.get_document_record(file_name)
+    doc_record = kb_service.get_document_record(
+        file_name,
+        architecture_id=int(old_architecture_id),
+    )
     if not doc_record:
         logger.warning(
             "文档分类变更失败: 文档记录不存在 fileName=%s oldArchitectureId=%s newArchitectureId=%s",
@@ -756,7 +762,11 @@ def llm_reassign():
             }
         }), 500
 
-    kb_service.update_document_architecture(file_name, new_architecture_id)
+    kb_service.update_document_architecture(
+        file_name,
+        new_architecture_id,
+        current_architecture_id=int(old_architecture_id),
+    )
 
     return jsonify({
         "businessType": "reassign",

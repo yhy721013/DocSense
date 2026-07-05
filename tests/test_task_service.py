@@ -762,3 +762,37 @@ class LLMTaskServiceTests(unittest.TestCase):
             service.mark_callback_skipped("file", "skipped.pdf")
             with self.assertRaisesRegex(ValueError, "非法回调状态转换"):
                 service.mark_callback_success("file", "skipped.pdf")
+
+    def test_rag_resource_lease_survives_audit_failure_for_recovery(self):
+        """审计失败时外部资源引用必须保留在独立租约中供巡检。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            leases = service.rag_resource_leases
+            leases.begin(
+                execution_id="execution-lease",
+                business_type="file",
+                business_key="lease.pdf",
+            )
+            leases.record_resources(
+                execution_id="execution-lease",
+                context_ref="context:1",
+                conversation_ref="conversation:1",
+                document_ref="document:1",
+                external_location="custom-documents/lease.pdf.json",
+            )
+            leases.mark_audit_result(
+                execution_id="execution-lease",
+                interaction_id=None,
+                error_message="audit database unavailable",
+            )
+
+            open_leases = leases.list_open()
+            self.assertEqual(1, len(open_leases))
+            self.assertEqual("audit_failed", open_leases[0].status)
+            self.assertEqual("document:1", open_leases[0].document_ref)
+
+            leases.mark_closed(
+                execution_id="execution-lease",
+                manual_recovery=True,
+            )
+            self.assertEqual([], leases.list_open())

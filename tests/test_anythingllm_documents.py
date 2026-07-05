@@ -146,6 +146,16 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
 
         self.transport.post_multipart.assert_not_called()
 
+    def test_upload_metadata_rejects_non_finite_numbers_before_http(self) -> None:
+        """NaN 不是严格 JSON，不能进入可重试上传请求或协调身份。"""
+        with self.assertRaises(ValueError):
+            self.client.upload_document(
+                str(self.file_path),
+                metadata={"score": float("nan")},
+            )
+
+        self.transport.post_multipart.assert_not_called()
+
     def test_upload_metadata_rejects_non_string_or_empty_keys(self) -> None:
         """元数据键不得通过隐式字符串转换产生碰撞或无名字段。"""
         for metadata in ({1: "value"}, {"": "value"}, {"   ": "value"}):

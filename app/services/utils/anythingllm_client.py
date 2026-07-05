@@ -29,6 +29,7 @@ from app.integrations.anythingllm.models import (
     AnythingLLMWorkspace,
     normalize_document_path,
 )
+from app.integrations.anythingllm.policies import document_rag_workspace_settings
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
@@ -39,29 +40,8 @@ logger = logging.getLogger(__name__)
 
 
 def _rag_workspace_settings() -> dict[str, Any]:
-    """返回旧 RAG 工作区使用的独立配置字典，避免请求间共享可变对象。"""
-    return {
-        "similarityThreshold": 0.25,
-        "openAiTemp": 0.1,
-        "openAiHistory": 1,
-        "openAiPrompt": (
-            "你是一个文档信息抽取与判断系统。\n"
-            "【重要规则】\n"
-            "1. 你只能基于已提供的文档内容回答，不得使用常识或猜测。\n"
-            "2. 如果文档中不存在相关信息，必须返回 null。\n"
-            "3. 你必须只输出合法的 JSON，不得包含任何解释、注释、Markdown 或多余文本。\n"
-            "4. JSON 的字段名、层级和类型必须严格保持一致。\n"
-            "5. 不允许补充文档中未明确出现的信息。\n"
-        ),
-        # 拒答内容仍使用合法 JSON，避免旧调用方按 JSON 解析时产生二次错误。
-        "queryRefusalResponse": (
-            '{"outline":[],"security_level":"公开","category_confidence":0.1,'
-            '"category":null,"sub_category":null,"category_candidates":[],'
-            '"extract":{},"summary":"未能从文档中检索到足够信息"}'
-        ),
-        "chatMode": "query",
-        "topN": 6,
-    }
+    """兼容旧调用方，并复用新集成层的唯一文档 RAG 策略。"""
+    return dict(document_rag_workspace_settings())
 
 
 def _chat_workspace_settings() -> dict[str, Any]:

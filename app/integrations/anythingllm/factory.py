@@ -1,18 +1,23 @@
-"""AnythingLLM 文档 RAG 的任务级依赖工厂。
+"""AnythingLLM 文档 RAG 与永久知识库的任务级依赖工厂。
 
-本模块是新文档 RAG 链路中唯一负责创建供应商对象图的位置。工厂自身只保存不可变配置，
-不持有 ``requests.Session``；每次进入 ``create`` 返回的上下文时，都会创建独立
-Transport、三个原子 Client 和一个 Gateway，并在退出任务作用域时关闭 Transport。
+本模块是新集成链路中唯一负责创建供应商对象图的位置。工厂自身只保存不可变配置和
+线程安全协调依赖，不持有 ``requests.Session``；每次进入 ``create`` 返回的上下文时，
+都会创建独立 Transport、所需原子 Client 和一个 Gateway，并在退出任务作用域时关闭
+Transport。
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import AbstractContextManager, contextmanager
 from types import MappingProxyType
 from typing import Any, Callable, Iterator, Mapping, Optional
 
 from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.knowledge_gateway import (
+    AnythingLLMKnowledgeGateway,
+)
 from app.integrations.anythingllm.policies import (
     DEFAULT_EMBEDDING_ATTEMPTS,
     DEFAULT_UPLOAD_RETRIES,
@@ -25,8 +30,12 @@ from app.integrations.anythingllm.rag_gateway import AnythingLLMRagGateway
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
-from app.ports import DocumentRagPort
+from app.ports import DocumentRagPort, KnowledgeIndexPort
 from app.services.core.config import AnythingLLMConfig
+from app.services.core.database import DatabaseService
+from app.services.llm_service.knowledge_index_operation_service import (
+    KnowledgeIndexOperationService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +147,106 @@ class AnythingLLMGatewayFactory:
                     if task_failed:
                         logger.exception(
                             "关闭 AnythingLLM 任务级 Transport 失败，保留原始任务异常"
+                        )
+                    else:
+                        raise
+
+
+class AnythingLLMKnowledgeIndexFactory:
+    """为每个任务创建永久知识库 Gateway，并共享进程内协调锁。
+
+    Factory 自身不持有网络连接，可以安全地作为应用单例共享。每次租约仍创建独立
+    Transport 和原子 Client；共享可重入锁仅串行化永久知识库的复合状态转换，防止同一
+    进程中的两个后台线程同时执行“检查协调记录后上传”的竞态。跨进程互斥继续由 SQLite
+    唯一约束和状态检查承担。
+    """
+
+    def __init__(
+        self,
+        config: AnythingLLMConfig,
+        operation_service: KnowledgeIndexOperationService,
+        database_service: DatabaseService,
+        *,
+        user_id: Optional[int] = 1,
+        workspace_settings: Optional[Mapping[str, Any]] = None,
+        upload_max_retries: int = DEFAULT_UPLOAD_RETRIES,
+        upload_retry_base_delay: float = DEFAULT_UPLOAD_RETRY_BASE_DELAY_SECONDS,
+        transport_factory: Callable[..., AnythingLLMTransport] = AnythingLLMTransport,
+    ) -> None:
+        """校验永久知识库对象图依赖，不在应用启动阶段创建 HTTP Session。"""
+        if not isinstance(config, AnythingLLMConfig):
+            raise TypeError("config 必须是 AnythingLLMConfig")
+        if not isinstance(operation_service, KnowledgeIndexOperationService):
+            raise TypeError("operation_service 类型无效")
+        if not isinstance(database_service, DatabaseService):
+            raise TypeError("database_service 类型无效")
+        if user_id is not None and (
+            isinstance(user_id, bool)
+            or not isinstance(user_id, int)
+            or user_id < 1
+        ):
+            raise ValueError("user_id 必须是正整数或 None")
+        if not callable(transport_factory):
+            raise TypeError("transport_factory 必须可调用")
+        self._config = config
+        self._operation_service = operation_service
+        self._database_service = database_service
+        self._user_id = user_id
+        self._workspace_settings = MappingProxyType(dict(workspace_settings or {}))
+        self._upload_max_retries = validate_upload_max_retries(upload_max_retries)
+        self._upload_retry_base_delay = validate_upload_retry_base_delay(
+            upload_retry_base_delay
+        )
+        self._transport_factory = transport_factory
+        self._operation_lock = threading.RLock()
+
+    def create(self) -> AbstractContextManager[KnowledgeIndexPort]:
+        """返回惰性任务租约，进入 ``with`` 后才创建网络对象图。"""
+        return self._create_lease()
+
+    @contextmanager
+    def _create_lease(self) -> Iterator[KnowledgeIndexPort]:
+        """创建永久知识库对象图，并在所有退出路径关闭 Transport。"""
+        transport: Optional[AnythingLLMTransport] = None
+        task_failed = False
+        try:
+            transport = self._transport_factory(
+                base_url=self._config.base_url,
+                api_key=self._config.api_key,
+                timeout=self._config.timeout,
+            )
+            document_client = AnythingLLMDocumentClient(
+                transport,
+                upload_max_retries=self._upload_max_retries,
+                upload_retry_base_delay=self._upload_retry_base_delay,
+            )
+            workspace_client = AnythingLLMWorkspaceClient(transport)
+            gateway = AnythingLLMKnowledgeGateway(
+                document_client,
+                workspace_client,
+                self._operation_service,
+                self._database_service,
+                operation_lock=self._operation_lock,
+                user_id=self._user_id,
+                workspace_settings=self._workspace_settings,
+            )
+            logger.debug(
+                "创建 AnythingLLM 任务级永久知识库对象图: has_user_context=%s",
+                self._user_id is not None,
+            )
+            yield gateway
+        except BaseException:
+            task_failed = True
+            raise
+        finally:
+            if transport is not None:
+                try:
+                    transport.close()
+                    logger.debug("关闭 AnythingLLM 任务级永久知识库对象图")
+                except Exception:
+                    if task_failed:
+                        logger.exception(
+                            "关闭永久知识库 Transport 失败，保留原始任务异常"
                         )
                     else:
                         raise
