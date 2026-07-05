@@ -161,7 +161,7 @@ class AnythingLLMRagGateway:
                 ),
             )
             logger.error(
-                "anythingllm.context.create_failed: operation=open_session "
+                "AnythingLLM 隔离工作区创建失败: 动作=open_session "
                 "context_name=%s stage=context_create error_type=%s",
                 normalized_context_name,
                 type(exc).__name__,
@@ -169,7 +169,7 @@ class AnythingLLMRagGateway:
             raise RagOperationError(error_message, trace) from exc
 
         logger.info(
-            "anythingllm.context.created: operation=open_session context_ref=%s",
+            "AnythingLLM 隔离工作区创建完成: 动作=open_session context_ref=%s",
             context_ref,
         )
         try:
@@ -191,7 +191,7 @@ class AnythingLLMRagGateway:
             ) from exc
 
         logger.info(
-            "anythingllm.conversation.created: operation=open_session "
+            "AnythingLLM 隔离线程创建完成: 动作=open_session "
             "context_ref=%s conversation_ref=%s",
             context_ref,
             conversation_ref,
@@ -262,7 +262,7 @@ class AnythingLLMRagGateway:
                 )
             )
             logger.info(
-                "anythingllm.context.rollback_completed: operation=open_session "
+                "AnythingLLM 隔离工作区回滚完成: 动作=open_session "
                 "context_ref=%s stage=conversation_create",
                 context_ref,
             )
@@ -282,7 +282,7 @@ class AnythingLLMRagGateway:
                 )
             )
             logger.error(
-                "anythingllm.context.rollback_failed: operation=open_session "
+                "AnythingLLM 隔离工作区回滚失败: 动作=open_session "
                 "context_ref=%s stage=cleanup error_type=%s",
                 context_ref,
                 type(cleanup_exc).__name__,
@@ -556,7 +556,7 @@ class _AnythingLLMRagSession:
                 external_ref=self._context_ref,
             )
             logger.info(
-                "anythingllm.session.cleanup: operation=context_delete context_ref=%s "
+                "AnythingLLM 会话临时资源清理完成: 动作=context_delete context_ref=%s "
                 "conversation_ref=%s cleanup_status=succeeded",
                 self._context_ref,
                 self._conversation_ref,
@@ -576,7 +576,7 @@ class _AnythingLLMRagSession:
                 error_message=error_message,
             )
             logger.error(
-                "anythingllm.session.cleanup: operation=context_delete context_ref=%s "
+                "AnythingLLM 会话临时资源清理失败: 动作=context_delete context_ref=%s "
                 "conversation_ref=%s cleanup_status=failed error_type=%s",
                 self._context_ref,
                 self._conversation_ref,
@@ -590,7 +590,7 @@ class _AnythingLLMRagSession:
         self._first_cleanup_result = result
         logger.log(
             logging.INFO if result.success else logging.WARNING,
-            "anythingllm.session.closed: context_ref=%s conversation_ref=%s "
+            "AnythingLLM 会话已关闭: context_ref=%s conversation_ref=%s "
             "retain_document=%s cleanup_status=%s cleanup_error_count=%d",
             self._context_ref,
             self._conversation_ref,
@@ -680,7 +680,7 @@ class _AnythingLLMRagSession:
             external_ref=location,
         )
         logger.info(
-            "anythingllm.document.uploaded: operation=analyse context_ref=%s "
+            "AnythingLLM 文档上传完成: 动作=analyse context_ref=%s "
             "upload_id=%s location=%s document_ref=%s file_name=%s",
             self._context_ref,
             document_id,
@@ -718,7 +718,7 @@ class _AnythingLLMRagSession:
                 )
                 self._bound_locations.add(location)
                 logger.info(
-                    "anythingllm.embedding.accepted: operation=analyse context_ref=%s "
+                    "AnythingLLM 文档嵌入变更已接受: 动作=analyse context_ref=%s "
                     "attempt=%d location=%s",
                     self._context_ref,
                     lifecycle_attempt,
@@ -761,7 +761,7 @@ class _AnythingLLMRagSession:
                 )
                 if can_retry:
                     logger.warning(
-                        "anythingllm.embedding.retry: operation=analyse context_ref=%s "
+                        "AnythingLLM 文档嵌入暂态失败，准备重试: 动作=analyse context_ref=%s "
                         "attempt=%d/%d http_status=%s",
                         self._context_ref,
                         local_attempt,
@@ -815,7 +815,7 @@ class _AnythingLLMRagSession:
                 )
                 self._pinned_location = location
                 logger.info(
-                    "anythingllm.document.pinned: operation=analyse context_ref=%s "
+                    "AnythingLLM 文档 Pin 完成: 动作=analyse context_ref=%s "
                     "attempt=%d location=%s",
                     self._context_ref,
                     pin_attempt,
@@ -835,7 +835,7 @@ class _AnythingLLMRagSession:
                 )
                 if exc.status_code == 404 and pin_attempt == 1:
                     logger.warning(
-                        "anythingllm.pin.recover: operation=analyse context_ref=%s "
+                        "AnythingLLM 文档 Pin 未找到，准备重新绑定后恢复: 动作=analyse context_ref=%s "
                         "attempt=1 http_status=404 action=rebind",
                         self._context_ref,
                     )
@@ -950,7 +950,7 @@ class _AnythingLLMRagSession:
                 )
                 logger.log(
                     source_log_level,
-                    "anythingllm.sources.verified: operation=%s context_ref=%s "
+                    "AnythingLLM 来源归属校验完成: 动作=%s context_ref=%s "
                     "conversation_ref=%s attempt=%d source_count=%d "
                     "verified_source_count=%d missing_marker_count=%d "
                     "mismatched_marker_count=%d verified=%s",
@@ -1019,7 +1019,7 @@ class _AnythingLLMRagSession:
                         trace=self._trace(),
                     )
                     logger.info(
-                        "anythingllm.query.completed: operation=%s context_ref=%s "
+                        "AnythingLLM 查询完成: 动作=%s context_ref=%s "
                         "conversation_ref=%s attempt=%d response_length=%d "
                         "sources_count=%d missing_marker_count=%d "
                         "mismatched_marker_count=%d "
@@ -1085,7 +1085,7 @@ class _AnythingLLMRagSession:
                 ) from exc
 
             logger.warning(
-                "anythingllm.query.retry_or_fail: operation=%s context_ref=%s "
+                "AnythingLLM 查询未满足契约，准备重试或失败: 动作=%s context_ref=%s "
                 "conversation_ref=%s attempt=%d/%d stage=%s",
                 operation,
                 self._context_ref,
@@ -1212,7 +1212,7 @@ class _AnythingLLMRagSession:
                 external_ref=location,
             )
             logger.info(
-                "anythingllm.document.compensated: operation=global_document_delete "
+                "AnythingLLM 全局文档补偿删除完成: 动作=global_document_delete "
                 "context_ref=%s location=%s cleanup_status=succeeded",
                 self._context_ref,
                 location,
@@ -1235,8 +1235,8 @@ class _AnythingLLMRagSession:
                 error_message=cleanup_error,
             )
             logger.error(
-                "anythingllm.document.compensation_failed: "
-                "operation=global_document_delete context_ref=%s location=%s "
+                "AnythingLLM 全局文档补偿删除失败: "
+                "动作=global_document_delete context_ref=%s location=%s "
                 "cleanup_status=failed error_type=%s",
                 self._context_ref,
                 location,
@@ -1294,7 +1294,7 @@ class _AnythingLLMRagSession:
         self._failure_stage = failure_stage
         self._error_message = message
         logger.error(
-            "anythingllm.rag.failed: context_ref=%s conversation_ref=%s stage=%s",
+            "AnythingLLM RAG 操作失败: context_ref=%s conversation_ref=%s stage=%s",
             self._context_ref,
             self._conversation_ref,
             failure_stage,

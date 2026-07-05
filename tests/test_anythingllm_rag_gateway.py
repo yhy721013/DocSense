@@ -189,11 +189,11 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             upload_kwargs["metadata"],
         )
         log_text = "\n".join(captured.output)
-        self.assertIn("anythingllm.document.uploaded", log_text)
-        self.assertIn("anythingllm.embedding.accepted", log_text)
-        self.assertIn("anythingllm.document.pinned", log_text)
-        self.assertIn("anythingllm.sources.verified", log_text)
-        self.assertIn("anythingllm.query.completed", log_text)
+        self.assertIn("AnythingLLM 文档上传完成", log_text)
+        self.assertIn("AnythingLLM 文档嵌入变更已接受", log_text)
+        self.assertIn("AnythingLLM 文档 Pin 完成", log_text)
+        self.assertIn("AnythingLLM 来源归属校验完成", log_text)
+        self.assertIn("AnythingLLM 查询完成", log_text)
         self.assertNotIn(harness.SOURCE_MARKER, log_text)
 
     def test_source_optional_fields_can_be_absent(self) -> None:
