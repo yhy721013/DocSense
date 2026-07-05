@@ -45,7 +45,13 @@ class DatabaseService:
             logger.info("数据库初始化完成: %s", self.db_path)
 
     def _ensure_documents_schema(self, conn: sqlite3.Connection) -> None:
-        """兼容旧列并迁移全局文件名主键为 architecture 内唯一键。"""
+        """把历史 ``documents`` 表向前迁移到当前结构。
+
+        该方法只在数据库初始化持有写锁时调用，所有 DDL、历史数据回填和表重建都处于
+        同一个 SQLite 事务中。迁移必须在任何业务读写发生前完成，不能把修改表结构的
+        副作用放进 ``list_document_records()`` 等查询方法，否则首次调用不同接口时会得到
+        不一致的数据库契约。
+        """
         cursor = conn.execute("PRAGMA table_info(documents)")
         columns = {row[1] for row in cursor.fetchall()}
 
@@ -70,6 +76,76 @@ class DatabaseService:
             SET original_name = file_name
             WHERE original_name IS NULL OR original_name = ''
             """
+        )
+
+        if not self._has_document_identity_constraint(conn):
+            self._migrate_documents_identity_constraint(conn)
+
+    @staticmethod
+    def _has_document_identity_constraint(conn: sqlite3.Connection) -> bool:
+        """判断文档表是否具备 ``(architecture_id, file_name)`` 唯一约束。
+
+        不能仅判断 ``file_name`` 是否仍为主键：某些中间版本可能已经移除了旧主键，
+        却尚未建立新的复合唯一约束。逐个检查 SQLite 唯一索引可以覆盖建表约束和显式
+        唯一索引两种实现，确保后续 UPSERT 的冲突目标确实存在。
+        """
+        for index_row in conn.execute("PRAGMA index_list(documents)").fetchall():
+            # PRAGMA index_list 的第三列表示该索引是否唯一。普通查询索引不能作为
+            # ON CONFLICT(architecture_id, file_name) 的冲突目标。
+            if not bool(index_row[2]):
+                continue
+            index_name = str(index_row[1]).replace('"', '""')
+            index_columns = [
+                str(column_row[2])
+                for column_row in conn.execute(
+                    f'PRAGMA index_info("{index_name}")'
+                ).fetchall()
+            ]
+            if index_columns == ["architecture_id", "file_name"]:
+                return True
+        return False
+
+    def _migrate_documents_identity_constraint(
+        self,
+        conn: sqlite3.Connection,
+    ) -> None:
+        """重建文档表，将全局文件名唯一规则改为分类内唯一规则。
+
+        SQLite 不能原地修改主键或表级唯一约束，因此需要在当前初始化事务中重命名旧表、
+        创建目标表并复制数据。任何一步失败都会使初始化失败并回滚，避免应用在结构不完整
+        的数据库上继续运行。复制时若发现历史数据违反新约束，也应明确失败，不能静默丢行。
+        """
+        legacy_table = "documents_legacy_identity"
+        conn.execute(f"ALTER TABLE documents RENAME TO {legacy_table}")
+        conn.execute(
+            """
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_name TEXT NOT NULL,
+                original_name TEXT NOT NULL DEFAULT '',
+                architecture_id INTEGER NOT NULL,
+                anything_doc_id TEXT NOT NULL,
+                doc_path TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE (architecture_id, file_name)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO documents (
+                file_name, original_name, architecture_id,
+                anything_doc_id, doc_path, metadata_json
+            )
+            SELECT file_name, original_name, architecture_id,
+                   anything_doc_id, doc_path, metadata_json
+            FROM {legacy_table}
+            """
+        )
+        conn.execute(f"DROP TABLE {legacy_table}")
+        logger.info(
+            "documents 表身份约束迁移完成: uniqueness=(architecture_id,file_name) db_path=%s",
+            self.db_path,
         )
 
     # ================= Workspace 表的增删改查 =================
@@ -353,7 +429,11 @@ class DatabaseService:
             return result
 
     def list_document_records(self) -> list[dict]:
-        """按文件名升序返回全部文档记录。"""
+        """按文件名和分类升序返回全部文档记录。
+
+        数据库结构迁移由初始化阶段统一完成，因此本方法是无副作用的纯查询。无记录时
+        返回空列表，任何正常路径都不得返回 ``None``，以维持公开类型标注承诺的契约。
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
@@ -361,45 +441,10 @@ class DatabaseService:
                 SELECT file_name, original_name, architecture_id,
                        anything_doc_id, doc_path, metadata_json
                 FROM documents
-                ORDER BY file_name ASC
-            """
-        )
-        table_info = conn.execute("PRAGMA table_info(documents)").fetchall()
-        file_name_is_primary_key = any(
-            row[1] == "file_name" and int(row[5]) > 0 for row in table_info
-        )
-        if file_name_is_primary_key:
-            # SQLite 不能原地修改主键。迁移在初始化事务内完成：任一步失败都会回滚，
-            # 不会留下半张新表或丢失旧数据。
-            conn.execute("ALTER TABLE documents RENAME TO documents_legacy_file_pk")
-            conn.execute(
-                """
-                CREATE TABLE documents (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    file_name TEXT NOT NULL,
-                    original_name TEXT NOT NULL DEFAULT '',
-                    architecture_id INTEGER NOT NULL,
-                    anything_doc_id TEXT NOT NULL,
-                    doc_path TEXT,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    UNIQUE (architecture_id, file_name)
-                )
+                ORDER BY file_name ASC, architecture_id ASC
                 """
             )
-            conn.execute(
-                """
-                INSERT INTO documents (
-                    file_name, original_name, architecture_id,
-                    anything_doc_id, doc_path, metadata_json
-                )
-                SELECT file_name, original_name, architecture_id,
-                       anything_doc_id, doc_path, metadata_json
-                FROM documents_legacy_file_pk
-                """
-            )
-            conn.execute("DROP TABLE documents_legacy_file_pk")
-            logger.info("documents 表已迁移为 architecture 内文件名唯一: %s", self.db_path)
-            records = []
+            records: list[dict] = []
             for row in cursor.fetchall():
                 record = dict(row)
                 record["metadata"] = self._deserialize_document_metadata(

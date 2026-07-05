@@ -330,9 +330,18 @@ def _target_document_records(
     architecture_id: int,
     selected_file_names: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    all_records = kb_service.list_document_records()
+    # 数据库服务公开契约要求始终返回列表。此处保留边界校验，可以把未来实现回归或测试
+    # 替身错误转换为带有明确上下文的异常，避免再次暴露难以定位的“NoneType 不可迭代”。
+    # 不使用 ``all_records or []`` 静默降级，因为空列表与违反返回契约具有不同业务含义。
+    if not isinstance(all_records, list):
+        raise TypeError(
+            "文档记录查询返回契约错误: "
+            f"期望 list，实际为 {type(all_records).__name__}"
+        )
     records = [
         record
-        for record in kb_service.list_document_records()
+        for record in all_records
         if str(record.get("architecture_id")) == str(architecture_id)
     ]
     if not selected_file_names:

@@ -233,6 +233,15 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不存在或不属于当前类别"):
             _target_document_records(FakeKB(), 123, ["other.pdf"])
 
+    def test_target_document_records_reject_invalid_database_contract(self):
+        """数据库实现若错误返回 None，应产生可诊断的契约异常而非迭代器异常。"""
+        class InvalidKB:
+            def list_document_records(self):
+                return None
+
+        with self.assertRaisesRegex(TypeError, "文档记录查询返回契约错误"):
+            _target_document_records(InvalidKB(), 123, ["a.pdf"])
+
     def test_resolve_original_source_name_for_mode2_callback(self):
         context = WeaponryRetrievalContext(
             target_file_names={"hash-name.pdf", "尼米兹级资料.pdf"},
