@@ -126,6 +126,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "10. documentOverview 字段要求输出不少于 1000 字的描述，尽可能详细完整，突出文档核心内容和特点。\n"
         "11. fileDataItem.dataTime 必须输出文档中明确提到的资料年代，输出格式为 yyyy-MM-dd，找不到时输出空字符串。\n"
         + data_standard_contract
+        + "12. fileDataItem.language 表示“原始资料正文的主要语种”，不是本次回答语言、摘要语言、翻译结果语言、文件名语言或提示词语言。\n"
         + "【正反例】\n"
         "- 正确：\"country\": \"美国\"\n"
         "- 错误：\"country\": {\"key\": \"02\", \"value\": \"美国\"}\n"

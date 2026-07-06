@@ -260,11 +260,9 @@ python run.py
 
 回调调试页说明：
 
-- 新回调 JSON 历史记录统一保存在 `${DOCSENSE_RUNTIME_DIR}/callback/`
-- `/debug/callback` 和 `/debug/api/callback` 暂不浏览回调历史目录，仍只尝试读取旧版 `${DOCSENSE_RUNTIME_DIR}/call_back.json`
-- 新回调 JSON 历史记录统一保存在仓库根目录 `.runtime/callback/`
-- `/debug/callback` 默认展示 `.runtime/callback/` 下最新一条回调，并可在页面中选择最近历史记录
-- `/debug/api/callback?record=<json文件名>` 可读取指定历史回调文件；不再兜底读取旧版 `.runtime/call_back.json`
+- 新回调 JSON 历史记录统一保存在 `${DOCSENSE_RUNTIME_DIR}/callback/`（默认仓库根目录 `.runtime/callback/`）
+- `/debug/callback` 默认展示回调历史目录下最新一条回调，并可在页面中选择最近历史记录
+- `/debug/api/callback?record=<json文件名>` 可读取指定历史回调文件；不再兜底读取旧版 `${DOCSENSE_RUNTIME_DIR}/call_back.json`
 - `file` 回调会结构化展示摘要信息、原文和翻译预览
 - `report` 回调会结构化展示报告信息和 HTML 报告预览
 - `weaponry` 回调会结构化展示字段抽取结果和溯源信息
