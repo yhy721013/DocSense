@@ -33,6 +33,7 @@ from app.services.llm_service.knowledge_index_operation_service import (
 from app.services.llm_service.rag_resource_lease_service import (
     RagResourceLeaseService,
 )
+from app.services.core.progress import normalize_progress
 from app.services.utils.callback_client import post_callback_payload
 
 
@@ -320,7 +321,7 @@ class LLMTaskService:
             "execution_id": row["execution_id"],
             "request_payload": self._deserialize(row["request_payload"]),
             "status": row["status"],
-            "progress": row["progress"],
+            "progress": normalize_progress(row["progress"]),
             "message": row["message"],
             "result_payload": self._deserialize(row["result_payload"]),
             "callback_status": row["callback_status"],
@@ -1153,6 +1154,7 @@ class LLMTaskService:
         status: Optional[str] = None,
     ) -> None:
         now = _utc_now_iso()
+        progress = normalize_progress(progress)
         status_sql = "status = ?, " if status is not None else ""
         params: list[Any] = []
         if status is not None:

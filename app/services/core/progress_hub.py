@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Callable, DefaultDict, Dict, List, Tuple
 
+from app.services.core.progress import normalize_progress_payload
+
 
 Subscriber = Callable[[Dict[str, Any]], None]
 
@@ -31,6 +33,7 @@ class LLMProgressHub:
 
     def publish(self, business_type: str, business_key: str, payload: Dict[str, Any]) -> None:
         key = (business_type, business_key)
+        payload = normalize_progress_payload(payload)
         self._latest[key] = payload
         for callback in list(self._subscribers.get(key, [])):
             callback(payload)
