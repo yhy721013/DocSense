@@ -229,7 +229,9 @@ class MarkdownHandler:
 
     def _convert_bilingual_to_monolingual(self, bilingual_html: str) -> str:
         """
-        将双语 HTML 转换为单语 HTML（只保留译文）
+        将双语 HTML 转换为单语 HTML
+        - 中文段落：保持 original-text 样式（黑色）
+        - 英文段落：移除原文，只保留 translated-text 样式（蓝色译文）
         :param bilingual_html: 双语 HTML 内容
         :return: 单语 HTML 内容
         """
@@ -238,16 +240,19 @@ class MarkdownHandler:
         # 复制一份双语 HTML
         monolingual_html = bilingual_html
 
-        # 移除所有 original-text span/div，只保留 translated-text
-        # 匹配 span 级别的双语结构
-        span_pattern = r'<span class="original-text">.*?</span>\s*<span class="translated-text">(.*?)</span>'
+        # 【关键修复1】span 级别的双语结构：移除原文，只保留译文（英文段落）
+        # 【重要】使用 [^<]* 替代 .*? 避免跨标签匹配
+        span_pattern = r'<span class="original-text">[^<]*</span>\s*<span class="translated-text">([^<]*)</span>'
         span_monolingual_pattern = r'<span class="translated-text">\1</span>'
         monolingual_html = re.sub(span_pattern, span_monolingual_pattern, monolingual_html, flags=re.DOTALL)
 
-        # 匹配 div 级别的双语结构
-        div_pattern = r'<div class="paragraph">\s*<div class="original-text">.*?</div>\s*<div class="translated-text">(.*?)</div>\s*</div>'
+        # 【关键修复2】div 级别的双语结构：移除原文，只保留译文（英文段落）
+        div_pattern = r'<div class="paragraph">\s*<div class="original-text">[^<]*</div>\s*<div class="translated-text">([^<]*)</div>\s*</div>'
         div_monolingual_pattern = r'<div class="paragraph"><div class="translated-text">\1</div></div>'
         monolingual_html = re.sub(div_pattern, div_monolingual_pattern, monolingual_html, flags=re.DOTALL)
+
+        # 【关键】只有 original-text 的中文段落保持不变（已经是黑色样式）
+        # 不需要做任何转换，保持原样即可
 
         return monolingual_html
 
@@ -369,8 +374,12 @@ class MarkdownHandler:
 
                 # 检测是否为中文，如果是则不翻译
                 if self._is_chinese_text(original_text):
-                    # 中文文本：只显示原文（因为原文=译文）
-                    bilingual_fragment = f'<span class="original-text">{self._escape_html(original_text)}</span>'
+                    # 【修复】中文文本：双语模式下只显示原文（不需要重复显示）
+                    if show_bilingual:
+                        bilingual_fragment = f'<span class="original-text">{self._escape_html(original_text)}</span>'
+                    else:
+                        # 单语模式：也显示原文（因为原文=译文）
+                        bilingual_fragment = f'<span class="translated-text">{self._escape_html(original_text)}</span>'
                     translated_fragments.append(bilingual_fragment)
                     logger.debug(
                         "HTML 翻译进度 [%s] %.1f%% | 片段 %d/%d [中文跳过]",
@@ -532,11 +541,12 @@ class MarkdownHandler:
         # 中文标点符号范围：包括常用标点如，。！？；：""''（）【】《》等
         chinese_punctuation = re.findall(r'[\u3000-\u303f\uff00-\uffef]', text)
 
-        # 如果中文字符、阿拉伯数字或中文标点占比超过 70%，则认为是中文文本
+        # 【关键修复】如果中文字符、阿拉伯数字或中文标点占比超过 50%，则认为是中文文本
+        # 【说明】降低阈值以兼容包含项目符号、空格等非中文字符的中文文本（如目录项 "▪ 动力系统"）
         if len(text) > 0:
             chinese_or_digit_count = len(chinese_chars) + len(arabic_numerals) + len(chinese_punctuation)
             ratio = chinese_or_digit_count / len(text)
-            return ratio >= 0.7
+            return ratio >= 0.5
         return False
 
     def _translate_paragraphs_one_by_one(
