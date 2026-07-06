@@ -24,18 +24,23 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
+| 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库及任务级 Factory 契约 | `rag.py` `knowledge_index.py` |
 | 业务层 | `app/services/llm_service/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排、对话记录及文档动态联动 | `analysis_service.py` `report_service.py` `weaponry_service.py` `chat_service.py` `task_service.py` |
-| 核心基础层 | `app/services/core/` | 全局配置、路径常量、日志、任务/知识库及独立对话数据库、进度中枢、Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
-| 工具与外部边界层 | `app/services/utils/` | AnythingLLM 客户端、回调发送、回调预览读取、文件下载、OCR 预处理、mhtml 归一化、RAG 流程 | `anythingllm_client.py` `callback_client.py` `callback_preview.py` `file_downloader.py` `ocr_preprocessor.py` `mhtml_normalizer.py` `rag_pipeline.py` |
+| 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
+| 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
+| 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
+| 迁移期工具层 | `app/services/utils/` | 回调、文件/OCR 预处理，以及尚未迁移完成的 legacy AnythingLLM Facade/RAG 流程 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
 | 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `pdf_handler.py` |
 
 ### 2.2 主要调用方向
 
 1. `blueprints -> llm_service`：蓝图只负责协议入口，不承载长流程业务。
-2. `llm_service -> core`：读取配置、写任务状态、发布进度、构建 Prompt。
-3. `llm_service -> utils`：下载文件、规范化文本、调用 AnythingLLM、发送回调。
-4. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
-5. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
+2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
+3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
+4. `integrations.anythingllm -> ports`：Gateway 实现端口，Factory 为每个后台任务创建独立 Transport。
+5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
+6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
+7. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
 
 ### 2.3 请求到回调的链路
 
@@ -54,7 +59,11 @@ Client Request
 
 ```text
 app/
-  __init__.py                       # Flask App 工厂，注册 llm/debug 蓝图
+  __init__.py                       # Flask App 工厂，安装依赖容器并注册蓝图
+  container.py                      # 应用装配根、ApplicationServices 与上传并发限制器
+  ports/                            # 供应商无关 Port、DTO 与任务级 Factory Protocol
+  integrations/
+    anythingllm/                    # Transport、策略、原子 Client、Gateway 与任务级 Factory
   blueprints/
     llm.py                          # /llm/* 路由 + WebSocket 进度通道
     debug.py                        # /debug/* 本地调试路由

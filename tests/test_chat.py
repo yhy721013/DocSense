@@ -1,9 +1,10 @@
 """文件对话接口（/llm/chat*）单元测试。"""
-import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch, MagicMock
 
 from app import create_app
+from app.container import APPLICATION_SERVICES_EXTENSION
 from app.services.core.database import ChatDatabaseService
 from tests import workspace_tempdir
 
@@ -17,11 +18,13 @@ class ChatRouteValidationTests(unittest.TestCase):
         self._tempdir = workspace_tempdir()
         self.tmp = self._tempdir.__enter__()
         self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
-        self.chat_db_patcher = patch("app.blueprints.llm.chat_db", self.chat_db)
-        self.chat_db_patcher.start()
+        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
+        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
+            services,
+            chat_db=self.chat_db,
+        )
 
     def tearDown(self):
-        self.chat_db_patcher.stop()
         self._tempdir.__exit__(None, None, None)
 
     # ── POST /llm/chat 参数校验 ──
@@ -184,11 +187,13 @@ class ChatDeleteTests(unittest.TestCase):
         self._tempdir = workspace_tempdir()
         self.tmp = self._tempdir.__enter__()
         self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
-        self.chat_db_patcher = patch("app.blueprints.llm.chat_db", self.chat_db)
-        self.chat_db_patcher.start()
+        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
+        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
+            services,
+            chat_db=self.chat_db,
+        )
 
     def tearDown(self):
-        self.chat_db_patcher.stop()
         self._tempdir.__exit__(None, None, None)
 
     @patch("app.services.llm_service.chat_service.AnythingLLMClient", autospec=True)

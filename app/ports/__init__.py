@@ -1,0 +1,73 @@
+"""应用层的供应商无关端口。
+
+该包只导出业务 DTO、稳定异常和 Protocol。业务服务通过这些类型表达意图，具体第三方
+系统的协议、认证、资源字段和错误对象只能出现在适配器层，测试替身也不进入生产包。
+"""
+
+from .knowledge_index import (
+    CollectionRef,
+    CollectionSpec,
+    IndexedDocument,
+    KnowledgeDocumentMetadata,
+    KnowledgeIndexConflictError,
+    KnowledgeIndexDocumentReleasedError,
+    KnowledgeIndexError,
+    KnowledgeOperationContext,
+    KnowledgeIndexFactory,
+    KnowledgeIndexPort,
+    KnowledgeIndexRecoveryRequiredError,
+    KnowledgeIndexRetentionRequiredError,
+    OperationResult,
+    build_document_idempotency_key,
+)
+from .rag import (
+    CleanupResult,
+    DocumentRagFactory,
+    DocumentRagPort,
+    DocumentRagSession,
+    MAX_RAG_QUERY_ATTEMPTS,
+    PreparedDocumentRef,
+    RagAttempt,
+    RagExecutionTrace,
+    RagLifecycleEvent,
+    RagOperationError,
+    RagPromptKind,
+    RagResult,
+    RagSource,
+    normalize_rag_prompt,
+    validate_rag_prompt_kind,
+    validate_rag_query_max_attempts,
+)
+
+__all__ = [
+    "CleanupResult",
+    "CollectionRef",
+    "CollectionSpec",
+    "DocumentRagFactory",
+    "DocumentRagPort",
+    "DocumentRagSession",
+    "IndexedDocument",
+    "KnowledgeDocumentMetadata",
+    "KnowledgeIndexConflictError",
+    "KnowledgeIndexDocumentReleasedError",
+    "KnowledgeIndexError",
+    "KnowledgeIndexFactory",
+    "KnowledgeIndexPort",
+    "KnowledgeIndexRecoveryRequiredError",
+    "KnowledgeIndexRetentionRequiredError",
+    "KnowledgeOperationContext",
+    "MAX_RAG_QUERY_ATTEMPTS",
+    "OperationResult",
+    "build_document_idempotency_key",
+    "PreparedDocumentRef",
+    "RagAttempt",
+    "RagExecutionTrace",
+    "RagLifecycleEvent",
+    "RagOperationError",
+    "RagPromptKind",
+    "RagResult",
+    "RagSource",
+    "normalize_rag_prompt",
+    "validate_rag_prompt_kind",
+    "validate_rag_query_max_attempts",
+]

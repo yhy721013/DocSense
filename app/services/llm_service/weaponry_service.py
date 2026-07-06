@@ -248,24 +248,22 @@ def _vector_search_with_top_n(
     top_n: int,
     user_id: int = 1,
 ) -> List[Dict[str, Any]]:
-    """在 weaponry 内部执行带 topN 的向量检索，不修改通用 client 接口。"""
-    url = f"{client.config.base_url}/workspace/{workspace_slug}/vector-search"
-    payload = {"query": query, "topN": top_n}
+    """通过公开 Client 接口执行带结果上限的向量检索。
+
+    业务层只表达查询文本和结果数量，不再了解 AnythingLLM URL、Header、Session 或
+    ``topN`` 请求字段。兼容 Facade 负责把 ``top_n`` 转换为供应商协议，并维持失败时
+    返回空列表的既有语义。
+    """
     try:
-        resp = client.session.post(
-            url,
-            headers=client._json_headers(user_id),
-            json=payload,
-            timeout=client.config.timeout,
+        return client.vector_search(
+            workspace_slug,
+            query,
+            user_id=user_id,
+            top_n=top_n,
         )
-        if not resp.ok:
-            logger.error("向量搜索失败 workspace=%s: %s %s", workspace_slug, resp.status_code, resp.text)
-            return []
-        body = resp.json()
-        results = body.get("results", [])
-        return results if isinstance(results, list) else []
-    except Exception as e:
-        logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, e)
+    except Exception as exc:
+        # 兼容测试 Fake 或尚未迁移实现抛出异常的场景，避免单字段检索中断整个任务。
+        logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, exc)
         return []
 
 
@@ -274,21 +272,16 @@ def _list_workspace_documents(
     workspace_slug: str,
     user_id: int = 1,
 ) -> List[Dict[str, Any]]:
-    url = f"{client.config.base_url}/workspace/{workspace_slug}"
+    """通过公开 Client 接口读取工作区文档列表。
+
+    AnythingLLM 的 ``workspace`` 包装结构和文档字段别名均由适配层处理，本函数只保留
+    weaponry 后续术语文档识别所需的兼容字典。
+    """
     try:
-        resp = client.session.get(url, headers=client._json_headers(user_id), timeout=client.config.timeout)
-        if not resp.ok:
-            logger.error("获取工作区 %s 文档列表失败: %s %s", workspace_slug, resp.status_code, resp.text)
-            return []
-        workspace = resp.json().get("workspace")
-        if isinstance(workspace, list):
-            workspace = workspace[0] if workspace else None
-        if not isinstance(workspace, dict):
-            return []
-        docs = workspace.get("documents", [])
-        return docs if isinstance(docs, list) else []
-    except Exception as e:
-        logger.error("获取工作区 %s 文档列表异常: %s", workspace_slug, e)
+        return client.list_workspace_documents(workspace_slug, user_id=user_id)
+    except Exception as exc:
+        # Facade 正常情况下会返回空列表；此处继续保护测试 Fake 与迁移期替代实现。
+        logger.error("获取工作区 %s 文档列表异常: %s", workspace_slug, exc)
         return []
 
 
@@ -337,9 +330,18 @@ def _target_document_records(
     architecture_id: int,
     selected_file_names: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    all_records = kb_service.list_document_records()
+    # 数据库服务公开契约要求始终返回列表。此处保留边界校验，可以把未来实现回归或测试
+    # 替身错误转换为带有明确上下文的异常，避免再次暴露难以定位的“NoneType 不可迭代”。
+    # 不使用 ``all_records or []`` 静默降级，因为空列表与违反返回契约具有不同业务含义。
+    if not isinstance(all_records, list):
+        raise TypeError(
+            "文档记录查询返回契约错误: "
+            f"期望 list，实际为 {type(all_records).__name__}"
+        )
     records = [
         record
-        for record in kb_service.list_document_records()
+        for record in all_records
         if str(record.get("architecture_id")) == str(architecture_id)
     ]
     if not selected_file_names:
@@ -1661,6 +1663,9 @@ def run_weaponry_task(
             else:
                 task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
                 logger.warning("回调结果提交失败: architectureId=%s", architecture_id)
+        else:
+            # 未配置回调时将终态记录为 skipped，防止后续巡检把它识别成待重放任务。
+            task_service.mark_callback_skipped("weaponry", architecture_id_str)
 
     except Exception as e:
         logger.exception("武器装备提取任务异常: architectureId=%s, error=%s", architecture_id, e)
@@ -1727,3 +1732,6 @@ def _fail_task(
             task_service.mark_callback_success("weaponry", architecture_id_str)
         else:
             task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
+    else:
+        # 失败结果已经落库但没有外部接收方，显式记录无需回调且不增加尝试次数。
+        task_service.mark_callback_skipped("weaponry", architecture_id_str)

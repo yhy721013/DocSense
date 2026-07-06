@@ -1,3 +1,10 @@
+"""旧业务兼容用 AnythingLLM RAG 流程。
+
+本模块仅供尚未进入阶段 10 的 report 等旧业务使用。阶段 9 起文件分析链路禁止导入或调用
+这里的任何能力；新业务必须依赖 ``app.ports`` 中的供应商无关端口。全部业务迁移完成后，
+阶段 11 将删除本模块。
+"""
+
 from __future__ import annotations
 
 import os

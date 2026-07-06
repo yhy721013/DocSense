@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
 import unicodedata
 from datetime import date
 from pathlib import Path
@@ -11,19 +10,38 @@ from typing import Any, Dict, Iterable
 
 import fitz
 
-from app.services.utils.anythingllm_client import AnythingLLMClient
-from app.services.core.config import load_anythingllm_config, load_ocr_config
+from app.ports import (
+    CollectionSpec,
+    DocumentRagFactory,
+    DocumentRagSession,
+    KnowledgeDocumentMetadata,
+    KnowledgeIndexDocumentReleasedError,
+    KnowledgeIndexError,
+    KnowledgeIndexFactory,
+    KnowledgeIndexRetentionRequiredError,
+    KnowledgeOperationContext,
+    PreparedDocumentRef,
+    RagExecutionTrace,
+    RagLifecycleEvent,
+    RagOperationError,
+    RagPromptKind,
+    build_document_idempotency_key,
+    normalize_rag_prompt,
+)
+from app.services.core.config import load_ocr_config
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
-from app.services.utils.rag_pipeline import RAGExecutionDetails, run_anythingllm_rag
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
 from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
 from app.services.core.progress_hub import LLMProgressHub
-from app.services.core.prompts import build_file_analysis_prompt
+from app.services.core.prompts import (
+    build_architecture_repair_prompt,
+    build_file_analysis_prompt,
+    build_json_repair_prompt,
+)
 from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.translation_service import get_translation_service
-from app.services.core.database import DatabaseService
 
 
 logger = logging.getLogger(__name__)
@@ -858,42 +876,6 @@ def _publish_progress(progress_hub: LLMProgressHub, file_name: str, progress: fl
     )
 
 
-def _parse_model_result(raw_result: Any) -> Dict[str, Any]:
-    if isinstance(raw_result, dict):
-        return raw_result
-    if isinstance(raw_result, str):
-        text = raw_result.strip()
-        if not text:
-            return {}
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as e:
-            # 尝试从文本中提取 JSON 块
-            # 优先查找完整的 { ... }
-            match = re.search(r"(\{[\s\S]*\})", text)
-            if not match:
-                # 如果没有完整的 {}，且文本包含 {，则尝试从第一个 { 提取到末尾（可能是截断）
-                match = re.search(r"(\{[\s\S]*)", text)
-            
-            if match:
-                extracted = match.group(1)
-                try:
-                    return json.loads(extracted)
-                except json.JSONDecodeError:
-                    # 如果还是失败，尝试通过补全右括号来处理截断问题
-                    # 即使原本有 }，补齐额外的 } 也可能让部分被解析
-                    for _ in range(5):
-                        extracted += "}"
-                        try:
-                            return json.loads(extracted)
-                        except json.JSONDecodeError:
-                            continue
-            
-            logger.error("解析模型结果 JSON 失败: %s. 原始文本: %s", e, text)
-            return {}
-    return {}
-
-
 def _read_original_text(file_path: str) -> str:
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -907,278 +889,1104 @@ def _read_original_text(file_path: str) -> str:
     return ""
 
 
-def _prepare_analysis_upload_files(file_path: str) -> list[str]:
+def _prepare_analysis_upload_file(file_path: str) -> str:
+    """返回单文件 RAG 实际使用的原文件或 OCR 增强文件路径。
+
+    阶段 9 的 Document RAG Session 严格处理一份目标文档，因此这里不再沿用旧 Pipeline 的
+    文件列表语义。路径不存在时保持原值交给 Gateway 统一产生可审计的上传阶段错误。
+    """
     path = Path(file_path)
     if not path.exists():
-        return []
+        return str(path)
 
     upload_path = prepare_analysis_file_for_upload(str(path), load_ocr_config())
     upload_path_obj = Path(upload_path)
     if not upload_path_obj.exists():
-        return [str(path)]
+        return str(path)
 
-    return [str(upload_path_obj)]
+    return str(upload_path_obj)
 
 
-def run_file_analysis_task(
+class AnalysisContractError(ValueError):
+    """模型回答违反文件分析业务契约。"""
+
+
+class ArchitectureContractError(AnalysisContractError):
+    """architectureId 缺失、类型错误、非叶子或超出候选范围。"""
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    """拒绝 Python JSON 解码器默认接受的 NaN 与 Infinity 扩展值。"""
+    raise ValueError(f"非法 JSON 常量: {value}")
+
+
+def _parse_strict_json_object(raw_result: Any) -> Dict[str, Any] | None:
+    """只接受原生对象或严格 JSON 对象，不执行猜括号等有损修补。
+
+    旧实现会从任意文本中截取最外层花括号并反复补 ``}``。这种做法可能把截断回答误判
+    为有效业务数据。阶段 9 改为显式发起一次 ``JSON_REPAIR`` 模型调用，因此本地解析器
+    必须保持确定性：语法不合法就返回 ``None``，由编排层决定是否修复；合法的空对象
+    仍交给业务契约校验并按 ``business_contract`` 失败，不能伪装成语法问题。
+    """
+    if isinstance(raw_result, dict):
+        try:
+            serialized = json.dumps(
+                raw_result,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            parsed_object = json.loads(serialized)
+        except (TypeError, ValueError):
+            return None
+        return parsed_object if isinstance(parsed_object, dict) else None
+    if not isinstance(raw_result, str) or not raw_result.strip():
+        return None
+    try:
+        parsed = json.loads(
+            raw_result.strip(),
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        logger.warning(
+            "文件分析模型结果不是严格 JSON 对象: response_chars=%d",
+            len(raw_result),
+        )
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _option_values(options: Iterable[Dict[str, Any]]) -> set[str]:
+    """提取非空候选 value；key 仅是请求编码，不属于模型输出契约。"""
+    return {
+        value
+        for item in options
+        if isinstance(item, dict) and (value := _as_text(item.get("value")))
+    }
+
+
+def _validate_analysis_model_contract(
+        parsed_result: Dict[str, Any],
+        request_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """校验并规范化 architecture 之外的文件分析模型契约。
+
+    四个枚举字段在缺少文档证据时允许为空；一旦模型返回非空值，则必须与请求候选的
+    ``value`` 精确相等。这里不接受候选 key、对象或相似字符串，也不通过正文猜测替换
+    模型返回值，防止“合法化”语义错误。architecture 单独校验，以便只对该字段执行一次
+    受控修复。
+    """
+    if not isinstance(parsed_result, dict) or not parsed_result:
+        raise AnalysisContractError("模型结果必须是非空 JSON 对象")
+    required_keys = {
+        "country",
+        "channel",
+        "maturity",
+        "format",
+        "fileDataItem",
+    }
+    missing_keys = sorted(required_keys.difference(parsed_result))
+    if missing_keys:
+        raise AnalysisContractError(
+            f"模型结果缺少必需顶层字段: {', '.join(missing_keys)}"
+        )
+    allowed_keys = required_keys | {"architectureId"}
+    unknown_keys = sorted(set(parsed_result).difference(allowed_keys))
+    if unknown_keys:
+        raise AnalysisContractError(
+            f"模型结果包含未知顶层字段: {', '.join(unknown_keys)}"
+        )
+    file_item = parsed_result.get("fileDataItem")
+    if not isinstance(file_item, dict):
+        raise AnalysisContractError("fileDataItem 必须是 JSON 对象")
+
+    normalized = dict(parsed_result)
+    normalized_file_item = dict(file_item)
+    ranges = build_effective_analysis_ranges(request_params)
+    for field_name in ("country", "channel", "maturity", "format"):
+        raw_value = parsed_result.get(field_name)
+        if raw_value in (None, ""):
+            normalized[field_name] = ""
+            continue
+        if not isinstance(raw_value, str):
+            raise AnalysisContractError(f"{field_name} 必须是候选 value 字符串或空字符串")
+        value = raw_value.strip()
+        if value not in _option_values(ranges[field_name]):
+            raise AnalysisContractError(f"{field_name} 不属于请求候选 value")
+        normalized[field_name] = value
+
+    raw_data_format = normalized_file_item.get("dataFormat")
+    if raw_data_format in (None, ""):
+        normalized_file_item["dataFormat"] = normalized["format"]
+    elif not isinstance(raw_data_format, str):
+        raise AnalysisContractError("fileDataItem.dataFormat 必须是字符串")
+    elif raw_data_format.strip() != normalized["format"]:
+        raise AnalysisContractError("fileDataItem.dataFormat 必须与顶层 format 完全一致")
+    else:
+        normalized_file_item["dataFormat"] = raw_data_format.strip()
+    normalized["fileDataItem"] = normalized_file_item
+    return normalized
+
+
+def _architecture_candidates(
+        request_params: Dict[str, Any],
+) -> tuple[list[Dict[str, Any]], set[int]]:
+    """返回有效候选及当前候选图中的叶子 ID 集合。
+
+    当请求只携带一个节点时，无论它在完整体系中是否还有子节点，都按阶段 9 契约直接
+    使用该唯一 ID。多候选时，只排除当前候选列表中明确拥有子节点的节点，避免根据缺失
+    的完整树结构猜测叶子关系。
+    """
+    items: list[Dict[str, Any]] = []
+    ids: set[int] = set()
+    for item in build_effective_analysis_ranges(request_params)["architectureList"]:
+        if not isinstance(item, dict):
+            continue
+        item_id = _coerce_int(item.get("id"))
+        if item_id is None or item_id < 1:
+            continue
+        if item_id in ids:
+            raise AnalysisContractError(f"architectureList 包含重复 id: {item_id}")
+        ids.add(item_id)
+        items.append(item)
+    if not items:
+        raise AnalysisContractError("architectureList 不包含有效候选")
+    if len(ids) == 1:
+        return items, set(ids)
+    parent_ids = {
+        parent_id
+        for item in items
+        if (parent_id := _coerce_int(item.get("parentId"))) in ids
+    }
+    leaf_ids = ids.difference(parent_ids)
+    if not leaf_ids:
+        raise AnalysisContractError("architectureList 无法形成有效叶子候选")
+    return items, leaf_ids
+
+
+def _resolve_analysis_architecture_id(
+        parsed_result: Dict[str, Any],
+        request_params: Dict[str, Any],
+) -> int:
+    """按单候选直返、多候选显式 ID 的规则解析 architectureId。"""
+    _items, allowed_ids = _architecture_candidates(request_params)
+    if len(allowed_ids) == 1:
+        return next(iter(allowed_ids))
+    if "architectureId" not in parsed_result or parsed_result.get("architectureId") in (None, ""):
+        raise ArchitectureContractError("architectureId 缺失")
+    raw_id = parsed_result.get("architectureId")
+    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+        raise ArchitectureContractError("architectureId 必须是数字 ID")
+    if raw_id not in allowed_ids:
+        raise ArchitectureContractError("architectureId 不是允许的叶子候选 ID")
+    return raw_id
+
+
+def _validate_architecture_repair_result(
+        raw_result: Any,
+        request_params: Dict[str, Any],
+) -> int:
+    """要求分类修复只能返回一个 architectureId 键并再次执行候选校验。"""
+    repaired = _parse_strict_json_object(raw_result)
+    if repaired is None:
+        raise ArchitectureContractError("architecture 修复结果不是严格 JSON 对象")
+    if set(repaired) != {"architectureId"}:
+        raise ArchitectureContractError("architecture 修复结果只能包含 architectureId")
+    return _resolve_analysis_architecture_id(repaired, request_params)
+
+
+def _safe_task_error(error: BaseException, *, fallback: str) -> str:
+    """生成有界任务错误，避免把 Prompt、正文或外部响应写入普通日志和回调状态。"""
+    if isinstance(
+        error,
+        (AnalysisContractError, KnowledgeIndexError, RagOperationError, ValueError),
+    ):
+        message = str(error)
+    else:
+        message = f"{fallback}（{type(error).__name__}）"
+    return " ".join((message or fallback).split())[:500]
+
+
+def _record_lease_resources(
+        task_service: LLMTaskService,
+        execution_id: str,
+        trace: RagExecutionTrace,
+        prepared_document: PreparedDocumentRef | None = None,
+) -> None:
+    """把 Trace 中已经可定位的资源立即写入跨进程租约。
+
+    上传阶段失败时可能还没有完整 ``PreparedDocumentRef``，但生命周期中的上传位置仍可
+    用于人工巡检。空字段不会覆盖租约中此前已经记录的更完整引用。
+    """
+    external_location = ""
+    if prepared_document is not None:
+        external_location = prepared_document.external_location
+    else:
+        for event in reversed(trace.lifecycle_events):
+            if event.operation == "document_upload" and event.external_ref:
+                external_location = event.external_ref
+                break
+    task_service.rag_resource_leases.record_resources(
+        execution_id=execution_id,
+        context_ref=trace.context_ref or "",
+        conversation_ref=trace.conversation_ref or "",
+        document_ref=(prepared_document.document_ref if prepared_document else ""),
+        external_location=external_location,
+    )
+
+
+def _submit_callback(
         *,
         task_service: LLMTaskService,
-        kb_service: DatabaseService,
+        file_name: str,
+        original_name: str,
+        callback_url: str,
+        callback_timeout: float,
+        callback_payload: Dict[str, Any],
+) -> None:
+    """在业务终态落库后执行可选回调，并精确推进回调状态机。"""
+    if not callback_url:
+        try:
+            task_service.mark_callback_skipped("file", file_name)
+        except Exception:
+            logger.critical(
+                "未配置回调但 skipped 状态无法提交: file_name=%s",
+                file_name,
+                exc_info=True,
+            )
+        return
+    callback_context = {
+        "businessType": "file",
+        "fileName": file_name,
+        "originalFileName": original_name,
+    }
+    try:
+        succeeded = post_callback_payload(
+            callback_url,
+            callback_payload,
+            timeout=callback_timeout,
+            callback_context=callback_context,
+        )
+    except Exception as exc:  # 回调异常不能改写已经确定的业务成功或失败结果。
+        callback_error = _safe_task_error(exc, fallback="callback failed")
+        try:
+            task_service.mark_callback_failed("file", file_name, callback_error)
+        except Exception:
+            logger.critical(
+                "文件分析回调异常后无法提交 failed 状态: file_name=%s",
+                file_name,
+                exc_info=True,
+            )
+        logger.exception("文件分析回调异常: file_name=%s", file_name)
+        return
+    try:
+        if succeeded:
+            task_service.mark_callback_success("file", file_name)
+            logger.info("文件分析回调提交成功: file_name=%s", file_name)
+        else:
+            task_service.mark_callback_failed("file", file_name, "callback failed")
+            logger.warning("文件分析回调提交失败: file_name=%s", file_name)
+    except Exception:
+        logger.critical(
+            "文件分析回调已执行但结果状态无法提交: file_name=%s callback_succeeded=%s",
+            file_name,
+            succeeded,
+            exc_info=True,
+        )
+
+
+def _finalize_file_failure(
+        *,
+        task_service: LLMTaskService,
+        progress_hub: LLMProgressHub,
+        file_name: str,
+        original_name: str,
+        stage: str,
+        error_message: str,
+        callback_url: str,
+        callback_timeout: float,
+) -> None:
+    """以失败语义终结任务；任务库不可写时禁止绕过状态落库发送外部回调。"""
+    callback_payload = build_file_callback_payload(file_name, {}, status="3")
+    try:
+        task_service.mark_business_result(
+            "file",
+            file_name,
+            callback_payload,
+            status="3",
+            message=f"解析失败（{stage}）：{error_message}",
+        )
+        _publish_progress(progress_hub, file_name, 1.0)
+    except Exception:  # SQLite 整体不可写时，回调也不能对外宣称已有可追踪的业务终态。
+        logger.critical(
+            "文件分析失败状态无法持久化，停止回调: file_name=%s stage=%s",
+            file_name,
+            stage,
+            exc_info=True,
+        )
+        return
+    try:
+        _submit_callback(
+            task_service=task_service,
+            file_name=file_name,
+            original_name=original_name,
+            callback_url=callback_url,
+            callback_timeout=callback_timeout,
+            callback_payload=callback_payload,
+        )
+    except Exception:
+        # 回调状态落库失败不能阻止审计成功后的资源补偿。调用方会继续执行 close，运维
+        # 可以根据任务终态和 critical 日志重放回调状态修复。
+        logger.critical(
+            "文件分析失败回调状态无法提交: file_name=%s stage=%s",
+            file_name,
+            stage,
+            exc_info=True,
+        )
+
+
+def _close_audited_session(
+        *,
+        task_service: LLMTaskService,
+        session: DocumentRagSession,
+        interaction_id: int,
+        execution_id: str,
+        audited_trace: RagExecutionTrace,
+        retain_document: bool,
+) -> None:
+    """关闭已审计 Session，并原子追加关闭事件与 cleanup 结果。
+
+    外部关闭已经发生但追加审计失败时，业务结果不回滚；资源租约保持 ``audited``，使巡检
+    能发现“外部可能已关闭、关闭证据尚未提交”的异常，而不是错误标记为完全 closed。
+    """
+    try:
+        cleanup = session.close(retain_document=retain_document)
+    except Exception:
+        logger.critical(
+            "RAG Session 关闭调用异常: interaction_id=%s execution_id=%s "
+            "retain_document=%s",
+            interaction_id,
+            execution_id,
+            retain_document,
+            exc_info=True,
+        )
+        return
+    closed_trace = session.trace
+    initial_event_count = len(audited_trace.lifecycle_events)
+    close_events = closed_trace.lifecycle_events[initial_event_count:]
+    cleanup_status = "deleted" if cleanup.success else "failed"
+    cleanup_error = "" if cleanup.success else cleanup.error_message
+    try:
+        if not close_events:
+            raise RuntimeError("RAG Session 关闭后未生成生命周期事件")
+        task_service.append_llm_interaction_lifecycle_events(
+            interaction_id,
+            close_events,
+            cleanup_status=cleanup_status,
+            cleanup_error=cleanup_error,
+        )
+    except Exception:
+        logger.critical(
+            "RAG Session 已关闭但关闭审计追加失败: interaction_id=%s execution_id=%s",
+            interaction_id,
+            execution_id,
+            exc_info=True,
+        )
+        return
+    try:
+        if cleanup.success:
+            task_service.rag_resource_leases.mark_closed(
+                execution_id=execution_id,
+            )
+        else:
+            task_service.rag_resource_leases.record_cleanup_failure(
+                execution_id=execution_id,
+                error_message=cleanup_error,
+            )
+    except Exception:
+        logger.critical(
+            "RAG Session 关闭后资源租约终结失败: interaction_id=%s execution_id=%s",
+            interaction_id,
+            execution_id,
+            exc_info=True,
+        )
+
+
+def _store_prepared_analysis_document(
+        *,
+        knowledge_index_factory: KnowledgeIndexFactory,
+        execution_id: str,
+        file_name: str,
+        original_name: str,
+        mapped_result: Dict[str, Any],
+        architecture_list: Iterable[Dict[str, Any]],
+        prepared_document: PreparedDocumentRef,
+) -> None:
+    """把 RAG 已上传的同一文档转交永久知识库，不读取源文件也不二次上传。"""
+    result_architecture_id = int(mapped_result["architectureId"])
+    storage_architecture_id = resolve_storage_architecture_id(
+        result_architecture_id,
+        architecture_list,
+    )
+    if storage_architecture_id is None or storage_architecture_id < 1:
+        raise AnalysisContractError("无法确定永久知识库存储分类")
+    if storage_architecture_id != result_architecture_id:
+        logger.info(
+            "文件知识库存储分类归并: file_name=%s result_architecture_id=%s "
+            "result_architecture_name=%s storage_architecture_id=%s storage_architecture_name=%s",
+            file_name,
+            result_architecture_id,
+            _architecture_name_by_id(result_architecture_id, architecture_list),
+            storage_architecture_id,
+            _architecture_name_by_id(storage_architecture_id, architecture_list),
+        )
+    attributes = {
+        key: mapped_result.get(key, "")
+        for key in ("country", "channel", "maturity", "format")
+    }
+    metadata = KnowledgeDocumentMetadata(
+        file_name=file_name,
+        original_name=original_name,
+        attributes=attributes,
+    )
+    operation_context = KnowledgeOperationContext(
+        execution_id=execution_id,
+        business_type="file",
+        business_key=file_name,
+    )
+    idempotency_key = build_document_idempotency_key(
+        file_name=file_name,
+        architecture_id=storage_architecture_id,
+        content_sha256=prepared_document.content_sha256,
+    )
+    with knowledge_index_factory.create() as knowledge_index:
+        collection = knowledge_index.ensure_collection(
+            CollectionSpec(
+                architecture_id=storage_architecture_id,
+                name=f"architectureId-{storage_architecture_id}",
+            )
+        )
+        knowledge_index.store_prepared_document(
+            collection,
+            prepared_document,
+            metadata,
+            operation_context=operation_context,
+            idempotency_key=idempotency_key,
+        )
+    logger.info(
+        "文件分析文档所有权已转交永久知识库: file_name=%s execution_id=%s "
+        "architecture_id=%s storage_architecture_id=%s",
+        file_name,
+        execution_id,
+        result_architecture_id,
+        storage_architecture_id,
+    )
+
+
+def _execute_file_analysis_task(
+        *,
+        task_service: LLMTaskService,
         progress_hub: LLMProgressHub,
         request_payload: Dict[str, Any],
         download_root: str,
         callback_url: str,
         callback_timeout: float,
+        document_rag_factory: DocumentRagFactory,
+        knowledge_index_factory: KnowledgeIndexFactory,
 ) -> None:
+    """按审计硬前置契约执行单文件分析和永久知识库转交。
+
+    关键顺序固定为：准备文件 → 隔离 RAG → 领域契约 → 原子审计 → 永久知识库 → 翻译与
+    业务结果 → 回调 → 审计化关闭。任何审计失败都保留外部现场且绝不调用 ``close``；审计
+    成功后的失败则按永久知识库是否已经接管文档决定删除或保留全局实体。
+    """
+    if not isinstance(document_rag_factory, DocumentRagFactory):
+        raise TypeError("document_rag_factory 必须实现 DocumentRagFactory")
+    if not isinstance(knowledge_index_factory, KnowledgeIndexFactory):
+        raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
     original_name = _as_text(params.get("originalFileName")) or file_name
     file_path = _as_text(params.get("filePath"))
-    client: AnythingLLMClient | None = None
+    task = task_service.get_task("file", file_name)
+    if task is None:
+        raise ValueError(f"文件分析任务不存在: {file_name}")
+    execution_id = _as_text(task.get("execution_id"))
     analysis_prompt = ""
-    raw_result: str | None = None
-    task_error = ""
-    rag_details = RAGExecutionDetails()
 
-    logger.info("开始执行文件分析任务: file_name=%s", file_name)
-
+    logger.info(
+        "开始执行文件分析任务: file_name=%s execution_id=%s",
+        file_name,
+        execution_id,
+    )
     try:
-        task_service.update_task_progress("file", file_name, progress=0.15, message="正在下载文件", status="1")
+        task_service.update_task_progress(
+            "file", file_name, progress=0.15, message="正在下载文件", status="1"
+        )
         _publish_progress(progress_hub, file_name, 0.15)
-
-        downloaded_path = download_to_temp_file(file_path, file_name, download_root, timeout=60)
-
-        task_service.update_task_progress("file", file_name, progress=0.35, message="正在执行文档解析")
+        downloaded_path = download_to_temp_file(
+            file_path,
+            file_name,
+            download_root,
+            timeout=60,
+        )
+        task_service.update_task_progress(
+            "file", file_name, progress=0.35, message="正在执行文档解析"
+        )
         _publish_progress(progress_hub, file_name, 0.35)
 
         llm_file_path = downloaded_path
         try:
             llm_file_path = normalize_file_for_llm(downloaded_path)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("mhtml归一化失败，降级使用原文件: %s (%s)", downloaded_path, exc)
-
-        client = AnythingLLMClient(load_anythingllm_config())
-        files_to_upload = _prepare_analysis_upload_files(llm_file_path)
-        if files_to_upload:
-            llm_file_path = files_to_upload[0]
-
-        analysis_prompt = build_file_analysis_prompt(params)
-        temporary_workspace_name = f"llm-file-{int(time.time() * 1000)}"
-        raw_result = run_anythingllm_rag(
-            client=client,
-            files_to_upload=files_to_upload,
-            prompt=analysis_prompt,
-            workspace_name=temporary_workspace_name,
-            thread_name=f"analysis-{Path(file_name).stem}",
-            user_id=1,
-            mode="query",
-            reuse_workspace=False,
-            execution_details=rag_details,
+        except Exception as exc:  # 归一化是增强能力，原文件仍是合法的降级输入。
+            logger.warning(
+                "MHTML 归一化失败，降级使用原文件: file_name=%s error_type=%s",
+                file_name,
+                type(exc).__name__,
+            )
+        llm_file_path = _prepare_analysis_upload_file(llm_file_path)
+        analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
+    except Exception as exc:
+        error_message = _safe_task_error(exc, fallback="文件预处理失败")
+        logger.exception(
+            "文件分析预处理失败: file_name=%s execution_id=%s",
+            file_name,
+            execution_id,
         )
-        if rag_details.text_response is None and isinstance(raw_result, str):
-            rag_details.text_response = raw_result
-        if raw_result is None or (isinstance(raw_result, str) and not raw_result.strip()):
-            raise RuntimeError("AnythingLLM结构化抽取未返回有效结果")
-        parsed_result = _parse_model_result(raw_result)
-        if not isinstance(parsed_result, dict) or not parsed_result:
-            raise RuntimeError("AnythingLLM结构化抽取结果无法解析")
-        mapped_result = map_analysis_result(parsed_result, params, original_text=_read_original_text(llm_file_path))
+        _finalize_file_failure(
+            task_service=task_service,
+            progress_hub=progress_hub,
+            file_name=file_name,
+            original_name=original_name,
+            stage="preparation",
+            error_message=error_message,
+            callback_url=callback_url,
+            callback_timeout=callback_timeout,
+        )
+        return
 
+    with document_rag_factory.create() as document_rag:
         try:
-            result_architecture_id = mapped_result.get("architectureId")
-            if result_architecture_id:
-                architecture_list = build_effective_analysis_ranges(params)["architectureList"]
-                storage_architecture_id = resolve_storage_architecture_id(
-                    result_architecture_id,
-                    architecture_list,
+            task_service.rag_resource_leases.begin(
+                execution_id=execution_id,
+                business_type="file",
+                business_key=file_name,
+            )
+        except Exception as exc:
+            # Factory 进入只创建本地 HTTP 对象图，不创建远端资源。租约登记仍严格发生在
+            # open_isolated_session 之前；登记失败时立即退出租约，不会产生无法追踪的资源。
+            lease_error = _safe_task_error(exc, fallback="RAG 资源租约登记失败")
+            logger.exception(
+                "RAG 资源租约登记失败，未创建外部资源: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="resource_lease",
+                error_message=lease_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+            return
+        session: DocumentRagSession | None = None
+        prepared_document: PreparedDocumentRef | None = None
+        final_prompt = analysis_prompt
+        try:
+            session = document_rag.open_isolated_session(
+                context_name=f"llm-file-{execution_id}",
+                conversation_name=f"analysis-{Path(file_name).stem}",
+            )
+            _record_lease_resources(
+                task_service,
+                execution_id,
+                session.trace,
+            )
+            rag_result = session.analyse(
+                llm_file_path,
+                analysis_prompt,
+                require_sources=True,
+                max_attempts=2,
+            )
+            prepared_document = rag_result.prepared_document
+            _record_lease_resources(
+                task_service,
+                execution_id,
+                rag_result.trace,
+                prepared_document,
+            )
+
+            parsed_result = _parse_strict_json_object(rag_result.text)
+            if parsed_result is None:
+                final_prompt = normalize_rag_prompt(
+                    build_json_repair_prompt(rag_result.text)
                 )
-                if storage_architecture_id != result_architecture_id:
-                    logger.info(
-                        "文件知识库存储分类归并: file_name=%s result_architecture_id=%s "
-                        "result_architecture_name=%s storage_architecture_id=%s storage_architecture_name=%s",
-                        file_name,
-                        result_architecture_id,
-                        _architecture_name_by_id(result_architecture_id, architecture_list),
-                        storage_architecture_id,
-                        _architecture_name_by_id(storage_architecture_id, architecture_list),
-                    )
+                repaired_result = session.ask(
+                    final_prompt,
+                    prompt_kind=RagPromptKind.JSON_REPAIR,
+                    require_sources=True,
+                    max_attempts=1,
+                )
+                parsed_result = _parse_strict_json_object(repaired_result.text)
+                if parsed_result is None:
+                    raise AnalysisContractError("JSON 修复后仍不是严格 JSON 对象")
 
-                workspace_slug = kb_service.get_workspace_slug(storage_architecture_id)
-                if not workspace_slug:
-                    workspace_name = f"architectureId-{storage_architecture_id}"
-                    ws_info = client.create_rag_workspace(workspace_name, user_id=1)
-                    if ws_info and ws_info.get("slug"):
-                        workspace_slug = ws_info["slug"]
-                        kb_service.add_workspace(storage_architecture_id, workspace_slug)
-
-                if workspace_slug:
-                    doc_info = client.upload_document(llm_file_path, user_id=1)
-                    if doc_info:
-                        doc_id = doc_info.get("id") or doc_info.get("docId")
-                        filename = Path(llm_file_path).name
-                        doc_relative_path = (
-                            doc_info.get("location")
-                            or doc_info.get("docpath")
-                            or f"custom-documents/{filename}-{doc_id}.json"
-                        )
-                        
-                        client.wait_for_processing(doc_relative_path)
-                        
-                        metadata = {
-                            "file_name": file_name,
-                            "architecture_id": storage_architecture_id,
-                        }
-                        for k in ["country", "channel", "maturity", "format"]:
-                            if mapped_result.get(k):
-                                metadata[k] = mapped_result[k]
-                                
-                        if not client.update_embeddings(doc_relative_path, workspace_slug, user_id=1, metadata=metadata):
-                            alt_path = f"custom-documents/{doc_id}.json"
-                            client.update_embeddings(alt_path, workspace_slug, user_id=1, metadata=metadata)
-                            
-                        if doc_id:
-                            kb_service.save_document_record(
-                                file_name,
-                                storage_architecture_id,
-                                str(doc_id),
-                                doc_path=doc_relative_path,
-                                original_name=original_name,
-                            )
-        except Exception as e:
-            logger.error("知识库尝试存入文件失败: %s", e)
-
-        # 【新增】在回调前添加翻译
-        task_service.update_task_progress("file", file_name, progress=0.65, message="正在翻译文档", status="1")
-        _publish_progress(progress_hub, file_name, 0.65)
-        # 根据配置决定是否启用全文翻译（可通过环境变量或请求参数控制）
-        enable_full_translation = params.get("enableFullTranslation", True)
-        enriched_result = enrich_with_translations(mapped_result, downloaded_path, enable_full_translation)
-        # 翻译完成后更新进度到 0.95（接近完成）
-        task_service.update_task_progress("file", file_name, progress=0.95, message="翻译完成，准备回调", status="1")
-        _publish_progress(progress_hub, file_name, 0.95)
-
-        callback_payload = build_file_callback_payload(file_name, enriched_result, status="2")
-        task_service.mark_business_result("file", file_name, callback_payload, status="2", message="解析完成")
-        _publish_progress(progress_hub, file_name, 1.0)
-
-        if callback_url:
-            callback_context = {
-                "businessType": "file",
-                "fileName": file_name,
-                "originalFileName": original_name,
-            }
-            if post_callback_payload(
-                callback_url,
-                callback_payload,
-                timeout=callback_timeout,
-                callback_context=callback_context,
-            ):
-                task_service.mark_callback_success("file", file_name)
-                logger.info("回调结果提交成功: file_name=%s", file_name)
-            else:
-                task_service.mark_callback_failed("file", file_name, "callback failed")
-                logger.warning("回调结果提交失败: file_name=%s", file_name)
-
-        logger.info("文件分析任务完成: file_name=%s", file_name)
-
-    except Exception as e:
-        task_error = str(e)
-        logger.exception("文件分析任务执行异常: file_name=%s, error=%s", file_name, e)
-        callback_payload = build_file_callback_payload(file_name, {}, status="3")
-        task_service.mark_business_result("file", file_name, callback_payload, status="3", message="解析失败")
-        _publish_progress(progress_hub, file_name, 1.0)
-        if callback_url:
-            callback_context = {
-                "businessType": "file",
-                "fileName": file_name,
-                "originalFileName": original_name,
-            }
-            if post_callback_payload(
-                callback_url,
-                callback_payload,
-                timeout=callback_timeout,
-                callback_context=callback_context,
-            ):
-                task_service.mark_callback_success("file", file_name)
-                logger.info("失败回调提交成功: file_name=%s", file_name)
-            else:
-                task_service.mark_callback_failed("file", file_name, "callback failed")
-                logger.warning("失败回调提交失败: file_name=%s", file_name)
-    finally:
-        is_temporary_workspace = (
-            rag_details.workspace_created
-            and bool(rag_details.workspace_slug)
-            and rag_details.workspace_name.startswith("llm-file-")
-        )
-        if is_temporary_workspace and client is not None:
-            interaction_id: int | None = None
+            normalized_result = _validate_analysis_model_contract(
+                parsed_result,
+                params,
+            )
             try:
-                interaction_succeeded = bool(rag_details.text_response and rag_details.text_response.strip())
-                interaction_id = task_service.create_llm_interaction(
+                architecture_id = _resolve_analysis_architecture_id(
+                    normalized_result,
+                    params,
+                )
+            except ArchitectureContractError as contract_error:
+                candidates, allowed_ids = _architecture_candidates(params)
+                final_prompt = normalize_rag_prompt(
+                    build_architecture_repair_prompt(
+                        normalized_result,
+                        [
+                            item
+                            for item in candidates
+                            if _coerce_int(item.get("id")) in allowed_ids
+                        ],
+                        str(contract_error),
+                    )
+                )
+                repaired_result = session.ask(
+                    final_prompt,
+                    prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                    require_sources=True,
+                    max_attempts=1,
+                )
+                architecture_id = _validate_architecture_repair_result(
+                    repaired_result.text,
+                    params,
+                )
+            normalized_result["architectureId"] = architecture_id
+            original_text = _read_original_text(llm_file_path)
+            mapped_result = map_analysis_result(
+                normalized_result,
+                params,
+                original_text=original_text,
+            )
+            # legacy 映射器仍保留 GJB 文本启发式。正式阶段 9 链路必须以已经完成候选
+            # 契约校验的 ID 和枚举值为准，禁止映射器通过正文关键词或兼容别名静默补值。
+            mapped_result["architectureId"] = architecture_id
+            for enum_field in ("country", "channel", "maturity", "format"):
+                mapped_result[enum_field] = normalized_result[enum_field]
+            mapped_result["fileDataItem"]["dataFormat"] = normalized_result["format"]
+        except Exception as exc:
+            trace = exc.trace if isinstance(exc, RagOperationError) else (
+                session.trace if session is not None else None
+            )
+            if trace is None:
+                raise
+            try:
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    trace,
+                    prepared_document,
+                )
+            except Exception:
+                logger.critical(
+                    "文件分析失败后无法更新资源租约: file_name=%s execution_id=%s",
+                    file_name,
+                    execution_id,
+                    exc_info=True,
+                )
+            error_message = _safe_task_error(exc, fallback="RAG 或业务契约失败")
+            failure_stage = trace.failure_stage or "business_contract"
+            try:
+                audit_result = task_service.create_llm_interaction_with_trace(
                     business_type="file",
                     business_key=file_name,
-                    workspace_name=rag_details.workspace_name,
-                    workspace_slug=rag_details.workspace_slug or "",
-                    thread_slug=rag_details.thread_slug or "",
-                    prompt=analysis_prompt,
-                    response=rag_details.raw_response or rag_details.text_response,
-                    sources=rag_details.sources,
-                    status="succeeded" if interaction_succeeded else "failed",
-                    error_message="" if interaction_succeeded else (task_error or "模型未返回有效结果"),
+                    execution_id=execution_id,
+                    prompt=final_prompt,
+                    trace=trace,
+                    status="failed",
+                    error_message=error_message,
                 )
-            except Exception:  # pylint: disable=broad-except
-                logger.exception(
-                    "LLM交互落库失败，保留临时Workspace避免对话丢失: file_name=%s, workspace=%s",
+            except Exception as audit_exc:
+                audit_error = _safe_task_error(audit_exc, fallback="交互审计失败")
+                try:
+                    task_service.rag_resource_leases.mark_audit_result(
+                        execution_id=execution_id,
+                        interaction_id=None,
+                        error_message=audit_error,
+                    )
+                except Exception:
+                    logger.critical(
+                        "交互审计失败后资源租约状态也无法更新: execution_id=%s",
+                        execution_id,
+                        exc_info=True,
+                    )
+                logger.critical(
+                    "文件分析交互审计失败，保留全部 RAG 现场: file_name=%s execution_id=%s",
                     file_name,
-                    rag_details.workspace_slug,
+                    execution_id,
+                    exc_info=True,
                 )
+                _finalize_file_failure(
+                    task_service=task_service,
+                    progress_hub=progress_hub,
+                    file_name=file_name,
+                    original_name=original_name,
+                    stage="audit",
+                    error_message=audit_error,
+                    callback_url=callback_url,
+                    callback_timeout=callback_timeout,
+                )
+                return
 
-            if interaction_id is not None:
-                cleanup_status = "failed"
-                cleanup_error = "AnythingLLM删除Workspace失败"
-                try:
-                    if client.delete_workspace(rag_details.workspace_slug or "", user_id=1):
-                        cleanup_status = "deleted"
-                        cleanup_error = ""
-                    else:
-                        logger.warning(
-                            "删除文件分析临时Workspace失败: file_name=%s, workspace=%s",
-                            file_name,
-                            rag_details.workspace_slug,
-                        )
-                except Exception as cleanup_exc:  # pylint: disable=broad-except
-                    cleanup_error = str(cleanup_exc)
-                    logger.warning(
-                        "删除文件分析临时Workspace异常: file_name=%s, workspace=%s, error=%s",
-                        file_name,
-                        rag_details.workspace_slug,
-                        cleanup_exc,
+            try:
+                task_service.rag_resource_leases.mark_audit_result(
+                    execution_id=execution_id,
+                    interaction_id=audit_result.interaction_id,
+                )
+            except Exception as lease_exc:
+                lease_error = _safe_task_error(
+                    lease_exc,
+                    fallback="资源租约审计状态更新失败",
+                )
+                logger.critical(
+                    "失败交互已审计但资源租约推进失败: interaction_id=%s execution_id=%s",
+                    audit_result.interaction_id,
+                    execution_id,
+                    exc_info=True,
+                )
+                _finalize_file_failure(
+                    task_service=task_service,
+                    progress_hub=progress_hub,
+                    file_name=file_name,
+                    original_name=original_name,
+                    stage="resource_lease",
+                    error_message=lease_error,
+                    callback_url=callback_url,
+                    callback_timeout=callback_timeout,
+                )
+                if session is not None:
+                    _close_audited_session(
+                        task_service=task_service,
+                        session=session,
+                        interaction_id=audit_result.interaction_id,
+                        execution_id=execution_id,
+                        audited_trace=trace,
+                        retain_document=False,
                     )
-
-                try:
-                    task_service.update_llm_interaction_cleanup(
-                        interaction_id,
-                        status=cleanup_status,
-                        error_message=cleanup_error,
+                return
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage=failure_stage,
+                error_message=error_message,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+            if session is not None:
+                _close_audited_session(
+                    task_service=task_service,
+                    session=session,
+                    interaction_id=audit_result.interaction_id,
+                    execution_id=execution_id,
+                    audited_trace=trace,
+                    retain_document=False,
+                )
+            else:
+                # open_isolated_session 失败时，Gateway 已把内部回滚写入初始 trace；没有
+                # 可供业务层再次 close 的 Session。原子审计入口已经按回滚事件写入 cleanup
+                # 终态；这里只在回滚成功时终结资源租约，失败时继续保留待恢复记录。
+                rollback_failed = any(
+                    event.operation == "context_rollback" and not event.success
+                    for event in trace.lifecycle_events
+                )
+                if not rollback_failed:
+                    task_service.rag_resource_leases.mark_closed(
+                        execution_id=execution_id,
                     )
-                except Exception:  # pylint: disable=broad-except
-                    logger.exception(
-                        "更新Workspace清理状态失败: interaction_id=%s, workspace=%s",
-                        interaction_id,
-                        rag_details.workspace_slug,
+                else:
+                    logger.critical(
+                        "隔离 Session 打开回滚失败，资源租约保持待恢复: "
+                        "interaction_id=%s execution_id=%s",
+                        audit_result.interaction_id,
+                        execution_id,
                     )
+            return
+
+        successful_trace = session.trace
+        try:
+            audit_result = task_service.create_llm_interaction_with_trace(
+                business_type="file",
+                business_key=file_name,
+                execution_id=execution_id,
+                prompt=final_prompt,
+                trace=successful_trace,
+                status="succeeded",
+            )
+        except Exception as audit_exc:
+            audit_error = _safe_task_error(audit_exc, fallback="交互审计失败")
+            try:
+                task_service.rag_resource_leases.mark_audit_result(
+                    execution_id=execution_id,
+                    interaction_id=None,
+                    error_message=audit_error,
+                )
+            except Exception:
+                logger.critical(
+                    "成功结果审计失败后资源租约状态也无法更新: execution_id=%s",
+                    execution_id,
+                    exc_info=True,
+                )
+            logger.critical(
+                "文件分析成功结果审计失败，禁止永久入库并保留现场: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+                exc_info=True,
+            )
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="audit",
+                error_message=audit_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+            return
+
+        try:
+            task_service.rag_resource_leases.mark_audit_result(
+                execution_id=execution_id,
+                interaction_id=audit_result.interaction_id,
+            )
+        except Exception as lease_exc:
+            lease_error = _safe_task_error(lease_exc, fallback="资源租约审计状态更新失败")
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="resource_lease",
+                error_message=lease_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+            _close_audited_session(
+                task_service=task_service,
+                session=session,
+                interaction_id=audit_result.interaction_id,
+                execution_id=execution_id,
+                audited_trace=successful_trace,
+                retain_document=False,
+            )
+            return
+
+        retain_document = False
+        knowledge_store_succeeded = False
+        try:
+            _store_prepared_analysis_document(
+                knowledge_index_factory=knowledge_index_factory,
+                execution_id=execution_id,
+                file_name=file_name,
+                original_name=original_name,
+                mapped_result=mapped_result,
+                architecture_list=build_effective_analysis_ranges(params)["architectureList"],
+                prepared_document=prepared_document,
+            )
+            retain_document = True
+            knowledge_store_succeeded = True
+        except KnowledgeIndexDocumentReleasedError as knowledge_exc:
+            # 只有该类型能证明 Gateway 已解绑永久集合并提交补偿成功状态，此时允许 RAG
+            # Session 永久删除未转交的全局文档。
+            knowledge_error = _safe_task_error(knowledge_exc, fallback="永久知识库写入失败")
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="knowledge_index",
+                error_message=knowledge_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+        except KnowledgeIndexRetentionRequiredError as knowledge_exc:
+            retain_document = True
+            knowledge_error = _safe_task_error(knowledge_exc, fallback="永久知识库需要恢复")
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="knowledge_index_recovery",
+                error_message=knowledge_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+        except Exception as knowledge_exc:
+            # 未分类异常无法证明永久集合没有接管文档。安全策略必须保留全局实体，等待
+            # 协调记录对账；错误删除会破坏永久知识库中可能已经提交的引用。
+            retain_document = True
+            knowledge_error = _safe_task_error(knowledge_exc, fallback="永久知识库写入状态不确定")
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="knowledge_index_unknown",
+                error_message=knowledge_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+        if not knowledge_store_succeeded:
+            _close_audited_session(
+                task_service=task_service,
+                session=session,
+                interaction_id=audit_result.interaction_id,
+                execution_id=execution_id,
+                audited_trace=successful_trace,
+                retain_document=retain_document,
+            )
+            return
+
+        try:
+            task_service.update_task_progress(
+                "file", file_name, progress=0.65, message="正在翻译文档", status="1"
+            )
+            _publish_progress(progress_hub, file_name, 0.65)
+            enriched_result = enrich_with_translations(
+                mapped_result,
+                downloaded_path,
+                params.get("enableFullTranslation", True),
+            )
+            task_service.update_task_progress(
+                "file", file_name, progress=0.95, message="翻译完成，准备回调", status="1"
+            )
+            _publish_progress(progress_hub, file_name, 0.95)
+            callback_payload = build_file_callback_payload(
+                file_name,
+                enriched_result,
+                status="2",
+            )
+            task_service.mark_business_result(
+                "file",
+                file_name,
+                callback_payload,
+                status="2",
+                message="解析完成",
+            )
+            _publish_progress(progress_hub, file_name, 1.0)
+            _submit_callback(
+                task_service=task_service,
+                file_name=file_name,
+                original_name=original_name,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+                callback_payload=callback_payload,
+            )
+            logger.info(
+                "文件分析任务完成: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+        except Exception as exc:
+            post_transfer_error = _safe_task_error(exc, fallback="知识库转交后业务处理失败")
+            logger.exception(
+                "文件分析在文档所有权转交后失败: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="post_transfer",
+                error_message=post_transfer_error,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+        finally:
+            _close_audited_session(
+                task_service=task_service,
+                session=session,
+                interaction_id=audit_result.interaction_id,
+                execution_id=execution_id,
+                audited_trace=successful_trace,
+                retain_document=True,
+            )
 
 
-def run_file_analysis_batch_task(
+def run_file_analysis_task(
         *,
         task_service: LLMTaskService,
-        kb_service: DatabaseService,
         progress_hub: LLMProgressHub,
         request_payload: Dict[str, Any],
         download_root: str,
         callback_url: str,
         callback_timeout: float,
+        document_rag_factory: DocumentRagFactory,
+        knowledge_index_factory: KnowledgeIndexFactory,
 ) -> None:
+    """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
+
+    状态机内部已经处理所有创建 Session 后的异常。本边界主要覆盖 Factory 进入失败、依赖
+    契约错误等尚未创建外部资源的异常，确保后台线程不会让任务永久停留在处理中。若未来
+    在内部增加新的外部副作用，必须先把相应审计和补偿加入状态机，不能依赖本兜底处理。
+    """
+    try:
+        _execute_file_analysis_task(
+            task_service=task_service,
+            progress_hub=progress_hub,
+            request_payload=request_payload,
+            download_root=download_root,
+            callback_url=callback_url,
+            callback_timeout=callback_timeout,
+            document_rag_factory=document_rag_factory,
+            knowledge_index_factory=knowledge_index_factory,
+        )
+    except Exception as exc:
+        params_list = request_payload.get("params", [])
+        params = params_list[0] if params_list and isinstance(params_list[0], dict) else {}
+        file_name = _as_text(params.get("fileName"))
+        original_name = _as_text(params.get("originalFileName")) or file_name
+        error_message = _safe_task_error(exc, fallback="文件分析编排失败")
+        logger.exception(
+            "文件分析后台线程未处理异常: file_name=%s error_type=%s",
+            file_name,
+            type(exc).__name__,
+        )
+        if file_name:
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="orchestration",
+                error_message=error_message,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+
+
+def run_file_analysis_batch_task(
+        *,
+        task_service: LLMTaskService,
+        progress_hub: LLMProgressHub,
+        request_payload: Dict[str, Any],
+        download_root: str,
+        callback_url: str,
+        callback_timeout: float,
+        document_rag_factory: DocumentRagFactory,
+        knowledge_index_factory: KnowledgeIndexFactory,
+) -> None:
+    """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
     for index, params in enumerate(params_list):
         if not isinstance(params, dict):
@@ -1186,17 +1994,22 @@ def run_file_analysis_batch_task(
         file_name = _as_text(params.get("fileName"))
         if not file_name:
             continue
-
         if index > 0:
-            task_service.update_task_progress("file", file_name, progress=0.0, message="准备开始解析", status="1")
+            task_service.update_task_progress(
+                "file",
+                file_name,
+                progress=0.0,
+                message="准备开始解析",
+                status="1",
+            )
             _publish_progress(progress_hub, file_name, 0.0)
-
         run_file_analysis_task(
             task_service=task_service,
-            kb_service=kb_service,
             progress_hub=progress_hub,
             request_payload={"businessType": "file", "params": [params]},
             download_root=download_root,
             callback_url=callback_url,
             callback_timeout=callback_timeout,
+            document_rag_factory=document_rag_factory,
+            knowledge_index_factory=knowledge_index_factory,
         )
