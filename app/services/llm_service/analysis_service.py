@@ -748,8 +748,12 @@ def _extract_data_standard_fields(
     return fields
 
 
-def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str, Any], original_text: str = "") -> Dict[
-    str, Any]:
+def map_analysis_result(
+        parsed_result: Dict[str, Any],
+        request_params: Dict[str, Any],
+        original_text: str = "",
+        resolved_architecture_id: Any = None,
+) -> Dict[str, Any]:
     file_name = _as_text(request_params.get("fileName"))
     ranges = build_effective_analysis_ranges(request_params)
     file_item = parsed_result.get("fileDataItem")
@@ -797,17 +801,19 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
         _first_non_empty_value(file_item, "keyword", "keywords", "关键词")
         or _first_non_empty_value(parsed_result, "keyword", "keywords", "关键词")
     )
-    architecture_id = (
-        _match_data_standard_architecture_id(
-            ranges["architectureList"],
-            normalized_original_text,
-            request_params.get("originalFileName"),
-            _resolve_field(parsed_result, file_item, "summary", "摘要"),
-            resolved_keyword,
-            _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
+    architecture_id = _coerce_int(resolved_architecture_id)
+    if architecture_id is None:
+        architecture_id = (
+            _match_data_standard_architecture_id(
+                ranges["architectureList"],
+                normalized_original_text,
+                request_params.get("originalFileName"),
+                _resolve_field(parsed_result, file_item, "summary", "摘要"),
+                resolved_keyword,
+                _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
+            )
+            or _match_architecture_id(parsed_result, ranges["architectureList"])
         )
-        or _match_architecture_id(parsed_result, ranges["architectureList"])
-    )
 
     file_data_item = {
         "fileName": file_name,
@@ -1630,9 +1636,10 @@ def _execute_file_analysis_task(
                 normalized_result,
                 params,
                 original_text=original_text,
+                resolved_architecture_id=architecture_id,
             )
-            # legacy 映射器仍保留 GJB 文本启发式。正式阶段 9 链路必须以已经完成候选
-            # 契约校验的 ID 和枚举值为准，禁止映射器通过正文关键词或兼容别名静默补值。
+            # legacy 映射器默认仍保留 GJB 文本启发式。正式阶段 9 链路显式传入已经完成
+            # 候选契约校验的 ID 和枚举值，禁止映射器通过正文关键词或兼容别名静默补值。
             mapped_result["architectureId"] = architecture_id
             for enum_field in ("country", "channel", "maturity", "format"):
                 mapped_result[enum_field] = normalized_result[enum_field]

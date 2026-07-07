@@ -311,6 +311,54 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["implTime"], "2020-05-06")
         self.assertEqual(result["fileDataItem"]["approvalDept"], "批准部门")
 
+    def test_map_analysis_result_uses_resolved_architecture_for_child_only_standard_range(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "originalFileName": "GJB 9001C-2017.pdf",
+            "architectureList": [
+                {"id": 202, "name": "数据标准", "path": "202", "pathName": "数据标准"},
+                {
+                    "id": 203,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/通用要求标准",
+                },
+                {"id": 301, "name": "水面装备", "path": "301", "pathName": "装备目标/水面装备"},
+            ],
+            "architectureStandardList": [
+                {
+                    "id": 203,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/通用要求标准",
+                },
+            ],
+        }
+        original_text = (
+            "GJB 9001C-2017 质量管理体系要求\n"
+            "国军标名称：GJB 9001C-2017 质量管理体系要求\n"
+            "编号：GJB 9001C-2017\n"
+            "发布时间：2017年5月18日\n"
+            "实施时间：2017年7月1日\n"
+            "批准部门：中央军委装备发展部\n"
+        )
+
+        result = map_analysis_result(
+            {"architectureId": 203},
+            request_params,
+            original_text=original_text,
+            resolved_architecture_id=203,
+        )
+
+        self.assertEqual(result["architectureId"], 203)
+        self.assertEqual(result["fileDataItem"]["militaryName"], "GJB 9001C-2017 质量管理体系要求")
+        self.assertEqual(result["fileDataItem"]["num"], "GJB 9001C-2017")
+        self.assertEqual(result["fileDataItem"]["startTime"], "2017-05-18")
+        self.assertEqual(result["fileDataItem"]["implTime"], "2017-07-01")
+        self.assertEqual(result["fileDataItem"]["approvalDept"], "中央军委装备发展部")
+
     def test_map_analysis_result_omits_standard_fields_when_architecture_not_in_standard_range(self):
         request_params = {
             "fileName": "sample.txt",
