@@ -135,7 +135,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "8. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
         "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断；source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
-        "10. documentOverview 字段要求输出不少于 1000 字的描述，尽可能详细完整，突出文档核心内容和特点。\n"
+        "10. documentOverview 字段为文件概述，必须按资料原有目录、章节或标题层级进行概述，全文不超过 1000 字。优先说明全文整体结构，例如全文共多少章、核心内容集中在哪些章节；再按章节顺序概述各章主题、关键对象、重要结论或核心信息。不要机械复述目录，不要编造原文不存在的章节或内容；若资料无清晰目录结构，则按可识别的标题层级或内容模块进行概述。示例1：全文共 8 个章节。第一章主要包括 a、b、c 等内容；第二章主要描述……；第三章围绕 d、e 等内容展开；其余章节分别介绍……。示例2：全文共 8 个章节，核心内容集中在第 3 至第 7 章。第 1、2 章介绍基本概念和背景，第 8 章为结束语。第 3 章包括 a、b 等内容；第 4 章主要描述……；第 5 章主要描述……。\n"
         "11. fileDataItem.dataTime 必须输出文档中明确提到的资料年代，输出格式为 yyyy-MM-dd，找不到时输出空字符串。\n"
         + data_standard_contract
         + "12. fileDataItem.language 表示“原始资料正文的主要语种”，不是本次回答语言、摘要语言、翻译结果语言、文件名语言或提示词语言。\n"
