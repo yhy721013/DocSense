@@ -380,7 +380,16 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
 
 
 def _default_secret_value(options: Iterable[Dict[str, Any]]) -> str:
-    return _match_option_value("公开", options) or "公开"
+    matched = _match_option_value("公开", options)
+    if matched:
+        return matched
+    for item in options:
+        if not isinstance(item, dict):
+            continue
+        candidate = _as_text(item.get("value"))
+        if candidate:
+            return candidate
+    return "公开"
 
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
