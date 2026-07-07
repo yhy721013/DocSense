@@ -99,6 +99,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             "fileName": "demo.txt",
             "channel": [{"key": "02", "value": "装发"}],
             "maturity": [{"key": "02", "value": "阶段成果"}],
+            "secrets": [{"key": "02", "value": "公开"}],
             "format": [{"key": "03", "value": "文档类"}],
         }
 
@@ -106,6 +107,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             {
                 "channel": "未知渠道",
                 "maturity": "未知成熟度",
+                "secrets": "绝密",
                 "format": "未知格式",
             },
             request_params,
@@ -113,7 +115,40 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["channel"], "")
         self.assertEqual(result["maturity"], "")
+        self.assertEqual(result["secrets"], "公开")
         self.assertEqual(result["format"], "")
+
+    def test_map_analysis_result_resolves_secret_from_candidate_range(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "secrets": [
+                {"key": "02", "value": "公开"},
+                {"key": "03", "value": "秘密"},
+            ],
+        }
+
+        result = map_analysis_result({"secrets": "秘密"}, request_params)
+
+        self.assertEqual(result["secrets"], "秘密")
+
+    def test_map_analysis_result_infers_secret_from_opening_text(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "secrets": [
+                {"key": "02", "value": "公开"},
+                {"key": "03", "value": "秘密"},
+            ],
+        }
+        original_text = "密级：秘密\n文件编号：ABC-001\n正文内容。"
+
+        result = map_analysis_result({}, request_params, original_text=original_text)
+
+        self.assertEqual(result["secrets"], "秘密")
+
+    def test_map_analysis_result_defaults_secret_to_public_when_missing(self):
+        result = map_analysis_result({}, {"fileName": "demo.txt"}, original_text="普通正文内容。")
+
+        self.assertEqual(result["secrets"], "公开")
 
     def test_map_analysis_result_matches_options_after_normalization(self):
         request_params = {
@@ -276,6 +311,54 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["implTime"], "2020-05-06")
         self.assertEqual(result["fileDataItem"]["approvalDept"], "批准部门")
 
+    def test_map_analysis_result_uses_resolved_architecture_for_child_only_standard_range(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "originalFileName": "GJB 9001C-2017.pdf",
+            "architectureList": [
+                {"id": 202, "name": "数据标准", "path": "202", "pathName": "数据标准"},
+                {
+                    "id": 203,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/通用要求标准",
+                },
+                {"id": 301, "name": "水面装备", "path": "301", "pathName": "装备目标/水面装备"},
+            ],
+            "architectureStandardList": [
+                {
+                    "id": 203,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/通用要求标准",
+                },
+            ],
+        }
+        original_text = (
+            "GJB 9001C-2017 质量管理体系要求\n"
+            "国军标名称：GJB 9001C-2017 质量管理体系要求\n"
+            "编号：GJB 9001C-2017\n"
+            "发布时间：2017年5月18日\n"
+            "实施时间：2017年7月1日\n"
+            "批准部门：中央军委装备发展部\n"
+        )
+
+        result = map_analysis_result(
+            {"architectureId": 203},
+            request_params,
+            original_text=original_text,
+            resolved_architecture_id=203,
+        )
+
+        self.assertEqual(result["architectureId"], 203)
+        self.assertEqual(result["fileDataItem"]["militaryName"], "GJB 9001C-2017 质量管理体系要求")
+        self.assertEqual(result["fileDataItem"]["num"], "GJB 9001C-2017")
+        self.assertEqual(result["fileDataItem"]["startTime"], "2017-05-18")
+        self.assertEqual(result["fileDataItem"]["implTime"], "2017-07-01")
+        self.assertEqual(result["fileDataItem"]["approvalDept"], "中央军委装备发展部")
+
     def test_map_analysis_result_omits_standard_fields_when_architecture_not_in_standard_range(self):
         request_params = {
             "fileName": "sample.txt",
@@ -406,12 +489,13 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         )
 
         self.assertIn('"country"', prompt)
+        self.assertIn('"secrets"', prompt)
         self.assertIn('"architectureId"', prompt)
         self.assertIn('"fileDataItem"', prompt)
         self.assertIn('"originalText"', prompt)
         self.assertIn("不要直接原样返回候选对象", prompt)
         self.assertIn("输出前自检清单", prompt)
-        self.assertIn("无法匹配时输出 1", prompt)
+        self.assertIn("无法匹配时输出空字符串", prompt)
         self.assertIn("parentId 表示父节点 id", prompt)
         self.assertIn("architectureList 只包含 id, name, parentId, path, pathName", prompt)
 
@@ -480,31 +564,37 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "fileName": "demo.txt",
                 "country": [{"key": "99", "value": "德国"}],
                 "format": [{"key": "88", "value": "数据库类"}],
+                "secrets": [{"key": "03", "value": "秘密"}],
             }
         )
         lines = prompt.splitlines()
         country_options_line = next(line for line in lines if line.startswith("国家候选:"))
         format_options_line = next(line for line in lines if line.startswith("格式候选:"))
+        secrets_options_line = next(line for line in lines if line.startswith("密级候选:"))
 
         self.assertIn('"德国"', country_options_line)
         self.assertNotIn('"美国"', country_options_line)
         self.assertIn('"数据库类"', format_options_line)
         self.assertNotIn('"文档类"', format_options_line)
+        self.assertIn('"秘密"', secrets_options_line)
+        self.assertNotIn('"公开"', secrets_options_line)
 
     def test_build_file_analysis_prompt_includes_architecture_classification_rules(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
 
         self.assertIn("领域体系候选:", prompt)
+        self.assertIn("密级候选:", prompt)
         self.assertIn('"name": "军事基地"', prompt)
         self.assertIn('"name": "作战指挥"', prompt)
         self.assertIn('"pathName": "作战指挥/组织机构"', prompt)
         self.assertIn("architectureId 只能输出候选 architectureList 中的叶子 id 数字", prompt)
         self.assertIn("fileDataItem.dataFormat 必须与顶层 format 完全一致", prompt)
-        self.assertIn("无法匹配时输出 1", prompt)
+        self.assertIn("无法匹配时输出空字符串", prompt)
         self.assertIn("当 architectureList 只有一个节点时", prompt)
         self.assertIn("分类到最底层的叶子节点", prompt)
-        self.assertIn("无法区分应该归类到哪一个叶子节点，则返回「战技指标」", prompt)
+        self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
+        self.assertIn("默认为“公开”", prompt)
         self.assertIn("由至少 10 个关键词构成", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
@@ -686,6 +776,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "country": "",
                 "channel": "",
                 "maturity": "",
+                "secrets": "",
                 "format": "",
                 "architectureId": architecture_id,
                 "fileDataItem": {
@@ -806,6 +897,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(task["result_payload"]["data"]["country"], "")
         self.assertEqual(task["result_payload"]["data"]["channel"], "")
         self.assertEqual(task["result_payload"]["data"]["maturity"], "")
+        self.assertEqual(task["result_payload"]["data"]["secrets"], "公开")
         self.assertEqual(task["result_payload"]["data"]["format"], "")
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
         self.assertTrue(all(item["query_mode"] == "query" for item in attempts))
@@ -1064,6 +1156,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         """批量任务必须为每个文件创建独立 Port，不能复用有状态 Session。"""
         with workspace_tempdir() as tmp:
             file_names = ("batch-a.txt", "batch-b.txt")
+            architecture_ids = (9501, 9502)
             for file_name in file_names:
                 Path(tmp, file_name).write_text(file_name, encoding="utf-8")
             request_payload = {
@@ -1071,9 +1164,9 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "params": [
                     self._stage9_request(
                         file_name,
-                        [{"id": 9501, "name": "批量候选", "parentId": None}],
+                        [{"id": architecture_id, "name": f"批量候选{architecture_id}", "parentId": None}],
                     )["params"][0]
-                    for file_name in file_names
+                    for file_name, architecture_id in zip(file_names, architecture_ids)
                 ],
             }
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
@@ -1087,7 +1180,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             rag_factory = FakeDocumentRagFactory(
                 analyse_outcomes=[
                     FakeRagOutcome(
-                        text=self._stage9_model_response("ignored.txt", 9501),
+                        text=self._stage9_model_response("ignored.txt", ""),
                         sources=(source,),
                     )
                 ]
