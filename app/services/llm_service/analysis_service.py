@@ -73,6 +73,10 @@ DEFAULT_MATURITY_OPTIONS = [
     {"key": "03", "value": "定型成果"},
 ]
 
+DEFAULT_SECRET_OPTIONS = [
+    {"key": "02", "value": "公开"},
+]
+
 DEFAULT_ARCHITECTURE_OPTIONS = [
     {"id": 101, "name": "军事基地", "parentId": None, "path": "101", "pathName": "军事基地", "remark": "军事设施、基地建设、基地布局、港口码头、机场跑道、后勤保障设施等。"},
     {"id": 102, "name": "体系运用", "parentId": None, "path": "102", "pathName": "体系运用", "remark": "作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗等。"},
@@ -119,6 +123,7 @@ def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str,
         "channel": _normalize_range_list(request_params.get("channel"), DEFAULT_CHANNEL_OPTIONS),
         "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
         "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
+        "secrets": _normalize_range_list(request_params.get("secrets"), DEFAULT_SECRET_OPTIONS),
         "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
         "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
     }
@@ -372,6 +377,10 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
         }:
             return value_text
     return ""
+
+
+def _default_secret_value(options: Iterable[Dict[str, Any]]) -> str:
+    return _match_option_value("公开", options) or "公开"
 
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
@@ -632,6 +641,45 @@ def _match_option_value_from_text(options: Iterable[Dict[str, Any]], original_te
     return ""
 
 
+def _opening_text(original_text: str, *, max_chars: int = 2000, max_lines: int = 80) -> str:
+    if not original_text:
+        return ""
+    collected: list[str] = []
+    total_chars = 0
+    for raw_line in original_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        collected.append(line)
+        total_chars += len(line)
+        if total_chars >= max_chars or len(collected) >= max_lines:
+            break
+    if collected:
+        return "\n".join(collected)[:max_chars]
+    return original_text[:max_chars]
+
+
+def _extract_secret_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
+    opening = _opening_text(original_text)
+    if not opening:
+        return ""
+    lines = [line.strip() for line in opening.splitlines() if line.strip()]
+    secret_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
+    for line in lines:
+        if not secret_label_pattern.search(line):
+            continue
+        matched = _match_option_value_from_text(options, line)
+        if matched:
+            return matched
+    for line in lines[:30]:
+        if len(line) > 40:
+            continue
+        matched = _match_option_value_from_text(options, line)
+        if matched:
+            return matched
+    return ""
+
+
 def _extract_title(original_text: str) -> str:
     lines = [line.strip() for line in original_text.splitlines()]
     for index, line in enumerate(lines):
@@ -713,6 +761,9 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     raw_country = _first_non_empty_value(parsed_result, "country", "国家")
     raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
     raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
+    raw_secrets = _first_non_empty_value(parsed_result, "secrets", "secret", "密级", "密级程度")
+    if raw_secrets in (None, "", [], {}):
+        raw_secrets = _first_non_empty_value(file_item, "secrets", "secret", "密级", "密级程度")
     raw_format = _first_non_empty_value(parsed_result, "format", "格式")
     if raw_format in (None, "", [], {}):
         raw_format = _first_non_empty_value(file_item, "dataFormat", "资料格式")
@@ -720,12 +771,14 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
     resolved_country = _match_option_value(raw_country, ranges["country"])
     resolved_channel = _match_option_value(raw_channel, ranges["channel"])
     resolved_maturity = _match_option_value(raw_maturity, ranges["maturity"])
+    resolved_secrets = _match_option_value(raw_secrets, ranges["secrets"])
     resolved_format = _match_option_value(raw_format, ranges["format"])
 
     for field_name, raw_value, resolved_value in (
         ("country", raw_country, resolved_country),
         ("channel", raw_channel, resolved_channel),
         ("maturity", raw_maturity, resolved_maturity),
+        ("secrets", raw_secrets, resolved_secrets),
         ("format", raw_format, resolved_format),
     ):
         if raw_value not in (None, "", [], {}) and not resolved_value:
@@ -789,6 +842,11 @@ def map_analysis_result(parsed_result: Dict[str, Any], request_params: Dict[str,
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
+        "secrets": (
+            resolved_secrets
+            or _extract_secret_from_opening_text(normalized_original_text, ranges["secrets"])
+            or _default_secret_value(ranges["secrets"])
+        ),
         "format": resolved_format,
         "architectureId": architecture_id,
         "fileDataItem": file_data_item,
@@ -970,7 +1028,7 @@ def _validate_analysis_model_contract(
 ) -> Dict[str, Any]:
     """校验并规范化 architecture 之外的文件分析模型契约。
 
-    四个枚举字段在缺少文档证据时允许为空；一旦模型返回非空值，则必须与请求候选的
+    五个枚举字段在缺少文档证据时允许为空；一旦模型返回非空值，则必须与请求候选的
     ``value`` 精确相等。这里不接受候选 key、对象或相似字符串，也不通过正文猜测替换
     模型返回值，防止“合法化”语义错误。architecture 单独校验，以便只对该字段执行一次
     受控修复。
@@ -981,6 +1039,7 @@ def _validate_analysis_model_contract(
         "country",
         "channel",
         "maturity",
+        "secrets",
         "format",
         "fileDataItem",
     }
@@ -1002,7 +1061,7 @@ def _validate_analysis_model_contract(
     normalized = dict(parsed_result)
     normalized_file_item = dict(file_item)
     ranges = build_effective_analysis_ranges(request_params)
-    for field_name in ("country", "channel", "maturity", "format"):
+    for field_name in ("country", "channel", "maturity", "secrets", "format"):
         raw_value = parsed_result.get(field_name)
         if raw_value in (None, ""):
             normalized[field_name] = ""
@@ -1341,7 +1400,7 @@ def _store_prepared_analysis_document(
         )
     attributes = {
         key: mapped_result.get(key, "")
-        for key in ("country", "channel", "maturity", "format")
+        for key in ("country", "channel", "maturity", "secrets", "format")
     }
     metadata = KnowledgeDocumentMetadata(
         file_name=file_name,
@@ -1577,6 +1636,8 @@ def _execute_file_analysis_task(
             mapped_result["architectureId"] = architecture_id
             for enum_field in ("country", "channel", "maturity", "format"):
                 mapped_result[enum_field] = normalized_result[enum_field]
+            if normalized_result.get("secrets"):
+                mapped_result["secrets"] = normalized_result["secrets"]
             mapped_result["fileDataItem"]["dataFormat"] = normalized_result["format"]
         except Exception as exc:
             trace = exc.trace if isinstance(exc, RagOperationError) else (
