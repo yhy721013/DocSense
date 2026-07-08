@@ -1,4 +1,7 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app.services.llm_service.translation_service import LLMTranslationService
@@ -12,10 +15,60 @@ class LLMTranslationServiceTests(unittest.TestCase):
         translator.translate_text.return_value = "translated"
         service._translator = translator
 
-        result = service.translate_text_only("hello", as_html=False)
+        with patch.dict(os.environ, {}, clear=True):
+            result = service.translate_text_only("hello", as_html=False)
 
         self.assertEqual(result, "translated")
         translator.translate_text.assert_called_once_with("hello", "Chinese", fast_translate=True)
+
+    def test_translate_text_only_can_use_llm_from_env(self):
+        service = LLMTranslationService()
+        translator = Mock()
+        translator.translate_text.return_value = "translated"
+        service._translator = translator
+
+        with patch.dict(os.environ, {"DOCSENSE_TRANSLATION_MODE": "llm"}):
+            result = service.translate_text_only("hello", as_html=False)
+
+        self.assertEqual(result, "translated")
+        translator.translate_text.assert_called_once_with("hello", "Chinese", fast_translate=False)
+
+    def test_translate_text_only_explicit_fast_translate_overrides_env(self):
+        service = LLMTranslationService()
+        translator = Mock()
+        translator.translate_text.return_value = "translated"
+        service._translator = translator
+
+        with patch.dict(os.environ, {"DOCSENSE_TRANSLATION_MODE": "llm"}):
+            result = service.translate_text_only("hello", fast_translate=True, as_html=False)
+
+        self.assertEqual(result, "translated")
+        translator.translate_text.assert_called_once_with("hello", "Chinese", fast_translate=True)
+
+    @patch("app.services.llm_service.translation_service.DocumentTranslator")
+    def test_translate_document_uses_translation_mode_from_env(self, mock_document_translator_cls):
+        service = LLMTranslationService()
+        service._translator = Mock()
+        service._document_translator = mock_document_translator_cls.return_value
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "sample.txt"
+            bilingual_path = temp_path / "bilingual.html"
+            monolingual_path = temp_path / "monolingual.html"
+            input_path.write_text("hello", encoding="utf-8")
+            bilingual_path.write_text("bilingual", encoding="utf-8")
+            monolingual_path.write_text("monolingual", encoding="utf-8")
+            mock_document_translator_cls.return_value.convert_to_html.return_value = (
+                str(bilingual_path),
+                str(monolingual_path),
+            )
+
+            with patch.dict(os.environ, {"DOCSENSE_TRANSLATION_MODE": "llm"}):
+                result = service.translate_document(str(input_path))
+
+        self.assertEqual(("bilingual", "monolingual"), result)
+        self.assertFalse(mock_document_translator_cls.return_value.convert_to_html.call_args.kwargs["fast_translate"])
 
     @patch("app.services.llm_service.translation_service.DocumentTranslator")
     def test_ensure_document_translator_recovers_half_initialized_state(self, mock_document_translator_cls):
