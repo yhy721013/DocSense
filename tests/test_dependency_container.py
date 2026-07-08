@@ -28,7 +28,12 @@ from app.container import (
     ApplicationServices,
     UploadTaskLimiter,
 )
-from app.services.chat import ChatPersistenceStore, ChatStore
+from app.services.chat import (
+    ChatCommandService,
+    ChatPersistenceStore,
+    ChatRunLockService,
+    ChatStore,
+)
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
@@ -207,6 +212,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.document_rag_factory = FakeDocumentRagFactory()
         self.knowledge_index_factory = FakeKnowledgeIndexFactory()
         self.chat_conversation_factory = FakeChatConversationFactory()
+        chat_db_path = f"{self.runtime_directory}/chat.sqlite3"
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -217,12 +223,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             kb_service=DatabaseService(
                 db_path=f"{self.runtime_directory}/knowledge.sqlite3"
             ),
-            chat_db=ChatDatabaseService(
-                db_path=f"{self.runtime_directory}/chat.sqlite3"
-            ),
-            chat_store=ChatStore(
-                db_path=f"{self.runtime_directory}/chat.sqlite3"
-            ),
+            chat_db=ChatDatabaseService(db_path=chat_db_path),
+            chat_store=ChatStore(db_path=chat_db_path),
+            chat_commands=ChatCommandService(ChatRunLockService(chat_db_path)),
             progress_hub=LLMProgressHub(),
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
             llm_config=LLMIntegrationConfig(
@@ -255,6 +258,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         )
         self.assertIsInstance(self.services.chat_store, ChatPersistenceStore)
         self.assertIsInstance(self.services.chat_store, ChatStore)
+        self.assertIsInstance(self.services.chat_commands, ChatCommandService)
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
 
@@ -281,6 +285,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             "LLMTaskService(",
             "DatabaseService(",
             "ChatDatabaseService(",
+            "ChatRunLockService(",
             "LLMProgressHub(",
             "threading.Semaphore(",
         )

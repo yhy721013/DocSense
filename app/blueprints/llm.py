@@ -4,7 +4,7 @@ import json
 import logging
 import threading
 from pathlib import PurePosixPath
-from typing import Any, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from urllib.parse import unquote, urlparse
 
 from flask import Blueprint, Response, jsonify, request
@@ -14,7 +14,6 @@ from app.container import ApplicationServices, get_application_services
 from app.services.chat import (
     ChatCommandService,
     ChatRunBusyError,
-    ChatRunLockService,
 )
 from app.services.core.progress import normalize_progress
 from app.services.llm_service.analysis_service import (
@@ -74,11 +73,42 @@ def _mark_chat_run_succeeded(
         logger.exception("failed to mark chat run succeeded: run_id=%s", run_id)
 
 
+def _touch_chat_run(
+    *,
+    chat_commands: ChatCommandService,
+    run_id: str,
+) -> None:
+    try:
+        chat_commands.heartbeat_chat_run(run_id=run_id)
+    except Exception:
+        logger.exception("failed to heartbeat chat run: run_id=%s", run_id)
+
+
+def _close_chat_stream_resource(
+    resource: Any,
+    *,
+    run_id: str,
+    label: str,
+) -> None:
+    close = getattr(resource, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        logger.exception(
+            "failed to close chat stream resource: run_id=%s resource=%s",
+            run_id,
+            label,
+        )
+
+
 def _finalize_chat_run_stream(
     *,
     stream: Iterable[str],
     chat_commands: ChatCommandService,
     run_id: str,
+    on_close: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     terminal_event = ""
     try:
@@ -87,6 +117,7 @@ def _finalize_chat_run_stream(
                 terminal_event = "error"
             elif _is_sse_event(payload, "done"):
                 terminal_event = "done"
+            _touch_chat_run(chat_commands=chat_commands, run_id=run_id)
             yield payload
         if terminal_event == "error":
             _mark_chat_run_failed(
@@ -131,6 +162,16 @@ def _finalize_chat_run_stream(
             error_message=str(exc) or exc.__class__.__name__,
         )
         raise
+    finally:
+        _close_chat_stream_resource(stream, run_id=run_id, label="stream")
+        if on_close is not None:
+            try:
+                on_close()
+            except Exception:
+                logger.exception(
+                    "failed to close chat client: run_id=%s",
+                    run_id,
+                )
 
 
 def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
@@ -994,9 +1035,7 @@ def llm_chat():
     # 将哈希文件名映射为原始文件名
     file_original_names = [kb_service.get_original_name(fn) for fn in normalized_file_names]
 
-    chat_commands = ChatCommandService(
-        ChatRunLockService(services.chat_store.db_path),
-    )
+    chat_commands = services.chat_commands
     try:
         chat_run = chat_commands.start_chat_run(chat_id=chat_id)
     except ChatRunBusyError:
@@ -1006,29 +1045,45 @@ def llm_chat():
         )
         return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
 
-    client = AnythingLLMClient(anythingllm_config)
-    stream = handle_chat_stream(
-        chat_db=chat_db,
-        kb_service=kb_service,
-        client=client,
-        chat_id=chat_id,
-        file_names=normalized_file_names,
-        file_original_names=file_original_names,
-        message=message,
-    )
-    generator = _finalize_chat_run_stream(
-        stream=stream,
-        chat_commands=chat_commands,
-        run_id=chat_run.run_id,
-    )
-    return Response(
-        generator,
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    client: AnythingLLMClient | None = None
+    try:
+        client = AnythingLLMClient(anythingllm_config)
+        stream = handle_chat_stream(
+            chat_db=chat_db,
+            kb_service=kb_service,
+            client=client,
+            chat_id=chat_id,
+            file_names=normalized_file_names,
+            file_original_names=file_original_names,
+            message=message,
+        )
+        generator = _finalize_chat_run_stream(
+            stream=stream,
+            chat_commands=chat_commands,
+            run_id=chat_run.run_id,
+            on_close=client.close,
+        )
+        return Response(
+            generator,
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception as exc:
+        if client is not None:
+            _close_chat_stream_resource(
+                client,
+                run_id=chat_run.run_id,
+                label="client",
+            )
+        _mark_chat_run_failed(
+            chat_commands=chat_commands,
+            run_id=chat_run.run_id,
+            error_message=str(exc) or exc.__class__.__name__,
+        )
+        raise
 
 
 @llm_bp.get("/llm/chat/history")

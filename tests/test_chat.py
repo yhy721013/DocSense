@@ -1,11 +1,12 @@
 """文件对话接口（/llm/chat*）单元测试。"""
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
 from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
-from app.services.chat import ChatStore
+from app.services.chat import ChatCommandService, ChatRunLockService, ChatStore
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -19,14 +20,16 @@ from tests.fakes import (
 
 def _build_test_services(tmp: str) -> ApplicationServices:
     """构建完全离线的应用容器，避免路由测试触碰生产 SQLite 或网络依赖。"""
+    chat_db_path = f"{tmp}/chat.sqlite3"
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
         chat_conversation_factory=FakeChatConversationFactory(),
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
-        chat_db=ChatDatabaseService(db_path=f"{tmp}/chat.sqlite3"),
-        chat_store=ChatStore(db_path=f"{tmp}/chat.sqlite3"),
+        chat_db=ChatDatabaseService(db_path=chat_db_path),
+        chat_store=ChatStore(db_path=chat_db_path),
+        chat_commands=ChatCommandService(ChatRunLockService(chat_db_path)),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=LLMIntegrationConfig(
@@ -135,6 +138,7 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(kwargs["file_names"], [])
         self.assertEqual(kwargs["file_original_names"], [])
         self.assertEqual(kwargs["message"], "hi")
+        mock_client_cls.return_value.close.assert_called_once_with()
         self.assertEqual((), self.services.chat_store.runs.list_active("c1"))
 
     def test_chat_returns_sse_events_for_resolved_file_request(self):
@@ -172,6 +176,7 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(kwargs["file_original_names"], ["alpha原名.pdf"])
         self.assertEqual(kwargs["message"], "请总结")
 
+        mock_client_cls.return_value.close.assert_called_once_with()
         self.assertEqual((), self.services.chat_store.runs.list_active("c-sse"))
 
     def test_chat_rejects_duplicate_active_stream(self):
@@ -224,10 +229,12 @@ class ChatRouteValidationTests(unittest.TestCase):
         from app.blueprints.llm import _finalize_chat_run_stream
 
         commands = MagicMock()
+        on_close = MagicMock()
         generator = _finalize_chat_run_stream(
             stream=iter(['event: done\ndata: {"chatId": "c-close"}\n\n']),
             chat_commands=commands,
             run_id="run-close",
+            on_close=on_close,
         )
 
         self.assertEqual(
@@ -238,6 +245,42 @@ class ChatRouteValidationTests(unittest.TestCase):
 
         commands.complete_chat_run.assert_called_once_with(run_id="run-close")
         commands.fail_chat_run.assert_not_called()
+        commands.heartbeat_chat_run.assert_called_once_with(run_id="run-close")
+        on_close.assert_called_once_with()
+
+    def test_chat_client_construction_failure_releases_active_stream(self):
+        self.app.config["PROPAGATE_EXCEPTIONS"] = False
+
+        with patch(
+            "app.blueprints.llm.AnythingLLMClient",
+            side_effect=RuntimeError("client boom"),
+        ):
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-client-fail",
+                    "fileNames": [],
+                    "message": "hi",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(
+            (),
+            self.services.chat_store.runs.list_active("c-client-fail"),
+        )
+        with sqlite3.connect(self.services.chat_store.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT status, error_message
+                FROM chat_runs
+                WHERE chat_id = ?
+                """,
+                ("c-client-fail",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("failed", row[0])
+        self.assertIn("client boom", row[1])
 
     def test_chat_rejects_empty_message(self):
         resp = self.client.post("/llm/chat", json={

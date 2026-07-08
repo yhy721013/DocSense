@@ -24,6 +24,9 @@ class ChatCommandService:
             error_message=error_message,
         )
 
+    def heartbeat_chat_run(self, *, run_id: str) -> ChatRun:
+        return self._lock_service.heartbeat_run(run_id)
+
     def request_abort(self, *, run_id: str) -> ChatRun:
         return self._lock_service.request_abort(run_id)
 

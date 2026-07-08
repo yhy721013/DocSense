@@ -25,7 +25,12 @@ from app.ports import (
     DocumentRagFactory,
     KnowledgeIndexFactory,
 )
-from app.services.chat import ChatPersistenceStore, ChatStore
+from app.services.chat import (
+    ChatCommandService,
+    ChatPersistenceStore,
+    ChatRunLockService,
+    ChatStore,
+)
 from app.services.core.config import (
     AnythingLLMConfig,
     LLMIntegrationConfig,
@@ -103,6 +108,7 @@ class ApplicationServices:
     kb_service: DatabaseService
     chat_db: ChatDatabaseService
     chat_store: ChatPersistenceStore
+    chat_commands: ChatCommandService
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
@@ -118,6 +124,7 @@ class ApplicationServices:
             "kb_service": self.kb_service,
             "chat_db": self.chat_db,
             "chat_store": self.chat_store,
+            "chat_commands": self.chat_commands,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
@@ -142,6 +149,8 @@ class ApplicationServices:
             )
         if not isinstance(self.chat_store, ChatPersistenceStore):
             raise TypeError("chat_store must implement ChatPersistenceStore")
+        if not isinstance(self.chat_commands, ChatCommandService):
+            raise TypeError("chat_commands must be ChatCommandService")
 
 
 def create_application_services() -> ApplicationServices:
@@ -150,6 +159,7 @@ def create_application_services() -> ApplicationServices:
     llm_config = load_llm_integration_config()
     task_service = LLMTaskService(llm_config.task_db_path)
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
+    chat_store = ChatStore(str(CHAT_DB_PATH))
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
@@ -165,7 +175,8 @@ def create_application_services() -> ApplicationServices:
         task_service=task_service,
         kb_service=kb_service,
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
-        chat_store=ChatStore(str(CHAT_DB_PATH)),
+        chat_store=chat_store,
+        chat_commands=ChatCommandService(ChatRunLockService(chat_store.db_path)),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,

@@ -60,9 +60,20 @@ class ChatResourceLeaseService:
             name="resource_type",
             allowed=RESOURCE_TYPES,
         )
+        normalized_run_id = _optional_text(run_id)
+        normalized_external_ref = _optional_text(external_ref)
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if normalized_run_id:
+                run_row = connection.execute(
+                    "SELECT chat_id FROM chat_runs WHERE run_id = ?",
+                    (normalized_run_id,),
+                ).fetchone()
+                if run_row is None:
+                    raise ValueError("run_id 对应的 chat_run 不存在")
+                if run_row["chat_id"] != normalized_chat_id:
+                    raise ValueError("chat_resource_lease run_id 不属于当前 chat_id")
             existing = connection.execute(
                 "SELECT * FROM chat_resource_leases WHERE lease_id = ?",
                 (normalized_lease_id,),
@@ -71,9 +82,33 @@ class ChatResourceLeaseService:
                 self._reject_identity_conflict(
                     existing,
                     chat_id=normalized_chat_id,
-                    run_id=_optional_text(run_id),
+                    run_id=normalized_run_id,
                     resource_type=normalized_type,
+                    external_ref=normalized_external_ref,
                 )
+                if not existing["external_ref"] and normalized_external_ref:
+                    if existing["status"] != LEASE_PLANNED:
+                        raise ValueError(
+                            "非 planned chat_resource_lease 不能补写 external_ref"
+                        )
+                    cursor = connection.execute(
+                        """
+                        UPDATE chat_resource_leases
+                        SET external_ref = ?, updated_at = ?
+                        WHERE lease_id = ? AND status = ? AND external_ref = ''
+                        """,
+                        (
+                            normalized_external_ref,
+                            now,
+                            normalized_lease_id,
+                            LEASE_PLANNED,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ValueError(
+                            "chat_resource_lease was changed concurrently"
+                        )
+                    return self._get_with_connection(connection, normalized_lease_id)
                 return self._row(existing)
             connection.execute(
                 """
@@ -85,9 +120,9 @@ class ChatResourceLeaseService:
                 (
                     normalized_lease_id,
                     normalized_chat_id,
-                    _optional_text(run_id),
+                    normalized_run_id,
                     normalized_type,
-                    _optional_text(external_ref),
+                    normalized_external_ref,
                     LEASE_PLANNED,
                     now,
                     now,
@@ -102,32 +137,38 @@ class ChatResourceLeaseService:
         external_ref: str = "",
     ) -> ChatResourceLease:
         normalized_lease_id = _required_text(lease_id, name="lease_id")
+        normalized_external_ref = _optional_text(external_ref)
         with _connection_scope(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._get_with_connection(connection, normalized_lease_id)
-            if current.status not in {LEASE_PLANNED, LEASE_ACTIVE}:
+            if current.status == LEASE_ACTIVE:
+                if (
+                    normalized_external_ref
+                    and normalized_external_ref != current.external_ref
+                ):
+                    raise ValueError("chat_resource_lease external_ref 冲突")
+                return current
+            if current.status != LEASE_PLANNED:
                 raise ValueError(
                     f"illegal chat_resource_lease status transition: "
                     f"{current.status} -> {LEASE_ACTIVE}"
                 )
+            resolved_external_ref = normalized_external_ref or current.external_ref
+            if not resolved_external_ref:
+                raise ValueError("激活 chat_resource_lease 时 external_ref 不能为空")
             cursor = connection.execute(
                 """
                 UPDATE chat_resource_leases
-                SET status = ?, external_ref = CASE
-                        WHEN ? != '' THEN ? ELSE external_ref
-                    END,
-                    error_message = '',
+                SET status = ?, external_ref = ?, error_message = '',
                     updated_at = ?
-                WHERE lease_id = ? AND status IN (?, ?)
+                WHERE lease_id = ? AND status = ?
                 """,
                 (
                     LEASE_ACTIVE,
-                    _optional_text(external_ref),
-                    _optional_text(external_ref),
+                    resolved_external_ref,
                     _utc_now_iso(),
                     normalized_lease_id,
                     LEASE_PLANNED,
-                    LEASE_ACTIVE,
                 ),
             )
             if cursor.rowcount != 1:
@@ -238,11 +279,17 @@ class ChatResourceLeaseService:
         chat_id: str,
         run_id: str,
         resource_type: str,
+        external_ref: str,
     ) -> None:
         if (
             row["chat_id"] != chat_id
             or row["run_id"] != run_id
             or row["resource_type"] != resource_type
+            or (
+                row["external_ref"]
+                and external_ref
+                and row["external_ref"] != external_ref
+            )
         ):
             raise ValueError("lease_id 对应的资源租约身份冲突")
 

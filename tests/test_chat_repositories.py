@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.services.chat import (
     LEASE_CLEANUP_FAILED,
@@ -153,6 +154,8 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
                 metadata={"bad": math.nan},
             )
 
+        self.store.runs.create(run_id="run-first", chat_id="chat-a")
+        self.store.runs.create(run_id="run-second", chat_id="chat-a")
         first = self.store.documents.add(
             chat_id="chat-a",
             file_name="hash.pdf",
@@ -176,6 +179,33 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual("更新原名.pdf", documents[0].original_name)
         self.assertEqual("document:second", documents[0].document_ref)
         self.assertEqual("run-first", documents[0].added_by_run_id)
+
+    def test_session_create_or_get_enriches_empty_placeholder(self) -> None:
+        placeholder = self.store.sessions.create_or_get(chat_id="chat-placeholder")
+
+        enriched = self.store.sessions.create_or_get(
+            chat_id="chat-placeholder",
+            workspace_ref="workspace-ref",
+            thread_ref="thread-ref",
+            metadata={"source": "chat"},
+        )
+        same = self.store.sessions.create_or_get(
+            chat_id="chat-placeholder",
+            workspace_ref="workspace-ref",
+            metadata={"source": "chat"},
+        )
+
+        self.assertEqual("", placeholder.workspace_ref)
+        self.assertEqual("workspace-ref", enriched.workspace_ref)
+        self.assertEqual("thread-ref", enriched.thread_ref)
+        self.assertEqual("chat", enriched.metadata["source"])
+        self.assertEqual(enriched, same)
+
+        with self.assertRaisesRegex(ValueError, "metadata 冲突"):
+            self.store.sessions.create_or_get(
+                chat_id="chat-placeholder",
+                metadata={"source": "other"},
+            )
 
     def test_run_status_transitions_and_active_lookup(self) -> None:
         self.store.sessions.create_or_get(chat_id="chat-run")
@@ -261,6 +291,22 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
             self.store.runs.mark_succeeded("run-terminal").completed_at,
         )
 
+    def test_run_must_be_created_as_accepted(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-run-create")
+
+        with self.assertRaisesRegex(ValueError, "accepted"):
+            self.store.runs.create(
+                run_id="run-created-running",
+                chat_id="chat-run-create",
+                status=RUN_RUNNING,
+            )
+        with self.assertRaisesRegex(ValueError, "accepted"):
+            self.store.runs.create(
+                run_id="run-created-succeeded",
+                chat_id="chat-run-create",
+                status=RUN_SUCCEEDED,
+            )
+
     def test_messages_keep_sequence_and_linked_files(self) -> None:
         self.store.sessions.create_or_get(chat_id="chat-message")
         self.store.runs.create(run_id="run-message", chat_id="chat-message")
@@ -290,6 +336,112 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual("  回答\n", messages[1].content)
         self.assertEqual("hash.pdf", messages[0].files[0].file_name)
         self.assertEqual("原名.pdf", messages[0].files[0].original_name)
+
+    def test_message_append_is_idempotent_and_rejects_conflicts(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-message-retry")
+        self.store.runs.create(
+            run_id="run-message-retry",
+            chat_id="chat-message-retry",
+        )
+        arguments = {
+            "message_id": "message-retry",
+            "chat_id": "chat-message-retry",
+            "run_id": "run-message-retry",
+            "role": MESSAGE_ROLE_USER,
+            "content": "请总结",
+            "status": MESSAGE_COMMITTED,
+            "files": (("b.pdf", "乙.pdf"), ("a.pdf", "甲.pdf")),
+        }
+
+        first = self.store.messages.append(**arguments)
+        second = self.store.messages.append(**arguments)
+
+        self.assertEqual(first, second)
+        self.assertEqual(1, second.sequence_no)
+        self.assertEqual(("a.pdf", "b.pdf"), tuple(item.file_name for item in second.files))
+        with self.assertRaisesRegex(ValueError, "身份或内容冲突"):
+            self.store.messages.append(**{**arguments, "content": "不同内容"})
+
+    def test_run_associations_must_belong_to_same_chat(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-left")
+        self.store.sessions.create_or_get(chat_id="chat-right")
+        self.store.runs.create(run_id="run-right", chat_id="chat-right")
+
+        with self.assertRaisesRegex(ValueError, "不属于当前 chat_id"):
+            self.store.messages.append(
+                message_id="message-cross-chat",
+                chat_id="chat-left",
+                run_id="run-right",
+                role=MESSAGE_ROLE_USER,
+                content="cross",
+                status=MESSAGE_COMMITTED,
+            )
+        with self.assertRaisesRegex(ValueError, "不属于当前 chat_id"):
+            self.store.documents.add(
+                chat_id="chat-left",
+                file_name="cross.pdf",
+                added_by_run_id="run-right",
+            )
+        with self.assertRaisesRegex(ValueError, "不属于当前 chat_id"):
+            self.store.resource_leases.begin(
+                lease_id="lease-cross-chat",
+                chat_id="chat-left",
+                run_id="run-right",
+                resource_type="workspace",
+            )
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "does not belong"):
+                connection.execute(
+                    """
+                    INSERT INTO chat_messages (
+                        message_id, chat_id, run_id, role, content,
+                        status, sequence_no, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "message-direct-cross-chat",
+                        "chat-left",
+                        "run-right",
+                        MESSAGE_ROLE_USER,
+                        "cross",
+                        MESSAGE_COMMITTED,
+                        1,
+                        "2026-07-08T00:00:00+00:00",
+                    ),
+                )
+
+    def test_message_history_loads_files_without_n_plus_one_queries(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-query-count")
+        self.store.runs.create(run_id="run-query-count", chat_id="chat-query-count")
+        for index in range(3):
+            self.store.messages.append(
+                message_id=f"message-query-{index}",
+                chat_id="chat-query-count",
+                run_id="run-query-count",
+                role=MESSAGE_ROLE_USER,
+                content=f"message-{index}",
+                status=MESSAGE_COMMITTED,
+                files=((f"{index}.pdf", f"{index}.pdf"),),
+            )
+
+        statements: list[str] = []
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.set_trace_callback(statements.append)
+        with patch(
+            "app.services.chat.repositories._connect",
+            return_value=connection,
+        ):
+            messages = self.store.messages.list_by_chat("chat-query-count")
+
+        select_statements = [
+            statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+        ]
+        self.assertEqual(3, len(messages))
+        self.assertEqual(2, len(select_statements))
 
     def test_resource_lease_lifecycle(self) -> None:
         self.store.sessions.create_or_get(chat_id="chat-lease")
@@ -348,6 +500,59 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
 
         self.assertEqual(LEASE_CLEANUP_FAILED, failed.status)
         self.assertEqual(LEASE_CLEANUP_PENDING, pending.status)
+
+    def test_active_resource_lease_external_ref_is_immutable(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-lease-immutable")
+        self.store.runs.create(
+            run_id="run-lease-immutable",
+            chat_id="chat-lease-immutable",
+        )
+        self.store.resource_leases.begin(
+            lease_id="lease-immutable",
+            chat_id="chat-lease-immutable",
+            run_id="run-lease-immutable",
+            resource_type="workspace",
+        )
+        active = self.store.resource_leases.activate(
+            lease_id="lease-immutable",
+            external_ref="workspace:first",
+        )
+        same = self.store.resource_leases.activate(
+            lease_id="lease-immutable",
+            external_ref="workspace:first",
+        )
+
+        self.assertEqual(active, same)
+        with self.assertRaisesRegex(ValueError, "external_ref 冲突"):
+            self.store.resource_leases.activate(
+                lease_id="lease-immutable",
+                external_ref="workspace:second",
+            )
+        with sqlite3.connect(self.db_path) as connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    """
+                    UPDATE chat_resource_leases
+                    SET external_ref = 'workspace:second'
+                    WHERE lease_id = 'lease-immutable'
+                    """
+                )
+
+        self.store.resource_leases.begin(
+            lease_id="lease-closed-without-ref",
+            chat_id="chat-lease-immutable",
+            run_id="run-lease-immutable",
+            resource_type="thread",
+        )
+        self.store.resource_leases.mark_closed("lease-closed-without-ref")
+        with self.assertRaisesRegex(ValueError, "非 planned"):
+            self.store.resource_leases.begin(
+                lease_id="lease-closed-without-ref",
+                chat_id="chat-lease-immutable",
+                run_id="run-lease-immutable",
+                resource_type="thread",
+                external_ref="thread:late",
+            )
 
     def test_delete_chat_clears_legacy_and_stage3_tables(self) -> None:
         legacy = ChatDatabaseService(self.db_path)

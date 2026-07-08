@@ -246,6 +246,96 @@ def ensure_chat_schema(db_path: str) -> None:
             ON chat_resource_leases (status, updated_at)
             """
         )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_documents_run_chat_insert
+            BEFORE INSERT ON chat_documents
+            WHEN NEW.added_by_run_id != '' AND NOT EXISTS (
+                SELECT 1 FROM chat_runs
+                WHERE run_id = NEW.added_by_run_id
+                  AND chat_id = NEW.chat_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_document run_id does not belong to chat_id');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_documents_run_chat_update
+            BEFORE UPDATE OF chat_id, added_by_run_id ON chat_documents
+            WHEN NEW.added_by_run_id != '' AND NOT EXISTS (
+                SELECT 1 FROM chat_runs
+                WHERE run_id = NEW.added_by_run_id
+                  AND chat_id = NEW.chat_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_document run_id does not belong to chat_id');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_insert
+            BEFORE INSERT ON chat_messages
+            WHEN NOT EXISTS (
+                SELECT 1 FROM chat_runs
+                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_message run_id does not belong to chat_id');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_update
+            BEFORE UPDATE OF chat_id, run_id ON chat_messages
+            WHEN NOT EXISTS (
+                SELECT 1 FROM chat_runs
+                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_message run_id does not belong to chat_id');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_run_chat_insert
+            BEFORE INSERT ON chat_resource_leases
+            WHEN NEW.run_id != '' AND NOT EXISTS (
+                SELECT 1 FROM chat_runs
+                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_resource_lease run_id does not belong to chat_id');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_run_chat_update
+            BEFORE UPDATE OF chat_id, run_id ON chat_resource_leases
+            WHEN NEW.run_id != '' AND NOT EXISTS (
+                SELECT 1 FROM chat_runs
+                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_resource_lease run_id does not belong to chat_id');
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_external_ref_immutable
+            BEFORE UPDATE OF external_ref ON chat_resource_leases
+            WHEN OLD.external_ref != '' AND NEW.external_ref != OLD.external_ref
+            BEGIN
+                SELECT RAISE(ABORT, 'chat_resource_lease external_ref is immutable');
+            END
+            """
+        )
 
 
 class _Repository:
@@ -294,6 +384,40 @@ class ChatSessionRepository(_Repository):
                     workspace_ref=normalized_workspace,
                     thread_ref=normalized_thread,
                 )
+                if existing["status"] != normalized_status:
+                    raise ValueError("chat_session status 冲突")
+                existing_metadata = _json_loads_object(existing["metadata_json"])
+                merged_metadata = dict(existing_metadata)
+                for key, value in (metadata or {}).items():
+                    if key in merged_metadata and merged_metadata[key] != value:
+                        raise ValueError("chat_session metadata 冲突")
+                    merged_metadata[key] = value
+                resolved_workspace = existing["workspace_ref"] or normalized_workspace
+                resolved_thread = existing["thread_ref"] or normalized_thread
+                if (
+                    resolved_workspace != existing["workspace_ref"]
+                    or resolved_thread != existing["thread_ref"]
+                    or merged_metadata != existing_metadata
+                ):
+                    connection.execute(
+                        """
+                        UPDATE chat_sessions
+                        SET workspace_ref = ?, thread_ref = ?, metadata_json = ?,
+                            updated_at = ?
+                        WHERE chat_id = ?
+                        """,
+                        (
+                            resolved_workspace,
+                            resolved_thread,
+                            _json_dumps(merged_metadata),
+                            now,
+                            normalized_chat_id,
+                        ),
+                    )
+                    existing = connection.execute(
+                        "SELECT * FROM chat_sessions WHERE chat_id = ?",
+                        (normalized_chat_id,),
+                    ).fetchone()
                 return self._row(existing)
             connection.execute(
                 """
@@ -431,8 +555,18 @@ class ChatDocumentRepository(_Repository):
     ) -> ChatDocument:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_file_name = _required_text(file_name, name="file_name")
+        normalized_added_by_run_id = _optional_text(added_by_run_id)
         now = _utc_now_iso()
         with self._connection() as connection:
+            if normalized_added_by_run_id:
+                run_row = connection.execute(
+                    "SELECT chat_id FROM chat_runs WHERE run_id = ?",
+                    (normalized_added_by_run_id,),
+                ).fetchone()
+                if run_row is None:
+                    raise ValueError("added_by_run_id 对应的 chat_run 不存在")
+                if run_row["chat_id"] != normalized_chat_id:
+                    raise ValueError("chat_document run_id 不属于当前 chat_id")
             connection.execute(
                 """
                 INSERT INTO chat_documents (
@@ -467,7 +601,7 @@ class ChatDocumentRepository(_Repository):
                     _optional_text(original_name),
                     _optional_text(document_ref),
                     _optional_text(external_location),
-                    _optional_text(added_by_run_id),
+                    normalized_added_by_run_id,
                     now,
                 ),
             )
@@ -537,6 +671,8 @@ class ChatRunRepository(_Repository):
             name="status",
             allowed=RUN_STATUSES,
         )
+        if normalized_status != RUN_ACCEPTED:
+            raise ValueError("chat_run 必须以 accepted 状态创建")
         now = _utc_now_iso()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -783,9 +919,35 @@ class ChatMessageRepository(_Repository):
             or sequence_no < 1
         ):
             raise ValueError("sequence_no 必须是正整数或 None")
+        normalized_files = self._normalize_files(files)
 
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT chat_id FROM chat_runs WHERE run_id = ?",
+                (normalized_run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise ValueError("chat_run 不存在")
+            if run_row["chat_id"] != normalized_chat_id:
+                raise ValueError("chat_message run_id 不属于当前 chat_id")
+            existing = connection.execute(
+                "SELECT * FROM chat_messages WHERE message_id = ?",
+                (normalized_message_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_message = self._row(connection, existing)
+                self._reject_identity_conflict(
+                    existing_message,
+                    chat_id=normalized_chat_id,
+                    run_id=normalized_run_id,
+                    role=normalized_role,
+                    content=content,
+                    status=normalized_status,
+                    sequence_no=sequence_no,
+                    files=normalized_files,
+                )
+                return existing_message
             resolved_sequence = sequence_no
             if resolved_sequence is None:
                 row = connection.execute(
@@ -818,7 +980,7 @@ class ChatMessageRepository(_Repository):
             self._replace_files(
                 connection,
                 message_id=normalized_message_id,
-                files=files,
+                files=normalized_files,
             )
             return self._get_with_connection(connection, normalized_message_id)
 
@@ -833,7 +995,30 @@ class ChatMessageRepository(_Repository):
                 """,
                 (normalized_chat_id,),
             ).fetchall()
-            return tuple(self._row(connection, row) for row in rows)
+            file_rows = connection.execute(
+                """
+                SELECT message_files.*
+                FROM chat_message_files AS message_files
+                INNER JOIN chat_messages AS messages
+                    ON messages.message_id = message_files.message_id
+                WHERE messages.chat_id = ?
+                ORDER BY messages.sequence_no ASC, message_files.file_name ASC
+                """,
+                (normalized_chat_id,),
+            ).fetchall()
+            files_by_message: dict[str, list[ChatMessageFile]] = {}
+            for file_row in file_rows:
+                files_by_message.setdefault(file_row["message_id"], []).append(
+                    self._file_row(file_row)
+                )
+            return tuple(
+                self._row(
+                    connection,
+                    row,
+                    files=tuple(files_by_message.get(row["message_id"], ())),
+                )
+                for row in rows
+            )
 
     def _replace_files(
         self,
@@ -860,6 +1045,45 @@ class ChatMessageRepository(_Repository):
                 ),
             )
 
+    @staticmethod
+    def _normalize_files(
+        files: Sequence[tuple[str, str]],
+    ) -> tuple[tuple[str, str], ...]:
+        normalized: dict[str, str] = {}
+        for file_name, original_name in files:
+            normalized_file_name = _required_text(file_name, name="file_name")
+            normalized_original_name = _optional_text(original_name)
+            if normalized_file_name in normalized:
+                raise ValueError("files 中存在重复 file_name")
+            normalized[normalized_file_name] = normalized_original_name
+        return tuple(sorted(normalized.items()))
+
+    @staticmethod
+    def _reject_identity_conflict(
+        message: ChatMessage,
+        *,
+        chat_id: str,
+        run_id: str,
+        role: str,
+        content: str,
+        status: str,
+        sequence_no: int | None,
+        files: tuple[tuple[str, str], ...],
+    ) -> None:
+        existing_files = tuple(
+            (item.file_name, item.original_name) for item in message.files
+        )
+        if (
+            message.chat_id != chat_id
+            or message.run_id != run_id
+            or message.role != role
+            or message.content != content
+            or message.status != status
+            or (sequence_no is not None and message.sequence_no != sequence_no)
+            or existing_files != files
+        ):
+            raise ValueError("message_id 对应的消息身份或内容冲突")
+
     def _get_with_connection(
         self,
         connection: sqlite3.Connection,
@@ -877,23 +1101,19 @@ class ChatMessageRepository(_Repository):
     def _row(
         connection: sqlite3.Connection,
         row: sqlite3.Row,
+        *,
+        files: tuple[ChatMessageFile, ...] | None = None,
     ) -> ChatMessage:
-        file_rows = connection.execute(
-            """
-            SELECT * FROM chat_message_files
-            WHERE message_id = ?
-            ORDER BY file_name ASC
-            """,
-            (row["message_id"],),
-        ).fetchall()
-        files = tuple(
-            ChatMessageFile(
-                message_id=file_row["message_id"],
-                file_name=file_row["file_name"],
-                original_name=file_row["original_name"],
-            )
-            for file_row in file_rows
-        )
+        if files is None:
+            file_rows = connection.execute(
+                """
+                SELECT * FROM chat_message_files
+                WHERE message_id = ?
+                ORDER BY file_name ASC
+                """,
+                (row["message_id"],),
+            ).fetchall()
+            files = tuple(ChatMessageRepository._file_row(item) for item in file_rows)
         return ChatMessage(
             message_id=row["message_id"],
             chat_id=row["chat_id"],
@@ -904,4 +1124,12 @@ class ChatMessageRepository(_Repository):
             sequence_no=row["sequence_no"],
             created_at=row["created_at"],
             files=files,
+        )
+
+    @staticmethod
+    def _file_row(row: sqlite3.Row) -> ChatMessageFile:
+        return ChatMessageFile(
+            message_id=row["message_id"],
+            file_name=row["file_name"],
+            original_name=row["original_name"],
         )
