@@ -126,9 +126,26 @@ class ChatRunEventRecorder:
             )
             user_written = True
 
-            for event in events:
+            event_iterator = iter(events)
+            while True:
+                if self._abort_requested(request.run_id):
+                    terminal_event = "aborted"
+                    self._commit_user(user_message_id)
+                    chat_commands.abort_chat_run(run_id=request.run_id)
+                    yield ChatStreamEvent("aborted", {"chatId": request.chat_id})
+                    break
+                try:
+                    event = next(event_iterator)
+                except StopIteration:
+                    break
                 if not isinstance(event, ChatStreamEvent):
                     raise TypeError("chat stream must yield ChatStreamEvent")
+                if self._abort_requested(request.run_id):
+                    terminal_event = "aborted"
+                    self._commit_user(user_message_id)
+                    chat_commands.abort_chat_run(run_id=request.run_id)
+                    yield ChatStreamEvent("aborted", {"chatId": request.chat_id})
+                    break
                 if event.event_type == "textChunk":
                     content = event.data.get("content")
                     if isinstance(content, str) and content:
@@ -159,20 +176,47 @@ class ChatRunEventRecorder:
                     break
 
             if not terminal_event:
-                self._commit_user(user_message_id)
-                chat_commands.fail_chat_run(
-                    run_id=request.run_id,
-                    error_message="chat stream ended without terminal event",
-                )
+                if self._abort_requested(request.run_id):
+                    terminal_event = "aborted"
+                    yield self._finish_aborted(
+                        request=request,
+                        user_message_id=user_message_id,
+                        chat_commands=chat_commands,
+                    )
+                else:
+                    self._commit_user(user_message_id)
+                    chat_commands.fail_chat_run(
+                        run_id=request.run_id,
+                        error_message="chat stream ended without terminal event",
+                    )
         except GeneratorExit:
             if user_written and not terminal_event:
-                self._commit_user(user_message_id)
-                chat_commands.fail_chat_run(
-                    run_id=request.run_id,
-                    error_message="chat stream closed before completion",
-                )
+                if self._abort_requested(request.run_id):
+                    terminal_event = "aborted"
+                    self._finish_aborted(
+                        request=request,
+                        user_message_id=user_message_id,
+                        chat_commands=chat_commands,
+                    )
+                else:
+                    self._commit_user(user_message_id)
+                    chat_commands.fail_chat_run(
+                        run_id=request.run_id,
+                        error_message="chat stream closed before completion",
+                    )
             raise
         except Exception as exc:
+            if not terminal_event and self._abort_requested(request.run_id):
+                terminal_event = "aborted"
+                if user_written:
+                    yield self._finish_aborted(
+                        request=request,
+                        user_message_id=user_message_id,
+                        chat_commands=chat_commands,
+                    )
+                else:
+                    chat_commands.abort_chat_run(run_id=request.run_id)
+                return
             if user_written and not terminal_event:
                 self._commit_user(user_message_id)
             if not terminal_event:
@@ -223,6 +267,21 @@ class ChatRunEventRecorder:
             content=content,
             status=MESSAGE_COMMITTED,
         )
+
+    def _finish_aborted(
+        self,
+        *,
+        request: ChatRunStreamRequest,
+        user_message_id: str,
+        chat_commands: ChatCommandService,
+    ) -> ChatStreamEvent:
+        self._commit_user(user_message_id)
+        chat_commands.abort_chat_run(run_id=request.run_id)
+        return ChatStreamEvent("aborted", {"chatId": request.chat_id})
+
+    def _abort_requested(self, run_id: str) -> bool:
+        run = self._store.runs.get(run_id)
+        return bool(run and run.abort_requested)
 
     @staticmethod
     def _message_id(run_id: str, role: str) -> str:

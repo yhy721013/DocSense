@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
 from app.services.chat import (
+    ChatAbortService,
     ChatCommandService,
     ChatHistoryService,
     ChatRunLockService,
@@ -31,6 +32,7 @@ def _build_test_services(tmp: str) -> ApplicationServices:
     """构建完全离线的应用容器，避免路由测试触碰生产 SQLite 或网络依赖。"""
     chat_db_path = f"{tmp}/chat.sqlite3"
     chat_store = ChatStore(db_path=chat_db_path)
+    chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
@@ -39,8 +41,12 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
         chat_db=ChatDatabaseService(db_path=chat_db_path),
         chat_store=chat_store,
-        chat_commands=ChatCommandService(ChatRunLockService(chat_db_path)),
+        chat_commands=chat_commands,
         chat_history=ChatHistoryService(chat_store),
+        chat_abort=ChatAbortService(
+            store=chat_store,
+            chat_commands=chat_commands,
+        ),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=LLMIntegrationConfig(
@@ -487,6 +493,105 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual([], resp.get_json())
         mock_client_cls.assert_not_called()
+
+    # ── POST /llm/chat/abort 参数校验与行为 ──
+
+    def test_abort_rejects_invalid_business_type(self):
+        resp = self.client.post("/llm/chat/abort", json={
+            "businessType": "wrong",
+            "params": {},
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual({"error": "businessType必须为chat"}, resp.get_json())
+
+    def test_abort_rejects_missing_params(self):
+        resp = self.client.post("/llm/chat/abort", json={"businessType": "chat"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual({"error": "params不能为空"}, resp.get_json())
+
+    def test_abort_rejects_empty_chat_id(self):
+        resp = self.client.post("/llm/chat/abort", json={
+            "businessType": "chat",
+            "params": {"chatId": ""},
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual({"error": "chatId不能为空"}, resp.get_json())
+
+    def test_abort_returns_false_without_active_stream(self):
+        resp = self.client.post("/llm/chat/abort", json={
+            "businessType": "chat",
+            "params": {"chatId": "c-idle"},
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            {
+                "chatId": "c-idle",
+                "aborted": False,
+                "msg": "当前无进行中的流式响应",
+            },
+            resp.get_json(),
+        )
+
+    def test_abort_returns_true_for_active_stream(self):
+        run = self.services.chat_commands.start_chat_run(chat_id="c-active")
+
+        resp = self.client.post("/llm/chat/abort", json={
+            "businessType": "chat",
+            "params": {"chatId": "c-active"},
+        })
+
+        stored = self.services.chat_store.runs.get(run.run_id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            {
+                "chatId": "c-active",
+                "aborted": True,
+                "msg": "已发送中断信号",
+            },
+            resp.get_json(),
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertTrue(stored.abort_requested)
+
+    def test_abort_endpoint_causes_active_stream_to_emit_aborted(self):
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
+            "app.blueprints.llm.handle_chat_events",
+            return_value=iter([
+                ChatStreamEvent("textChunk", {"content": "已输出"}),
+                ChatStreamEvent("done", {"chatId": "c-stream-abort"}),
+            ]),
+        ):
+            stream_resp = self.client.post(
+                "/llm/chat",
+                json={
+                    "businessType": "chat",
+                    "params": {
+                        "chatId": "c-stream-abort",
+                        "fileNames": [],
+                        "message": "请总结",
+                    },
+                },
+                buffered=False,
+            )
+            abort_resp = self.client.post("/llm/chat/abort", json={
+                "businessType": "chat",
+                "params": {"chatId": "c-stream-abort"},
+            })
+            body = self._stream_body(stream_resp)
+
+        self.assertEqual(abort_resp.status_code, 200)
+        self.assertEqual(True, abort_resp.get_json()["aborted"])
+        self.assertEqual(
+            'event: textChunk\ndata: {"content": "已输出"}\n\n'
+            'event: aborted\ndata: {"chatId": "c-stream-abort"}\n\n',
+            body,
+        )
+        mock_client_cls.return_value.close.assert_called_once_with()
+        self.assertEqual((), self.services.chat_store.runs.list_active("c-stream-abort"))
+        messages = self.services.chat_store.messages.list_by_chat("c-stream-abort")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
 
     # ── POST /llm/chat/delete 参数校验 ──
 

@@ -29,6 +29,7 @@ from app.container import (
     UploadTaskLimiter,
 )
 from app.services.chat import (
+    ChatAbortService,
     ChatCommandService,
     ChatHistoryService,
     ChatPersistenceStore,
@@ -215,6 +216,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.chat_conversation_factory = FakeChatConversationFactory()
         chat_db_path = f"{self.runtime_directory}/chat.sqlite3"
         chat_store = ChatStore(db_path=chat_db_path)
+        chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -227,8 +229,12 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             ),
             chat_db=ChatDatabaseService(db_path=chat_db_path),
             chat_store=chat_store,
-            chat_commands=ChatCommandService(ChatRunLockService(chat_db_path)),
+            chat_commands=chat_commands,
             chat_history=ChatHistoryService(chat_store),
+            chat_abort=ChatAbortService(
+                store=chat_store,
+                chat_commands=chat_commands,
+            ),
             progress_hub=LLMProgressHub(),
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
             llm_config=LLMIntegrationConfig(
@@ -263,6 +269,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_store, ChatStore)
         self.assertIsInstance(self.services.chat_commands, ChatCommandService)
         self.assertIsInstance(self.services.chat_history, ChatHistoryService)
+        self.assertIsInstance(self.services.chat_abort, ChatAbortService)
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
 

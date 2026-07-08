@@ -18,6 +18,7 @@ from app.services.chat import (
     MESSAGE_ROLE_USER,
     RUN_ABORTED,
     RUN_FAILED,
+    RUN_RUNNING,
     RUN_SUCCEEDED,
     record_chat_run_events,
 )
@@ -174,6 +175,182 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
         self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+
+    def test_abort_request_stops_stream_before_next_chunk(self) -> None:
+        stream = record_chat_run_events(
+            request=self.request,
+            events=[
+                ChatStreamEvent("textChunk", {"content": "第一段"}),
+                ChatStreamEvent("textChunk", {"content": "第二段"}),
+                ChatStreamEvent("done", {"chatId": "chat-1"}),
+            ],
+            store=self.store,
+            chat_commands=self.commands,
+        )
+
+        first = next(stream)
+        self.commands.request_abort(run_id="run-1")
+        second = next(stream)
+
+        self.assertEqual(ChatStreamEvent("textChunk", {"content": "第一段"}), first)
+        self.assertEqual(ChatStreamEvent("aborted", {"chatId": "chat-1"}), second)
+        with self.assertRaises(StopIteration):
+            next(stream)
+        messages = self.store.messages.list_by_chat("chat-1")
+        run = self.store.runs.get("run-1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_ABORTED, run.status)
+        next_run = self.commands.start_chat_run(chat_id="chat-1")
+        self.assertNotEqual("run-1", next_run.run_id)
+        self.assertEqual(RUN_RUNNING, next_run.status)
+
+    def test_abort_request_during_upstream_wait_wins_over_done_event(self) -> None:
+        commands = self.commands
+
+        class AbortBeforeDoneStream:
+            def __init__(self) -> None:
+                self.index = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self) -> ChatStreamEvent:
+                if self.index == 0:
+                    self.index += 1
+                    return ChatStreamEvent("textChunk", {"content": "第一段"})
+                if self.index == 1:
+                    self.index += 1
+                    commands.request_abort(run_id="run-1")
+                    return ChatStreamEvent("done", {"chatId": "chat-1"})
+                raise StopIteration
+
+        result = list(
+            record_chat_run_events(
+                request=self.request,
+                events=AbortBeforeDoneStream(),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        self.assertEqual(
+            [
+                ChatStreamEvent("textChunk", {"content": "第一段"}),
+                ChatStreamEvent("aborted", {"chatId": "chat-1"}),
+            ],
+            result,
+        )
+        messages = self.store.messages.list_by_chat("chat-1")
+        run = self.store.runs.get("run-1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_ABORTED, run.status)
+
+    def test_pre_requested_abort_does_not_consume_upstream_event(self) -> None:
+        self.commands.request_abort(run_id="run-1")
+
+        result = list(
+            record_chat_run_events(
+                request=self.request,
+                events=[ChatStreamEvent("textChunk", {"content": "不会输出"})],
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        self.assertEqual([ChatStreamEvent("aborted", {"chatId": "chat-1"})], result)
+        messages = self.store.messages.list_by_chat("chat-1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+
+    def test_abort_request_before_upstream_exception_yields_aborted(self) -> None:
+        commands = self.commands
+
+        class AbortThenRaiseStream:
+            def __iter__(self):
+                return self
+
+            def __next__(self) -> ChatStreamEvent:
+                commands.request_abort(run_id="run-1")
+                raise RuntimeError("upstream closed")
+
+        result = list(
+            record_chat_run_events(
+                request=self.request,
+                events=AbortThenRaiseStream(),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        self.assertEqual([ChatStreamEvent("aborted", {"chatId": "chat-1"})], result)
+        messages = self.store.messages.list_by_chat("chat-1")
+        run = self.store.runs.get("run-1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_ABORTED, run.status)
+
+    def test_abort_request_before_upstream_end_yields_aborted(self) -> None:
+        commands = self.commands
+
+        class AbortThenEndStream:
+            def __iter__(self):
+                return self
+
+            def __next__(self) -> ChatStreamEvent:
+                commands.request_abort(run_id="run-1")
+                raise StopIteration
+
+        result = list(
+            record_chat_run_events(
+                request=self.request,
+                events=AbortThenEndStream(),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        self.assertEqual([ChatStreamEvent("aborted", {"chatId": "chat-1"})], result)
+        messages = self.store.messages.list_by_chat("chat-1")
+        run = self.store.runs.get("run-1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_ABORTED, run.status)
+
+    def test_close_after_abort_marks_run_aborted(self) -> None:
+        stream = record_chat_run_events(
+            request=self.request,
+            events=[
+                ChatStreamEvent("textChunk", {"content": "第一段"}),
+                ChatStreamEvent("done", {"chatId": "chat-1"}),
+            ],
+            store=self.store,
+            chat_commands=self.commands,
+        )
+
+        self.assertEqual(
+            ChatStreamEvent("textChunk", {"content": "第一段"}),
+            next(stream),
+        )
+        self.commands.request_abort(run_id="run-1")
+        stream.close()
+
+        messages = self.store.messages.list_by_chat("chat-1")
+        run = self.store.runs.get("run-1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_ABORTED, run.status)
 
     def test_non_terminal_event_heartbeats_active_run(self) -> None:
         list(

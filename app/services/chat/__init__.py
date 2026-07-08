@@ -1,5 +1,9 @@
 """Public facade for file-chat domain, application and persistence services."""
 
+from app.services.chat.application.abort_service import (
+    ChatAbortResult,
+    ChatAbortService,
+)
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
@@ -68,6 +72,8 @@ from app.services.chat.persistence.store import ChatPersistenceStore, ChatStore
 __all__ = [
     "ChatDocument",
     "ChatDocumentRepository",
+    "ChatAbortResult",
+    "ChatAbortService",
     "ChatCommandService",
     "ChatHistoryService",
     "ChatMessage",

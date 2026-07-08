@@ -988,6 +988,36 @@ def llm_chat_history():
     return jsonify(services.chat_history.list_history(chat_id))
 
 
+@llm_bp.post("/llm/chat/abort")
+def llm_chat_abort():
+    services = _services()
+    payload = request.get_json(silent=True) or {}
+    logger.info("收到中断对话请求: payload_keys=%s", list(payload.keys()))
+
+    if payload.get("businessType") != "chat":
+        logger.warning(
+            "中断对话请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
+        return jsonify({"error": "businessType必须为chat"}), 400
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        logger.warning(
+            "中断对话请求被拒绝: params无效 params_type=%s",
+            type(params).__name__,
+        )
+        return jsonify({"error": "params不能为空"}), 400
+
+    chat_id = params.get("chatId")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        logger.warning("中断对话请求被拒绝: chatId为空")
+        return jsonify({"error": "chatId不能为空"}), 400
+
+    result = services.chat_abort.abort_chat(chat_id=chat_id)
+    return jsonify(result.to_response())
+
+
 @llm_bp.post("/llm/chat/delete")
 def llm_chat_delete():
     services = _services()

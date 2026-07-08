@@ -26,6 +26,7 @@ from app.ports import (
     KnowledgeIndexFactory,
 )
 from app.services.chat import (
+    ChatAbortService,
     ChatCommandService,
     ChatHistoryService,
     ChatPersistenceStore,
@@ -111,6 +112,7 @@ class ApplicationServices:
     chat_store: ChatPersistenceStore
     chat_commands: ChatCommandService
     chat_history: ChatHistoryService
+    chat_abort: ChatAbortService
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
@@ -128,6 +130,7 @@ class ApplicationServices:
             "chat_store": self.chat_store,
             "chat_commands": self.chat_commands,
             "chat_history": self.chat_history,
+            "chat_abort": self.chat_abort,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
@@ -156,6 +159,8 @@ class ApplicationServices:
             raise TypeError("chat_commands must be ChatCommandService")
         if not isinstance(self.chat_history, ChatHistoryService):
             raise TypeError("chat_history must be ChatHistoryService")
+        if not isinstance(self.chat_abort, ChatAbortService):
+            raise TypeError("chat_abort must be ChatAbortService")
 
 
 def create_application_services() -> ApplicationServices:
@@ -165,6 +170,7 @@ def create_application_services() -> ApplicationServices:
     task_service = LLMTaskService(llm_config.task_db_path)
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_store = ChatStore(str(CHAT_DB_PATH))
+    chat_commands = ChatCommandService(ChatRunLockService(chat_store.db_path))
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
@@ -181,8 +187,12 @@ def create_application_services() -> ApplicationServices:
         kb_service=kb_service,
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
         chat_store=chat_store,
-        chat_commands=ChatCommandService(ChatRunLockService(chat_store.db_path)),
+        chat_commands=chat_commands,
         chat_history=ChatHistoryService(chat_store),
+        chat_abort=ChatAbortService(
+            store=chat_store,
+            chat_commands=chat_commands,
+        ),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,
