@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
 
 from app.presenters.chat_stream import (
     finalize_chat_run_stream,
@@ -40,28 +39,7 @@ class ChatStreamPresenterTests(unittest.TestCase):
             body,
         )
 
-    def test_error_event_marks_run_failed(self) -> None:
-        commands = MagicMock()
-
-        body = "".join(
-            finalize_chat_run_stream(
-                stream=iter([ChatStreamEvent("error", {"error": "boom"})]),
-                chat_commands=commands,
-                run_id="run-error",
-            )
-        )
-
-        self.assertEqual('event: error\ndata: {"error": "boom"}\n\n', body)
-        commands.heartbeat_chat_run.assert_called_once_with(run_id="run-error")
-        commands.fail_chat_run.assert_called_once_with(
-            run_id="run-error",
-            error_message="chat stream emitted error event",
-        )
-        commands.complete_chat_run.assert_not_called()
-        commands.abort_chat_run.assert_not_called()
-
     def test_first_terminal_event_wins_and_closes_stream(self) -> None:
-        commands = MagicMock()
         closed = False
 
         def stream():
@@ -75,39 +53,30 @@ class ChatStreamPresenterTests(unittest.TestCase):
         body = "".join(
             finalize_chat_run_stream(
                 stream=stream(),
-                chat_commands=commands,
                 run_id="run-terminal",
             )
         )
 
         self.assertEqual('event: error\ndata: {"error": "boom"}\n\n', body)
         self.assertTrue(closed)
-        commands.fail_chat_run.assert_called_once_with(
-            run_id="run-terminal",
-            error_message="chat stream emitted error event",
-        )
-        commands.complete_chat_run.assert_not_called()
-        commands.abort_chat_run.assert_not_called()
 
-    def test_aborted_event_marks_run_aborted(self) -> None:
-        commands = MagicMock()
+    def test_finalize_closes_client_callback(self) -> None:
+        closed = False
+
+        def close_client() -> None:
+            nonlocal closed
+            closed = True
 
         body = "".join(
             finalize_chat_run_stream(
-                stream=iter([ChatStreamEvent("aborted", {"chatId": "c-abort"})]),
-                chat_commands=commands,
-                run_id="run-abort",
+                stream=iter([ChatStreamEvent("done", {"chatId": "c-close"})]),
+                run_id="run-close",
+                on_close=close_client,
             )
         )
 
-        self.assertEqual(
-            'event: aborted\ndata: {"chatId": "c-abort"}\n\n',
-            body,
-        )
-        commands.heartbeat_chat_run.assert_called_once_with(run_id="run-abort")
-        commands.abort_chat_run.assert_called_once_with(run_id="run-abort")
-        commands.complete_chat_run.assert_not_called()
-        commands.fail_chat_run.assert_not_called()
+        self.assertEqual('event: done\ndata: {"chatId": "c-close"}\n\n', body)
+        self.assertTrue(closed)
 
 
 if __name__ == "__main__":

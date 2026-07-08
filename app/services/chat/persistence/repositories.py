@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from app.services.chat.domain.models import (
+    MESSAGE_COMMITTED,
+    MESSAGE_DISCARDED,
+    MESSAGE_PENDING,
     MESSAGE_ROLES,
     MESSAGE_STATUSES,
     RUN_ABORTED,
@@ -36,6 +39,12 @@ _RUN_STATUS_TRANSITIONS = {
     RUN_SUCCEEDED: frozenset(),
     RUN_FAILED: frozenset(),
     RUN_ABORTED: frozenset(),
+}
+
+_MESSAGE_STATUS_TRANSITIONS = {
+    MESSAGE_PENDING: frozenset({MESSAGE_COMMITTED, MESSAGE_DISCARDED}),
+    MESSAGE_COMMITTED: frozenset(),
+    MESSAGE_DISCARDED: frozenset(),
 }
 
 
@@ -1020,6 +1029,38 @@ class ChatMessageRepository(_Repository):
                 for row in rows
             )
 
+    def set_status(self, *, message_id: str, status: str) -> ChatMessage:
+        normalized_message_id = _required_text(message_id, name="message_id")
+        normalized_status = _validate_choice(
+            status,
+            name="status",
+            allowed=MESSAGE_STATUSES,
+        )
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get_with_connection(connection, normalized_message_id)
+            self._ensure_status_transition(
+                current_status=current.status,
+                next_status=normalized_status,
+            )
+            if current.status == normalized_status:
+                return current
+            cursor = connection.execute(
+                """
+                UPDATE chat_messages
+                SET status = ?
+                WHERE message_id = ? AND status = ?
+                """,
+                (
+                    normalized_status,
+                    normalized_message_id,
+                    current.status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("chat_message status was changed concurrently")
+            return self._get_with_connection(connection, normalized_message_id)
+
     def _replace_files(
         self,
         connection: sqlite3.Connection,
@@ -1073,16 +1114,34 @@ class ChatMessageRepository(_Repository):
         existing_files = tuple(
             (item.file_name, item.original_name) for item in message.files
         )
+        status_conflicts = message.status != status and not (
+            status == MESSAGE_PENDING and message.status == MESSAGE_COMMITTED
+        )
         if (
             message.chat_id != chat_id
             or message.run_id != run_id
             or message.role != role
             or message.content != content
-            or message.status != status
+            or status_conflicts
             or (sequence_no is not None and message.sequence_no != sequence_no)
             or existing_files != files
         ):
             raise ValueError("message_id 对应的消息身份或内容冲突")
+
+    @staticmethod
+    def _ensure_status_transition(
+        *,
+        current_status: str,
+        next_status: str,
+    ) -> None:
+        if current_status == next_status:
+            return
+        allowed = _MESSAGE_STATUS_TRANSITIONS[current_status]
+        if next_status not in allowed:
+            raise ValueError(
+                f"illegal chat_message status transition: "
+                f"{current_status} -> {next_status}"
+            )
 
     def _get_with_connection(
         self,

@@ -45,39 +45,6 @@ def mark_chat_run_failed(
         logger.exception("failed to mark chat run failed: run_id=%s", run_id)
 
 
-def mark_chat_run_succeeded(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-) -> None:
-    try:
-        chat_commands.complete_chat_run(run_id=run_id)
-    except Exception:
-        logger.exception("failed to mark chat run succeeded: run_id=%s", run_id)
-
-
-def mark_chat_run_aborted(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-) -> None:
-    try:
-        chat_commands.abort_chat_run(run_id=run_id)
-    except Exception:
-        logger.exception("failed to mark chat run aborted: run_id=%s", run_id)
-
-
-def touch_chat_run(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-) -> None:
-    try:
-        chat_commands.heartbeat_chat_run(run_id=run_id)
-    except Exception:
-        logger.exception("failed to heartbeat chat run: run_id=%s", run_id)
-
-
 def close_chat_stream_resource(
     resource: Any,
     *,
@@ -100,75 +67,17 @@ def close_chat_stream_resource(
 def finalize_chat_run_stream(
     *,
     stream: Iterable[ChatStreamEvent],
-    chat_commands: ChatCommandService,
     run_id: str,
     on_close: Callable[[], None] | None = None,
 ) -> Iterator[str]:
-    terminal_event = ""
     try:
         for event in stream:
             if not isinstance(event, ChatStreamEvent):
                 raise TypeError("chat stream must yield ChatStreamEvent")
             is_terminal = event.event_type in _TERMINAL_EVENT_TYPES
-            if is_terminal:
-                terminal_event = event.event_type
-            touch_chat_run(chat_commands=chat_commands, run_id=run_id)
             yield format_sse_event(event.event_type, event.data)
             if is_terminal:
                 break
-        if terminal_event == "error":
-            mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream emitted error event",
-            )
-        elif terminal_event == "aborted":
-            mark_chat_run_aborted(
-                chat_commands=chat_commands,
-                run_id=run_id,
-            )
-        elif terminal_event == "done":
-            mark_chat_run_succeeded(
-                chat_commands=chat_commands,
-                run_id=run_id,
-            )
-        else:
-            mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream ended without terminal event",
-            )
-    except GeneratorExit:
-        if terminal_event == "done":
-            mark_chat_run_succeeded(
-                chat_commands=chat_commands,
-                run_id=run_id,
-            )
-        elif terminal_event == "aborted":
-            mark_chat_run_aborted(
-                chat_commands=chat_commands,
-                run_id=run_id,
-            )
-        elif terminal_event == "error":
-            mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream emitted error event before close",
-            )
-        else:
-            mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream closed before completion",
-            )
-        raise
-    except Exception as exc:
-        mark_chat_run_failed(
-            chat_commands=chat_commands,
-            run_id=run_id,
-            error_message=str(exc) or exc.__class__.__name__,
-        )
-        raise
     finally:
         close_chat_stream_resource(stream, run_id=run_id, label="stream")
         if on_close is not None:
@@ -185,9 +94,6 @@ __all__ = [
     "close_chat_stream_resource",
     "finalize_chat_run_stream",
     "format_sse_event",
-    "mark_chat_run_aborted",
     "mark_chat_run_failed",
-    "mark_chat_run_succeeded",
     "present_chat_stream",
-    "touch_chat_run",
 ]

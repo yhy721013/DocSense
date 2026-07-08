@@ -8,9 +8,13 @@ from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
 from app.services.chat import (
     ChatCommandService,
+    ChatHistoryService,
     ChatRunLockService,
     ChatStore,
     ChatStreamEvent,
+    MESSAGE_COMMITTED,
+    MESSAGE_ROLE_ASSISTANT,
+    MESSAGE_ROLE_USER,
 )
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
@@ -26,6 +30,7 @@ from tests.fakes import (
 def _build_test_services(tmp: str) -> ApplicationServices:
     """构建完全离线的应用容器，避免路由测试触碰生产 SQLite 或网络依赖。"""
     chat_db_path = f"{tmp}/chat.sqlite3"
+    chat_store = ChatStore(db_path=chat_db_path)
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
@@ -33,8 +38,9 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
         chat_db=ChatDatabaseService(db_path=chat_db_path),
-        chat_store=ChatStore(db_path=chat_db_path),
+        chat_store=chat_store,
         chat_commands=ChatCommandService(ChatRunLockService(chat_db_path)),
+        chat_history=ChatHistoryService(chat_store),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=LLMIntegrationConfig(
@@ -145,6 +151,11 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(kwargs["message"], "hi")
         mock_client_cls.return_value.close.assert_called_once_with()
         self.assertEqual((), self.services.chat_store.runs.list_active("c1"))
+        messages = self.services.chat_store.messages.list_by_chat("c1")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+        self.assertEqual("hi", messages[0].content)
 
     def test_chat_returns_sse_events_for_resolved_file_request(self):
         """已解析文件进入 SSE 流，路由负责传入哈希文件名和原始文件名快照。"""
@@ -183,6 +194,45 @@ class ChatRouteValidationTests(unittest.TestCase):
 
         mock_client_cls.return_value.close.assert_called_once_with()
         self.assertEqual((), self.services.chat_store.runs.list_active("c-sse"))
+        messages = self.services.chat_store.messages.list_by_chat("c-sse")
+        self.assertEqual(2, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+        self.assertEqual("请总结", messages[0].content)
+        self.assertEqual("hash-alpha.pdf", messages[0].files[0].file_name)
+        self.assertEqual("alpha原名.pdf", messages[0].files[0].original_name)
+        self.assertEqual(MESSAGE_ROLE_ASSISTANT, messages[1].role)
+        self.assertEqual(MESSAGE_COMMITTED, messages[1].status)
+        self.assertEqual("你好", messages[1].content)
+
+    def test_chat_deduplicates_file_names_before_streaming(self):
+        self._save_document("hash-alpha.pdf", original_name="alpha原名.pdf")
+
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
+            "app.blueprints.llm.handle_chat_events",
+            return_value=iter([
+                ChatStreamEvent("chatInfo", {"chatId": "c-dedupe"}),
+                ChatStreamEvent("done", {"chatId": "c-dedupe"}),
+            ]),
+        ) as mock_stream:
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-dedupe",
+                    "fileNames": ["hash-alpha.pdf", "hash-alpha.pdf"],
+                    "message": "请总结",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 200)
+        self._stream_body(resp)
+        kwargs = mock_stream.call_args.kwargs
+        self.assertIs(kwargs["client"], mock_client_cls.return_value)
+        self.assertEqual(["hash-alpha.pdf"], kwargs["file_names"])
+        self.assertEqual(["alpha原名.pdf"], kwargs["file_original_names"])
+        messages = self.services.chat_store.messages.list_by_chat("c-dedupe")
+        self.assertEqual(1, len(messages[0].files))
+        self.assertEqual("hash-alpha.pdf", messages[0].files[0].file_name)
 
     def test_chat_rejects_duplicate_active_stream(self):
         self.services.chat_store.sessions.create_or_get(chat_id="c-busy")
@@ -229,15 +279,18 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("event: error", self._stream_body(resp))
         self.assertEqual((), self.services.chat_store.runs.list_active("c-error"))
+        messages = self.services.chat_store.messages.list_by_chat("c-error")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
+        self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+        self.assertEqual("hi", messages[0].content)
 
-    def test_chat_done_event_close_marks_run_succeeded(self):
+    def test_chat_done_event_close_closes_stream_resource(self):
         from app.presenters.chat_stream import finalize_chat_run_stream
 
-        commands = MagicMock()
         on_close = MagicMock()
         generator = finalize_chat_run_stream(
             stream=iter([ChatStreamEvent("done", {"chatId": "c-close"})]),
-            chat_commands=commands,
             run_id="run-close",
             on_close=on_close,
         )
@@ -248,9 +301,6 @@ class ChatRouteValidationTests(unittest.TestCase):
         )
         generator.close()
 
-        commands.complete_chat_run.assert_called_once_with(run_id="run-close")
-        commands.fail_chat_run.assert_not_called()
-        commands.heartbeat_chat_run.assert_called_once_with(run_id="run-close")
         on_close.assert_called_once_with()
 
     def test_chat_client_construction_failure_releases_active_stream(self):
@@ -370,68 +420,73 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_history_returns_empty_list_for_nonexistent_chat(self):
-        resp = self.client.get("/llm/chat/history?chatId=nonexistent")
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
+            resp = self.client.get("/llm/chat/history?chatId=nonexistent")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.get_json(), [])
+        mock_client_cls.assert_not_called()
 
     def test_history_returns_target_schema(self):
-        self.chat_db.create_chat(
-            "conv-target",
-            ["alpha原名.pdf", "beta原名.pdf"],
-            "ws-slug",
-            "th-slug",
+        self.services.chat_store.sessions.create_or_get(chat_id="conv-target")
+        self.services.chat_store.runs.create(
+            run_id="run-target",
+            chat_id="conv-target",
+        )
+        self.services.chat_store.messages.append(
+            message_id="message-target-user",
+            chat_id="conv-target",
+            run_id="run-target",
+            role=MESSAGE_ROLE_USER,
+            content="请总结该文件",
+            status=MESSAGE_COMMITTED,
+            files=(
+                ("alpha.pdf", "alpha原名.pdf"),
+                ("beta.pdf", "beta原名.pdf"),
+            ),
+        )
+        self.services.chat_store.messages.append(
+            message_id="message-target-assistant",
+            chat_id="conv-target",
+            run_id="run-target",
+            role=MESSAGE_ROLE_ASSISTANT,
+            content="抱歉，AI 服务出现错误",
+            status=MESSAGE_COMMITTED,
         )
 
-        mock_client = MagicMock()
-        mock_client.get_thread_chats.return_value = [
-            {"role": "user", "content": "请总结该文件", "timestamp": 1777364120677},
-            {
-                "role": "assistant",
-                "content": "抱歉，AI 服务出现错误",
-                "timestamp": 1777364120678,
-            },
-        ]
-
-        with patch("app.blueprints.llm.AnythingLLMClient", return_value=mock_client):
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
             resp = self.client.get("/llm/chat/history?chatId=conv-target")
 
         self.assertEqual(resp.status_code, 200)
+        mock_client_cls.assert_not_called()
         data = resp.get_json()
         self.assertIsInstance(data, list)
         self.assertEqual(len(data), 2)
         self.assertEqual(data[0]["role"], "user")
         self.assertEqual(data[0]["content"], "请总结该文件")
-        self.assertEqual(data[0]["timestamp"], 1777364120677)
+        self.assertIsInstance(data[0]["timestamp"], int)
         self.assertEqual(
             data[0]["files"],
             [{"name": "alpha原名.pdf"}, {"name": "beta原名.pdf"}],
         )
         self.assertEqual(data[1]["role"], "assistant")
         self.assertEqual(data[1]["content"], "抱歉，AI 服务出现错误")
-        self.assertEqual(data[1]["timestamp"], 1777364120678)
+        self.assertIsInstance(data[1]["timestamp"], int)
         self.assertNotIn("files", data[1])
 
-    def test_history_uses_db_turn_timestamp_when_upstream_missing(self):
+    def test_history_does_not_fallback_for_legacy_empty_local_history(self):
         self.chat_db.create_chat(
-            "conv-no-upstream-ts",
+            "conv-legacy",
             ["测试文件.pdf"],
             "ws-slug",
             "th-slug",
         )
 
-        mock_client = MagicMock()
-        mock_client.get_thread_chats.return_value = [
-            {"role": "user", "content": "请总结该文件"},
-            {"role": "assistant", "content": "好的"},
-        ]
-
-        with patch("app.blueprints.llm.AnythingLLMClient", return_value=mock_client):
-            resp = self.client.get("/llm/chat/history?chatId=conv-no-upstream-ts")
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
+            resp = self.client.get("/llm/chat/history?chatId=conv-legacy")
 
         self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertIsInstance(data[0]["timestamp"], int)
-        self.assertIsNone(data[1]["timestamp"])
+        self.assertEqual([], resp.get_json())
+        mock_client_cls.assert_not_called()
 
     # ── POST /llm/chat/delete 参数校验 ──
 

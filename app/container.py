@@ -27,6 +27,7 @@ from app.ports import (
 )
 from app.services.chat import (
     ChatCommandService,
+    ChatHistoryService,
     ChatPersistenceStore,
     ChatRunLockService,
     ChatStore,
@@ -109,6 +110,7 @@ class ApplicationServices:
     chat_db: ChatDatabaseService
     chat_store: ChatPersistenceStore
     chat_commands: ChatCommandService
+    chat_history: ChatHistoryService
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
@@ -125,6 +127,7 @@ class ApplicationServices:
             "chat_db": self.chat_db,
             "chat_store": self.chat_store,
             "chat_commands": self.chat_commands,
+            "chat_history": self.chat_history,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
@@ -151,6 +154,8 @@ class ApplicationServices:
             raise TypeError("chat_store must implement ChatPersistenceStore")
         if not isinstance(self.chat_commands, ChatCommandService):
             raise TypeError("chat_commands must be ChatCommandService")
+        if not isinstance(self.chat_history, ChatHistoryService):
+            raise TypeError("chat_history must be ChatHistoryService")
 
 
 def create_application_services() -> ApplicationServices:
@@ -177,6 +182,7 @@ def create_application_services() -> ApplicationServices:
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
         chat_store=chat_store,
         chat_commands=ChatCommandService(ChatRunLockService(chat_store.db_path)),
+        chat_history=ChatHistoryService(chat_store),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,

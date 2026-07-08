@@ -14,6 +14,8 @@ from app.services.chat import (
     LEASE_CLEANUP_PENDING,
     LEASE_CLOSED,
     MESSAGE_COMMITTED,
+    MESSAGE_DISCARDED,
+    MESSAGE_PENDING,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
     RUN_ACCEPTED,
@@ -361,6 +363,41 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual(("a.pdf", "b.pdf"), tuple(item.file_name for item in second.files))
         with self.assertRaisesRegex(ValueError, "身份或内容冲突"):
             self.store.messages.append(**{**arguments, "content": "不同内容"})
+
+    def test_message_status_transitions_are_guarded(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-message-status")
+        self.store.runs.create(
+            run_id="run-message-status",
+            chat_id="chat-message-status",
+        )
+        pending = self.store.messages.append(
+            message_id="message-status",
+            chat_id="chat-message-status",
+            run_id="run-message-status",
+            role=MESSAGE_ROLE_USER,
+            content="请总结",
+            status=MESSAGE_PENDING,
+        )
+
+        committed = self.store.messages.set_status(
+            message_id="message-status",
+            status=MESSAGE_COMMITTED,
+        )
+
+        self.assertEqual(MESSAGE_PENDING, pending.status)
+        self.assertEqual(MESSAGE_COMMITTED, committed.status)
+        self.assertEqual(
+            committed,
+            self.store.messages.set_status(
+                message_id="message-status",
+                status=MESSAGE_COMMITTED,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "illegal chat_message"):
+            self.store.messages.set_status(
+                message_id="message-status",
+                status=MESSAGE_DISCARDED,
+            )
 
     def test_run_associations_must_belong_to_same_chat(self) -> None:
         self.store.sessions.create_or_get(chat_id="chat-left")

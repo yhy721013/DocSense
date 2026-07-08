@@ -1,9 +1,12 @@
 """Public facade for file-chat domain, application and persistence services."""
 
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
+    ChatRunEventRecorder,
     ChatRunExecutor,
     ChatRunStreamRequest,
+    record_chat_run_events,
 )
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (
@@ -66,6 +69,7 @@ __all__ = [
     "ChatDocument",
     "ChatDocumentRepository",
     "ChatCommandService",
+    "ChatHistoryService",
     "ChatMessage",
     "ChatMessageFile",
     "ChatMessageRepository",
@@ -74,6 +78,7 @@ __all__ = [
     "ChatResourceLeaseService",
     "ChatRun",
     "ChatRunBusyError",
+    "ChatRunEventRecorder",
     "ChatRunExecutor",
     "ChatRunLockService",
     "ChatRunRepository",
@@ -115,4 +120,5 @@ __all__ = [
     "SESSION_ERROR",
     "SESSION_STATUSES",
     "ensure_chat_schema",
+    "record_chat_run_events",
 ]

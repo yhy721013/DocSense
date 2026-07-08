@@ -16,7 +16,11 @@ from app.presenters.chat_stream import (
     finalize_chat_run_stream,
     mark_chat_run_failed,
 )
-from app.services.chat import ChatRunBusyError, ChatRunStreamRequest
+from app.services.chat import (
+    ChatRunBusyError,
+    ChatRunStreamRequest,
+    record_chat_run_events,
+)
 from app.services.core.progress import normalize_progress
 from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
@@ -26,7 +30,6 @@ from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.weaponry_service import run_weaponry_task
 from app.services.llm_service.chat_service import (
     handle_chat_events,
-    get_chat_history,
     delete_chat,
     ChatNotFoundError,
 )
@@ -881,7 +884,10 @@ def llm_chat():
         return jsonify({"error": "message不能为空"}), 400
     message = message.strip()
 
-    # 校验引用文件均已解析
+    normalized_file_names: list[str] = []
+    seen_file_names: set[str] = set()
+
+    # 校验引用文件均已解析，并按首次出现顺序去重。
     for index, fn in enumerate(file_names):
         if not isinstance(fn, str) or not fn.strip():
             logger.warning(
@@ -890,17 +896,20 @@ def llm_chat():
                 index,
             )
             return jsonify({"error": "fileNames中包含无效文件名"}), 400
-        doc_record = kb_service.get_document_record(fn.strip())
+        normalized_file_name = fn.strip()
+        if normalized_file_name in seen_file_names:
+            continue
+        seen_file_names.add(normalized_file_name)
+        doc_record = kb_service.get_document_record(normalized_file_name)
         if not doc_record:
             logger.warning(
                 "文件对话请求被拒绝: 文件尚未解析 chatId=%s fileName=%s index=%s",
                 chat_id,
-                fn.strip(),
+                normalized_file_name,
                 index,
             )
             return jsonify({"error": f"文件 {fn} 尚未解析，无法用于对话"}), 404
-
-    normalized_file_names = [fn.strip() for fn in file_names]
+        normalized_file_names.append(normalized_file_name)
 
     # 将哈希文件名映射为原始文件名
     file_original_names = [kb_service.get_original_name(fn) for fn in normalized_file_names]
@@ -934,9 +943,14 @@ def llm_chat():
             file_original_names=list(chat_run_request.file_original_names),
             message=chat_run_request.message,
         )
+        stream = record_chat_run_events(
+            request=chat_run_request,
+            events=stream,
+            store=services.chat_store,
+            chat_commands=chat_commands,
+        )
         generator = finalize_chat_run_stream(
             stream=stream,
-            chat_commands=chat_commands,
             run_id=chat_run.run_id,
             on_close=client.close,
         )
@@ -966,19 +980,12 @@ def llm_chat():
 @llm_bp.get("/llm/chat/history")
 def llm_chat_history():
     services = _services()
-    chat_db = services.chat_db
-    anythingllm_config = services.anythingllm_config
     chat_id = request.args.get("chatId", "").strip()
     if not chat_id:
         logger.warning("对话历史请求被拒绝: chatId为空")
         return jsonify({"error": "chatId不能为空"}), 400
 
-    client = AnythingLLMClient(anythingllm_config)
-    try:
-        result = get_chat_history(chat_db=chat_db, client=client, chat_id=chat_id)
-        return jsonify(result)
-    except ChatNotFoundError:
-        return jsonify([])
+    return jsonify(services.chat_history.list_history(chat_id))
 
 
 @llm_bp.post("/llm/chat/delete")
