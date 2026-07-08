@@ -909,7 +909,6 @@ def enrich_with_translations(
                 file_path=file_path,
                 target_lang="Chinese",
                 translate_all=0,
-                fast_translate=True,
                 use_minerU= True,
             )
 

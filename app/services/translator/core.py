@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 
 import requests
@@ -13,6 +14,80 @@ logger = logging.getLogger(__name__)
 
 
 class HYMTTranslator:
+    _TARGET_LANGUAGE_MAP = {
+        "chinese": "zh",
+        "中文": "zh",
+        "zh": "zh",
+        "zh-cn": "zh",
+        "english": "en",
+        "英文": "en",
+        "en": "en",
+        "french": "fr",
+        "法文": "fr",
+        "法语": "fr",
+        "fr": "fr",
+        "german": "de",
+        "德文": "de",
+        "德语": "de",
+        "de": "de",
+        "spanish": "es",
+        "西文": "es",
+        "西班牙语": "es",
+        "es": "es",
+        "japanese": "ja",
+        "日文": "ja",
+        "日语": "ja",
+        "ja": "ja",
+        "korean": "ko",
+        "韩文": "ko",
+        "韩语": "ko",
+        "ko": "ko",
+        "russian": "ru",
+        "俄文": "ru",
+        "俄语": "ru",
+        "ru": "ru",
+        "italian": "it",
+        "意文": "it",
+        "意大利语": "it",
+        "it": "it",
+    }
+    _PIVOT_LANGUAGE_CODE = "en"
+    _ARGOS_LANGUAGE_PACKAGES = [
+        ("zh", "en", "中文→英文"),
+        ("en", "zh", "英文→中文"),
+        ("ja", "en", "日文→英文"),
+        ("ru", "en", "俄文→英文"),
+        ("ko", "en", "韩文→英文"),
+        ("fr", "en", "法文→英文"),
+        ("de", "en", "德文→英文"),
+        ("it", "en", "意文→英文"),
+    ]
+    _LATIN_LANGUAGE_MARKERS = {
+        "fr": {
+            "le", "la", "les", "des", "du", "de", "un", "une", "et", "est", "dans",
+            "pour", "avec", "sur", "que", "qui", "pas", "au", "aux", "ce", "cette",
+            "par", "plus", "peut", "porte", "avions", "mauvais", "temps", "il",
+            "aujourd'hui", "aujourd", "hui", "fait", "beau", "nous", "testons",
+            "traduction",
+        },
+        "de": {
+            "der", "die", "das", "den", "dem", "des", "und", "ist", "nicht", "mit",
+            "zu", "ein", "eine", "im", "auf", "für", "von", "bei", "kann",
+            "flugzeugträger", "flugzeuge", "wetter", "schlechtem", "starten",
+        },
+        "it": {
+            "il", "lo", "la", "gli", "le", "un", "una", "e", "è", "che", "di",
+            "del", "della", "dei", "degli", "delle", "per", "con", "non", "in",
+            "su", "da", "al", "alla", "può", "portaerei", "lanciare", "aerei",
+            "maltempo",
+        },
+    }
+    _LATIN_DIACRITIC_MARKERS = {
+        "fr": "àâçéèêëîïôûùüÿœæ",
+        "de": "äöüß",
+        "it": "àèéìòù",
+    }
+
     def __init__(self, model_name=None, device_map="auto", check_ollama: bool = True):
         """
         初始化翻译器。
@@ -182,7 +257,7 @@ class HYMTTranslator:
         :return: 翻译后的文本
         """
         try:
-            from argostranslate import package, translate
+            from argostranslate import translate
             import argostranslate.sbd
 
             # Argos Translate 会在延迟导入 utils 模块时把自身 logger 重置为 INFO。必须在
@@ -205,58 +280,20 @@ class HYMTTranslator:
                 argostranslate.sbd.StanzaSentencizer._is_patched = True
             # ---------------------------------------------------------------------------
 
-            # 检测源语言（简单判断：如果包含中文字符则为中文）
-            from_lang_code = "zh" if any('\u4e00' <= c <= '\u9fff' for c in text) else "en"
-
-            # 目标语言映射
-            lang_map = {
-                "chinese": "zh",
-                "english": "en",
-                "french": "fr",
-                "german": "de",
-                "spanish": "es",
-                "japanese": "ja",
-                "korean": "ko",
-            }
-            to_lang_code = lang_map.get(target_lang.lower(), "en")
+            from_lang_code = self._detect_argos_source_language(text)
+            to_lang_code = self._target_argos_language_code(target_lang)
 
             # 如果源语言和目标语言相同，直接返回
             if from_lang_code == to_lang_code:
                 return text
 
-            # 【关键修复】使用正确的 API 调用方式
-            # 1. 获取已安装的语言列表
             installed_languages = translate.get_installed_languages()
-
-            # 2. 找到源语言和目标语言对象
-            from_lang_obj = next((lang for lang in installed_languages if lang.code == from_lang_code), None)
-            to_lang_obj = next((lang for lang in installed_languages if lang.code == to_lang_code), None)
-
-            # 3. 检查是否找到对应的语言
-            if not from_lang_obj:
-                logger.warning(f"  [警告] 未找到源语言 {from_lang_code} 的翻译包")
-                raise RuntimeError(f"未找到源语言 {from_lang_code} 的翻译包")
-
-            if not to_lang_obj:
-                logger.warning(f"  [警告] 未找到目标语言 {to_lang_code} 的翻译包")
-                raise RuntimeError(f"未找到目标语言 {to_lang_code} 的翻译包")
-
-            # 4. 获取翻译器对象
-            translation = from_lang_obj.get_translation(to_lang_obj)
-
-            if not translation:
-                logger.warning(f"  [警告] 无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
-                raise RuntimeError(f"无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
-
-            # 5. 执行翻译
-            translated = translation.translate(text)
-
-            # 6. 检查翻译结果
-            if not translated:
-                logger.warning(f"  [警告] ArgoTranslate 返回空结果")
-                raise RuntimeError("ArgoTranslate 返回空结果")
-
-            return translated
+            return self._translate_argos_path(
+                text=text,
+                installed_languages=installed_languages,
+                from_lang_code=from_lang_code,
+                to_lang_code=to_lang_code,
+            )
 
         except ImportError as ie:
             logger.error(f"  [错误] argostranslate 未安装：{ie}")
@@ -272,6 +309,131 @@ class HYMTTranslator:
     def get_progress_tracker(self) -> ProgressTracker:
         """获取进度追踪器"""
         return self.progress_tracker
+
+    @classmethod
+    def _target_argos_language_code(cls, target_lang: str) -> str:
+        return cls._TARGET_LANGUAGE_MAP.get((target_lang or "").strip().lower(), "en")
+
+    @classmethod
+    def _detect_argos_source_language(cls, text: str) -> str:
+        """
+        检测 Argos 源语言。优先用字符集识别日/韩/俄/中，再对拉丁语系做轻量词表判断。
+        未能识别的拉丁文本保持历史行为，默认当作英文处理。
+        """
+        if re.search(r"[\u3040-\u30ff]", text):
+            return "ja"
+        if re.search(r"[\uac00-\ud7af]", text):
+            return "ko"
+        if re.search(r"[\u0400-\u04ff]", text):
+            return "ru"
+        if re.search(r"[\u4e00-\u9fff]", text):
+            return "zh"
+
+        latin_language = cls._detect_latin_source_language(text)
+        return latin_language or "en"
+
+    @classmethod
+    def _detect_latin_source_language(cls, text: str) -> str | None:
+        normalized = text.lower()
+        tokens = re.findall(r"[a-zA-ZÀ-ÖØ-öø-ÿ]+(?:['’][a-zA-ZÀ-ÖØ-öø-ÿ]+)?", normalized)
+        if not tokens:
+            return None
+
+        scores = {code: 0 for code in cls._LATIN_LANGUAGE_MARKERS}
+        for code, chars in cls._LATIN_DIACRITIC_MARKERS.items():
+            scores[code] += sum(2 for char in normalized if char in chars)
+
+        for token in tokens:
+            for code, markers in cls._LATIN_LANGUAGE_MARKERS.items():
+                if token in markers:
+                    scores[code] += 1
+
+        best_code, best_score = max(scores.items(), key=lambda item: item[1])
+        if best_score <= 0:
+            return None
+
+        # 只在分值有明确优势时切到非英文，避免普通英文被短词误判。
+        other_scores = [score for code, score in scores.items() if code != best_code]
+        if best_score >= 2 and best_score >= max(other_scores, default=0) + 1:
+            return best_code
+        return None
+
+    def _translate_argos_path(
+            self,
+            text: str,
+            installed_languages,
+            from_lang_code: str,
+            to_lang_code: str,
+    ) -> str:
+        direct_translation = self._get_argos_translation(installed_languages, from_lang_code, to_lang_code)
+        if direct_translation:
+            return self._run_argos_translation(direct_translation, text, f"{from_lang_code} -> {to_lang_code}")
+
+        if (
+                to_lang_code == "zh"
+                and from_lang_code != self._PIVOT_LANGUAGE_CODE
+                and (
+                        pivot_translation := self._get_argos_translation(
+                            installed_languages,
+                            from_lang_code,
+                            self._PIVOT_LANGUAGE_CODE,
+                        )
+                )
+                and (
+                        final_translation := self._get_argos_translation(
+                            installed_languages,
+                            self._PIVOT_LANGUAGE_CODE,
+                            to_lang_code,
+                        )
+                )
+        ):
+            logger.info(
+                "  [提示] 未找到 %s -> %s 直达翻译包，使用 %s -> %s -> %s 中转翻译",
+                from_lang_code,
+                to_lang_code,
+                from_lang_code,
+                self._PIVOT_LANGUAGE_CODE,
+                to_lang_code,
+            )
+            pivot_text = self._run_argos_translation(
+                pivot_translation,
+                text,
+                f"{from_lang_code} -> {self._PIVOT_LANGUAGE_CODE}",
+            )
+            return self._run_argos_translation(
+                final_translation,
+                pivot_text,
+                f"{self._PIVOT_LANGUAGE_CODE} -> {to_lang_code}",
+            )
+
+        self._ensure_argos_language_available(installed_languages, from_lang_code, "源语言")
+        self._ensure_argos_language_available(installed_languages, to_lang_code, "目标语言")
+        logger.warning(f"  [警告] 无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
+        raise RuntimeError(f"无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
+
+    def _get_argos_translation(self, installed_languages, from_lang_code: str, to_lang_code: str):
+        from_lang_obj = self._find_argos_language(installed_languages, from_lang_code)
+        to_lang_obj = self._find_argos_language(installed_languages, to_lang_code)
+        if not from_lang_obj or not to_lang_obj:
+            return None
+        return from_lang_obj.get_translation(to_lang_obj)
+
+    @staticmethod
+    def _find_argos_language(installed_languages, lang_code: str):
+        return next((lang for lang in installed_languages if lang.code == lang_code), None)
+
+    def _ensure_argos_language_available(self, installed_languages, lang_code: str, role: str) -> None:
+        if not self._find_argos_language(installed_languages, lang_code):
+            logger.warning(f"  [警告] 未找到{role} {lang_code} 的翻译包")
+            raise RuntimeError(f"未找到{role} {lang_code} 的翻译包")
+
+    @staticmethod
+    def _run_argos_translation(translation, text: str, path_desc: str) -> str:
+        translated = translation.translate(text)
+        if not translated:
+            logger.warning(f"  [警告] ArgoTranslate {path_desc} 返回空结果")
+            raise RuntimeError(f"ArgoTranslate {path_desc} 返回空结果")
+        return translated
 
     def _auto_install_argos_packages(self) -> None:
         """
@@ -294,13 +456,7 @@ class HYMTTranslator:
             installed_languages = translate.get_installed_languages()
             logger.info(f"[ArgoTranslate] 当前已安装的语言：{[str(lang) for lang in installed_languages]}")
 
-            # 需要安装的语言对
-            language_pairs = [
-                ("zh", "en", "中文→英文"),
-                ("en", "zh", "英文→中文"),
-            ]
-
-            for from_code, to_code, desc in language_pairs:
+            for from_code, to_code, desc in self._ARGOS_LANGUAGE_PACKAGES:
                 # 检查是否已安装
                 from_lang_obj = next((lang for lang in installed_languages if lang.code == from_code), None)
                 to_lang_obj = next((lang for lang in installed_languages if lang.code == to_code), None)
