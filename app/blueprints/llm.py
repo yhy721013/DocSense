@@ -11,6 +11,7 @@ from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
 from app.container import ApplicationServices, get_application_services
+from app.services.core.progress import normalize_progress
 from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
     run_file_analysis_task,
@@ -151,7 +152,7 @@ def _build_progress_snapshot(business_type: str, business_key: str, task: Option
         data["architectureId"] = business_key
 
     if task is not None:
-        data["progress"] = task["progress"]
+        data["progress"] = normalize_progress(task["progress"])
     else:
         data["exists"] = False
 

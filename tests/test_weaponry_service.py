@@ -702,6 +702,90 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
         )
         self.assertEqual(second_row[0]["analyseData"], "AN/SPS-49")
 
+    @patch("app.services.llm_service.weaponry_service._vector_search_with_top_n", return_value=[])
+    def test_query_table_field_preserves_original_template_when_no_rows(self, _mock_vector_search):
+        progress_calls = []
+        original_table = [
+            [
+                {
+                    "fieldName": "雷达名称",
+                    "fieldType": "INPUT",
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                },
+                {
+                    "fieldName": "频段",
+                    "fieldType": "INPUT",
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                },
+            ]
+        ]
+        field = {
+            "fieldName": "雷达配置",
+            "fieldType": "TABLE",
+            "fieldDescription": "提取雷达配置。",
+            "tableFieldList": original_table,
+        }
+
+        result = _query_table_field(
+            object(),
+            "target-ws",
+            "parent-thread",
+            field,
+            on_cell_done=lambda: progress_calls.append(1),
+        )
+
+        self.assertEqual(progress_calls, [1])
+        self.assertEqual(result["tableFieldList"], original_table)
+
+    @patch(
+        "app.services.llm_service.weaponry_service._vector_search_with_top_n",
+        return_value=[
+            {
+                "metadata": {"title": "carrier-radars.pdf"},
+                "text": "The document does not contain a structured radar table.",
+                "score": 0.75,
+            }
+        ],
+    )
+    def test_query_table_field_preserves_original_template_when_model_returns_empty_rows(
+        self,
+        _mock_vector_search,
+    ):
+        class FakeClient:
+            def send_prompt_to_thread(
+                self,
+                workspace_slug,
+                thread_slug,
+                prompt,
+                user_id=1,
+                mode="chat",
+            ):
+                return {"textResponse": "[]"}
+
+        original_table = [
+            [
+                {"fieldName": "雷达名称", "fieldType": "INPUT"},
+                {"fieldName": "频段", "fieldType": "INPUT"},
+            ]
+        ]
+        field = {
+            "fieldName": "雷达配置",
+            "fieldType": "TABLE",
+            "fieldDescription": "提取雷达配置。",
+            "tableFieldList": original_table,
+        }
+
+        result = _query_table_field(
+            FakeClient(),
+            "target-ws",
+            "parent-thread",
+            field,
+        )
+
+        self.assertEqual(result["tableFieldList"], original_table)
+
 
 class TestWeaponrySelectedFilesTask(unittest.TestCase):
     @patch("app.services.llm_service.weaponry_service._query_input_field")

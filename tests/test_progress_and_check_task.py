@@ -18,6 +18,23 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
         hub.publish("file", "demo.pdf", {"businessType": "file", "data": {"fileName": "demo.pdf", "progress": 0.35}})
         self.assertEqual(sink[-1]["data"]["progress"], 0.35)
 
+    def test_progress_hub_normalizes_floating_point_artifacts(self):
+        hub = LLMProgressHub()
+        sink = []
+        hub.subscribe("weaponry", "1001", sink.append)
+
+        hub.publish(
+            "weaponry",
+            "1001",
+            {
+                "businessType": "weaponry",
+                "data": {"architectureId": "1001", "progress": 0.28000000004},
+            },
+        )
+
+        self.assertEqual(sink[-1]["data"]["progress"], 0.28)
+        self.assertEqual(hub.get_latest("weaponry", "1001")["data"]["progress"], 0.28)
+
     def test_progress_hub_keeps_latest_message_per_task(self):
         hub = LLMProgressHub()
         hub.publish("file", "a.pdf", {"businessType": "file", "data": {"fileName": "a.pdf", "progress": 0.15}})
@@ -97,6 +114,25 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
                 {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
             ],
         )
+
+    def test_task_progress_is_normalized_when_persisted(self):
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            service.create_weaponry_task(
+                1001,
+                {"businessType": "weaponry", "params": {"architectureId": 1001}},
+            )
+            service.update_task_progress(
+                "weaponry",
+                "1001",
+                progress=0.28000000004,
+                message="处理中",
+                status="1",
+            )
+
+            task = service.get_task("weaponry", "1001")
+
+        self.assertEqual(task["progress"], 0.28)
 
     @patch("app.services.llm_service.task_service.post_callback_payload", return_value=True)
     def test_check_task_replays_failed_callback(self, _mock_callback):

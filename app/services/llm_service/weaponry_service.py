@@ -1334,17 +1334,19 @@ def _query_table_field(
             on_cell_done()
         return filled_field
 
+    def _preserve_original_table_rows() -> Dict[str, Any]:
+        filled = dict(field)
+        if "tableFieldList" not in filled:
+            filled["tableFieldList"] = []
+        return filled
+
     template_rows = field.get("tableFieldList") or []
     if not template_rows:
-        filled = dict(field)
-        filled["tableFieldList"] = []
-        return _finish(filled)
+        return _finish(_preserve_original_table_rows())
 
     column_defs = _extract_table_column_defs(field)
     if not column_defs:
-        filled = dict(field)
-        filled["tableFieldList"] = []
-        return _finish(filled)
+        return _finish(_preserve_original_table_rows())
 
     table_name = field.get("fieldName", "表格")
     logger.info("  -> 开始处理表格 [%s]，列数: %d", table_name, len(column_defs))
@@ -1364,10 +1366,8 @@ def _query_table_field(
     ]
 
     if not vs_results:
-        logger.info("表格 [%s] 向量搜索无匹配，返回空表格", table_name)
-        filled = dict(field)
-        filled["tableFieldList"] = []
-        return _finish(filled)
+        logger.info("表格 [%s] 向量搜索无匹配，保留原始表格模板", table_name)
+        return _finish(_preserve_original_table_rows())
 
     terms_rule_context = ""
     if _terms_rule_context_enabled() and retrieval_context and retrieval_context.terms_workspace_slug:
@@ -1438,8 +1438,14 @@ def _query_table_field(
 
     filled = dict(field)
     merged_rows = _merge_table_rows(row_results, column_defs)
-    filled["tableFieldList"] = _assemble_table_rows(merged_rows, column_defs)
-    logger.info("表格 [%s] 提取完成: 行数=%d", table_name, len(filled["tableFieldList"]))
+    assembled_rows = _assemble_table_rows(merged_rows, column_defs)
+    if assembled_rows:
+        filled["tableFieldList"] = assembled_rows
+        extracted_row_count = len(assembled_rows)
+    else:
+        filled["tableFieldList"] = template_rows
+        extracted_row_count = 0
+    logger.info("表格 [%s] 提取完成: 解析行数=%d", table_name, extracted_row_count)
     return _finish(filled)
 
 
