@@ -1,31 +1,77 @@
 """文件对话接口（/llm/chat*）单元测试。"""
+import tempfile
 import unittest
-from dataclasses import replace
 from unittest.mock import patch, MagicMock
 
 from app import create_app
-from app.container import APPLICATION_SERVICES_EXTENSION
-from app.services.core.database import ChatDatabaseService
-from tests import workspace_tempdir
+from app.container import ApplicationServices, UploadTaskLimiter
+from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
+from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.core.progress_hub import LLMProgressHub
+from app.services.llm_service.task_service import LLMTaskService
+from tests.fakes import FakeDocumentRagFactory, FakeKnowledgeIndexFactory
+
+
+def _build_test_services(tmp: str) -> ApplicationServices:
+    """构建完全离线的应用容器，避免路由测试触碰生产 SQLite 或网络依赖。"""
+    return ApplicationServices(
+        document_rag_factory=FakeDocumentRagFactory(),
+        knowledge_index_factory=FakeKnowledgeIndexFactory(),
+        task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
+        kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
+        chat_db=ChatDatabaseService(db_path=f"{tmp}/chat.sqlite3"),
+        progress_hub=LLMProgressHub(),
+        upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
+        llm_config=LLMIntegrationConfig(
+            callback_url=None,
+            callback_timeout=5.0,
+            task_db_path=f"{tmp}/tasks.sqlite3",
+            download_timeout=5.0,
+            download_dir=tmp,
+        ),
+        anythingllm_config=AnythingLLMConfig(
+            base_url="http://anythingllm.invalid/api/v1",
+            api_key="test-key",
+            timeout=5.0,
+            storage_root=None,
+        ),
+    )
 
 
 class ChatRouteValidationTests(unittest.TestCase):
     """参数校验类测试 — 不依赖 AnythingLLM。"""
 
     def setUp(self):
-        self.app = create_app()
-        self.client = self.app.test_client()
-        self._tempdir = workspace_tempdir()
+        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
-        self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
-        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
-        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
-            services,
-            chat_db=self.chat_db,
-        )
+        self.services = _build_test_services(self.tmp)
+        self.chat_db = self.services.chat_db
+        self.kb_service = self.services.kb_service
+        self.app = create_app(services=self.services)
+        self.client = self.app.test_client()
 
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
+
+    @staticmethod
+    def _stream_body(resp) -> str:
+        return resp.get_data(as_text=True)
+
+    def _save_document(
+        self,
+        file_name: str = "hash-alpha.pdf",
+        *,
+        original_name: str = "alpha原名.pdf",
+        architecture_id: int = 1,
+        anything_doc_id: str = "doc-alpha",
+    ) -> None:
+        self.kb_service.save_document_record(
+            file_name,
+            architecture_id,
+            anything_doc_id,
+            f"custom-documents/{anything_doc_id}.json",
+            original_name=original_name,
+        )
 
     # ── POST /llm/chat 参数校验 ──
 
@@ -37,6 +83,14 @@ class ChatRouteValidationTests(unittest.TestCase):
         resp = self.client.post("/llm/chat", json={"businessType": "chat"})
         self.assertEqual(resp.status_code, 400)
 
+    def test_chat_rejects_file_names_that_are_not_list(self):
+        resp = self.client.post("/llm/chat", json={
+            "businessType": "chat",
+            "params": {"chatId": "c1", "fileNames": "a.pdf", "message": "hi"},
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["error"], "fileNames必须为数组")
+
     def test_chat_rejects_empty_chat_id(self):
         resp = self.client.post("/llm/chat", json={
             "businessType": "chat",
@@ -46,15 +100,69 @@ class ChatRouteValidationTests(unittest.TestCase):
 
     def test_chat_accepts_empty_file_names_for_new_chat(self):
         """新对话传空 fileNames 不再报 400（允许创建不引用文件的对话）。"""
-        with patch("app.blueprints.llm.handle_chat_stream", return_value=iter([
-            'event: chatInfo\ndata: {"chatId": "c1", "isNewChat": true}\n\n',
-            'event: done\ndata: {"chatId": "c1"}\n\n',
-        ])):
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
+            "app.blueprints.llm.handle_chat_stream",
+            return_value=iter([
+                'event: chatInfo\ndata: {"chatId": "c1", "isNewChat": true}\n\n',
+                'event: done\ndata: {"chatId": "c1"}\n\n',
+            ]),
+        ) as mock_stream:
             resp = self.client.post("/llm/chat", json={
                 "businessType": "chat",
-                "params": {"chatId": "c1", "fileNames": [], "message": "hi"},
+                "params": {"chatId": "c1", "fileNames": [], "message": " hi "},
             })
-        self.assertNotEqual(resp.status_code, 400)
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, "text/event-stream")
+        self.assertEqual(resp.headers["Cache-Control"], "no-cache")
+        self.assertEqual(resp.headers["X-Accel-Buffering"], "no")
+        self.assertEqual(
+            self._stream_body(resp),
+            'event: chatInfo\ndata: {"chatId": "c1", "isNewChat": true}\n\n'
+            'event: done\ndata: {"chatId": "c1"}\n\n',
+        )
+        mock_stream.assert_called_once()
+        kwargs = mock_stream.call_args.kwargs
+        self.assertIs(kwargs["client"], mock_client_cls.return_value)
+        self.assertEqual(kwargs["chat_id"], "c1")
+        self.assertEqual(kwargs["file_names"], [])
+        self.assertEqual(kwargs["file_original_names"], [])
+        self.assertEqual(kwargs["message"], "hi")
+
+    def test_chat_returns_sse_events_for_resolved_file_request(self):
+        """已解析文件进入 SSE 流，路由负责传入哈希文件名和原始文件名快照。"""
+        self._save_document("hash-alpha.pdf", original_name="alpha原名.pdf")
+
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
+            "app.blueprints.llm.handle_chat_stream",
+            return_value=iter([
+                'event: chatInfo\ndata: {"chatId": "c-sse", "isNewChat": true}\n\n',
+                'event: textChunk\ndata: {"content": "你好"}\n\n',
+                'event: done\ndata: {"chatId": "c-sse"}\n\n',
+            ]),
+        ) as mock_stream:
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-sse",
+                    "fileNames": ["hash-alpha.pdf"],
+                    "message": " 请总结 ",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, "text/event-stream")
+        body = self._stream_body(resp)
+        self.assertIn('event: chatInfo\ndata: {"chatId": "c-sse", "isNewChat": true}', body)
+        self.assertIn('event: textChunk\ndata: {"content": "你好"}', body)
+        self.assertTrue(body.endswith('event: done\ndata: {"chatId": "c-sse"}\n\n'))
+        kwargs = mock_stream.call_args.kwargs
+        self.assertIs(kwargs["client"], mock_client_cls.return_value)
+        self.assertIs(kwargs["chat_db"], self.chat_db)
+        self.assertIs(kwargs["kb_service"], self.kb_service)
+        self.assertEqual(kwargs["file_names"], ["hash-alpha.pdf"])
+        self.assertEqual(kwargs["file_original_names"], ["alpha原名.pdf"])
+        self.assertEqual(kwargs["message"], "请总结")
 
     def test_chat_rejects_empty_message(self):
         resp = self.client.post("/llm/chat", json={
@@ -77,15 +185,25 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.chat_db.create_chat("c-exist", ["测试文件.pdf"], "ws-slug", "th-slug")
         # 仍然会走到 handle_chat_stream，但不会报参数错误
         # 这里 mock handle_chat_stream 以避免实际调用 AnythingLLM
-        with patch("app.blueprints.llm.handle_chat_stream", return_value=iter([
-            'event: chatInfo\ndata: {"chatId": "c-exist", "isNewChat": false}\n\n',
-            'event: done\ndata: {"chatId": "c-exist"}\n\n',
-        ])):
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
+            "app.blueprints.llm.handle_chat_stream",
+            return_value=iter([
+                'event: chatInfo\ndata: {"chatId": "c-exist", "isNewChat": false}\n\n',
+                'event: done\ndata: {"chatId": "c-exist"}\n\n',
+            ]),
+        ) as mock_stream:
             resp = self.client.post("/llm/chat", json={
                 "businessType": "chat",
                 "params": {"chatId": "c-exist", "fileNames": [], "message": "继续聊"},
             })
         self.assertEqual(resp.status_code, 200)
+        self.assertIn('"isNewChat": false', self._stream_body(resp))
+        kwargs = mock_stream.call_args.kwargs
+        self.assertIs(kwargs["client"], mock_client_cls.return_value)
+        self.assertEqual(kwargs["chat_id"], "c-exist")
+        self.assertEqual(kwargs["file_names"], [])
+        self.assertEqual(kwargs["file_original_names"], [])
+        self.assertEqual(kwargs["message"], "继续聊")
 
     # ── GET /llm/chat/history 参数校验 ──
 
@@ -176,22 +294,19 @@ class ChatRouteValidationTests(unittest.TestCase):
             "params": {"chatId": "nonexistent"},
         })
         self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.get_json()["error"], "对话不存在")
 
 
 class ChatDeleteTests(unittest.TestCase):
     """删除对话的行为测试。"""
 
     def setUp(self):
-        self.app = create_app()
-        self.client = self.app.test_client()
-        self._tempdir = workspace_tempdir()
+        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
-        self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
-        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
-        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
-            services,
-            chat_db=self.chat_db,
-        )
+        self.services = _build_test_services(self.tmp)
+        self.chat_db = self.services.chat_db
+        self.app = create_app(services=self.services)
+        self.client = self.app.test_client()
 
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
