@@ -9,7 +9,7 @@ import uuid
 import sqlite3
 from datetime import datetime, timezone
 
-from app.services.chat.models import (
+from app.services.chat.domain.models import (
     RUN_ACCEPTED,
     RUN_ACTIVE_STATUSES,
     RUN_FAILED,
@@ -17,7 +17,7 @@ from app.services.chat.models import (
     RUN_SUCCEEDED,
     ChatRun,
 )
-from app.services.chat.repositories import (
+from app.services.chat.persistence.repositories import (
     ChatRunRepository,
     _connection_scope,
     _optional_text,

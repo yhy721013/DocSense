@@ -4,17 +4,19 @@ import json
 import logging
 import threading
 from pathlib import PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
 from app.container import ApplicationServices, get_application_services
-from app.services.chat import (
-    ChatCommandService,
-    ChatRunBusyError,
+from app.presenters.chat_stream import (
+    close_chat_stream_resource,
+    finalize_chat_run_stream,
+    mark_chat_run_failed,
 )
+from app.services.chat import ChatRunBusyError
 from app.services.core.progress import normalize_progress
 from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
@@ -40,138 +42,6 @@ logger = logging.getLogger(__name__)
 def _services() -> ApplicationServices:
     """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
     return get_application_services()
-
-
-def _is_sse_event(payload: str, event_name: str) -> bool:
-    prefix = f"event: {event_name}"
-    return any(line.strip() == prefix for line in payload.splitlines())
-
-
-def _mark_chat_run_failed(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-    error_message: str,
-) -> None:
-    try:
-        chat_commands.fail_chat_run(
-            run_id=run_id,
-            error_message=error_message,
-        )
-    except Exception:
-        logger.exception("failed to mark chat run failed: run_id=%s", run_id)
-
-
-def _mark_chat_run_succeeded(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-) -> None:
-    try:
-        chat_commands.complete_chat_run(run_id=run_id)
-    except Exception:
-        logger.exception("failed to mark chat run succeeded: run_id=%s", run_id)
-
-
-def _touch_chat_run(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-) -> None:
-    try:
-        chat_commands.heartbeat_chat_run(run_id=run_id)
-    except Exception:
-        logger.exception("failed to heartbeat chat run: run_id=%s", run_id)
-
-
-def _close_chat_stream_resource(
-    resource: Any,
-    *,
-    run_id: str,
-    label: str,
-) -> None:
-    close = getattr(resource, "close", None)
-    if not callable(close):
-        return
-    try:
-        close()
-    except Exception:
-        logger.exception(
-            "failed to close chat stream resource: run_id=%s resource=%s",
-            run_id,
-            label,
-        )
-
-
-def _finalize_chat_run_stream(
-    *,
-    stream: Iterable[str],
-    chat_commands: ChatCommandService,
-    run_id: str,
-    on_close: Callable[[], None] | None = None,
-) -> Iterator[str]:
-    terminal_event = ""
-    try:
-        for payload in stream:
-            if _is_sse_event(payload, "error"):
-                terminal_event = "error"
-            elif _is_sse_event(payload, "done"):
-                terminal_event = "done"
-            _touch_chat_run(chat_commands=chat_commands, run_id=run_id)
-            yield payload
-        if terminal_event == "error":
-            _mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream emitted error event",
-            )
-        elif terminal_event == "done":
-            _mark_chat_run_succeeded(
-                chat_commands=chat_commands,
-                run_id=run_id,
-            )
-        else:
-            _mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream ended without terminal event",
-            )
-    except GeneratorExit:
-        if terminal_event == "done":
-            _mark_chat_run_succeeded(
-                chat_commands=chat_commands,
-                run_id=run_id,
-            )
-        elif terminal_event == "error":
-            _mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream emitted error event before close",
-            )
-        else:
-            _mark_chat_run_failed(
-                chat_commands=chat_commands,
-                run_id=run_id,
-                error_message="chat stream closed before completion",
-            )
-        raise
-    except Exception as exc:
-        _mark_chat_run_failed(
-            chat_commands=chat_commands,
-            run_id=run_id,
-            error_message=str(exc) or exc.__class__.__name__,
-        )
-        raise
-    finally:
-        _close_chat_stream_resource(stream, run_id=run_id, label="stream")
-        if on_close is not None:
-            try:
-                on_close()
-            except Exception:
-                logger.exception(
-                    "failed to close chat client: run_id=%s",
-                    run_id,
-                )
 
 
 def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
@@ -1057,7 +927,7 @@ def llm_chat():
             file_original_names=file_original_names,
             message=message,
         )
-        generator = _finalize_chat_run_stream(
+        generator = finalize_chat_run_stream(
             stream=stream,
             chat_commands=chat_commands,
             run_id=chat_run.run_id,
@@ -1073,12 +943,12 @@ def llm_chat():
         )
     except Exception as exc:
         if client is not None:
-            _close_chat_stream_resource(
+            close_chat_stream_resource(
                 client,
                 run_id=chat_run.run_id,
                 label="client",
             )
-        _mark_chat_run_failed(
+        mark_chat_run_failed(
             chat_commands=chat_commands,
             run_id=chat_run.run_id,
             error_message=str(exc) or exc.__class__.__name__,

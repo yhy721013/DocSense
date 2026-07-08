@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.services.chat.lock_service import ChatRunLockService
-from app.services.chat.models import ChatRun
+from app.services.chat.domain.models import ChatRun
+from app.services.chat.locking.lock_service import ChatRunLockService
 
 
 class ChatCommandService:

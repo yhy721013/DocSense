@@ -553,7 +553,7 @@ class ChatDatabaseService:
         self._init_db()
 
     def _init_db(self):
-        from app.services.chat.repositories import ensure_chat_schema
+        from app.services.chat.persistence.repositories import ensure_chat_schema
 
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:

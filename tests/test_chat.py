@@ -226,11 +226,11 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual((), self.services.chat_store.runs.list_active("c-error"))
 
     def test_chat_done_event_close_marks_run_succeeded(self):
-        from app.blueprints.llm import _finalize_chat_run_stream
+        from app.presenters.chat_stream import finalize_chat_run_stream
 
         commands = MagicMock()
         on_close = MagicMock()
-        generator = _finalize_chat_run_stream(
+        generator = finalize_chat_run_stream(
             stream=iter(['event: done\ndata: {"chatId": "c-close"}\n\n']),
             chat_commands=commands,
             run_id="run-close",

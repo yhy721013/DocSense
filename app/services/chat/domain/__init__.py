@@ -1,7 +1,5 @@
-"""Public facade for file-chat domain, application and persistence services."""
+"""Domain models and events for file chat."""
 
-from app.services.chat.application.command_service import ChatCommandService
-from app.services.chat.application.run_executor import ChatRunExecutor
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (
     LEASE_ACTIVE,
@@ -42,43 +40,15 @@ from app.services.chat.domain.models import (
     ChatRun,
     ChatSession,
 )
-from app.services.chat.locking.lock_service import (
-    DEFAULT_STALE_RUN_SECONDS,
-    ChatRunBusyError,
-    ChatRunLockService,
-)
-from app.services.chat.persistence.repositories import (
-    ChatDocumentRepository,
-    ChatMessageRepository,
-    ChatRunRepository,
-    ChatSessionRepository,
-    ensure_chat_schema,
-)
-from app.services.chat.persistence.resource_lease_service import (
-    ChatResourceLeaseService,
-)
-from app.services.chat.persistence.store import ChatPersistenceStore, ChatStore
 
 __all__ = [
     "ChatDocument",
-    "ChatDocumentRepository",
-    "ChatCommandService",
     "ChatMessage",
     "ChatMessageFile",
-    "ChatMessageRepository",
-    "ChatPersistenceStore",
     "ChatResourceLease",
-    "ChatResourceLeaseService",
     "ChatRun",
-    "ChatRunBusyError",
-    "ChatRunExecutor",
-    "ChatRunLockService",
-    "ChatRunRepository",
     "ChatSession",
-    "ChatSessionRepository",
-    "ChatStore",
     "ChatStreamEvent",
-    "DEFAULT_STALE_RUN_SECONDS",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",
     "LEASE_CLEANUP_PENDING",
@@ -110,5 +80,4 @@ __all__ = [
     "SESSION_DELETING",
     "SESSION_ERROR",
     "SESSION_STATUSES",
-    "ensure_chat_schema",
 ]

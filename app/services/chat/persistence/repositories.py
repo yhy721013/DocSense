@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
-from app.services.chat.models import (
+from app.services.chat.domain.models import (
     MESSAGE_ROLES,
     MESSAGE_STATUSES,
     RUN_ABORTED,

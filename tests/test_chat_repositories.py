@@ -432,7 +432,7 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         connection.execute("PRAGMA foreign_keys = ON")
         connection.set_trace_callback(statements.append)
         with patch(
-            "app.services.chat.repositories._connect",
+            "app.services.chat.persistence.repositories._connect",
             return_value=connection,
         ):
             messages = self.store.messages.list_by_chat("chat-query-count")

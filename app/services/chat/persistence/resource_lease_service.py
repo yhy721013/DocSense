@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from app.services.chat.models import (
+from app.services.chat.domain.models import (
     LEASE_ACTIVE,
     LEASE_CLEANUP_FAILED,
     LEASE_CLEANUP_PENDING,
@@ -15,7 +15,7 @@ from app.services.chat.models import (
     RESOURCE_TYPES,
     ChatResourceLease,
 )
-from app.services.chat.repositories import (
+from app.services.chat.persistence.repositories import (
     _connection_scope,
     _optional_text,
     _required_text,
