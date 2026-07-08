@@ -135,6 +135,7 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(kwargs["file_names"], [])
         self.assertEqual(kwargs["file_original_names"], [])
         self.assertEqual(kwargs["message"], "hi")
+        self.assertEqual((), self.services.chat_store.runs.list_active("c1"))
 
     def test_chat_returns_sse_events_for_resolved_file_request(self):
         """已解析文件进入 SSE 流，路由负责传入哈希文件名和原始文件名快照。"""
@@ -170,6 +171,73 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(kwargs["file_names"], ["hash-alpha.pdf"])
         self.assertEqual(kwargs["file_original_names"], ["alpha原名.pdf"])
         self.assertEqual(kwargs["message"], "请总结")
+
+        self.assertEqual((), self.services.chat_store.runs.list_active("c-sse"))
+
+    def test_chat_rejects_duplicate_active_stream(self):
+        self.services.chat_store.sessions.create_or_get(chat_id="c-busy")
+        self.services.chat_store.runs.create(run_id="run-busy", chat_id="c-busy")
+        self.services.chat_store.runs.mark_running("run-busy")
+
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
+            "app.blueprints.llm.handle_chat_stream",
+            return_value=iter(()),
+        ) as mock_stream:
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-busy",
+                    "fileNames": [],
+                    "message": "hi",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(
+            resp.get_json(),
+            {"error": "当前对话已有进行中的流式响应"},
+        )
+        mock_client_cls.assert_not_called()
+        mock_stream.assert_not_called()
+
+    def test_chat_error_event_releases_active_stream(self):
+        with patch("app.blueprints.llm.AnythingLLMClient"), patch(
+            "app.blueprints.llm.handle_chat_stream",
+            return_value=iter([
+                'event: error\ndata: {"error": "boom"}\n\n',
+            ]),
+        ):
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-error",
+                    "fileNames": [],
+                    "message": "hi",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("event: error", self._stream_body(resp))
+        self.assertEqual((), self.services.chat_store.runs.list_active("c-error"))
+
+    def test_chat_done_event_close_marks_run_succeeded(self):
+        from app.blueprints.llm import _finalize_chat_run_stream
+
+        commands = MagicMock()
+        generator = _finalize_chat_run_stream(
+            stream=iter(['event: done\ndata: {"chatId": "c-close"}\n\n']),
+            chat_commands=commands,
+            run_id="run-close",
+        )
+
+        self.assertEqual(
+            'event: done\ndata: {"chatId": "c-close"}\n\n',
+            next(generator),
+        )
+        generator.close()
+
+        commands.complete_chat_run.assert_called_once_with(run_id="run-close")
+        commands.fail_chat_run.assert_not_called()
 
     def test_chat_rejects_empty_message(self):
         resp = self.client.post("/llm/chat", json={

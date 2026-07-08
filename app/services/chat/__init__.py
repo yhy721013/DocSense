@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from app.services.chat.command_service import ChatCommandService
+from app.services.chat.lock_service import ChatRunBusyError, ChatRunLockService
 from app.services.chat.models import (
     LEASE_ACTIVE,
     LEASE_CLEANUP_FAILED,
@@ -84,12 +86,15 @@ class ChatStore:
 __all__ = [
     "ChatDocument",
     "ChatDocumentRepository",
+    "ChatCommandService",
     "ChatMessage",
     "ChatMessageFile",
     "ChatMessageRepository",
     "ChatResourceLease",
     "ChatResourceLeaseService",
     "ChatRun",
+    "ChatRunBusyError",
+    "ChatRunLockService",
     "ChatRunRepository",
     "ChatSession",
     "ChatSessionRepository",

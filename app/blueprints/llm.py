@@ -4,13 +4,18 @@ import json
 import logging
 import threading
 from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 from urllib.parse import unquote, urlparse
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
 from app.container import ApplicationServices, get_application_services
+from app.services.chat import (
+    ChatCommandService,
+    ChatRunBusyError,
+    ChatRunLockService,
+)
 from app.services.core.progress import normalize_progress
 from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
@@ -36,6 +41,96 @@ logger = logging.getLogger(__name__)
 def _services() -> ApplicationServices:
     """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
     return get_application_services()
+
+
+def _is_sse_event(payload: str, event_name: str) -> bool:
+    prefix = f"event: {event_name}"
+    return any(line.strip() == prefix for line in payload.splitlines())
+
+
+def _mark_chat_run_failed(
+    *,
+    chat_commands: ChatCommandService,
+    run_id: str,
+    error_message: str,
+) -> None:
+    try:
+        chat_commands.fail_chat_run(
+            run_id=run_id,
+            error_message=error_message,
+        )
+    except Exception:
+        logger.exception("failed to mark chat run failed: run_id=%s", run_id)
+
+
+def _mark_chat_run_succeeded(
+    *,
+    chat_commands: ChatCommandService,
+    run_id: str,
+) -> None:
+    try:
+        chat_commands.complete_chat_run(run_id=run_id)
+    except Exception:
+        logger.exception("failed to mark chat run succeeded: run_id=%s", run_id)
+
+
+def _finalize_chat_run_stream(
+    *,
+    stream: Iterable[str],
+    chat_commands: ChatCommandService,
+    run_id: str,
+) -> Iterator[str]:
+    terminal_event = ""
+    try:
+        for payload in stream:
+            if _is_sse_event(payload, "error"):
+                terminal_event = "error"
+            elif _is_sse_event(payload, "done"):
+                terminal_event = "done"
+            yield payload
+        if terminal_event == "error":
+            _mark_chat_run_failed(
+                chat_commands=chat_commands,
+                run_id=run_id,
+                error_message="chat stream emitted error event",
+            )
+        elif terminal_event == "done":
+            _mark_chat_run_succeeded(
+                chat_commands=chat_commands,
+                run_id=run_id,
+            )
+        else:
+            _mark_chat_run_failed(
+                chat_commands=chat_commands,
+                run_id=run_id,
+                error_message="chat stream ended without terminal event",
+            )
+    except GeneratorExit:
+        if terminal_event == "done":
+            _mark_chat_run_succeeded(
+                chat_commands=chat_commands,
+                run_id=run_id,
+            )
+        elif terminal_event == "error":
+            _mark_chat_run_failed(
+                chat_commands=chat_commands,
+                run_id=run_id,
+                error_message="chat stream emitted error event before close",
+            )
+        else:
+            _mark_chat_run_failed(
+                chat_commands=chat_commands,
+                run_id=run_id,
+                error_message="chat stream closed before completion",
+            )
+        raise
+    except Exception as exc:
+        _mark_chat_run_failed(
+            chat_commands=chat_commands,
+            run_id=run_id,
+            error_message=str(exc) or exc.__class__.__name__,
+        )
+        raise
 
 
 def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
@@ -899,8 +994,20 @@ def llm_chat():
     # 将哈希文件名映射为原始文件名
     file_original_names = [kb_service.get_original_name(fn) for fn in normalized_file_names]
 
+    chat_commands = ChatCommandService(
+        ChatRunLockService(services.chat_store.db_path),
+    )
+    try:
+        chat_run = chat_commands.start_chat_run(chat_id=chat_id)
+    except ChatRunBusyError:
+        logger.warning(
+            "文件对话请求被拒绝: chatId已有进行中的流式响应 chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
+
     client = AnythingLLMClient(anythingllm_config)
-    generator = handle_chat_stream(
+    stream = handle_chat_stream(
         chat_db=chat_db,
         kb_service=kb_service,
         client=client,
@@ -908,6 +1015,11 @@ def llm_chat():
         file_names=normalized_file_names,
         file_original_names=file_original_names,
         message=message,
+    )
+    generator = _finalize_chat_run_stream(
+        stream=stream,
+        chat_commands=chat_commands,
+        run_id=chat_run.run_id,
     )
     return Response(
         generator,
