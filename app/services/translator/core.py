@@ -372,24 +372,26 @@ class HYMTTranslator:
         if (
                 to_lang_code == "zh"
                 and from_lang_code != self._PIVOT_LANGUAGE_CODE
-                and self._get_argos_translation(installed_languages, from_lang_code, self._PIVOT_LANGUAGE_CODE)
-                and self._get_argos_translation(installed_languages, self._PIVOT_LANGUAGE_CODE, to_lang_code)
+                and (
+                        pivot_translation := self._get_argos_translation(
+                            installed_languages,
+                            from_lang_code,
+                            self._PIVOT_LANGUAGE_CODE,
+                        )
+                )
+                and (
+                        final_translation := self._get_argos_translation(
+                            installed_languages,
+                            self._PIVOT_LANGUAGE_CODE,
+                            to_lang_code,
+                        )
+                )
         ):
             logger.info(
                 "  [提示] 未找到 %s -> %s 直达翻译包，使用 %s -> %s -> %s 中转翻译",
                 from_lang_code,
                 to_lang_code,
                 from_lang_code,
-                self._PIVOT_LANGUAGE_CODE,
-                to_lang_code,
-            )
-            pivot_translation = self._get_argos_translation(
-                installed_languages,
-                from_lang_code,
-                self._PIVOT_LANGUAGE_CODE,
-            )
-            final_translation = self._get_argos_translation(
-                installed_languages,
                 self._PIVOT_LANGUAGE_CODE,
                 to_lang_code,
             )
