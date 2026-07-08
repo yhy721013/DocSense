@@ -25,6 +25,7 @@ from app.ports import (
     DocumentRagFactory,
     KnowledgeIndexFactory,
 )
+from app.services.chat import ChatPersistenceStore, ChatStore
 from app.services.core.config import (
     AnythingLLMConfig,
     LLMIntegrationConfig,
@@ -101,6 +102,7 @@ class ApplicationServices:
     task_service: LLMTaskService
     kb_service: DatabaseService
     chat_db: ChatDatabaseService
+    chat_store: ChatPersistenceStore
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
@@ -115,6 +117,7 @@ class ApplicationServices:
             "task_service": self.task_service,
             "kb_service": self.kb_service,
             "chat_db": self.chat_db,
+            "chat_store": self.chat_store,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
@@ -137,6 +140,8 @@ class ApplicationServices:
             raise TypeError(
                 "chat_conversation_factory must implement ChatConversationFactory"
             )
+        if not isinstance(self.chat_store, ChatPersistenceStore):
+            raise TypeError("chat_store must implement ChatPersistenceStore")
 
 
 def create_application_services() -> ApplicationServices:
@@ -160,6 +165,7 @@ def create_application_services() -> ApplicationServices:
         task_service=task_service,
         kb_service=kb_service,
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
+        chat_store=ChatStore(str(CHAT_DB_PATH)),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,

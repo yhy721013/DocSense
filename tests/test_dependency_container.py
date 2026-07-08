@@ -28,6 +28,7 @@ from app.container import (
     ApplicationServices,
     UploadTaskLimiter,
 )
+from app.services.chat import ChatPersistenceStore, ChatStore
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
@@ -219,6 +220,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             chat_db=ChatDatabaseService(
                 db_path=f"{self.runtime_directory}/chat.sqlite3"
             ),
+            chat_store=ChatStore(
+                db_path=f"{self.runtime_directory}/chat.sqlite3"
+            ),
             progress_hub=LLMProgressHub(),
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
             llm_config=LLMIntegrationConfig(
@@ -249,6 +253,8 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             self.services,
             app.extensions[APPLICATION_SERVICES_EXTENSION],
         )
+        self.assertIsInstance(self.services.chat_store, ChatPersistenceStore)
+        self.assertIsInstance(self.services.chat_store, ChatStore)
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
 

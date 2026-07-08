@@ -117,8 +117,8 @@ class ChatDebugPreviewTests(unittest.TestCase):
         self.assertEqual(result["data"], {"sessions": [], "availableFiles": []})
         self.assertIn("读取失败", result["message"])
 
-    def test_load_chat_debug_bootstrap_documents_legacy_chats_schema_gap(self):
-        """当前旧 chats 表缺少 turn_timestamps 时会进入错误态，阶段 0 仅记录基线。"""
+    def test_load_chat_debug_bootstrap_migrates_legacy_chats_schema(self):
+        """Stage 3 migrates old chats tables that lack turn_timestamps."""
         from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
 
         legacy_path = f"{self.tmp}/legacy-chat.sqlite3"
@@ -159,6 +159,6 @@ class ChatDebugPreviewTests(unittest.TestCase):
             kb_service=self.kb_service,
         )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["data"], {"sessions": [], "availableFiles": []})
-        self.assertIn("turn_timestamps", result["message"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["sessions"][0]["chatId"], "legacy-chat")
+        self.assertEqual(1, len(result["data"]["sessions"][0]["fileNames"]))

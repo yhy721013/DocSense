@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
+from app.services.chat import ChatStore
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -25,6 +26,7 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
         chat_db=ChatDatabaseService(db_path=f"{tmp}/chat.sqlite3"),
+        chat_store=ChatStore(db_path=f"{tmp}/chat.sqlite3"),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=LLMIntegrationConfig(
