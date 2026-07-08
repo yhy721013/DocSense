@@ -2,18 +2,32 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
-from app.services.chat import ChatCommandService
+from app.services.chat import ChatCommandService, ChatStreamEvent
 
 
 logger = logging.getLogger(__name__)
+_TERMINAL_EVENT_TYPES = frozenset({"aborted", "done", "error"})
 
 
-def is_sse_event(payload: str, event_name: str) -> bool:
-    prefix = f"event: {event_name}"
-    return any(line.strip() == prefix for line in payload.splitlines())
+def format_sse_event(event_type: str, data: Mapping[str, Any] | None = None) -> str:
+    """Format one domain stream event as a Server-Sent Events payload."""
+    normalized_type = str(event_type or "").strip()
+    if not normalized_type:
+        raise ValueError("event_type cannot be empty")
+    payload = json.dumps(dict(data or {}), ensure_ascii=False)
+    return f"event: {normalized_type}\ndata: {payload}\n\n"
+
+
+def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
+    """Convert supplier-neutral chat events to SSE payloads."""
+    for event in events:
+        if not isinstance(event, ChatStreamEvent):
+            raise TypeError("chat stream must yield ChatStreamEvent")
+        yield format_sse_event(event.event_type, event.data)
 
 
 def mark_chat_run_failed(
@@ -40,6 +54,17 @@ def mark_chat_run_succeeded(
         chat_commands.complete_chat_run(run_id=run_id)
     except Exception:
         logger.exception("failed to mark chat run succeeded: run_id=%s", run_id)
+
+
+def mark_chat_run_aborted(
+    *,
+    chat_commands: ChatCommandService,
+    run_id: str,
+) -> None:
+    try:
+        chat_commands.abort_chat_run(run_id=run_id)
+    except Exception:
+        logger.exception("failed to mark chat run aborted: run_id=%s", run_id)
 
 
 def touch_chat_run(
@@ -74,25 +99,33 @@ def close_chat_stream_resource(
 
 def finalize_chat_run_stream(
     *,
-    stream: Iterable[str],
+    stream: Iterable[ChatStreamEvent],
     chat_commands: ChatCommandService,
     run_id: str,
     on_close: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     terminal_event = ""
     try:
-        for payload in stream:
-            if is_sse_event(payload, "error"):
-                terminal_event = "error"
-            elif is_sse_event(payload, "done"):
-                terminal_event = "done"
+        for event in stream:
+            if not isinstance(event, ChatStreamEvent):
+                raise TypeError("chat stream must yield ChatStreamEvent")
+            is_terminal = event.event_type in _TERMINAL_EVENT_TYPES
+            if is_terminal:
+                terminal_event = event.event_type
             touch_chat_run(chat_commands=chat_commands, run_id=run_id)
-            yield payload
+            yield format_sse_event(event.event_type, event.data)
+            if is_terminal:
+                break
         if terminal_event == "error":
             mark_chat_run_failed(
                 chat_commands=chat_commands,
                 run_id=run_id,
                 error_message="chat stream emitted error event",
+            )
+        elif terminal_event == "aborted":
+            mark_chat_run_aborted(
+                chat_commands=chat_commands,
+                run_id=run_id,
             )
         elif terminal_event == "done":
             mark_chat_run_succeeded(
@@ -108,6 +141,11 @@ def finalize_chat_run_stream(
     except GeneratorExit:
         if terminal_event == "done":
             mark_chat_run_succeeded(
+                chat_commands=chat_commands,
+                run_id=run_id,
+            )
+        elif terminal_event == "aborted":
+            mark_chat_run_aborted(
                 chat_commands=chat_commands,
                 run_id=run_id,
             )
@@ -146,8 +184,10 @@ def finalize_chat_run_stream(
 __all__ = [
     "close_chat_stream_resource",
     "finalize_chat_run_stream",
-    "is_sse_event",
+    "format_sse_event",
+    "mark_chat_run_aborted",
     "mark_chat_run_failed",
     "mark_chat_run_succeeded",
+    "present_chat_stream",
     "touch_chat_run",
 ]

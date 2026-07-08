@@ -16,7 +16,7 @@ from app.presenters.chat_stream import (
     finalize_chat_run_stream,
     mark_chat_run_failed,
 )
-from app.services.chat import ChatRunBusyError
+from app.services.chat import ChatRunBusyError, ChatRunStreamRequest
 from app.services.core.progress import normalize_progress
 from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
@@ -25,7 +25,7 @@ from app.services.llm_service.analysis_service import (
 from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.weaponry_service import run_weaponry_task
 from app.services.llm_service.chat_service import (
-    handle_chat_stream,
+    handle_chat_events,
     get_chat_history,
     delete_chat,
     ChatNotFoundError,
@@ -917,15 +917,22 @@ def llm_chat():
 
     client: AnythingLLMClient | None = None
     try:
+        chat_run_request = ChatRunStreamRequest(
+            run_id=chat_run.run_id,
+            chat_id=chat_id,
+            file_names=tuple(normalized_file_names),
+            file_original_names=tuple(file_original_names),
+            message=message,
+        )
         client = AnythingLLMClient(anythingllm_config)
-        stream = handle_chat_stream(
+        stream = handle_chat_events(
             chat_db=chat_db,
             kb_service=kb_service,
             client=client,
-            chat_id=chat_id,
-            file_names=normalized_file_names,
-            file_original_names=file_original_names,
-            message=message,
+            chat_id=chat_run_request.chat_id,
+            file_names=list(chat_run_request.file_names),
+            file_original_names=list(chat_run_request.file_original_names),
+            message=chat_run_request.message,
         )
         generator = finalize_chat_run_stream(
             stream=stream,

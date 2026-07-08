@@ -1,7 +1,10 @@
 """Public facade for file-chat domain, application and persistence services."""
 
 from app.services.chat.application.command_service import ChatCommandService
-from app.services.chat.application.run_executor import ChatRunExecutor
+from app.services.chat.application.run_executor import (
+    ChatRunExecutor,
+    ChatRunStreamRequest,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (
     LEASE_ACTIVE,
@@ -74,6 +77,7 @@ __all__ = [
     "ChatRunExecutor",
     "ChatRunLockService",
     "ChatRunRepository",
+    "ChatRunStreamRequest",
     "ChatSession",
     "ChatSessionRepository",
     "ChatStore",

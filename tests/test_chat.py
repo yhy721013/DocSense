@@ -6,7 +6,12 @@ from unittest.mock import patch, MagicMock
 
 from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
-from app.services.chat import ChatCommandService, ChatRunLockService, ChatStore
+from app.services.chat import (
+    ChatCommandService,
+    ChatRunLockService,
+    ChatStore,
+    ChatStreamEvent,
+)
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -111,10 +116,10 @@ class ChatRouteValidationTests(unittest.TestCase):
     def test_chat_accepts_empty_file_names_for_new_chat(self):
         """新对话传空 fileNames 不再报 400（允许创建不引用文件的对话）。"""
         with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
-            "app.blueprints.llm.handle_chat_stream",
+            "app.blueprints.llm.handle_chat_events",
             return_value=iter([
-                'event: chatInfo\ndata: {"chatId": "c1", "isNewChat": true}\n\n',
-                'event: done\ndata: {"chatId": "c1"}\n\n',
+                ChatStreamEvent("chatInfo", {"chatId": "c1", "isNewChat": True}),
+                ChatStreamEvent("done", {"chatId": "c1"}),
             ]),
         ) as mock_stream:
             resp = self.client.post("/llm/chat", json={
@@ -146,11 +151,11 @@ class ChatRouteValidationTests(unittest.TestCase):
         self._save_document("hash-alpha.pdf", original_name="alpha原名.pdf")
 
         with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
-            "app.blueprints.llm.handle_chat_stream",
+            "app.blueprints.llm.handle_chat_events",
             return_value=iter([
-                'event: chatInfo\ndata: {"chatId": "c-sse", "isNewChat": true}\n\n',
-                'event: textChunk\ndata: {"content": "你好"}\n\n',
-                'event: done\ndata: {"chatId": "c-sse"}\n\n',
+                ChatStreamEvent("chatInfo", {"chatId": "c-sse", "isNewChat": True}),
+                ChatStreamEvent("textChunk", {"content": "你好"}),
+                ChatStreamEvent("done", {"chatId": "c-sse"}),
             ]),
         ) as mock_stream:
             resp = self.client.post("/llm/chat", json={
@@ -185,7 +190,7 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.services.chat_store.runs.mark_running("run-busy")
 
         with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
-            "app.blueprints.llm.handle_chat_stream",
+            "app.blueprints.llm.handle_chat_events",
             return_value=iter(()),
         ) as mock_stream:
             resp = self.client.post("/llm/chat", json={
@@ -207,9 +212,9 @@ class ChatRouteValidationTests(unittest.TestCase):
 
     def test_chat_error_event_releases_active_stream(self):
         with patch("app.blueprints.llm.AnythingLLMClient"), patch(
-            "app.blueprints.llm.handle_chat_stream",
+            "app.blueprints.llm.handle_chat_events",
             return_value=iter([
-                'event: error\ndata: {"error": "boom"}\n\n',
+                ChatStreamEvent("error", {"error": "boom"}),
             ]),
         ):
             resp = self.client.post("/llm/chat", json={
@@ -231,7 +236,7 @@ class ChatRouteValidationTests(unittest.TestCase):
         commands = MagicMock()
         on_close = MagicMock()
         generator = finalize_chat_run_stream(
-            stream=iter(['event: done\ndata: {"chatId": "c-close"}\n\n']),
+            stream=iter([ChatStreamEvent("done", {"chatId": "c-close"})]),
             chat_commands=commands,
             run_id="run-close",
             on_close=on_close,
@@ -282,6 +287,41 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual("failed", row[0])
         self.assertIn("client boom", row[1])
 
+    def test_chat_run_request_failure_releases_active_stream(self):
+        self.app.config["PROPAGATE_EXCEPTIONS"] = False
+
+        with patch(
+            "app.blueprints.llm.ChatRunStreamRequest",
+            side_effect=RuntimeError("request boom"),
+        ), patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-request-fail",
+                    "fileNames": [],
+                    "message": "hi",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 500)
+        mock_client_cls.assert_not_called()
+        self.assertEqual(
+            (),
+            self.services.chat_store.runs.list_active("c-request-fail"),
+        )
+        with sqlite3.connect(self.services.chat_store.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT status, error_message
+                FROM chat_runs
+                WHERE chat_id = ?
+                """,
+                ("c-request-fail",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("failed", row[0])
+        self.assertIn("request boom", row[1])
+
     def test_chat_rejects_empty_message(self):
         resp = self.client.post("/llm/chat", json={
             "businessType": "chat",
@@ -301,13 +341,13 @@ class ChatRouteValidationTests(unittest.TestCase):
     def test_chat_allows_empty_file_names_for_existing_chat(self):
         """已有会话时传空 fileNames 不报 400（增量语义：无新增文件）。"""
         self.chat_db.create_chat("c-exist", ["测试文件.pdf"], "ws-slug", "th-slug")
-        # 仍然会走到 handle_chat_stream，但不会报参数错误
-        # 这里 mock handle_chat_stream 以避免实际调用 AnythingLLM
+        # 仍然会走到 handle_chat_events，但不会报参数错误
+        # 这里 mock handle_chat_events 以避免实际调用 AnythingLLM
         with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls, patch(
-            "app.blueprints.llm.handle_chat_stream",
+            "app.blueprints.llm.handle_chat_events",
             return_value=iter([
-                'event: chatInfo\ndata: {"chatId": "c-exist", "isNewChat": false}\n\n',
-                'event: done\ndata: {"chatId": "c-exist"}\n\n',
+                ChatStreamEvent("chatInfo", {"chatId": "c-exist", "isNewChat": False}),
+                ChatStreamEvent("done", {"chatId": "c-exist"}),
             ]),
         ) as mock_stream:
             resp = self.client.post("/llm/chat", json={

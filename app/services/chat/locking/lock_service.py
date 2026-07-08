@@ -175,6 +175,9 @@ class ChatRunLockService:
             error_message=_required_text(error_message, name="error_message"),
         )
 
+    def abort_run(self, run_id: str) -> ChatRun:
+        return self._runs.mark_aborted(run_id)
+
     def request_abort(self, run_id: str) -> ChatRun:
         return self._runs.request_abort(run_id)
 
