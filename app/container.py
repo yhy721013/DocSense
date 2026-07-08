@@ -18,8 +18,13 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
 )
+from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.policies import document_rag_workspace_settings
-from app.ports import DocumentRagFactory, KnowledgeIndexFactory
+from app.ports import (
+    ChatConversationFactory,
+    DocumentRagFactory,
+    KnowledgeIndexFactory,
+)
 from app.services.core.config import (
     AnythingLLMConfig,
     LLMIntegrationConfig,
@@ -92,6 +97,7 @@ class ApplicationServices:
 
     document_rag_factory: DocumentRagFactory
     knowledge_index_factory: KnowledgeIndexFactory
+    chat_conversation_factory: ChatConversationFactory
     task_service: LLMTaskService
     kb_service: DatabaseService
     chat_db: ChatDatabaseService
@@ -105,6 +111,7 @@ class ApplicationServices:
         required_dependencies: dict[str, Any] = {
             "document_rag_factory": self.document_rag_factory,
             "knowledge_index_factory": self.knowledge_index_factory,
+            "chat_conversation_factory": self.chat_conversation_factory,
             "task_service": self.task_service,
             "kb_service": self.kb_service,
             "chat_db": self.chat_db,
@@ -123,6 +130,13 @@ class ApplicationServices:
             KnowledgeIndexFactory,
         ):
             raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
+        if not isinstance(
+            self.chat_conversation_factory,
+            ChatConversationFactory,
+        ):
+            raise TypeError(
+                "chat_conversation_factory must implement ChatConversationFactory"
+            )
 
 
 def create_application_services() -> ApplicationServices:
@@ -142,6 +156,7 @@ def create_application_services() -> ApplicationServices:
             kb_service,
             workspace_settings=document_rag_workspace_settings(),
         ),
+        chat_conversation_factory=AnythingLLMChatFactory(anythingllm_config),
         task_service=task_service,
         kb_service=kb_service,
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),

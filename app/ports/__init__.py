@@ -4,6 +4,21 @@
 系统的协议、认证、资源字段和错误对象只能出现在适配器层，测试替身也不进入生产包。
 """
 
+from .chat import (
+    ChatChunk,
+    ChatConversationConflictError,
+    ChatConversationFactory,
+    ChatConversationNotFoundError,
+    ChatConversationPort,
+    ChatDocumentRef,
+    ChatMessageSnapshot,
+    ChatOperationResult,
+    ChatPortError,
+    ChatResourceError,
+    ChatResponseError,
+    ChatRole,
+    ChatSessionRefs,
+)
 from .knowledge_index import (
     CollectionRef,
     CollectionSpec,
@@ -40,6 +55,19 @@ from .rag import (
 )
 
 __all__ = [
+    "ChatChunk",
+    "ChatConversationConflictError",
+    "ChatConversationFactory",
+    "ChatConversationNotFoundError",
+    "ChatConversationPort",
+    "ChatDocumentRef",
+    "ChatMessageSnapshot",
+    "ChatOperationResult",
+    "ChatPortError",
+    "ChatResourceError",
+    "ChatResponseError",
+    "ChatRole",
+    "ChatSessionRefs",
     "CleanupResult",
     "CollectionRef",
     "CollectionSpec",

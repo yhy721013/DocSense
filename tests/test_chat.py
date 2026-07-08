@@ -9,7 +9,11 @@ from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
-from tests.fakes import FakeDocumentRagFactory, FakeKnowledgeIndexFactory
+from tests.fakes import (
+    FakeChatConversationFactory,
+    FakeDocumentRagFactory,
+    FakeKnowledgeIndexFactory,
+)
 
 
 def _build_test_services(tmp: str) -> ApplicationServices:
@@ -17,6 +21,7 @@ def _build_test_services(tmp: str) -> ApplicationServices:
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
+        chat_conversation_factory=FakeChatConversationFactory(),
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
         chat_db=ChatDatabaseService(db_path=f"{tmp}/chat.sqlite3"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -11,8 +12,11 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
 )
+from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.ports import (
+    ChatConversationFactory,
+    ChatConversationPort,
     DocumentRagFactory,
     DocumentRagPort,
     KnowledgeIndexFactory,
@@ -27,8 +31,11 @@ from app.container import (
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
-from tests import workspace_tempdir
-from tests.fakes import FakeDocumentRagFactory, FakeKnowledgeIndexFactory
+from tests.fakes import (
+    FakeChatConversationFactory,
+    FakeDocumentRagFactory,
+    FakeKnowledgeIndexFactory,
+)
 
 
 class AnythingLLMGatewayFactoryTests(unittest.TestCase):
@@ -117,7 +124,7 @@ class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
 
     def test_knowledge_factory_is_lazy_and_closes_transport(self) -> None:
         """创建租约不联网，进入后返回 Port，退出时关闭本次独立 Transport。"""
-        with workspace_tempdir() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             database_service = DatabaseService(
                 db_path=f"{tmp}/knowledge.sqlite3"
@@ -147,6 +154,33 @@ class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
             transport.close.assert_called_once_with()
 
 
+class AnythingLLMChatFactoryTests(unittest.TestCase):
+    """Verify file-chat factory isolation and lazy transport lifecycle."""
+
+    def test_chat_factory_is_lazy_and_closes_transport(self) -> None:
+        transport = MagicMock(spec=AnythingLLMTransport)
+        transport_factory = Mock(return_value=transport)
+        factory = AnythingLLMChatFactory(
+            AnythingLLMConfig(
+                base_url="http://anythingllm.invalid/api/v1",
+                api_key="test-key",
+                timeout=5.0,
+                storage_root=None,
+            ),
+            transport_factory=transport_factory,
+        )
+
+        lease = factory.create()
+        self.assertIsInstance(factory, ChatConversationFactory)
+        transport_factory.assert_not_called()
+
+        with lease as gateway:
+            self.assertIsInstance(gateway, ChatConversationPort)
+            transport.close.assert_not_called()
+
+        transport.close.assert_called_once_with()
+
+
 class UploadTaskLimiterTests(unittest.TestCase):
     """验证上传并发许可在异常路径也会归还。"""
 
@@ -165,13 +199,17 @@ class ApplicationContainerRouteTests(unittest.TestCase):
 
     def setUp(self) -> None:
         """创建隔离 SQLite 服务和不访问网络的 Fake Factory。"""
-        self._temp_directory = workspace_tempdir()
+        self._temp_directory = tempfile.TemporaryDirectory(
+            ignore_cleanup_errors=True
+        )
         self.runtime_directory = self._temp_directory.__enter__()
         self.document_rag_factory = FakeDocumentRagFactory()
         self.knowledge_index_factory = FakeKnowledgeIndexFactory()
+        self.chat_conversation_factory = FakeChatConversationFactory()
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
+            chat_conversation_factory=self.chat_conversation_factory,
             task_service=LLMTaskService(
                 db_path=f"{self.runtime_directory}/tasks.sqlite3"
             ),
