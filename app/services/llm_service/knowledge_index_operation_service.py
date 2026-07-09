@@ -436,6 +436,32 @@ class KnowledgeIndexOperationService:
                         and existing["external_location"] == normalized_location
                     )
                 if not immutable_matches:
+                    logger.error(
+                        "[DEBUG] 知识库幂等键冲突: collection_ref=%s idempotency_key=%s "
+                        "business_type_match=%s business_key_match=%s source_kind_match=%s "
+                        "source_digest_match=%s metadata_match=%s",
+                        normalized_collection,
+                        normalized_key,
+                        existing["business_type"] == operation_context.business_type,
+                        existing["business_key"] == operation_context.business_key,
+                        existing["source_kind"] == normalized_source_kind,
+                        existing["source_digest"] == normalized_digest,
+                        existing["metadata_json"] == metadata_json,
+                    )
+                    if normalized_source_kind == "prepared":
+                        logger.error(
+                            "[DEBUG] prepared 文档引用冲突: document_ref_match=%s location_match=%s",
+                            existing["document_ref"] == normalized_document_ref,
+                            existing["external_location"] == normalized_location,
+                        )
+                    logger.error(
+                        "[DEBUG] 现有元数据: %s",
+                        existing["metadata_json"][:200] if existing["metadata_json"] else "None",
+                    )
+                    logger.error(
+                        "[DEBUG] 新元数据: %s",
+                        metadata_json[:200] if metadata_json else "None",
+                    )
                     raise KnowledgeIndexConflictError(
                         "相同知识库幂等键对应的业务身份、来源或 metadata 发生冲突"
                     )
