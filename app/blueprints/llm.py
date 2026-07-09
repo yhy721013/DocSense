@@ -883,11 +883,18 @@ def llm_chat():
         logger.warning("文件对话请求被拒绝: message为空 chatId=%s", chat_id)
         return jsonify({"error": "message不能为空"}), 400
     message = message.strip()
+    logger.info(
+        "文件对话请求参数校验通过: chatId=%s raw_file_count=%d message_length=%d",
+        chat_id,
+        len(file_names),
+        len(message),
+    )
 
     normalized_file_names: list[str] = []
     seen_file_names: set[str] = set()
 
-    # 校验引用文件均已解析，并按首次出现顺序去重。
+    # 对话入参中的 fileNames 是业务侧哈希文件名。这里必须在进入 AnythingLLM 前
+    # 完成“存在性校验 + 首次出现顺序去重”，否则本地历史快照与远端检索上下文会不一致。
     for index, fn in enumerate(file_names):
         if not isinstance(fn, str) or not fn.strip():
             logger.warning(
@@ -898,6 +905,12 @@ def llm_chat():
             return jsonify({"error": "fileNames中包含无效文件名"}), 400
         normalized_file_name = fn.strip()
         if normalized_file_name in seen_file_names:
+            logger.debug(
+                "文件对话请求去重重复文件名: chatId=%s fileName=%s index=%s",
+                chat_id,
+                normalized_file_name,
+                index,
+            )
             continue
         seen_file_names.add(normalized_file_name)
         doc_record = kb_service.get_document_record(normalized_file_name)
@@ -913,6 +926,11 @@ def llm_chat():
 
     # 将哈希文件名映射为原始文件名
     file_original_names = [kb_service.get_original_name(fn) for fn in normalized_file_names]
+    logger.info(
+        "文件对话引用文件校验完成: chatId=%s normalized_file_count=%d",
+        chat_id,
+        len(normalized_file_names),
+    )
 
     chat_commands = services.chat_commands
     try:
@@ -923,6 +941,12 @@ def llm_chat():
             chat_id,
         )
         return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
+    logger.info(
+        "文件对话run已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
+        chat_id,
+        chat_run.run_id,
+        len(normalized_file_names),
+    )
 
     client: AnythingLLMClient | None = None
     try:
@@ -934,6 +958,11 @@ def llm_chat():
             message=message,
         )
         client = AnythingLLMClient(anythingllm_config)
+        logger.info(
+            "文件对话AnythingLLM客户端已创建: chatId=%s runId=%s",
+            chat_id,
+            chat_run.run_id,
+        )
         stream = handle_chat_events(
             chat_db=chat_db,
             kb_service=kb_service,
@@ -954,6 +983,11 @@ def llm_chat():
             run_id=chat_run.run_id,
             on_close=client.close,
         )
+        logger.info(
+            "文件对话SSE响应已创建: chatId=%s runId=%s",
+            chat_id,
+            chat_run.run_id,
+        )
         return Response(
             generator,
             mimetype="text/event-stream",
@@ -963,6 +997,11 @@ def llm_chat():
             },
         )
     except Exception as exc:
+        logger.exception(
+            "文件对话请求在SSE响应创建前失败: chatId=%s runId=%s",
+            chat_id,
+            chat_run.run_id,
+        )
         if client is not None:
             close_chat_stream_resource(
                 client,
@@ -985,7 +1024,9 @@ def llm_chat_history():
         logger.warning("对话历史请求被拒绝: chatId为空")
         return jsonify({"error": "chatId不能为空"}), 400
 
-    return jsonify(services.chat_history.list_history(chat_id))
+    history = services.chat_history.list_history(chat_id)
+    logger.info("返回文件对话历史: chatId=%s message_count=%d", chat_id, len(history))
+    return jsonify(history)
 
 
 @llm_bp.post("/llm/chat/abort")
@@ -1015,6 +1056,11 @@ def llm_chat_abort():
         return jsonify({"error": "chatId不能为空"}), 400
 
     result = services.chat_abort.abort_chat(chat_id=chat_id)
+    logger.info(
+        "返回文件对话中断结果: chatId=%s aborted=%s",
+        result.chat_id,
+        result.aborted,
+    )
     return jsonify(result.to_response())
 
 

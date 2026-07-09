@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -31,6 +32,9 @@ from app.services.chat.domain.models import (
     ChatRun,
     ChatSession,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 _RUN_STATUS_TRANSITIONS = {
@@ -283,6 +287,7 @@ def ensure_chat_schema(db_path: str) -> None:
             END
             """
         )
+        logger.debug("文件对话本地权威表结构已确认: db_path=%s", normalized_path)
         connection.execute(
             """
             CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_insert
@@ -408,6 +413,12 @@ class ChatSessionRepository(_Repository):
                     or resolved_thread != existing["thread_ref"]
                     or merged_metadata != existing_metadata
                 ):
+                    logger.info(
+                        "更新文件对话会话引用: chat_id=%s workspace_ref=%s thread_ref=%s",
+                        normalized_chat_id,
+                        resolved_workspace,
+                        resolved_thread,
+                    )
                     connection.execute(
                         """
                         UPDATE chat_sessions
@@ -427,6 +438,11 @@ class ChatSessionRepository(_Repository):
                         "SELECT * FROM chat_sessions WHERE chat_id = ?",
                         (normalized_chat_id,),
                     ).fetchone()
+                logger.debug(
+                    "复用文件对话会话: chat_id=%s status=%s",
+                    normalized_chat_id,
+                    existing["status"],
+                )
                 return self._row(existing)
             connection.execute(
                 """
@@ -449,6 +465,13 @@ class ChatSessionRepository(_Repository):
                 "SELECT * FROM chat_sessions WHERE chat_id = ?",
                 (normalized_chat_id,),
             ).fetchone()
+            logger.info(
+                "创建文件对话会话: chat_id=%s status=%s workspace_ref=%s thread_ref=%s",
+                normalized_chat_id,
+                normalized_status,
+                normalized_workspace,
+                normalized_thread,
+            )
             return self._row(row)
 
     def get(self, chat_id: str) -> ChatSession | None:
@@ -493,6 +516,16 @@ class ChatSessionRepository(_Repository):
                     normalized_chat_id,
                 ),
             )
+            logger.info(
+                "更新文件对话会话远端引用: chat_id=%s workspace_ref=%s thread_ref=%s",
+                normalized_chat_id,
+                _optional_text(workspace_ref)
+                if workspace_ref is not None
+                else row["workspace_ref"],
+                _optional_text(thread_ref)
+                if thread_ref is not None
+                else row["thread_ref"],
+            )
             return self._row(
                 connection.execute(
                     "SELECT * FROM chat_sessions WHERE chat_id = ?",
@@ -515,6 +548,11 @@ class ChatSessionRepository(_Repository):
                 WHERE chat_id = ?
                 """,
                 (normalized_status, _utc_now_iso(), normalized_chat_id),
+            )
+            logger.info(
+                "更新文件对话会话状态: chat_id=%s status=%s",
+                normalized_chat_id,
+                normalized_status,
             )
             row = connection.execute(
                 "SELECT * FROM chat_sessions WHERE chat_id = ?",
@@ -614,6 +652,13 @@ class ChatDocumentRepository(_Repository):
                     now,
                 ),
             )
+            logger.info(
+                "绑定文件到本地对话: chat_id=%s file_name=%s original_name=%s added_by_run_id=%s",
+                normalized_chat_id,
+                normalized_file_name,
+                _optional_text(original_name),
+                normalized_added_by_run_id,
+            )
             return self._get_with_connection(
                 connection,
                 chat_id=normalized_chat_id,
@@ -696,6 +741,12 @@ class ChatRunRepository(_Repository):
                     request_id=_optional_text(request_id),
                     owner_instance_id=_optional_text(owner_instance_id),
                 )
+                logger.debug(
+                    "复用已存在文件对话run: chat_id=%s run_id=%s status=%s",
+                    normalized_chat_id,
+                    normalized_run_id,
+                    existing["status"],
+                )
                 return self._row(existing)
             connection.execute(
                 """
@@ -713,6 +764,14 @@ class ChatRunRepository(_Repository):
                     now,
                     now,
                 ),
+            )
+            logger.info(
+                "创建文件对话run记录: chat_id=%s run_id=%s request_id=%s owner=%s status=%s",
+                normalized_chat_id,
+                normalized_run_id,
+                _optional_text(request_id),
+                _optional_text(owner_instance_id),
+                normalized_status,
             )
             return self._get_with_connection(connection, normalized_run_id)
 
@@ -748,6 +807,12 @@ class ChatRunRepository(_Repository):
                 next_status=normalized_status,
             )
             if current.status == normalized_status:
+                logger.debug(
+                    "文件对话run状态无需变更: chat_id=%s run_id=%s status=%s",
+                    current.chat_id,
+                    normalized_run_id,
+                    normalized_status,
+                )
                 return current
             cursor = connection.execute(
                 """
@@ -780,6 +845,15 @@ class ChatRunRepository(_Repository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_run status was changed concurrently")
+            logger.info(
+                "文件对话run状态迁移: chat_id=%s run_id=%s %s->%s terminal=%s error=%s",
+                current.chat_id,
+                normalized_run_id,
+                current.status,
+                normalized_status,
+                terminal,
+                _optional_text(error_message),
+            )
             return self._get_with_connection(connection, normalized_run_id)
 
     def mark_running(self, run_id: str) -> ChatRun:
@@ -808,6 +882,12 @@ class ChatRunRepository(_Repository):
             connection.execute("BEGIN IMMEDIATE")
             current = self._get_with_connection(connection, normalized_run_id)
             if current.status not in RUN_ACTIVE_STATUSES:
+                logger.info(
+                    "拒绝为非活跃run设置中断标记: chat_id=%s run_id=%s status=%s",
+                    current.chat_id,
+                    normalized_run_id,
+                    current.status,
+                )
                 raise ValueError("cannot request abort for inactive chat_run")
             cursor = connection.execute(
                 """
@@ -823,6 +903,12 @@ class ChatRunRepository(_Repository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_run status was changed concurrently")
+            logger.info(
+                "文件对话run中断标记已持久化: chat_id=%s run_id=%s previous_status=%s",
+                current.chat_id,
+                normalized_run_id,
+                current.status,
+            )
             return self._get_with_connection(connection, normalized_run_id)
 
     def list_active(self, chat_id: str) -> tuple[ChatRun, ...]:
@@ -991,6 +1077,16 @@ class ChatMessageRepository(_Repository):
                 message_id=normalized_message_id,
                 files=normalized_files,
             )
+            logger.info(
+                "写入文件对话消息: chat_id=%s run_id=%s message_id=%s role=%s status=%s sequence_no=%s file_count=%d",
+                normalized_chat_id,
+                normalized_run_id,
+                normalized_message_id,
+                normalized_role,
+                normalized_status,
+                resolved_sequence,
+                len(normalized_files),
+            )
             return self._get_with_connection(connection, normalized_message_id)
 
     def list_by_chat(self, chat_id: str) -> tuple[ChatMessage, ...]:
@@ -1044,6 +1140,11 @@ class ChatMessageRepository(_Repository):
                 next_status=normalized_status,
             )
             if current.status == normalized_status:
+                logger.debug(
+                    "文件对话消息状态无需变更: message_id=%s status=%s",
+                    normalized_message_id,
+                    normalized_status,
+                )
                 return current
             cursor = connection.execute(
                 """
@@ -1059,6 +1160,14 @@ class ChatMessageRepository(_Repository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_message status was changed concurrently")
+            logger.info(
+                "文件对话消息状态变更: chat_id=%s run_id=%s message_id=%s %s->%s",
+                current.chat_id,
+                current.run_id,
+                normalized_message_id,
+                current.status,
+                normalized_status,
+            )
             return self._get_with_connection(connection, normalized_message_id)
 
     def _replace_files(

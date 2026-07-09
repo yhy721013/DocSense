@@ -6,6 +6,7 @@ import os
 import socket
 import uuid
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 
@@ -28,6 +29,7 @@ from app.services.chat.persistence.repositories import (
 
 
 DEFAULT_STALE_RUN_SECONDS = 6 * 60 * 60
+logger = logging.getLogger(__name__)
 
 
 def _default_owner_instance_id() -> str:
@@ -74,6 +76,12 @@ class ChatRunLockService:
         self.stale_after_seconds = stale_after_seconds
         ensure_chat_schema(self.db_path)
         self._runs = ChatRunRepository(self.db_path, initialize=False)
+        logger.info(
+            "文件对话run锁服务已初始化: db_path=%s owner=%s stale_after_seconds=%s",
+            self.db_path,
+            self.owner_instance_id,
+            self.stale_after_seconds,
+        )
 
     def try_acquire_chat_run(
         self,
@@ -89,7 +97,16 @@ class ChatRunLockService:
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
 
         with _connection_scope(self.db_path) as connection:
+            # BEGIN IMMEDIATE 在 SQLite 中会立即取得写锁，保证“检查活跃 run”和
+            # “插入新 run”处于同一个临界区。后续替换为 PostgreSQL/Redis 时，
+            # 这里就是分布式互斥语义的边界。
             connection.execute("BEGIN IMMEDIATE")
+            logger.info(
+                "尝试获取文件对话run锁: chat_id=%s run_id=%s owner=%s",
+                normalized_chat_id,
+                normalized_run_id,
+                self.owner_instance_id,
+            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_sessions (
@@ -115,6 +132,12 @@ class ChatRunLockService:
                 (normalized_chat_id, *active_statuses),
             ).fetchone()
             if active_row is not None:
+                logger.warning(
+                    "文件对话run锁获取失败，存在活跃run: chat_id=%s active_run_id=%s active_status=%s",
+                    normalized_chat_id,
+                    active_row["run_id"],
+                    active_row["status"],
+                )
                 raise ChatRunBusyError(
                     chat_id=normalized_chat_id,
                     active_run_id=active_row["run_id"],
@@ -163,6 +186,13 @@ class ChatRunLockService:
             ).fetchone()
             if row is None:
                 raise ValueError("chat_run was not created")
+            logger.info(
+                "文件对话run锁获取成功: chat_id=%s run_id=%s request_id=%s owner=%s",
+                normalized_chat_id,
+                normalized_run_id,
+                normalized_request_id,
+                self.owner_instance_id,
+            )
             return self._row(row)
 
     def complete_run(self, run_id: str) -> ChatRun:
@@ -194,6 +224,11 @@ class ChatRunLockService:
             if current is None:
                 raise ValueError("chat_run 不存在")
             if current["status"] not in RUN_ACTIVE_STATUSES:
+                logger.debug(
+                    "跳过非活跃run心跳: run_id=%s status=%s",
+                    normalized_run_id,
+                    current["status"],
+                )
                 return self._row(current)
             cursor = connection.execute(
                 f"""
@@ -211,6 +246,11 @@ class ChatRunLockService:
             ).fetchone()
             if row is None:
                 raise ValueError("chat_run 不存在")
+            logger.debug(
+                "文件对话run心跳写入成功: run_id=%s status=%s",
+                normalized_run_id,
+                row["status"],
+            )
             return self._row(row)
 
     def _expire_stale_runs(
@@ -247,6 +287,12 @@ class ChatRunLockService:
                 stale_run_ids.append(row["run_id"])
 
         for stale_run_id in stale_run_ids:
+            logger.warning(
+                "文件对话run心跳超时，标记失败释放锁: chat_id=%s run_id=%s stale_after_seconds=%s",
+                chat_id,
+                stale_run_id,
+                self.stale_after_seconds,
+            )
             connection.execute(
                 f"""
                 UPDATE chat_runs

@@ -120,37 +120,76 @@ class ChatRunEventRecorder:
         terminal_event = ""
         assistant_parts: list[str] = []
         try:
+            logger.info(
+                "开始记录文件对话run事件: chat_id=%s run_id=%s file_count=%d",
+                request.chat_id,
+                request.run_id,
+                len(request.file_names),
+            )
             self._append_user_pending(
                 request=request,
                 message_id=user_message_id,
             )
             user_written = True
+            logger.debug(
+                "用户消息已写入pending: chat_id=%s run_id=%s message_id=%s",
+                request.chat_id,
+                request.run_id,
+                user_message_id,
+            )
 
             event_iterator = iter(events)
             while True:
                 if self._abort_requested(request.run_id):
                     terminal_event = "aborted"
-                    self._commit_user(user_message_id)
-                    chat_commands.abort_chat_run(run_id=request.run_id)
-                    yield ChatStreamEvent("aborted", {"chatId": request.chat_id})
+                    logger.info(
+                        "消费上游事件前检测到中断: chat_id=%s run_id=%s",
+                        request.chat_id,
+                        request.run_id,
+                    )
+                    yield self._finish_aborted(
+                        request=request,
+                        user_message_id=user_message_id,
+                        chat_commands=chat_commands,
+                    )
                     break
                 try:
                     event = next(event_iterator)
                 except StopIteration:
+                    logger.warning(
+                        "文件对话run上游事件流无终态结束: chat_id=%s run_id=%s",
+                        request.chat_id,
+                        request.run_id,
+                    )
                     break
                 if not isinstance(event, ChatStreamEvent):
                     raise TypeError("chat stream must yield ChatStreamEvent")
                 if self._abort_requested(request.run_id):
                     terminal_event = "aborted"
-                    self._commit_user(user_message_id)
-                    chat_commands.abort_chat_run(run_id=request.run_id)
-                    yield ChatStreamEvent("aborted", {"chatId": request.chat_id})
+                    logger.info(
+                        "处理上游事件前检测到中断: chat_id=%s run_id=%s upstream_event=%s",
+                        request.chat_id,
+                        request.run_id,
+                        event.event_type,
+                    )
+                    yield self._finish_aborted(
+                        request=request,
+                        user_message_id=user_message_id,
+                        chat_commands=chat_commands,
+                    )
                     break
                 if event.event_type == "textChunk":
                     content = event.data.get("content")
                     if isinstance(content, str) and content:
                         assistant_parts.append(content)
                 if event.event_type in _TERMINAL_EVENT_TYPES:
+                    logger.info(
+                        "文件对话run收到终态事件: chat_id=%s run_id=%s event=%s chunks=%d",
+                        request.chat_id,
+                        request.run_id,
+                        event.event_type,
+                        len(assistant_parts),
+                    )
                     if event.event_type == "done":
                         self._commit_user(user_message_id)
                         self._append_assistant_committed(
@@ -178,6 +217,11 @@ class ChatRunEventRecorder:
             if not terminal_event:
                 if self._abort_requested(request.run_id):
                     terminal_event = "aborted"
+                    logger.info(
+                        "上游无终态结束但检测到中断请求: chat_id=%s run_id=%s",
+                        request.chat_id,
+                        request.run_id,
+                    )
                     yield self._finish_aborted(
                         request=request,
                         user_message_id=user_message_id,
@@ -185,6 +229,11 @@ class ChatRunEventRecorder:
                     )
                 else:
                     self._commit_user(user_message_id)
+                    logger.warning(
+                        "文件对话run因缺失终态标记失败: chat_id=%s run_id=%s",
+                        request.chat_id,
+                        request.run_id,
+                    )
                     chat_commands.fail_chat_run(
                         run_id=request.run_id,
                         error_message="chat stream ended without terminal event",
@@ -193,6 +242,11 @@ class ChatRunEventRecorder:
             if user_written and not terminal_event:
                 if self._abort_requested(request.run_id):
                     terminal_event = "aborted"
+                    logger.info(
+                        "SSE连接关闭时检测到中断请求: chat_id=%s run_id=%s",
+                        request.chat_id,
+                        request.run_id,
+                    )
                     self._finish_aborted(
                         request=request,
                         user_message_id=user_message_id,
@@ -200,6 +254,11 @@ class ChatRunEventRecorder:
                     )
                 else:
                     self._commit_user(user_message_id)
+                    logger.warning(
+                        "SSE连接在终态前关闭: chat_id=%s run_id=%s",
+                        request.chat_id,
+                        request.run_id,
+                    )
                     chat_commands.fail_chat_run(
                         run_id=request.run_id,
                         error_message="chat stream closed before completion",
@@ -208,6 +267,12 @@ class ChatRunEventRecorder:
         except Exception as exc:
             if not terminal_event and self._abort_requested(request.run_id):
                 terminal_event = "aborted"
+                logger.warning(
+                    "上游异常后检测到中断请求，按中断收敛: chat_id=%s run_id=%s error=%s",
+                    request.chat_id,
+                    request.run_id,
+                    exc,
+                )
                 if user_written:
                     yield self._finish_aborted(
                         request=request,
@@ -220,6 +285,11 @@ class ChatRunEventRecorder:
             if user_written and not terminal_event:
                 self._commit_user(user_message_id)
             if not terminal_event:
+                logger.exception(
+                    "文件对话run事件记录异常，按失败收敛: chat_id=%s run_id=%s",
+                    request.chat_id,
+                    request.run_id,
+                )
                 chat_commands.fail_chat_run(
                     run_id=request.run_id,
                     error_message=str(exc) or exc.__class__.__name__,
@@ -234,6 +304,8 @@ class ChatRunEventRecorder:
         request: ChatRunStreamRequest,
         message_id: str,
     ) -> None:
+        # user 消息先以 pending 写入，只有 run 明确进入 done/error/aborted 等终态
+        # 后才提交为 committed。这样可以避免进程崩溃时把未完成轮次误暴露给历史接口。
         self._store.messages.append(
             message_id=message_id,
             chat_id=request.chat_id,
@@ -258,6 +330,11 @@ class ChatRunEventRecorder:
         content: str,
     ) -> None:
         if not content:
+            logger.info(
+                "跳过空assistant消息入库: chat_id=%s run_id=%s",
+                request.chat_id,
+                request.run_id,
+            )
             return
         self._store.messages.append(
             message_id=message_id,
@@ -275,8 +352,15 @@ class ChatRunEventRecorder:
         user_message_id: str,
         chat_commands: ChatCommandService,
     ) -> ChatStreamEvent:
+        # 中断时保留 user committed，丢弃已输出但不完整的 assistant 片段；
+        # 这是本地历史的权威语义，不依赖 AnythingLLM 是否已经写入远端 Thread。
         self._commit_user(user_message_id)
         chat_commands.abort_chat_run(run_id=request.run_id)
+        logger.info(
+            "文件对话run按中断完成收敛: chat_id=%s run_id=%s",
+            request.chat_id,
+            request.run_id,
+        )
         return ChatStreamEvent("aborted", {"chatId": request.chat_id})
 
     def _abort_requested(self, run_id: str) -> bool:

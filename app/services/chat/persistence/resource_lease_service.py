@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 from app.services.chat.domain.models import (
@@ -25,6 +26,9 @@ from app.services.chat.persistence.repositories import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 _LEASE_STATUS_TRANSITIONS = {
     LEASE_PLANNED: frozenset({LEASE_ACTIVE, LEASE_CLEANUP_PENDING, LEASE_CLOSED}),
     LEASE_ACTIVE: frozenset(
@@ -43,6 +47,11 @@ class ChatResourceLeaseService:
         self.db_path = _required_text(db_path, name="db_path")
         if initialize:
             ensure_chat_schema(self.db_path)
+        logger.info(
+            "文件对话资源租约服务已初始化: db_path=%s initialize=%s",
+            self.db_path,
+            initialize,
+        )
 
     def begin(
         self,
@@ -64,6 +73,8 @@ class ChatResourceLeaseService:
         normalized_external_ref = _optional_text(external_ref)
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
+            # 租约用于记录远端 workspace/thread/document binding 等副作用资源。
+            # 即使后续业务失败，cleanup worker 也可以根据租约表重试清理。
             connection.execute("BEGIN IMMEDIATE")
             if normalized_run_id:
                 run_row = connection.execute(
@@ -91,6 +102,12 @@ class ChatResourceLeaseService:
                         raise ValueError(
                             "非 planned chat_resource_lease 不能补写 external_ref"
                         )
+                    logger.info(
+                        "补写文件对话资源租约external_ref: lease_id=%s chat_id=%s resource_type=%s",
+                        normalized_lease_id,
+                        normalized_chat_id,
+                        normalized_type,
+                    )
                     cursor = connection.execute(
                         """
                         UPDATE chat_resource_leases
@@ -109,6 +126,12 @@ class ChatResourceLeaseService:
                             "chat_resource_lease was changed concurrently"
                         )
                     return self._get_with_connection(connection, normalized_lease_id)
+                logger.debug(
+                    "文件对话资源租约已存在，直接复用: lease_id=%s chat_id=%s status=%s",
+                    normalized_lease_id,
+                    normalized_chat_id,
+                    existing["status"],
+                )
                 return self._row(existing)
             connection.execute(
                 """
@@ -127,6 +150,14 @@ class ChatResourceLeaseService:
                     now,
                     now,
                 ),
+            )
+            logger.info(
+                "创建文件对话资源租约: lease_id=%s chat_id=%s run_id=%s resource_type=%s external_ref=%s",
+                normalized_lease_id,
+                normalized_chat_id,
+                normalized_run_id,
+                normalized_type,
+                normalized_external_ref,
             )
             return self._get_with_connection(connection, normalized_lease_id)
 
@@ -147,6 +178,11 @@ class ChatResourceLeaseService:
                     and normalized_external_ref != current.external_ref
                 ):
                     raise ValueError("chat_resource_lease external_ref 冲突")
+                logger.debug(
+                    "文件对话资源租约已处于active: lease_id=%s external_ref=%s",
+                    normalized_lease_id,
+                    current.external_ref,
+                )
                 return current
             if current.status != LEASE_PLANNED:
                 raise ValueError(
@@ -173,6 +209,11 @@ class ChatResourceLeaseService:
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_resource_lease status was changed concurrently")
+            logger.info(
+                "激活文件对话资源租约: lease_id=%s external_ref=%s",
+                normalized_lease_id,
+                resolved_external_ref,
+            )
             return self._get_with_connection(connection, normalized_lease_id)
 
     def mark_cleanup_pending(self, lease_id: str) -> ChatResourceLease:
@@ -240,6 +281,11 @@ class ChatResourceLeaseService:
                 next_status=normalized_status,
             )
             if current.status == normalized_status:
+                logger.debug(
+                    "文件对话资源租约状态无需变更: lease_id=%s status=%s",
+                    normalized_lease_id,
+                    normalized_status,
+                )
                 return current
             cursor = connection.execute(
                 """
@@ -257,6 +303,13 @@ class ChatResourceLeaseService:
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_resource_lease status was changed concurrently")
+            logger.info(
+                "文件对话资源租约状态变更: lease_id=%s %s->%s error=%s",
+                normalized_lease_id,
+                current.status,
+                normalized_status,
+                _optional_text(error_message),
+            )
             return self._get_with_connection(connection, normalized_lease_id)
 
     def _get_with_connection(

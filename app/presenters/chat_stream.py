@@ -27,6 +27,7 @@ def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
     for event in events:
         if not isinstance(event, ChatStreamEvent):
             raise TypeError("chat stream must yield ChatStreamEvent")
+        logger.debug("展示文件对话SSE事件: event_type=%s", event.event_type)
         yield format_sse_event(event.event_type, event.data)
 
 
@@ -53,9 +54,19 @@ def close_chat_stream_resource(
 ) -> None:
     close = getattr(resource, "close", None)
     if not callable(close):
+        logger.debug(
+            "文件对话流资源无需关闭: run_id=%s resource=%s",
+            run_id,
+            label,
+        )
         return
     try:
         close()
+        logger.debug(
+            "文件对话流资源已关闭: run_id=%s resource=%s",
+            run_id,
+            label,
+        )
     except Exception:
         logger.exception(
             "failed to close chat stream resource: run_id=%s resource=%s",
@@ -75,14 +86,28 @@ def finalize_chat_run_stream(
             if not isinstance(event, ChatStreamEvent):
                 raise TypeError("chat stream must yield ChatStreamEvent")
             is_terminal = event.event_type in _TERMINAL_EVENT_TYPES
+            # Presenter 只负责协议转换和资源关闭，run 状态已经由 application
+            # 层的 ChatRunEventRecorder 收敛，避免展示层与业务层双写状态。
+            logger.debug(
+                "准备发送文件对话SSE事件: run_id=%s event_type=%s terminal=%s",
+                run_id,
+                event.event_type,
+                is_terminal,
+            )
             yield format_sse_event(event.event_type, event.data)
             if is_terminal:
+                logger.info(
+                    "文件对话SSE流收到终态事件并准备关闭: run_id=%s event_type=%s",
+                    run_id,
+                    event.event_type,
+                )
                 break
     finally:
         close_chat_stream_resource(stream, run_id=run_id, label="stream")
         if on_close is not None:
             try:
                 on_close()
+                logger.debug("文件对话客户端关闭回调已完成: run_id=%s", run_id)
             except Exception:
                 logger.exception(
                     "failed to close chat client: run_id=%s",
