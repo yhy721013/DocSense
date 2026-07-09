@@ -1397,10 +1397,23 @@ def _store_prepared_analysis_document(
         prepared_document: PreparedDocumentRef,
 ) -> None:
     """把 RAG 已上传的同一文档转交永久知识库，不读取源文件也不二次上传。"""
+    logger.info(
+        "[DEBUG] 开始转交文档到永久知识库: file_name=%s execution_id=%s",
+        file_name,
+        execution_id,
+    )
     result_architecture_id = int(mapped_result["architectureId"])
+    logger.info(
+        "[DEBUG] 解析结果 architecture_id=%s",
+        result_architecture_id,
+    )
     storage_architecture_id = resolve_storage_architecture_id(
         result_architecture_id,
         architecture_list,
+    )
+    logger.info(
+        "[DEBUG] 存储架构 architecture_id=%s",
+        storage_architecture_id,
     )
     if storage_architecture_id is None or storage_architecture_id < 1:
         raise AnalysisContractError("无法确定永久知识库存储分类")
@@ -1423,6 +1436,11 @@ def _store_prepared_analysis_document(
         original_name=original_name,
         attributes=attributes,
     )
+    logger.info(
+        "[DEBUG] 元数据构建完成: file_name=%s attributes=%s",
+        file_name,
+        list(attributes.keys()),
+    )
     operation_context = KnowledgeOperationContext(
         execution_id=execution_id,
         business_type="file",
@@ -1433,20 +1451,42 @@ def _store_prepared_analysis_document(
         architecture_id=storage_architecture_id,
         content_sha256=prepared_document.content_sha256,
     )
-    with knowledge_index_factory.create() as knowledge_index:
-        collection = knowledge_index.ensure_collection(
-            CollectionSpec(
-                architecture_id=storage_architecture_id,
-                name=f"architectureId-{storage_architecture_id}",
+    logger.info(
+        "[DEBUG] 幂等键生成完成: idempotency_key=%s",
+        idempotency_key[:50] + "...",
+    )
+    try:
+        logger.info("[DEBUG] 进入 knowledge_index_factory 上下文")
+        with knowledge_index_factory.create() as knowledge_index:
+            logger.info("[DEBUG] knowledge_index_factory 创建成功")
+            collection = knowledge_index.ensure_collection(
+                CollectionSpec(
+                    architecture_id=storage_architecture_id,
+                    name=f"architectureId-{storage_architecture_id}",
+                )
             )
+            logger.info(
+                "[DEBUG] 集合确保完成: collection_ref=%s",
+                collection.ref,
+            )
+            logger.info("[DEBUG] 开始调用 store_prepared_document")
+            knowledge_index.store_prepared_document(
+                collection,
+                prepared_document,
+                metadata,
+                operation_context=operation_context,
+                idempotency_key=idempotency_key,
+            )
+            logger.info("[DEBUG] store_prepared_document 调用成功")
+        logger.info("[DEBUG] knowledge_index_factory 上下文退出成功")
+    except Exception as exc:
+        logger.exception(
+            "[DEBUG] knowledge_index_factory 上下文中发生异常: file_name=%s error_type=%s error=%s",
+            file_name,
+            type(exc).__name__,
+            str(exc),
         )
-        knowledge_index.store_prepared_document(
-            collection,
-            prepared_document,
-            metadata,
-            operation_context=operation_context,
-            idempotency_key=idempotency_key,
-        )
+        raise
     logger.info(
         "文件分析文档所有权已转交永久知识库: file_name=%s execution_id=%s "
         "architecture_id=%s storage_architecture_id=%s",
@@ -2039,6 +2079,11 @@ def _execute_file_analysis_task(
         except KnowledgeIndexDocumentReleasedError as knowledge_exc:
             # 只有该类型能证明 Gateway 已解绑永久集合并提交补偿成功状态，此时允许 RAG
             # Session 永久删除未转交的全局文档。
+            logger.exception(
+                "[DEBUG] 捕获 KnowledgeIndexDocumentReleasedError: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
             knowledge_error = _safe_task_error(knowledge_exc, fallback="永久知识库写入失败")
             _finalize_file_failure(
                 task_service=task_service,
@@ -2052,6 +2097,11 @@ def _execute_file_analysis_task(
             )
         except KnowledgeIndexRetentionRequiredError as knowledge_exc:
             retain_document = True
+            logger.exception(
+                "[DEBUG] 捕获 KnowledgeIndexRetentionRequiredError: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
             knowledge_error = _safe_task_error(knowledge_exc, fallback="永久知识库需要恢复")
             _finalize_file_failure(
                 task_service=task_service,
@@ -2067,6 +2117,12 @@ def _execute_file_analysis_task(
             # 未分类异常无法证明永久集合没有接管文档。安全策略必须保留全局实体，等待
             # 协调记录对账；错误删除会破坏永久知识库中可能已经提交的引用。
             retain_document = True
+            logger.exception(
+                "[DEBUG] 捕获未分类异常: file_name=%s execution_id=%s error_type=%s",
+                file_name,
+                execution_id,
+                type(knowledge_exc).__name__,
+            )
             knowledge_error = _safe_task_error(knowledge_exc, fallback="永久知识库写入状态不确定")
             _finalize_file_failure(
                 task_service=task_service,
