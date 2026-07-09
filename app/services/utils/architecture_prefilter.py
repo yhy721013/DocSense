@@ -254,7 +254,7 @@ def _do_prune(
     # ── Index ──
     nodes_by_id: Dict[int, Dict[str, Any]] = {}
     root_nodes: List[Dict[str, Any]] = []
-    child_ids: Set[int] = set()
+    parent_ids: Set[int] = set()  # IDs that are referenced as parentId by other nodes
 
     for node in architecture_list:
         if not isinstance(node, dict):
@@ -267,7 +267,8 @@ def _do_prune(
         if parent_id is None:
             root_nodes.append(node)
         else:
-            child_ids.add(node_id)
+            # Track which IDs are used as parentId (these are NOT leaves)
+            parent_ids.add(parent_id)
 
     # Identify leaf nodes (not referenced as parentId by any other node)
     leaf_nodes: List[Dict[str, Any]] = []
@@ -275,7 +276,7 @@ def _do_prune(
         if not isinstance(node, dict):
             continue
         node_id = _coerce_int(node.get("id"))
-        if node_id is not None and node_id not in child_ids:
+        if node_id is not None and node_id not in parent_ids:
             leaf_nodes.append(node)
 
     if not leaf_nodes:

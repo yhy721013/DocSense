@@ -1481,6 +1481,12 @@ def _apply_architecture_prefilter(
         logger.info("Architecture pre-filter skipped: no architectureList provided")
         return
 
+    # DEBUG: Log received architecture list size
+    logger.info(
+        "Architecture pre-filter: received %d nodes in architectureList",
+        len(architecture_list),
+    )
+
     try:
         # Build search text from file name + document opening
         search_parts = [original_name]
@@ -1657,6 +1663,13 @@ def _execute_file_analysis_task(
             )
         llm_file_path = _prepare_analysis_upload_file(llm_file_path)
         analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
+        
+        # Log prompt size for monitoring pre-filter effectiveness
+        logger.info(
+            "LLM prompt generated: %d chars (after pre-filter from 132 to %d nodes)",
+            len(analysis_prompt),
+            len(params.get("architectureList", [])),
+        )
     except Exception as exc:
         error_message = _safe_task_error(exc, fallback="文件预处理失败")
         logger.exception(
