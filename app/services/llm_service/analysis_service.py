@@ -1651,6 +1651,12 @@ def _execute_file_analysis_task(
 
         # Apply architecture pre-filter after download, before LLM call
         _apply_architecture_prefilter(params, downloaded_path, original_name)
+        
+        # DEBUG: Log the architectureList size after pre-filter
+        logger.info(
+            "After pre-filter: architectureList has %d nodes",
+            len(params.get("architectureList", [])),
+        )
 
         llm_file_path = downloaded_path
         try:
