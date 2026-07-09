@@ -57,6 +57,28 @@ def document_rag_workspace_settings() -> dict[str, object]:
     }
 
 
+def chat_workspace_settings() -> dict[str, object]:
+    """Return the workspace settings used by the file-chat conversation flow.
+
+    This function is the single integration-layer owner of the legacy
+    `/llm/chat` workspace policy. It returns a fresh dict on every call so
+    request-scoped gateways cannot mutate shared configuration.
+    """
+    return {
+        "similarityThreshold": 0.0,
+        "openAiTemp": 0.7,
+        "openAiHistory": 20,
+        "openAiPrompt": (
+            "你是一个基于文档内容的智能问答助手。\n"
+            "请根据已提供的文档内容回答用户的问题。\n"
+            "如果文档中没有相关信息，请如实告知用户。\n"
+            "回答应当准确、清晰、有条理。\n"
+        ),
+        "chatMode": "chat",
+        "topN": 20,
+    }
+
+
 def validate_upload_max_retries(value: int) -> int:
     """校验并返回全局文档上传的额外重试次数。
 
