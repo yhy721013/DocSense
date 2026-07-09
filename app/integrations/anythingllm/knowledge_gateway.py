@@ -322,6 +322,15 @@ class AnythingLLMKnowledgeGateway:
                 known_collection.ref,
                 normalized_key,
             )
+            # 如果已存在且状态为 committed，直接复用，避免 document_ref/location 冲突
+            if existing is not None and existing.status == STATUS_COMMITTED:
+                logger.info(
+                    "永久知识库文档已存在且已提交，直接复用: collection_ref=%s idempotency_key=%s",
+                    known_collection.ref,
+                    normalized_key,
+                )
+                return self._indexed_result(existing, created=False)
+            
             record = self._operation_service.begin(
                 collection_ref=known_collection.ref,
                 idempotency_key=normalized_key,
