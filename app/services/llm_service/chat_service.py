@@ -1,22 +1,14 @@
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List
 
+from app.services.chat import ChatStreamEvent
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.database import ChatDatabaseService, DatabaseService
 
 logger = logging.getLogger(__name__)
-
-
-# ── SSE 格式化 ──────────────────────────────────────────────
-
-def _format_sse_event(event: str, data: dict) -> str:
-    """将事件名和数据格式化为 SSE 文本行。"""
-    payload = json.dumps(data, ensure_ascii=False)
-    return f"event: {event}\ndata: {payload}\n\n"
 
 
 def _build_doc_path(anything_doc_id: str) -> str:
@@ -84,7 +76,7 @@ def _filter_think_stream(generator: Generator[str, None, None]) -> Generator[str
 
 # ── 对话主流程 ──────────────────────────────────────────────
 
-def handle_chat_stream(
+def handle_chat_events(
     *,
     chat_db: ChatDatabaseService,
     kb_service: DatabaseService,
@@ -93,8 +85,8 @@ def handle_chat_stream(
     file_names: List[str],
     file_original_names: List[str],
     message: str,
-) -> Generator[str, None, None]:
-    """SSE 流式对话生成器。
+) -> Generator[ChatStreamEvent, None, None]:
+    """领域事件流式对话生成器。
 
     流程：
     1. 判断新/旧对话
@@ -109,7 +101,7 @@ def handle_chat_stream(
             # ── 新对话 ──
             workspace_info = client.create_chat_workspace(f"chat-{chat_id}")
             if not workspace_info:
-                yield _format_sse_event("error", {"error": "创建对话工作区失败"})
+                yield ChatStreamEvent("error", {"error": "创建对话工作区失败"})
                 return
 
             workspace_slug = workspace_info.get("slug") or str(workspace_info.get("id"))
@@ -119,12 +111,12 @@ def handle_chat_stream(
             if doc_paths:
                 success = client.update_embeddings_batch(workspace_slug, adds=doc_paths)
                 if not success:
-                    yield _format_sse_event("error", {"error": "在工作区中引用文件失败"})
+                    yield ChatStreamEvent("error", {"error": "在工作区中引用文件失败"})
                     return
 
             thread_info = client.create_thread(workspace_slug, f"thread-{chat_id}")
             if not thread_info:
-                yield _format_sse_event("error", {"error": "创建对话线程失败"})
+                yield ChatStreamEvent("error", {"error": "创建对话线程失败"})
                 return
             thread_slug = client.extract_thread_slug(thread_info) or str(thread_info.get("id"))
 
@@ -144,7 +136,7 @@ def handle_chat_stream(
                 add_paths = _resolve_doc_paths(kb_service, to_add)
                 success = client.update_embeddings_batch(workspace_slug, adds=add_paths or None)
                 if not success:
-                    yield _format_sse_event("error", {"error": "更新工作区文件引用失败"})
+                    yield ChatStreamEvent("error", {"error": "更新工作区文件引用失败"})
                     return
             
             chat_db.append_file_original_names(chat_id, file_original_names)
@@ -152,7 +144,7 @@ def handle_chat_stream(
             is_new_chat = False
 
         # ── 推送 chatInfo ──
-        yield _format_sse_event("chatInfo", {"chatId": chat_id, "isNewChat": is_new_chat})
+        yield ChatStreamEvent("chatInfo", {"chatId": chat_id, "isNewChat": is_new_chat})
 
         # ── 流式对话 ──
         current_doc_ids = _resolve_doc_ids(client, kb_service, workspace_slug, file_names)
@@ -164,14 +156,14 @@ def handle_chat_stream(
             document_ids=current_doc_ids
         )
         for chunk in _filter_think_stream(raw_stream):
-            yield _format_sse_event("textChunk", {"content": chunk})
+            yield ChatStreamEvent("textChunk", {"content": chunk})
 
         # ── 完成 ──
-        yield _format_sse_event("done", {"chatId": chat_id})
+        yield ChatStreamEvent("done", {"chatId": chat_id})
 
     except Exception as e:
         logger.exception("对话流处理异常: chat_id=%s, error=%s", chat_id, e)
-        yield _format_sse_event("error", {"error": f"大模型服务响应异常: {e}"})
+        yield ChatStreamEvent("error", {"error": f"大模型服务响应异常: {e}"})
 
 
 # ── 获取对话历史 ──────────────────────────────────────────
