@@ -12,6 +12,12 @@ from app.services.chat.application.run_executor import (
     ChatRunStreamRequest,
     record_chat_run_events,
 )
+from app.services.chat.application.title_service import (
+    ChatTitleEmptyHistoryError,
+    ChatTitleGenerationError,
+    ChatTitleResult,
+    ChatTitleService,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (
     LEASE_ACTIVE,
@@ -55,6 +61,7 @@ from app.services.chat.domain.models import (
 from app.services.chat.locking.lock_service import (
     DEFAULT_STALE_RUN_SECONDS,
     ChatRunBusyError,
+    ChatRunInactiveError,
     ChatRunLockService,
 )
 from app.services.chat.persistence.repositories import (
@@ -84,6 +91,7 @@ __all__ = [
     "ChatResourceLeaseService",
     "ChatRun",
     "ChatRunBusyError",
+    "ChatRunInactiveError",
     "ChatRunEventRecorder",
     "ChatRunExecutor",
     "ChatRunLockService",
@@ -93,6 +101,10 @@ __all__ = [
     "ChatSessionRepository",
     "ChatStore",
     "ChatStreamEvent",
+    "ChatTitleEmptyHistoryError",
+    "ChatTitleGenerationError",
+    "ChatTitleResult",
+    "ChatTitleService",
     "DEFAULT_STALE_RUN_SECONDS",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",

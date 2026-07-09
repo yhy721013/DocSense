@@ -11,6 +11,7 @@ from app.services.chat import (
     RUN_RUNNING,
     RUN_SUCCEEDED,
     ChatRunBusyError,
+    ChatRunInactiveError,
     ChatRunLockService,
     ChatStore,
 )
@@ -154,6 +155,38 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual(RUN_FAILED, stale.status)
         self.assertEqual("chat run heartbeat expired", stale.error_message)
 
+    def test_stale_active_run_can_be_expired_without_retry(self) -> None:
+        locks = ChatRunLockService(
+            self.db_path,
+            owner_instance_id="test-instance",
+            stale_after_seconds=1,
+        )
+        locks.try_acquire_chat_run(
+            chat_id="chat-stale-explicit",
+            run_id="run-stale-explicit",
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE chat_runs
+                SET heartbeat_at = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    "2000-01-01T00:00:00+00:00",
+                    "2000-01-01T00:00:00+00:00",
+                    "run-stale-explicit",
+                ),
+            )
+
+        expired = locks.expire_stale_runs_for_chat(chat_id="chat-stale-explicit")
+        active = self.store.runs.list_active("chat-stale-explicit")
+
+        self.assertEqual(["run-stale-explicit"], [run.run_id for run in expired])
+        self.assertEqual(RUN_FAILED, expired[0].status)
+        self.assertEqual("chat run heartbeat expired", expired[0].error_message)
+        self.assertEqual((), active)
+
     def test_terminal_run_rejects_illegal_follow_up_state_changes(self) -> None:
         self.locks.try_acquire_chat_run(
             chat_id="chat-terminal",
@@ -163,7 +196,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self.locks.fail_run("run-terminal", error_message="late failure")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ChatRunInactiveError):
             self.locks.request_abort("run-terminal")
 
         self.assertEqual(RUN_SUCCEEDED, completed.status)

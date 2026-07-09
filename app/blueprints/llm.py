@@ -19,6 +19,7 @@ from app.presenters.chat_stream import (
 from app.services.chat import (
     ChatRunBusyError,
     ChatRunStreamRequest,
+    ChatTitleEmptyHistoryError,
     record_chat_run_events,
 )
 from app.services.core.progress import normalize_progress
@@ -839,6 +840,73 @@ def llm_progress(ws):
 #  文件对话接口
 # ══════════════════════════════════════════════════════════════
 
+
+def _sync_chat_session_refs_from_legacy_record(
+    *,
+    services: ApplicationServices,
+    chat_db,
+    chat_id: str,
+) -> None:
+    """把当前 legacy 主流程创建的远端引用同步到新会话表。
+
+    阶段 8 的标题服务只依赖新 `chat_sessions`，但 `/llm/chat` 主流程尚未在阶段 10 前
+    完全迁移到 Chat Gateway。因此这里作为过渡桥接：只从 legacy `chats` 表读取已经
+    创建成功的 workspace/thread 引用，写入新会话表，不改变对外 SSE 事件形态。
+    """
+    try:
+        session = services.chat_store.sessions.get(chat_id)
+        if session is None or (session.workspace_ref and session.thread_ref):
+            return
+        legacy_record = chat_db.get_chat(chat_id)
+        if legacy_record is None:
+            logger.debug(
+                "跳过文件对话远端引用同步: legacy记录不存在 chatId=%s",
+                chat_id,
+            )
+            return
+        workspace_ref = str(legacy_record.get("workspace_slug") or "").strip()
+        thread_ref = str(legacy_record.get("thread_slug") or "").strip()
+        if not workspace_ref or not thread_ref:
+            logger.warning(
+                "跳过文件对话远端引用同步: legacy记录引用不完整 chatId=%s "
+                "hasWorkspace=%s hasThread=%s",
+                chat_id,
+                bool(workspace_ref),
+                bool(thread_ref),
+            )
+            return
+        services.chat_store.sessions.update_refs(
+            chat_id=chat_id,
+            workspace_ref=workspace_ref,
+            thread_ref=thread_ref,
+        )
+        logger.info(
+            "文件对话远端引用已同步到本地会话: chatId=%s workspace_ref=%s thread_ref=%s",
+            chat_id,
+            workspace_ref,
+            thread_ref,
+        )
+    except Exception:
+        logger.exception("同步文件对话远端引用失败: chatId=%s", chat_id)
+
+
+def _sync_chat_session_refs_from_legacy_events(
+    *,
+    events,
+    services: ApplicationServices,
+    chat_db,
+    chat_id: str,
+):
+    """在不改写 SSE 事件的前提下，为标题生成补齐新会话表远端引用。"""
+    for event in events:
+        if getattr(event, "event_type", "") == "chatInfo":
+            _sync_chat_session_refs_from_legacy_record(
+                services=services,
+                chat_db=chat_db,
+                chat_id=chat_id,
+            )
+        yield event
+
 @llm_bp.post("/llm/chat")
 def llm_chat():
     services = _services()
@@ -972,6 +1040,12 @@ def llm_chat():
             file_original_names=list(chat_run_request.file_original_names),
             message=chat_run_request.message,
         )
+        stream = _sync_chat_session_refs_from_legacy_events(
+            events=stream,
+            services=services,
+            chat_db=chat_db,
+            chat_id=chat_run_request.chat_id,
+        )
         stream = record_chat_run_events(
             request=chat_run_request,
             events=stream,
@@ -1014,6 +1088,45 @@ def llm_chat():
             error_message=str(exc) or exc.__class__.__name__,
         )
         raise
+
+
+@llm_bp.post("/llm/chat/title")
+def llm_chat_title():
+    services = _services()
+    payload = request.get_json(silent=True) or {}
+    logger.info("收到生成对话标题请求: payload_keys=%s", list(payload.keys()))
+
+    if payload.get("businessType") != "chat":
+        logger.warning(
+            "生成对话标题请求被拒绝: businessType无效 businessType=%s",
+            payload.get("businessType"),
+        )
+        return jsonify({"error": "businessType必须为chat"}), 400
+
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        logger.warning(
+            "生成对话标题请求被拒绝: params无效 params_type=%s",
+            type(params).__name__,
+        )
+        return jsonify({"error": "params不能为空"}), 400
+
+    chat_id = params.get("chatId")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        logger.warning("生成对话标题请求被拒绝: chatId为空")
+        return jsonify({"error": "chatId不能为空"}), 400
+
+    try:
+        result = services.chat_title.generate_title(chat_id=chat_id)
+    except ChatTitleEmptyHistoryError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    logger.info(
+        "返回文件对话标题: chatId=%s title_chars=%d",
+        result.chat_id,
+        len(result.title),
+    )
+    return jsonify(result.to_response())
 
 
 @llm_bp.get("/llm/chat/history")

@@ -13,6 +13,7 @@ from app.services.chat import (
     ChatRunLockService,
     ChatStore,
     ChatStreamEvent,
+    ChatTitleService,
     MESSAGE_COMMITTED,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
@@ -33,16 +34,23 @@ def _build_test_services(tmp: str) -> ApplicationServices:
     chat_db_path = f"{tmp}/chat.sqlite3"
     chat_store = ChatStore(db_path=chat_db_path)
     chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
+    chat_history = ChatHistoryService(chat_store)
+    chat_conversation_factory = FakeChatConversationFactory()
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
-        chat_conversation_factory=FakeChatConversationFactory(),
+        chat_conversation_factory=chat_conversation_factory,
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
         chat_db=ChatDatabaseService(db_path=chat_db_path),
         chat_store=chat_store,
         chat_commands=chat_commands,
-        chat_history=ChatHistoryService(chat_store),
+        chat_history=chat_history,
+        chat_title=ChatTitleService(
+            store=chat_store,
+            history_service=chat_history,
+            conversation_factory=chat_conversation_factory,
+        ),
         chat_abort=ChatAbortService(
             store=chat_store,
             chat_commands=chat_commands,
@@ -239,6 +247,32 @@ class ChatRouteValidationTests(unittest.TestCase):
         messages = self.services.chat_store.messages.list_by_chat("c-dedupe")
         self.assertEqual(1, len(messages[0].files))
         self.assertEqual("hash-alpha.pdf", messages[0].files[0].file_name)
+
+    def test_chat_syncs_legacy_remote_refs_into_local_session(self):
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.create_chat_workspace.return_value = {"slug": "ws-sync"}
+            mock_client.create_thread.return_value = {"slug": "thread-sync"}
+            mock_client.extract_thread_slug.return_value = "thread-sync"
+            mock_client.stream_chat_to_thread.return_value = iter(["同步回答"])
+
+            resp = self.client.post("/llm/chat", json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "c-sync",
+                    "fileNames": [],
+                    "message": "请总结",
+                },
+            })
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("event: done", self._stream_body(resp))
+        session = self.services.chat_store.sessions.get("c-sync")
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual("ws-sync", session.workspace_ref)
+        self.assertEqual("thread-sync", session.thread_ref)
+        mock_client.close.assert_called_once_with()
 
     def test_chat_rejects_duplicate_active_stream(self):
         self.services.chat_store.sessions.create_or_get(chat_id="c-busy")
@@ -493,6 +527,117 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual([], resp.get_json())
         mock_client_cls.assert_not_called()
+
+    # ── POST /llm/chat/title 参数校验与行为 ──
+
+    def test_title_rejects_invalid_business_type(self):
+        resp = self.client.post("/llm/chat/title", json={
+            "businessType": "wrong",
+            "params": {},
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual({"error": "businessType必须为chat"}, resp.get_json())
+
+    def test_title_rejects_missing_params(self):
+        resp = self.client.post("/llm/chat/title", json={"businessType": "chat"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual({"error": "params不能为空"}, resp.get_json())
+
+    def test_title_rejects_empty_chat_id(self):
+        resp = self.client.post("/llm/chat/title", json={
+            "businessType": "chat",
+            "params": {"chatId": ""},
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual({"error": "chatId不能为空"}, resp.get_json())
+
+    def test_title_returns_empty_for_nonexistent_chat(self):
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
+            resp = self.client.post("/llm/chat/title", json={
+                "businessType": "chat",
+                "params": {"chatId": "missing-chat"},
+            })
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            {"chatId": "missing-chat", "title": ""},
+            resp.get_json(),
+        )
+        mock_client_cls.assert_not_called()
+        self.assertEqual(0, len(self.services.chat_conversation_factory.ports))
+
+    def test_title_returns_400_for_empty_history(self):
+        with self.services.chat_conversation_factory.create() as port:
+            refs = port.open_conversation(
+                context_name="context-empty-title",
+                conversation_name="thread-empty-title",
+            )
+        self.services.chat_store.sessions.create_or_get(
+            chat_id="empty-title",
+            workspace_ref=refs.context_ref,
+            thread_ref=refs.conversation_ref,
+        )
+
+        resp = self.client.post("/llm/chat/title", json={
+            "businessType": "chat",
+            "params": {"chatId": "empty-title"},
+        })
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(
+            {"error": "对话历史为空，无法生成标题"},
+            resp.get_json(),
+        )
+
+    def test_title_uses_local_committed_history_without_mutating_it(self):
+        with self.services.chat_conversation_factory.create() as port:
+            refs = port.open_conversation(
+                context_name="context-title",
+                conversation_name="thread-title",
+            )
+        self.services.chat_store.sessions.create_or_get(
+            chat_id="conv-title",
+            workspace_ref=refs.context_ref,
+            thread_ref=refs.conversation_ref,
+        )
+        self.services.chat_store.runs.create(
+            run_id="run-title",
+            chat_id="conv-title",
+        )
+        self.services.chat_store.messages.append(
+            message_id="run-title:user",
+            chat_id="conv-title",
+            run_id="run-title",
+            role=MESSAGE_ROLE_USER,
+            content="请总结这份战略文件",
+            status=MESSAGE_COMMITTED,
+        )
+        self.services.chat_store.messages.append(
+            message_id="run-title:assistant",
+            chat_id="conv-title",
+            run_id="run-title",
+            role=MESSAGE_ROLE_ASSISTANT,
+            content="文件讨论国防战略和装备发展。",
+            status=MESSAGE_COMMITTED,
+        )
+        before = self.services.chat_history.list_history("conv-title")
+
+        with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
+            resp = self.client.post("/llm/chat/title", json={
+                "businessType": "chat",
+                "params": {"chatId": "conv-title"},
+            })
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            {"chatId": "conv-title", "title": "模拟标题"},
+            resp.get_json(),
+        )
+        self.assertEqual(before, self.services.chat_history.list_history("conv-title"))
+        mock_client_cls.assert_not_called()
+        prompts = self.services.chat_conversation_factory.ports[-1].standalone_prompts
+        self.assertEqual(1, len(prompts))
+        self.assertIn("请总结这份战略文件", prompts[0][1])
 
     # ── POST /llm/chat/abort 参数校验与行为 ──
 

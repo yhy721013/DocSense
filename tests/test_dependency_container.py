@@ -35,6 +35,7 @@ from app.services.chat import (
     ChatPersistenceStore,
     ChatRunLockService,
     ChatStore,
+    ChatTitleService,
 )
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -217,6 +218,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         chat_db_path = f"{self.runtime_directory}/chat.sqlite3"
         chat_store = ChatStore(db_path=chat_db_path)
         chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
+        chat_history = ChatHistoryService(chat_store)
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -230,7 +232,12 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             chat_db=ChatDatabaseService(db_path=chat_db_path),
             chat_store=chat_store,
             chat_commands=chat_commands,
-            chat_history=ChatHistoryService(chat_store),
+            chat_history=chat_history,
+            chat_title=ChatTitleService(
+                store=chat_store,
+                history_service=chat_history,
+                conversation_factory=self.chat_conversation_factory,
+            ),
             chat_abort=ChatAbortService(
                 store=chat_store,
                 chat_commands=chat_commands,
@@ -269,6 +276,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_store, ChatStore)
         self.assertIsInstance(self.services.chat_commands, ChatCommandService)
         self.assertIsInstance(self.services.chat_history, ChatHistoryService)
+        self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))

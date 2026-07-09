@@ -82,5 +82,17 @@ class ChatCommandService:
         )
         return run
 
+    def expire_stale_chat_runs(self, *, chat_id: str) -> tuple[ChatRun, ...]:
+        expired_runs = self._lock_service.expire_stale_runs_for_chat(
+            chat_id=chat_id,
+        )
+        if expired_runs:
+            logger.warning(
+                "文件对话过期run已在命令层收敛: chat_id=%s run_ids=%s",
+                chat_id,
+                ",".join(run.run_id for run in expired_runs),
+            )
+        return expired_runs
+
 
 __all__ = ["ChatCommandService"]

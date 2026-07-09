@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.locking.lock_service import ChatRunInactiveError
 from app.services.chat.persistence.store import ChatPersistenceStore
 
 
@@ -52,6 +53,16 @@ class ChatAbortService:
     def abort_chat(self, *, chat_id: str) -> ChatAbortResult:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         logger.info("收到文件对话中断指令: chat_id=%s", normalized_chat_id)
+        expired_runs = self._chat_commands.expire_stale_chat_runs(
+            chat_id=normalized_chat_id,
+        )
+        if expired_runs:
+            logger.warning(
+                "文件对话中断前已释放过期run: chat_id=%s expired_run_ids=%s",
+                normalized_chat_id,
+                ",".join(run.run_id for run in expired_runs),
+            )
+
         active_runs = self._store.runs.list_active(normalized_chat_id)
         if not active_runs:
             logger.info(
@@ -72,11 +83,12 @@ class ChatAbortService:
             requested = self._chat_commands.request_abort(
                 run_id=active_run.run_id,
             )
-        except ValueError:
+        except ChatRunInactiveError as exc:
             logger.info(
-                "文件对话中断指令写入失败: chat_id=%s run_id=%s reason=inactive",
+                "文件对话中断指令写入失败: chat_id=%s run_id=%s reason=inactive status=%s",
                 normalized_chat_id,
-                active_run.run_id,
+                exc.run_id,
+                exc.status,
             )
             return ChatAbortResult(
                 chat_id=normalized_chat_id,

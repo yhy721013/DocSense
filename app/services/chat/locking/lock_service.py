@@ -57,6 +57,15 @@ class ChatRunBusyError(RuntimeError):
         self.active_run_id = active_run_id
 
 
+class ChatRunInactiveError(RuntimeError):
+    """Raised when an abort request races with a terminal chat run."""
+
+    def __init__(self, *, run_id: str, status: str) -> None:
+        super().__init__("chat run is no longer active")
+        self.run_id = run_id
+        self.status = status
+
+
 class ChatRunLockService:
     """Acquire and release durable per-chat run ownership."""
 
@@ -209,7 +218,51 @@ class ChatRunLockService:
         return self._runs.mark_aborted(run_id)
 
     def request_abort(self, run_id: str) -> ChatRun:
-        return self._runs.request_abort(run_id)
+        normalized_run_id = _required_text(run_id, name="run_id")
+        try:
+            return self._runs.request_abort(normalized_run_id)
+        except ValueError as exc:
+            current = self._runs.get(normalized_run_id)
+            if current is not None and current.status not in RUN_ACTIVE_STATUSES:
+                raise ChatRunInactiveError(
+                    run_id=normalized_run_id,
+                    status=current.status,
+                ) from exc
+            raise
+
+    def expire_stale_runs_for_chat(self, *, chat_id: str) -> tuple[ChatRun, ...]:
+        """Mark stale active runs for one chat as failed and return them.
+
+        `/llm/chat` already expires stale runs before acquiring a new lock. Abort
+        must apply the same rule before reporting that an active stream can be
+        interrupted; otherwise a crashed worker would receive `aborted: true`
+        even though no executor remains to observe the abort flag.
+        """
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        if self.stale_after_seconds is None:
+            return ()
+        now = _utc_now_iso()
+        active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stale_run_ids = self._expire_stale_runs(
+                connection,
+                chat_id=normalized_chat_id,
+                now=now,
+                active_statuses=active_statuses,
+            )
+            if not stale_run_ids:
+                return ()
+            placeholders = ",".join("?" for _ in stale_run_ids)
+            rows = connection.execute(
+                f"""
+                SELECT * FROM chat_runs
+                WHERE run_id IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                stale_run_ids,
+            ).fetchall()
+        return tuple(self._row(row) for row in rows)
 
     def heartbeat_run(self, run_id: str) -> ChatRun:
         normalized_run_id = _required_text(run_id, name="run_id")
@@ -260,12 +313,12 @@ class ChatRunLockService:
         chat_id: str,
         now: str,
         active_statuses: tuple[str, ...],
-    ) -> None:
+    ) -> tuple[str, ...]:
         if self.stale_after_seconds is None:
-            return
+            return ()
         now_dt = _parse_utc(now)
         if now_dt is None:
-            return
+            return ()
         rows = connection.execute(
             f"""
             SELECT * FROM chat_runs
@@ -311,6 +364,7 @@ class ChatRunLockService:
                     *active_statuses,
                 ),
             )
+        return tuple(stale_run_ids)
 
     @staticmethod
     def _row(row: sqlite3.Row) -> ChatRun:
@@ -332,6 +386,7 @@ class ChatRunLockService:
 
 __all__ = [
     "ChatRunBusyError",
+    "ChatRunInactiveError",
     "ChatRunLockService",
     "DEFAULT_STALE_RUN_SECONDS",
 ]

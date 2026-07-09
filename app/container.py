@@ -32,6 +32,7 @@ from app.services.chat import (
     ChatPersistenceStore,
     ChatRunLockService,
     ChatStore,
+    ChatTitleService,
 )
 from app.services.core.config import (
     AnythingLLMConfig,
@@ -112,6 +113,7 @@ class ApplicationServices:
     chat_store: ChatPersistenceStore
     chat_commands: ChatCommandService
     chat_history: ChatHistoryService
+    chat_title: ChatTitleService
     chat_abort: ChatAbortService
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
@@ -130,6 +132,7 @@ class ApplicationServices:
             "chat_store": self.chat_store,
             "chat_commands": self.chat_commands,
             "chat_history": self.chat_history,
+            "chat_title": self.chat_title,
             "chat_abort": self.chat_abort,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
@@ -159,6 +162,8 @@ class ApplicationServices:
             raise TypeError("chat_commands must be ChatCommandService")
         if not isinstance(self.chat_history, ChatHistoryService):
             raise TypeError("chat_history must be ChatHistoryService")
+        if not isinstance(self.chat_title, ChatTitleService):
+            raise TypeError("chat_title must be ChatTitleService")
         if not isinstance(self.chat_abort, ChatAbortService):
             raise TypeError("chat_abort must be ChatAbortService")
 
@@ -171,6 +176,8 @@ def create_application_services() -> ApplicationServices:
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_store = ChatStore(str(CHAT_DB_PATH))
     chat_commands = ChatCommandService(ChatRunLockService(chat_store.db_path))
+    chat_history = ChatHistoryService(chat_store)
+    chat_conversation_factory = AnythingLLMChatFactory(anythingllm_config)
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
@@ -182,13 +189,18 @@ def create_application_services() -> ApplicationServices:
             kb_service,
             workspace_settings=document_rag_workspace_settings(),
         ),
-        chat_conversation_factory=AnythingLLMChatFactory(anythingllm_config),
+        chat_conversation_factory=chat_conversation_factory,
         task_service=task_service,
         kb_service=kb_service,
         chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
         chat_store=chat_store,
         chat_commands=chat_commands,
-        chat_history=ChatHistoryService(chat_store),
+        chat_history=chat_history,
+        chat_title=ChatTitleService(
+            store=chat_store,
+            history_service=chat_history,
+            conversation_factory=chat_conversation_factory,
+        ),
         chat_abort=ChatAbortService(
             store=chat_store,
             chat_commands=chat_commands,

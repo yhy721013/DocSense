@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 
@@ -11,6 +12,7 @@ from app.services.chat import (
     ChatRunLockService,
     ChatStreamEvent,
     ChatStore,
+    RUN_FAILED,
     RUN_SUCCEEDED,
 )
 
@@ -73,6 +75,60 @@ class ChatAbortServiceTests(unittest.TestCase):
         self.assertEqual(RUN_SUCCEEDED, completed.status)
         self.assertFalse(result.aborted)
         self.assertEqual("当前无进行中的流式响应", result.msg)
+
+    def test_stale_active_run_is_expired_before_abort(self) -> None:
+        short_commands = ChatCommandService(
+            ChatRunLockService(
+                self.db_path,
+                owner_instance_id="test-instance",
+                stale_after_seconds=1,
+            )
+        )
+        abort = ChatAbortService(
+            store=self.store,
+            chat_commands=short_commands,
+        )
+        run = short_commands.start_chat_run(chat_id="chat-stale-abort")
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE chat_runs
+                SET heartbeat_at = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    "2000-01-01T00:00:00+00:00",
+                    "2000-01-01T00:00:00+00:00",
+                    run.run_id,
+                ),
+            )
+
+        result = abort.abort_chat(chat_id="chat-stale-abort")
+        stored = self.store.runs.get(run.run_id)
+
+        self.assertFalse(result.aborted)
+        self.assertEqual("当前无进行中的流式响应", result.msg)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(RUN_FAILED, stored.status)
+        self.assertEqual("chat run heartbeat expired", stored.error_message)
+
+    def test_unexpected_request_abort_value_error_is_not_masked(self) -> None:
+        class FailingCommands:
+            def expire_stale_chat_runs(self, *, chat_id: str):
+                return ()
+
+            def request_abort(self, *, run_id: str):
+                raise ValueError("unexpected persistence failure")
+
+        self.commands.start_chat_run(chat_id="chat-corrupt")
+        abort = ChatAbortService(
+            store=self.store,
+            chat_commands=FailingCommands(),  # type: ignore[arg-type]
+        )
+
+        with self.assertRaisesRegex(ValueError, "unexpected persistence failure"):
+            abort.abort_chat(chat_id="chat-corrupt")
 
     def test_build_abort_signal_returns_domain_event(self) -> None:
         self.assertEqual(

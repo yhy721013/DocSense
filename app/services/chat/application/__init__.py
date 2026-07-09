@@ -12,6 +12,12 @@ from app.services.chat.application.run_executor import (
     ChatRunStreamRequest,
     record_chat_run_events,
 )
+from app.services.chat.application.title_service import (
+    ChatTitleEmptyHistoryError,
+    ChatTitleGenerationError,
+    ChatTitleResult,
+    ChatTitleService,
+)
 
 __all__ = [
     "ChatAbortResult",
@@ -21,5 +27,9 @@ __all__ = [
     "ChatRunEventRecorder",
     "ChatRunExecutor",
     "ChatRunStreamRequest",
+    "ChatTitleEmptyHistoryError",
+    "ChatTitleGenerationError",
+    "ChatTitleResult",
+    "ChatTitleService",
     "record_chat_run_events",
 ]
