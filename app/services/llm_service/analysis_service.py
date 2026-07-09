@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
 from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
+from app.services.utils.architecture_prefilter import prune_architecture_list
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
     build_architecture_repair_prompt,
@@ -1455,6 +1457,140 @@ def _store_prepared_analysis_document(
     )
 
 
+def _apply_architecture_prefilter(
+    params: Dict[str, Any],
+    downloaded_path: str,
+    original_name: str,
+) -> None:
+    """Apply architecture pre-filter to narrow candidate list before LLM.
+
+    This modifies ``params["architectureList"]`` in-place with the pruned list.
+    If pre-filtering is not applicable or fails, the original list is kept.
+
+    Parameters
+    ----------
+    params :
+        Request parameters dict containing ``architectureList``.
+    downloaded_path :
+        Path to the downloaded file for text extraction.
+    original_name :
+        Original file name (used as part of search query).
+    """
+    architecture_list = params.get("architectureList")
+    if not isinstance(architecture_list, list) or not architecture_list:
+        logger.info("Architecture pre-filter skipped: no architectureList provided")
+        return
+
+    try:
+        # Build search text from file name + document opening
+        search_parts = [original_name]
+        if params.get("fileName"):
+            search_parts.append(params["fileName"])
+
+        # Read first ~2000 chars from downloaded file
+        try:
+            doc_text = _read_original_text(downloaded_path)[:2000]
+            if doc_text:
+                search_parts.append(doc_text)
+        except Exception as exc:
+            logger.warning(
+                "Failed to read document for pre-filter: %s", type(exc).__name__
+            )
+
+        search_text = " ".join(part for part in search_parts if part)
+        if not search_text.strip():
+            logger.info("Architecture pre-filter skipped: empty search text")
+            return
+
+        # Apply pre-filter
+        pruned_list = prune_architecture_list(architecture_list, search_text)
+
+        # Log tree structure of selected nodes
+        if len(pruned_list) < len(architecture_list):
+            _log_architecture_tree(pruned_list, "After pre-filter")
+            params["architectureList"] = pruned_list
+        else:
+            logger.info(
+                "Architecture pre-filter: no reduction (%d nodes), keeping original",
+                len(pruned_list),
+            )
+
+    except Exception as exc:
+        logger.warning(
+            "Architecture pre-filter failed, using full list: %s - %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _log_architecture_tree(nodes: list[dict[str, Any]], label: str = "") -> None:
+    """Log the hierarchical tree structure of architecture nodes.
+
+    Parameters
+    ----------
+    nodes :
+        List of architecture node dicts.
+    label :
+        Optional label prefix for the log message.
+    """
+    if not nodes:
+        return
+
+    # Build index and parent-child relationships
+    nodes_by_id: dict[int, dict[str, Any]] = {}
+    children_map: dict[int | None, list[dict[str, Any]]] = {}
+    root_nodes: list[dict[str, Any]] = []
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = _coerce_int(node.get("id"))
+        if node_id is None:
+            continue
+        nodes_by_id[node_id] = node
+        parent_id = _coerce_int(node.get("parentId"))
+        children_map.setdefault(parent_id, []).append(node)
+        if parent_id is None:
+            root_nodes.append(node)
+
+    if not root_nodes:
+        # Fallback: show flat list if no roots found
+        logger.info(
+            "%s: %d nodes (no root hierarchy detected)",
+            label or "Architecture tree",
+            len(nodes),
+        )
+        return
+
+    # Build tree lines
+    lines: list[str] = []
+
+    def _build_tree(node_list: list[dict[str, Any]], prefix: str = "", is_last: bool = True) -> None:
+        for idx, node in enumerate(node_list):
+            node_id = _coerce_int(node.get("id"))
+            node_name = node.get("name", "")
+            is_final = idx == len(node_list) - 1
+
+            connector = "└── " if is_final else "├── "
+            line_prefix = prefix + connector
+            lines.append(f"{line_prefix}[{node_id}] {node_name}")
+
+            # Recurse into children
+            child_nodes = children_map.get(node_id, [])
+            if child_nodes:
+                extension = "    " if is_final else "│   "
+                _build_tree(child_nodes, prefix + extension, is_final)
+
+    # Start with root nodes
+    header = f"{label}: {len(nodes)} nodes" if label else f"Architecture tree: {len(nodes)} nodes"
+    lines.append(header)
+    _build_tree(root_nodes)
+
+    # Log all lines
+    for line in lines:
+        logger.info(line)
+
+
 def _execute_file_analysis_task(
         *,
         task_service: LLMTaskService,
@@ -1476,7 +1612,7 @@ def _execute_file_analysis_task(
         raise TypeError("document_rag_factory 必须实现 DocumentRagFactory")
     if not isinstance(knowledge_index_factory, KnowledgeIndexFactory):
         raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
-    params = request_payload["params"][0]
+    params = copy.deepcopy(request_payload["params"][0])
     file_name = _as_text(params.get("fileName"))
     original_name = _as_text(params.get("originalFileName")) or file_name
     file_path = _as_text(params.get("filePath"))
@@ -1506,6 +1642,9 @@ def _execute_file_analysis_task(
             "file", file_name, progress=0.35, message="正在执行文档解析"
         )
         _publish_progress(progress_hub, file_name, 0.35)
+
+        # Apply architecture pre-filter after download, before LLM call
+        _apply_architecture_prefilter(params, downloaded_path, original_name)
 
         llm_file_path = downloaded_path
         try:

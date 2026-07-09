@@ -594,7 +594,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("分类到最底层的叶子节点", prompt)
         self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
-        self.assertIn("默认为“公开”", prompt)
+        self.assertIn("若密级候选包含“公开”则输出“公开”", prompt)
         self.assertIn("由至少 10 个关键词构成", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)

@@ -13,8 +13,9 @@ if ([string]::IsNullOrEmpty($BaseUrl)) {
     }
     $hostAddr = $env:APP_HOST
     $port = $env:APP_PORT
+    if ($hostAddr -eq "0.0.0.0") { $hostAddr = "127.0.0.1" }
     $BaseUrl = "http://${hostAddr}:${port}"
 }
 
 $body = Get-Content -Path $PayloadPath -Raw -Encoding utf8
-Invoke-WebRequest -Uri "$BaseUrl/llm/analysis" -Method Post -ContentType "application/json; charset=utf-8" -Body $body
+Invoke-WebRequest -Uri "$BaseUrl/llm/analysis" -Method Post -ContentType "application/json; charset=utf-8" -Body $body -UseBasicParsing
