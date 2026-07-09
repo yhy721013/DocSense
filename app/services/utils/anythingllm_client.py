@@ -29,7 +29,10 @@ from app.integrations.anythingllm.models import (
     AnythingLLMWorkspace,
     normalize_document_path,
 )
-from app.integrations.anythingllm.policies import document_rag_workspace_settings
+from app.integrations.anythingllm.policies import (
+    chat_workspace_settings,
+    document_rag_workspace_settings,
+)
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
@@ -46,19 +49,7 @@ def _rag_workspace_settings() -> dict[str, Any]:
 
 def _chat_workspace_settings() -> dict[str, Any]:
     """返回旧对话工作区使用的独立配置字典。"""
-    return {
-        "similarityThreshold": 0.0,
-        "openAiTemp": 0.7,
-        "openAiHistory": 20,
-        "openAiPrompt": (
-            "你是一个基于文档内容的智能问答助手。\n"
-            "请根据已提供的文档内容回答用户的问题。\n"
-            "如果文档中没有相关信息，请如实告知用户。\n"
-            "回答应当准确、清晰、有条理。\n"
-        ),
-        "chatMode": "chat",
-        "topN": 20,
-    }
+    return dict(chat_workspace_settings())
 
 
 @dataclass

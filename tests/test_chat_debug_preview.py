@@ -1,14 +1,15 @@
+import json
 import sqlite3
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from app.services.core.database import ChatDatabaseService, DatabaseService
-from tests import workspace_tempdir
 
 
 class ChatDebugDatabaseQueryTests(unittest.TestCase):
     def setUp(self):
-        self._tempdir = workspace_tempdir()
+        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
         self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
         self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
@@ -64,7 +65,7 @@ class ChatDebugDatabaseQueryTests(unittest.TestCase):
 
 class ChatDebugPreviewTests(unittest.TestCase):
     def setUp(self):
-        self._tempdir = workspace_tempdir()
+        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
         self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
         self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
@@ -115,3 +116,49 @@ class ChatDebugPreviewTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["data"], {"sessions": [], "availableFiles": []})
         self.assertIn("读取失败", result["message"])
+
+    def test_load_chat_debug_bootstrap_migrates_legacy_chats_schema(self):
+        """Stage 3 migrates old chats tables that lack turn_timestamps."""
+        from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
+
+        legacy_path = f"{self.tmp}/legacy-chat.sqlite3"
+        with sqlite3.connect(legacy_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE chats (
+                    chat_id TEXT PRIMARY KEY,
+                    file_original_names TEXT NOT NULL,
+                    workspace_slug TEXT NOT NULL,
+                    thread_slug TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO chats (
+                    chat_id, file_original_names, workspace_slug,
+                    thread_slug, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-chat",
+                    json.dumps([["旧文件.pdf"]], ensure_ascii=False),
+                    "legacy-ws",
+                    "legacy-thread",
+                    "2026-07-08T00:00:00+00:00",
+                    "2026-07-08T00:00:00+00:00",
+                ),
+            )
+
+        legacy_chat_db = ChatDatabaseService(db_path=legacy_path)
+        result = load_chat_debug_bootstrap(
+            chat_db=legacy_chat_db,
+            kb_service=self.kb_service,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["sessions"][0]["chatId"], "legacy-chat")
+        self.assertEqual(1, len(result["data"]["sessions"][0]["fileNames"]))

@@ -553,6 +553,8 @@ class ChatDatabaseService:
         self._init_db()
 
     def _init_db(self):
+        from app.services.chat.persistence.repositories import ensure_chat_schema
+
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
@@ -566,7 +568,17 @@ class ChatDatabaseService:
                         updated_at  TEXT NOT NULL
                     )
                 """)
+                columns = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(chats)").fetchall()
+                }
+                if "turn_timestamps" not in columns:
+                    conn.execute(
+                        "ALTER TABLE chats "
+                        "ADD COLUMN turn_timestamps TEXT NOT NULL DEFAULT '[]'"
+                    )
                 conn.commit()
+            ensure_chat_schema(self.db_path)
             logger.info("对话数据库初始化完成: %s", self.db_path)
 
     def create_chat(
@@ -670,9 +682,38 @@ class ChatDatabaseService:
                 conn.commit()
         logger.info("已追加对话引用文件: chat_id=%s, new_count=%d", chat_id, len(new_file_original_names))
 
+    def delete_legacy_chat_record(self, chat_id: str) -> None:
+        """Delete only the legacy `chats` row after durable cleanup succeeds.
+
+        The stage-9 delete state machine keeps `chat_sessions`, messages, runs
+        and resource leases as the local audit and recovery source. The older
+        `delete_chat()` method is intentionally retained for compatibility, but
+        new deletion flow must not cascade-delete the recovery records.
+        """
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+                conn.commit()
+        logger.info("宸插垹闄ゆ枃浠跺璇濇棫chats璁板綍: chat_id=%s", chat_id)
+
     def delete_chat(self, chat_id: str) -> None:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
+                conn.execute("PRAGMA foreign_keys = ON")
+                conn.execute(
+                    """
+                    DELETE FROM chat_message_files
+                    WHERE message_id IN (
+                        SELECT message_id FROM chat_messages WHERE chat_id = ?
+                    )
+                    """,
+                    (chat_id,),
+                )
+                conn.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
+                conn.execute("DELETE FROM chat_resource_leases WHERE chat_id = ?", (chat_id,))
+                conn.execute("DELETE FROM chat_documents WHERE chat_id = ?", (chat_id,))
+                conn.execute("DELETE FROM chat_runs WHERE chat_id = ?", (chat_id,))
+                conn.execute("DELETE FROM chat_sessions WHERE chat_id = ?", (chat_id,))
                 conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
                 conn.commit()
         logger.info("已删除对话记录: chat_id=%s", chat_id)

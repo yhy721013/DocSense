@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 
 MAX_REPAIR_CONTEXT_CHARS = 20_000
@@ -59,6 +59,54 @@ def _format_architecture_options(items: Iterable[Any], title: str = "领域体�
             continue
         formatted_items.append({field: item.get(field) for field in fields if field in item})
     return _format_options(title, formatted_items)
+
+
+def build_chat_title_prompt(
+    messages: Sequence[Mapping[str, str]],
+    *,
+    max_title_chars: int = 20,
+) -> str:
+    """构建文件对话标题生成 Prompt。
+
+    标题接口只允许使用本地 committed 历史作为输入。这里把消息序列序列化为 JSON，
+    而不是拼接自然语言段落，避免历史内容中的换行、冒号或提示词片段破坏边界。
+    """
+    if (
+        isinstance(max_title_chars, bool)
+        or not isinstance(max_title_chars, int)
+        or max_title_chars < 1
+    ):
+        raise ValueError("max_title_chars 必须是正整数")
+
+    normalized_messages: list[dict[str, str]] = []
+    for item in messages:
+        if not isinstance(item, Mapping):
+            raise TypeError("messages 只能包含 Mapping")
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        normalized_messages.append({"role": role, "content": content})
+
+    if not normalized_messages:
+        raise ValueError("messages 不能为空")
+
+    history_json = json.dumps(
+        normalized_messages,
+        ensure_ascii=False,
+        indent=2,
+    )
+    return (
+        "你是文件对话标题生成器。请仅根据给定的对话历史生成一个简短中文标题。\n"
+        "要求：\n"
+        f"1. 标题最多 {max_title_chars} 个字符，超出也必须自行压缩。\n"
+        "2. 只输出标题正文，不要输出引号、书名号、Markdown、序号、解释或多余标点。\n"
+        "3. 标题应概括用户问题和助手回答的核心主题，避免使用“对话”“总结”等泛化词。\n"
+        "4. 不得使用对话历史之外的信息，不得编造文件中不存在的主题。\n"
+        "【对话历史(JSON)】\n"
+        f"{history_json}\n"
+        "【输出】"
+    )
 
 
 def build_file_analysis_prompt(request_params: dict) -> str:
