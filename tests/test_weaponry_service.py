@@ -1,9 +1,11 @@
 """tests/test_weaponry_service.py — weaponry_service 核心映射函数的单元测试"""
 import os
 import unittest
-from unittest.mock import MagicMock, patch
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from app.services.llm_service import weaponry_service as weaponry_service_module
 from app.services.llm_service.weaponry_service import (
     WeaponryRetrievalContext,
     _count_query_fields,
@@ -15,6 +17,7 @@ from app.services.llm_service.weaponry_service import (
     _format_terms_rule_context,
     _is_target_source,
     _is_terms_source_name,
+    _list_workspace_documents,
     _parse_table_json_rows,
     _prepare_retrieval_context,
     _query_input_field,
@@ -23,8 +26,63 @@ from app.services.llm_service.weaponry_service import (
     _resolve_hashed_source_name,
     _resolve_original_source_name,
     _target_document_records,
+    _vector_search_with_top_n,
     run_weaponry_task,
 )
+
+
+class TestAnythingLLMHTTPBoundary(unittest.TestCase):
+    """验证 weaponry 只依赖 AnythingLLMClient 公开能力，不再拼装 HTTP。"""
+
+    def test_vector_search_delegates_to_public_client_method(self) -> None:
+        """带 top_n 的检索应完整转发参数并返回 Client 结果。"""
+        client = MagicMock()
+        expected = [{"text": "chunk", "score": 0.8}]
+        client.vector_search.return_value = expected
+
+        result = _vector_search_with_top_n(
+            client,
+            "workspace-1",
+            "检索问题",
+            top_n=12,
+            user_id=7,
+        )
+
+        self.assertIs(result, expected)
+        client.vector_search.assert_called_once_with(
+            "workspace-1",
+            "检索问题",
+            user_id=7,
+            top_n=12,
+        )
+
+    def test_workspace_document_list_delegates_to_public_client_method(self) -> None:
+        """文档列表查询应只调用公开 Facade 方法。"""
+        client = MagicMock()
+        expected = [{"id": "doc-1", "docpath": "custom-documents/a.json"}]
+        client.list_workspace_documents.return_value = expected
+
+        result = _list_workspace_documents(client, "workspace-1", user_id=8)
+
+        self.assertIs(result, expected)
+        client.list_workspace_documents.assert_called_once_with(
+            "workspace-1",
+            user_id=8,
+        )
+
+    def test_weaponry_source_contains_no_anythingllm_http_escape_hatch(self) -> None:
+        """静态阻止 Session、私有 Header、base_url 和供应商 URL 再次进入业务层。"""
+        source = Path(weaponry_service_module.__file__).read_text(encoding="utf-8")
+        forbidden_fragments = (
+            "client.session",
+            "client._json_headers",
+            "config.base_url",
+            "/workspace/",
+        )
+
+        for fragment in forbidden_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, source)
 
 
 class TestStripDocumentMetadata(unittest.TestCase):
@@ -174,6 +232,15 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertEqual([record["file_name"] for record in records], ["b.pdf", "a.pdf"])
         with self.assertRaisesRegex(ValueError, "不存在或不属于当前类别"):
             _target_document_records(FakeKB(), 123, ["other.pdf"])
+
+    def test_target_document_records_reject_invalid_database_contract(self):
+        """数据库实现若错误返回 None，应产生可诊断的契约异常而非迭代器异常。"""
+        class InvalidKB:
+            def list_document_records(self):
+                return None
+
+        with self.assertRaisesRegex(TypeError, "文档记录查询返回契约错误"):
+            _target_document_records(InvalidKB(), 123, ["a.pdf"])
 
     def test_resolve_original_source_name_for_mode2_callback(self):
         context = WeaponryRetrievalContext(
@@ -634,6 +701,90 @@ class TestWeaponryTableFieldExtraction(unittest.TestCase):
             ["The carrier carries AN/SPY-1D S-band radar and AN/SPS-49 L-band radar."],
         )
         self.assertEqual(second_row[0]["analyseData"], "AN/SPS-49")
+
+    @patch("app.services.llm_service.weaponry_service._vector_search_with_top_n", return_value=[])
+    def test_query_table_field_preserves_original_template_when_no_rows(self, _mock_vector_search):
+        progress_calls = []
+        original_table = [
+            [
+                {
+                    "fieldName": "雷达名称",
+                    "fieldType": "INPUT",
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                },
+                {
+                    "fieldName": "频段",
+                    "fieldType": "INPUT",
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                },
+            ]
+        ]
+        field = {
+            "fieldName": "雷达配置",
+            "fieldType": "TABLE",
+            "fieldDescription": "提取雷达配置。",
+            "tableFieldList": original_table,
+        }
+
+        result = _query_table_field(
+            object(),
+            "target-ws",
+            "parent-thread",
+            field,
+            on_cell_done=lambda: progress_calls.append(1),
+        )
+
+        self.assertEqual(progress_calls, [1])
+        self.assertEqual(result["tableFieldList"], original_table)
+
+    @patch(
+        "app.services.llm_service.weaponry_service._vector_search_with_top_n",
+        return_value=[
+            {
+                "metadata": {"title": "carrier-radars.pdf"},
+                "text": "The document does not contain a structured radar table.",
+                "score": 0.75,
+            }
+        ],
+    )
+    def test_query_table_field_preserves_original_template_when_model_returns_empty_rows(
+        self,
+        _mock_vector_search,
+    ):
+        class FakeClient:
+            def send_prompt_to_thread(
+                self,
+                workspace_slug,
+                thread_slug,
+                prompt,
+                user_id=1,
+                mode="chat",
+            ):
+                return {"textResponse": "[]"}
+
+        original_table = [
+            [
+                {"fieldName": "雷达名称", "fieldType": "INPUT"},
+                {"fieldName": "频段", "fieldType": "INPUT"},
+            ]
+        ]
+        field = {
+            "fieldName": "雷达配置",
+            "fieldType": "TABLE",
+            "fieldDescription": "提取雷达配置。",
+            "tableFieldList": original_table,
+        }
+
+        result = _query_table_field(
+            FakeClient(),
+            "target-ws",
+            "parent-thread",
+            field,
+        )
+
+        self.assertEqual(result["tableFieldList"], original_table)
 
 
 class TestWeaponrySelectedFilesTask(unittest.TestCase):

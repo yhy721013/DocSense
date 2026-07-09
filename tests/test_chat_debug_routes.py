@@ -1,7 +1,8 @@
 import unittest
-from unittest.mock import patch
+from dataclasses import replace
 
 from app import create_app
+from app.container import APPLICATION_SERVICES_EXTENSION
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from tests import workspace_tempdir
 
@@ -14,14 +15,14 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.tmp = self._tempdir.__enter__()
         self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
         self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
-        self.chat_patch = patch("app.blueprints.debug.chat_db", self.chat_db)
-        self.kb_patch = patch("app.blueprints.debug.kb_service", self.kb_service)
-        self.chat_patch.start()
-        self.kb_patch.start()
+        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
+        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
+            services,
+            chat_db=self.chat_db,
+            kb_service=self.kb_service,
+        )
 
     def tearDown(self):
-        self.chat_patch.stop()
-        self.kb_patch.stop()
         self._tempdir.__exit__(None, None, None)
 
     def test_chat_bootstrap_api_returns_local_sessions_and_files(self):

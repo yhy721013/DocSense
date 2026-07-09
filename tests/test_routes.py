@@ -1,7 +1,9 @@
 import unittest
-from unittest.mock import patch
+from dataclasses import replace
+from unittest.mock import MagicMock, patch
 
 from app import create_app
+from app.container import APPLICATION_SERVICES_EXTENSION
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
@@ -13,11 +15,15 @@ class LLMRouteValidationTests(unittest.TestCase):
         self._tempdir = workspace_tempdir()
         self.tmp = self._tempdir.__enter__()
         self.task_service = LLMTaskService(db_path=f"{self.tmp}/tasks.sqlite3")
-        self.task_service_patcher = patch("app.blueprints.llm.task_service", self.task_service)
-        self.task_service_patcher.start()
+        self.kb_service = MagicMock()
+        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
+        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
+            services,
+            task_service=self.task_service,
+            kb_service=self.kb_service,
+        )
 
     def tearDown(self):
-        self.task_service_patcher.stop()
         self._tempdir.__exit__(None, None, None)
 
     def test_analysis_rejects_invalid_business_type(self):
@@ -143,13 +149,11 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     @patch("app.blueprints.llm.threading.Thread")
-    @patch("app.blueprints.llm.kb_service")
     def test_weaponry_normalizes_selected_file_urls_and_preserves_original_request(
         self,
-        mock_kb_service,
         mock_thread,
     ):
-        mock_kb_service.get_document_record.return_value = {
+        self.kb_service.get_document_record.return_value = {
             "file_name": "abc123.pdf",
             "architecture_id": 10502,
             "doc_path": "custom-documents/abc123.json",
@@ -174,17 +178,15 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        mock_kb_service.get_document_record.assert_called_once_with("abc123.pdf")
+        self.kb_service.get_document_record.assert_called_once_with("abc123.pdf")
         worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
         self.assertEqual(worker_kwargs["selected_file_names"], ["abc123.pdf"])
         task = self.task_service.get_task("weaponry", "10502")
         self.assertEqual(task["request_payload"]["params"]["filePathList"], original_file_paths)
 
     @patch("app.blueprints.llm.threading.Thread")
-    @patch("app.blueprints.llm.kb_service")
     def test_weaponry_empty_file_path_list_keeps_full_category_scope(
         self,
-        mock_kb_service,
         mock_thread,
     ):
         response = self.client.post(
@@ -202,7 +204,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        mock_kb_service.get_document_record.assert_not_called()
+        self.kb_service.get_document_record.assert_not_called()
         self.assertEqual(mock_thread.call_args.kwargs["kwargs"]["selected_file_names"], [])
 
     def test_weaponry_rejects_invalid_file_path_list_type(self):
@@ -223,9 +225,8 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("filePathList必须为数组", response.get_json()["error"])
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_weaponry_rejects_unknown_selected_file(self, mock_kb_service):
-        mock_kb_service.get_document_record.return_value = None
+    def test_weaponry_rejects_unknown_selected_file(self):
+        self.kb_service.get_document_record.return_value = None
         response = self.client.post(
             "/llm/weaponry",
             json={
@@ -242,9 +243,8 @@ class LLMRouteValidationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_weaponry_rejects_selected_file_from_another_category(self, mock_kb_service):
-        mock_kb_service.get_document_record.return_value = {
+    def test_weaponry_rejects_selected_file_from_another_category(self):
+        self.kb_service.get_document_record.return_value = {
             "file_name": "abc123.pdf",
             "architecture_id": 99999,
         }
@@ -265,18 +265,15 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("不属于当前类别", response.get_json()["error"])
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_rejects_invalid_business_type(self, mock_kb_service):
+    def test_reassign_rejects_invalid_business_type(self):
         response = self.client.post("/llm/reassign", json={"businessType": "wrong", "params": {}})
         self.assertEqual(response.status_code, 400)
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_rejects_missing_params(self, mock_kb_service):
+    def test_reassign_rejects_missing_params(self):
         response = self.client.post("/llm/reassign", json={"businessType": "reassign"})
         self.assertEqual(response.status_code, 400)
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_rejects_same_architecture_id(self, mock_kb_service):
+    def test_reassign_rejects_same_architecture_id(self):
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -290,9 +287,8 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_returns_error_when_record_not_found(self, mock_kb_service):
-        mock_kb_service.get_document_record.return_value = None
+    def test_reassign_returns_error_when_record_not_found(self):
+        self.kb_service.get_document_record.return_value = None
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -309,9 +305,8 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertFalse(data["data"]["success"])
         self.assertEqual(data["data"]["message"], "文档记录不存在")
 
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_returns_error_when_inconsistent(self, mock_kb_service):
-        mock_kb_service.get_document_record.return_value = {"architecture_id": 3}
+    def test_reassign_returns_error_when_inconsistent(self):
+        self.kb_service.get_document_record.return_value = {"architecture_id": 3}
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -327,16 +322,17 @@ class LLMRouteValidationTests(unittest.TestCase):
         data = response.get_json()
         self.assertFalse(data["data"]["success"])
         self.assertIn("分类不一致", data["data"]["message"])
-        mock_kb_service.update_document_architecture.assert_not_called()
+        self.kb_service.update_document_architecture.assert_not_called()
 
     @patch("app.blueprints.llm.AnythingLLMClient")
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_success(self, mock_kb_service, MockClient):
-        mock_kb_service.get_document_record.return_value = {
+    def test_reassign_success(self, MockClient):
+        self.kb_service.get_document_record.return_value = {
             "architecture_id": 1,
             "doc_path": "custom-documents/test.pdf"
         }
-        mock_kb_service.get_workspace_slug.side_effect = lambda x: "ws_old" if x == 1 else "ws_new"
+        self.kb_service.get_workspace_slug.side_effect = (
+            lambda value: "ws_old" if value == 1 else "ws_new"
+        )
         
         mock_client_instance = MockClient.return_value
         
@@ -354,18 +350,19 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["data"]["success"])
-        mock_kb_service.update_document_architecture.assert_called_once_with("a.pdf", 2)
+        self.kb_service.update_document_architecture.assert_called_once_with("a.pdf", 2)
         mock_client_instance.update_embeddings_batch.assert_called_once_with("ws_old", deletes=["custom-documents/test.pdf"], user_id=1)
         mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_new", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
 
     @patch("app.blueprints.llm.AnythingLLMClient")
-    @patch("app.blueprints.llm.kb_service")
-    def test_reassign_creates_workspace_if_missing(self, mock_kb_service, MockClient):
-        mock_kb_service.get_document_record.return_value = {
+    def test_reassign_creates_workspace_if_missing(self, MockClient):
+        self.kb_service.get_document_record.return_value = {
             "architecture_id": 1,
             "doc_path": "custom-documents/test.pdf"
         }
-        mock_kb_service.get_workspace_slug.side_effect = lambda x: "ws_old" if x == 1 else None
+        self.kb_service.get_workspace_slug.side_effect = (
+            lambda value: "ws_old" if value == 1 else None
+        )
         
         mock_client_instance = MockClient.return_value
         mock_client_instance.create_rag_workspace.return_value = {"slug": "ws_created"}
@@ -384,9 +381,9 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["data"]["success"])
-        mock_kb_service.update_document_architecture.assert_called_once_with("a.pdf", 2)
+        self.kb_service.update_document_architecture.assert_called_once_with("a.pdf", 2)
         mock_client_instance.update_embeddings_batch.assert_called_once_with("ws_old", deletes=["custom-documents/test.pdf"], user_id=1)
         mock_client_instance.create_rag_workspace.assert_called_once_with("architectureId-2", user_id=1)
-        mock_kb_service.add_workspace.assert_called_once_with(2, "ws_created")
+        self.kb_service.add_workspace.assert_called_once_with(2, "ws_created")
         mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_created", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
 

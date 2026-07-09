@@ -1,9 +1,10 @@
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from app import create_app
-from app.blueprints import llm as llm_module
 from app.blueprints.llm import _handle_progress_command, _parse_progress_command
+from app.container import APPLICATION_SERVICES_EXTENSION
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
@@ -16,6 +17,23 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
         hub.subscribe("file", "demo.pdf", sink.append)
         hub.publish("file", "demo.pdf", {"businessType": "file", "data": {"fileName": "demo.pdf", "progress": 0.35}})
         self.assertEqual(sink[-1]["data"]["progress"], 0.35)
+
+    def test_progress_hub_normalizes_floating_point_artifacts(self):
+        hub = LLMProgressHub()
+        sink = []
+        hub.subscribe("weaponry", "1001", sink.append)
+
+        hub.publish(
+            "weaponry",
+            "1001",
+            {
+                "businessType": "weaponry",
+                "data": {"architectureId": "1001", "progress": 0.28000000004},
+            },
+        )
+
+        self.assertEqual(sink[-1]["data"]["progress"], 0.28)
+        self.assertEqual(hub.get_latest("weaponry", "1001")["data"]["progress"], 0.28)
 
     def test_progress_hub_keeps_latest_message_per_task(self):
         hub = LLMProgressHub()
@@ -68,9 +86,26 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
                 }
             )
 
-            with patch.object(llm_module, "task_service", service), patch.object(llm_module, "progress_hub", hub):
-                _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
-                _handle_progress_command(sent_messages.append, subscriptions, command, emit_ack=False)
+            app = create_app()
+            services = replace(
+                app.extensions[APPLICATION_SERVICES_EXTENSION],
+                task_service=service,
+                progress_hub=hub,
+            )
+            _handle_progress_command(
+                sent_messages.append,
+                subscriptions,
+                command,
+                emit_ack=False,
+                services=services,
+            )
+            _handle_progress_command(
+                sent_messages.append,
+                subscriptions,
+                command,
+                emit_ack=False,
+                services=services,
+            )
 
         self.assertEqual(
             sent_messages,
@@ -79,6 +114,25 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
                 {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
             ],
         )
+
+    def test_task_progress_is_normalized_when_persisted(self):
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            service.create_weaponry_task(
+                1001,
+                {"businessType": "weaponry", "params": {"architectureId": 1001}},
+            )
+            service.update_task_progress(
+                "weaponry",
+                "1001",
+                progress=0.28000000004,
+                message="处理中",
+                status="1",
+            )
+
+            task = service.get_task("weaponry", "1001")
+
+        self.assertEqual(task["progress"], 0.28)
 
     @patch("app.services.llm_service.task_service.post_callback_payload", return_value=True)
     def test_check_task_replays_failed_callback(self, _mock_callback):
@@ -99,14 +153,17 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
             service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
             service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
 
-            with patch("app.blueprints.llm.task_service", service):
-                response = client.post(
-                    "/llm/check-task",
-                    json={
-                        "businessType": "file",
-                        "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
-                    },
-                )
+            app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
+                app.extensions[APPLICATION_SERVICES_EXTENSION],
+                task_service=service,
+            )
+            response = client.post(
+                "/llm/check-task",
+                json={
+                    "businessType": "file",
+                    "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
+                },
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()

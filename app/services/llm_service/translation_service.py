@@ -4,12 +4,16 @@ import os
 import logging
 import threading
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Optional
 
 from app.services.translator import DocumentTranslator, HYMTTranslator
 
 
 logger = logging.getLogger(__name__)
+
+
+_MACHINE_TRANSLATION_MODES = {"machine", "fast", "argos", "argostranslate"}
+_LLM_TRANSLATION_MODES = {"llm", "model", "ollama"}
 
 
 class LLMTranslationService:
@@ -60,12 +64,36 @@ class LLMTranslationService:
             except Exception as e:
                 logger.error("进度回调失败: %s", e)
 
+    def _default_fast_translate(self) -> bool:
+        """
+        根据环境变量决定默认翻译模式。
+
+        DOCSENSE_TRANSLATION_MODE=machine 使用 argostranslate 机器翻译；
+        DOCSENSE_TRANSLATION_MODE=llm 使用本地大模型翻译。
+        """
+        mode = os.getenv("DOCSENSE_TRANSLATION_MODE", "machine").strip().lower()
+        if mode in _MACHINE_TRANSLATION_MODES:
+            return True
+        if mode in _LLM_TRANSLATION_MODES:
+            return False
+
+        logger.warning(
+            "DOCSENSE_TRANSLATION_MODE=%s 无效，默认使用 machine 机器翻译",
+            mode,
+        )
+        return True
+
+    def _resolve_fast_translate(self, fast_translate: Optional[bool]) -> bool:
+        if fast_translate is not None:
+            return fast_translate
+        return self._default_fast_translate()
+
     def translate_document(
             self,
             file_path: str,
             target_lang: str = "Chinese",
             translate_all: int = 0,
-            fast_translate: bool = True,
+            fast_translate: Optional[bool] = None,
             use_minerU: bool = True
     ) -> tuple[str, str]:
         """
@@ -74,7 +102,7 @@ class LLMTranslationService:
         :param file_path: 待翻译文件路径
         :param target_lang: 目标语言
         :param translate_all: 是否翻译全文，0=全文，>0 表示翻译前 N 页/段落
-        :param fast_translate: 是否启用快速翻译（使用 argostranslate 而非大模型）
+        :param fast_translate: 是否启用快速翻译；不传时读取 DOCSENSE_TRANSLATION_MODE
         :return: (双语 HTML 内容，单语 HTML 内容)
         """
         self._ensure_document_translator()
@@ -93,12 +121,13 @@ class LLMTranslationService:
             if document_translator is None:
                 raise RuntimeError("文档翻译器未初始化")
 
+            resolved_fast_translate = self._resolve_fast_translate(fast_translate)
             bilingual_html_path, monolingual_html_path = document_translator.convert_to_html(
                 file_path=str(file_path),
                 output_dir=str(output_htmls),
                 target_lang=target_lang,
                 translate_all=translate_all,
-                fast_translate=fast_translate,
+                fast_translate=resolved_fast_translate,
             )
 
             # 读取双语 HTML 内容
@@ -117,13 +146,19 @@ class LLMTranslationService:
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
-    def translate_text_only(self, text: str, target_lang: str = "Chinese", fast_translate: bool = True, as_html: bool = True) -> str:
+    def translate_text_only(
+            self,
+            text: str,
+            target_lang: str = "Chinese",
+            fast_translate: Optional[bool] = None,
+            as_html: bool = True,
+    ) -> str:
         """
         仅翻译纯文本（适用于短文本或摘要）
 
         :param text: 待翻译文本
         :param target_lang: 目标语言
-        :param fast_translate: 是否使用快速翻译
+        :param fast_translate: 是否使用快速翻译；不传时读取 DOCSENSE_TRANSLATION_MODE
         :param as_html: 是否返回带 HTML 标记的格式（用于前端页面展示）
         :return: 翻译后的文本
         """
@@ -133,7 +168,8 @@ class LLMTranslationService:
             return ""
 
         try:
-            translated = self._translator.translate_text(text, target_lang, fast_translate=fast_translate)
+            resolved_fast_translate = self._resolve_fast_translate(fast_translate)
+            translated = self._translator.translate_text(text, target_lang, fast_translate=resolved_fast_translate)
             if as_html:
                 # 返回HTML格式
                 return f'<div class="translated-text">{self._escape_html(translated)}</div>'

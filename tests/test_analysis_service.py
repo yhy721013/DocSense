@@ -1,7 +1,14 @@
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from app.ports import (
+    KnowledgeIndexDocumentReleasedError,
+    KnowledgeIndexRetentionRequiredError,
+    RagPromptKind,
+    RagSource,
+)
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.analysis_service import (
     DEFAULT_ARCHITECTURE_OPTIONS,
@@ -12,6 +19,11 @@ from app.services.llm_service.analysis_service import (
 from app.services.core.prompts import build_file_analysis_prompt
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.fakes.knowledge_index import (
+    FakeKnowledgeIndexFactory,
+    FakeKnowledgeIndexPort,
+)
+from tests.fakes.rag import FakeDocumentRagFactory, FakeRagOutcome
 
 
 class LLMAnalysisServiceTests(unittest.TestCase):
@@ -87,6 +99,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             "fileName": "demo.txt",
             "channel": [{"key": "02", "value": "装发"}],
             "maturity": [{"key": "02", "value": "阶段成果"}],
+            "secrets": [{"key": "02", "value": "公开"}],
             "format": [{"key": "03", "value": "文档类"}],
         }
 
@@ -94,6 +107,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             {
                 "channel": "未知渠道",
                 "maturity": "未知成熟度",
+                "secrets": "绝密",
                 "format": "未知格式",
             },
             request_params,
@@ -101,7 +115,40 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["channel"], "")
         self.assertEqual(result["maturity"], "")
+        self.assertEqual(result["secrets"], "公开")
         self.assertEqual(result["format"], "")
+
+    def test_map_analysis_result_resolves_secret_from_candidate_range(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "secrets": [
+                {"key": "02", "value": "公开"},
+                {"key": "03", "value": "秘密"},
+            ],
+        }
+
+        result = map_analysis_result({"secrets": "秘密"}, request_params)
+
+        self.assertEqual(result["secrets"], "秘密")
+
+    def test_map_analysis_result_infers_secret_from_opening_text(self):
+        request_params = {
+            "fileName": "demo.txt",
+            "secrets": [
+                {"key": "02", "value": "公开"},
+                {"key": "03", "value": "秘密"},
+            ],
+        }
+        original_text = "密级：秘密\n文件编号：ABC-001\n正文内容。"
+
+        result = map_analysis_result({}, request_params, original_text=original_text)
+
+        self.assertEqual(result["secrets"], "秘密")
+
+    def test_map_analysis_result_defaults_secret_to_public_when_missing(self):
+        result = map_analysis_result({}, {"fileName": "demo.txt"}, original_text="普通正文内容。")
+
+        self.assertEqual(result["secrets"], "公开")
 
     def test_map_analysis_result_matches_options_after_normalization(self):
         request_params = {
@@ -264,6 +311,54 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["implTime"], "2020-05-06")
         self.assertEqual(result["fileDataItem"]["approvalDept"], "批准部门")
 
+    def test_map_analysis_result_uses_resolved_architecture_for_child_only_standard_range(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "originalFileName": "GJB 9001C-2017.pdf",
+            "architectureList": [
+                {"id": 202, "name": "数据标准", "path": "202", "pathName": "数据标准"},
+                {
+                    "id": 203,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/通用要求标准",
+                },
+                {"id": 301, "name": "水面装备", "path": "301", "pathName": "装备目标/水面装备"},
+            ],
+            "architectureStandardList": [
+                {
+                    "id": 203,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/通用要求标准",
+                },
+            ],
+        }
+        original_text = (
+            "GJB 9001C-2017 质量管理体系要求\n"
+            "国军标名称：GJB 9001C-2017 质量管理体系要求\n"
+            "编号：GJB 9001C-2017\n"
+            "发布时间：2017年5月18日\n"
+            "实施时间：2017年7月1日\n"
+            "批准部门：中央军委装备发展部\n"
+        )
+
+        result = map_analysis_result(
+            {"architectureId": 203},
+            request_params,
+            original_text=original_text,
+            resolved_architecture_id=203,
+        )
+
+        self.assertEqual(result["architectureId"], 203)
+        self.assertEqual(result["fileDataItem"]["militaryName"], "GJB 9001C-2017 质量管理体系要求")
+        self.assertEqual(result["fileDataItem"]["num"], "GJB 9001C-2017")
+        self.assertEqual(result["fileDataItem"]["startTime"], "2017-05-18")
+        self.assertEqual(result["fileDataItem"]["implTime"], "2017-07-01")
+        self.assertEqual(result["fileDataItem"]["approvalDept"], "中央军委装备发展部")
+
     def test_map_analysis_result_omits_standard_fields_when_architecture_not_in_standard_range(self):
         request_params = {
             "fileName": "sample.txt",
@@ -394,12 +489,13 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         )
 
         self.assertIn('"country"', prompt)
+        self.assertIn('"secrets"', prompt)
         self.assertIn('"architectureId"', prompt)
         self.assertIn('"fileDataItem"', prompt)
         self.assertIn('"originalText"', prompt)
         self.assertIn("不要直接原样返回候选对象", prompt)
         self.assertIn("输出前自检清单", prompt)
-        self.assertIn("无法匹配时输出 1", prompt)
+        self.assertIn("无法匹配时输出空字符串", prompt)
         self.assertIn("parentId 表示父节点 id", prompt)
         self.assertIn("architectureList 只包含 id, name, parentId, path, pathName", prompt)
 
@@ -468,31 +564,37 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "fileName": "demo.txt",
                 "country": [{"key": "99", "value": "德国"}],
                 "format": [{"key": "88", "value": "数据库类"}],
+                "secrets": [{"key": "03", "value": "秘密"}],
             }
         )
         lines = prompt.splitlines()
         country_options_line = next(line for line in lines if line.startswith("国家候选:"))
         format_options_line = next(line for line in lines if line.startswith("格式候选:"))
+        secrets_options_line = next(line for line in lines if line.startswith("密级候选:"))
 
         self.assertIn('"德国"', country_options_line)
         self.assertNotIn('"美国"', country_options_line)
         self.assertIn('"数据库类"', format_options_line)
         self.assertNotIn('"文档类"', format_options_line)
+        self.assertIn('"秘密"', secrets_options_line)
+        self.assertNotIn('"公开"', secrets_options_line)
 
     def test_build_file_analysis_prompt_includes_architecture_classification_rules(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
 
         self.assertIn("领域体系候选:", prompt)
+        self.assertIn("密级候选:", prompt)
         self.assertIn('"name": "军事基地"', prompt)
         self.assertIn('"name": "作战指挥"', prompt)
         self.assertIn('"pathName": "作战指挥/组织机构"', prompt)
         self.assertIn("architectureId 只能输出候选 architectureList 中的叶子 id 数字", prompt)
         self.assertIn("fileDataItem.dataFormat 必须与顶层 format 完全一致", prompt)
-        self.assertIn("无法匹配时输出 1", prompt)
+        self.assertIn("无法匹配时输出空字符串", prompt)
         self.assertIn("当 architectureList 只有一个节点时", prompt)
         self.assertIn("分类到最底层的叶子节点", prompt)
-        self.assertIn("无法区分应该归类到哪一个叶子节点，则返回「战技指标」", prompt)
+        self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
+        self.assertIn("默认为“公开”", prompt)
         self.assertIn("由至少 10 个关键词构成", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
@@ -613,457 +715,6 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(resolve_storage_architecture_id(6801, missing_parent_id), 6801)
         self.assertEqual(resolve_storage_architecture_id(6801, mismatched_parent), 6801)
 
-    @patch("app.services.llm_service.analysis_service.AnythingLLMClient")
-    @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag", return_value='{"architectureId":6801,"summary":"摘要"}')
-    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm", side_effect=lambda path: path)
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_keeps_result_id_and_persists_weaponry_id(
-        self,
-        mock_download,
-        _mock_normalize,
-        _mock_pipeline,
-        _mock_enrich,
-        MockClient,
-    ):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "sample.txt"
-            sample.write_text("sample", encoding="utf-8")
-            mock_download.return_value = str(sample)
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "sample.txt",
-                        "originalFileName": "CVN68 sample.txt",
-                        "filePath": "http://127.0.0.1:8000/sample.txt",
-                        "enableFullTranslation": False,
-                        "architectureList": [
-                            {"id": 680, "name": "CVN68", "parentId": 60, "path": "60/680"},
-                            {
-                                "id": 6801,
-                                "name": "CVN68-基础数据",
-                                "parentId": 680,
-                                "path": "60/680/6801",
-                            },
-                        ],
-                    }
-                ],
-            }
-
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.txt", request_payload)
-            kb_service = Mock()
-            kb_service.get_workspace_slug.return_value = None
-            client = MockClient.return_value
-            client.create_rag_workspace.return_value = {"slug": "architectureid-680"}
-            client.upload_document.return_value = {
-                "id": "doc-1",
-                "location": "custom-documents/doc-1.json",
-            }
-            client.wait_for_processing.return_value = True
-            client.update_embeddings.return_value = True
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=kb_service,
-                progress_hub=LLMProgressHub(),
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="",
-                callback_timeout=5,
-            )
-
-            task = task_service.get_task("file", "sample.txt")
-
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 6801)
-        self.assertEqual(_mock_pipeline.call_args.kwargs["files_to_upload"], [str(sample)])
-        kb_service.get_workspace_slug.assert_called_once_with(680)
-        client.create_rag_workspace.assert_called_once_with("architectureId-680", user_id=1)
-        kb_service.add_workspace.assert_called_once_with(680, "architectureid-680")
-        client.update_embeddings.assert_called_once_with(
-            "custom-documents/doc-1.json",
-            "architectureid-680",
-            user_id=1,
-            metadata={
-                "file_name": "sample.txt",
-                "architecture_id": 680,
-            },
-        )
-        kb_service.save_document_record.assert_called_once_with(
-            "sample.txt",
-            680,
-            "doc-1",
-            doc_path="custom-documents/doc-1.json",
-            original_name="CVN68 sample.txt",
-        )
-
-    @patch("app.services.llm_service.analysis_service.AnythingLLMClient")
-    @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag", return_value='{"architectureId":6801,"summary":"摘要"}')
-    @patch("app.services.llm_service.analysis_service.prepare_analysis_file_for_upload")
-    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm", side_effect=lambda path: path)
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_persists_prepared_markdown_for_scanned_pdf(
-        self,
-        mock_download,
-        _mock_normalize,
-        mock_prepare,
-        mock_rag,
-        _mock_enrich,
-        MockClient,
-    ):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "scan.pdf"
-            sample.write_bytes(b"%PDF-1.4\n")
-            prepared = Path(tmp) / "scan.mineru.md"
-            prepared.write_text("MinerU text", encoding="utf-8")
-            mock_download.return_value = str(sample)
-            mock_prepare.return_value = str(prepared)
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "scan.pdf",
-                        "filePath": "http://127.0.0.1:8000/scan.pdf",
-                        "enableFullTranslation": False,
-                        "architectureList": [
-                            {"id": 680, "name": "CVN68", "parentId": 60, "path": "60/680"},
-                            {"id": 6801, "name": "CVN68-基础数据", "parentId": 680, "path": "60/680/6801"},
-                        ],
-                    }
-                ],
-            }
-
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("scan.pdf", request_payload)
-            kb_service = Mock()
-            kb_service.get_workspace_slug.return_value = "architectureid-680"
-            client = MockClient.return_value
-            client.upload_document.return_value = {
-                "id": "doc-1",
-                "location": "custom-documents/doc-1.json",
-            }
-            client.wait_for_processing.return_value = True
-            client.update_embeddings.return_value = True
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=kb_service,
-                progress_hub=LLMProgressHub(),
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="",
-                callback_timeout=5,
-            )
-
-        mock_rag.assert_called_once()
-        self.assertEqual(mock_rag.call_args.kwargs["files_to_upload"], [str(prepared)])
-        client.upload_document.assert_called_once_with(str(prepared), user_id=1)
-
-    @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
-    @patch("app.services.llm_service.analysis_service.post_callback_payload", return_value=True)
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
-    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm")
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_normalizes_mhtml_before_rag(
-        self,
-        mock_download,
-        mock_normalize,
-        _mock_pipeline,
-        _mock_callback,
-        _mock_enrich,
-    ):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "sample.mhtml"
-            sample.write_text("mhtml", encoding="utf-8")
-            normalized = Path(tmp) / "sample.mhtml.normalized.md"
-            normalized.write_text("标题\nHello MHTML", encoding="utf-8")
-            mock_download.return_value = str(sample)
-            mock_normalize.return_value = str(normalized)
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "sample.mhtml",
-                        "filePath": "http://127.0.0.1:8000/sample.mhtml",
-                        "enableFullTranslation": False,
-                        "country": [],
-                        "channel": [],
-                        "maturity": [],
-                        "format": [],
-                        "architectureList": [],
-                    }
-                ],
-            }
-
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.mhtml", request_payload)
-            hub = LLMProgressHub()
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
-
-        mock_normalize.assert_called_once_with(str(sample))
-        self.assertEqual(_mock_pipeline.call_args.kwargs["files_to_upload"], [str(normalized)])
-
-    @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
-    @patch("app.services.llm_service.analysis_service.post_callback_payload", return_value=True)
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
-    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm", side_effect=RuntimeError("boom"))
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_falls_back_to_original_file_when_mhtml_normalization_fails(
-        self,
-        mock_download,
-        _mock_normalize,
-        _mock_pipeline,
-        _mock_callback,
-        _mock_enrich,
-    ):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "sample.mhtml"
-            sample.write_text("mhtml", encoding="utf-8")
-            mock_download.return_value = str(sample)
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "sample.mhtml",
-                        "filePath": "http://127.0.0.1:8000/sample.mhtml",
-                        "enableFullTranslation": False,
-                        "country": [],
-                        "channel": [],
-                        "maturity": [],
-                        "format": [],
-                        "architectureList": [],
-                    }
-                ],
-            }
-
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.mhtml", request_payload)
-            hub = LLMProgressHub()
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
-
-        self.assertEqual(_mock_pipeline.call_args.kwargs["files_to_upload"], [str(sample)])
-
-    @patch("app.services.llm_service.analysis_service.post_callback_payload", return_value=True)
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag", return_value='{"summary":"摘要","language":"中文","score":3.6}')
-    @patch("app.services.llm_service.analysis_service.enrich_with_translations", side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result)
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_marks_success(self, mock_download, _mock_enrich, _mock_pipeline, _mock_callback):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "sample.txt"
-            sample.write_text("sample", encoding="utf-8")
-            mock_download.return_value = str(sample)
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "sample.txt",
-                        "filePath": "http://127.0.0.1:8000/sample.txt",
-                        "enableFullTranslation": False,
-                        "country": [],
-                        "channel": [],
-                        "maturity": [],
-                        "format": [],
-                        "architectureList": [],
-                    }
-                ],
-            }
-
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.txt", request_payload)
-            hub = LLMProgressHub()
-            events = []
-            hub.subscribe("file", "sample.txt", events.append)
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=Mock(),
-                progress_hub=hub,
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
-
-            task = task_service.get_task("file", "sample.txt")
-            self.assertIsNotNone(task)
-            self.assertEqual(task["status"], "2")
-            self.assertEqual(task["callback_status"], "success")
-            self.assertEqual(task["result_payload"]["msg"], "解析成功")
-            self.assertEqual(events[-1]["data"]["progress"], 1.0)
-
-    @patch("app.services.llm_service.analysis_service.post_callback_payload", return_value=True)
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag", return_value=None)
-    @patch("app.services.llm_service.analysis_service.enrich_with_translations")
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_marks_failure_when_rag_returns_no_result(
-        self,
-        mock_download,
-        mock_enrich,
-        _mock_pipeline,
-        mock_callback,
-    ):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "sample.txt"
-            sample.write_text("sample", encoding="utf-8")
-            mock_download.return_value = str(sample)
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "sample.txt",
-                        "filePath": "http://127.0.0.1:8000/sample.txt",
-                        "enableFullTranslation": False,
-                        "country": [],
-                        "channel": [],
-                        "maturity": [],
-                        "format": [],
-                        "architectureList": [],
-                    }
-                ],
-            }
-
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.txt", request_payload)
-            kb_service = Mock()
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=kb_service,
-                progress_hub=LLMProgressHub(),
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="http://127.0.0.1:9000/llm/callback",
-                callback_timeout=5,
-            )
-
-            task = task_service.get_task("file", "sample.txt")
-
-        self.assertIsNotNone(task)
-        self.assertEqual(task["status"], "3")
-        self.assertEqual(task["callback_status"], "success")
-        self.assertEqual(task["result_payload"]["msg"], "解析失败")
-        self.assertEqual(task["result_payload"]["data"]["status"], "3")
-        mock_enrich.assert_not_called()
-        kb_service.get_workspace_slug.assert_not_called()
-        callback_payload = mock_callback.call_args.args[1]
-        self.assertEqual(callback_payload["msg"], "解析失败")
-        self.assertEqual(callback_payload["data"]["status"], "3")
-
-    @patch("app.services.llm_service.analysis_service.AnythingLLMClient")
-    @patch(
-        "app.services.llm_service.analysis_service.enrich_with_translations",
-        side_effect=lambda mapped_result, *_args, **_kwargs: mapped_result,
-    )
-    @patch("app.services.llm_service.analysis_service.run_anythingllm_rag")
-    @patch("app.services.llm_service.analysis_service.normalize_file_for_llm", side_effect=lambda path: path)
-    @patch("app.services.llm_service.analysis_service.download_to_temp_file")
-    def test_run_file_analysis_task_persists_interaction_before_deleting_temporary_workspace(
-        self,
-        mock_download,
-        _mock_normalize,
-        mock_rag,
-        _mock_enrich,
-        MockClient,
-    ):
-        with workspace_tempdir() as tmp:
-            sample = Path(tmp) / "sample.txt"
-            sample.write_text("sample", encoding="utf-8")
-            mock_download.return_value = str(sample)
-            response = '{"summary":"摘要","language":"中文","score":3.6}'
-
-            def fake_rag(**kwargs):
-                details = kwargs["execution_details"]
-                details.workspace_name = kwargs["workspace_name"]
-                details.workspace_slug = "llm-file-temp"
-                details.thread_slug = "analysis-sample"
-                details.workspace_created = True
-                details.text_response = response
-                details.sources = [{"title": "sample.txt", "text": "sample chunk"}]
-                return response
-
-            mock_rag.side_effect = fake_rag
-            client = MockClient.return_value
-            client.delete_workspace.return_value = True
-            client.upload_document.return_value = None
-
-            request_payload = {
-                "businessType": "file",
-                "params": [
-                    {
-                        "fileName": "sample.txt",
-                        "filePath": "http://127.0.0.1:8000/sample.txt",
-                        "enableFullTranslation": False,
-                        "country": [],
-                        "channel": [],
-                        "maturity": [],
-                        "format": [],
-                        "architectureList": [],
-                    }
-                ],
-            }
-            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("sample.txt", request_payload)
-            kb_service = Mock()
-            kb_service.get_workspace_slug.return_value = "architectureid-1"
-
-            from app.services.llm_service.analysis_service import run_file_analysis_task
-
-            run_file_analysis_task(
-                task_service=task_service,
-                kb_service=kb_service,
-                progress_hub=LLMProgressHub(),
-                request_payload=request_payload,
-                download_root=tmp,
-                callback_url="",
-                callback_timeout=5,
-            )
-
-            interactions = task_service.get_llm_interactions("file", "sample.txt")
-
-        self.assertEqual(len(interactions), 1)
-        self.assertEqual(interactions[0]["response"], response)
-        self.assertEqual(interactions[0]["sources"][0]["text"], "sample chunk")
-        self.assertEqual(interactions[0]["workspace_cleanup_status"], "deleted")
-        client.delete_workspace.assert_called_once_with("llm-file-temp", user_id=1)
-
     @patch("app.services.llm_service.analysis_service.run_file_analysis_task")
     def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):
         with workspace_tempdir() as tmp:
@@ -1100,12 +751,13 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
             run_file_analysis_batch_task(
                 task_service=task_service,
-                kb_service=Mock(),
                 progress_hub=hub,
                 request_payload=request_payload,
                 download_root=tmp,
                 callback_url="http://127.0.0.1:9000/llm/callback",
                 callback_timeout=5,
+                document_rag_factory=Mock(),
+                knowledge_index_factory=Mock(),
             )
 
             self.assertEqual(
@@ -1115,3 +767,470 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     ("b.txt", "2", "1"),
                 ],
             )
+
+    @staticmethod
+    def _stage9_model_response(file_name: str, architecture_id: int | str) -> str:
+        """生成满足阶段 9 顶层契约的最小严格 JSON 回答。"""
+        return json.dumps(
+            {
+                "country": "",
+                "channel": "",
+                "maturity": "",
+                "secrets": "",
+                "format": "",
+                "architectureId": architecture_id,
+                "fileDataItem": {
+                    "fileName": file_name,
+                    "dataFormat": "",
+                    "summary": "阶段 9 测试摘要",
+                    "keyword": "测试",
+                    "score": 55,
+                    "source": "未明确数据来源",
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _stage9_request(file_name: str, architecture_list: list[dict]) -> dict:
+        """构造一个不依赖真实后台服务的文件分析请求。"""
+        return {
+            "businessType": "file",
+            "params": [
+                {
+                    "fileName": file_name,
+                    "originalFileName": file_name,
+                    "filePath": f"https://example.invalid/{file_name}",
+                    "enableFullTranslation": False,
+                    "architectureList": architecture_list,
+                }
+            ],
+        }
+
+    @staticmethod
+    def _run_stage9_task(
+            *,
+            task_service: LLMTaskService,
+            request_payload: dict,
+            download_root: str,
+            document_rag_factory: FakeDocumentRagFactory,
+            knowledge_index_factory: FakeKnowledgeIndexFactory,
+    ) -> None:
+        """在文件下载、归一化和翻译边界使用纯内存替身执行阶段 9 编排。"""
+        file_name = request_payload["params"][0]["fileName"]
+        local_file = str(Path(download_root) / file_name)
+        with (
+            patch(
+                "app.services.llm_service.analysis_service.download_to_temp_file",
+                return_value=local_file,
+            ),
+            patch(
+                "app.services.llm_service.analysis_service.normalize_file_for_llm",
+                side_effect=lambda path: path,
+            ),
+            patch(
+                "app.services.llm_service.analysis_service.prepare_analysis_file_for_upload",
+                side_effect=lambda path, *_args: path,
+            ),
+            patch(
+                "app.services.llm_service.analysis_service.enrich_with_translations",
+                side_effect=lambda result, *_args, **_kwargs: result,
+            ),
+        ):
+            from app.services.llm_service.analysis_service import run_file_analysis_task
+
+            run_file_analysis_task(
+                task_service=task_service,
+                progress_hub=LLMProgressHub(),
+                request_payload=request_payload,
+                download_root=download_root,
+                callback_url="",
+                callback_timeout=5,
+                document_rag_factory=document_rag_factory,
+                knowledge_index_factory=knowledge_index_factory,
+            )
+
+    def test_stage9_success_audits_then_transfers_prepared_document(self):
+        """成功路径应审计一次上传所得文档，并在转交后保留全局实体。"""
+        with workspace_tempdir() as tmp:
+            file_name = "stage9.txt"
+            Path(tmp, file_name).write_text("stage 9", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9001, "name": "阶段九分类", "parentId": None}],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9001),
+                        sources=(
+                            RagSource(
+                                document_ref="document:stage9",
+                                text="阶段 9 来源证据",
+                            ),
+                        ),
+                    )
+                ]
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=knowledge_factory,
+            )
+
+            task = task_service.get_task("file", file_name)
+            interactions = task_service.get_llm_interactions("file", file_name)
+            attempts = task_service.get_llm_interaction_attempts(interactions[0]["id"])
+            lifecycle = task_service.get_llm_interaction_lifecycle_events(
+                interactions[0]["id"]
+            )
+            leases = task_service.rag_resource_leases.list_open()
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["callback_status"], "skipped")
+        self.assertEqual(task["result_payload"]["data"]["country"], "")
+        self.assertEqual(task["result_payload"]["data"]["channel"], "")
+        self.assertEqual(task["result_payload"]["data"]["maturity"], "")
+        self.assertEqual(task["result_payload"]["data"]["secrets"], "公开")
+        self.assertEqual(task["result_payload"]["data"]["format"], "")
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+        self.assertTrue(all(item["query_mode"] == "query" for item in attempts))
+        self.assertEqual(interactions[0]["workspace_cleanup_status"], "deleted")
+        self.assertEqual(lifecycle[-1]["operation"], "context_delete")
+        self.assertTrue(rag_factory.ports[0].sessions[0].retain_document_on_close)
+        self.assertEqual(len(knowledge_factory.ports), 1)
+        self.assertEqual(leases, [])
+
+    def test_stage9_architecture_repair_has_separate_audit_attempt(self):
+        """多候选缺少 architectureId 时只能通过专用修复调用恢复。"""
+        with workspace_tempdir() as tmp:
+            file_name = "architecture-repair.txt"
+            Path(tmp, file_name).write_text("architecture", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9101, "name": "候选一", "parentId": None},
+                    {"id": 9102, "name": "候选二", "parentId": None},
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:repair", text="分类证据")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, ""),
+                        sources=(source,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":9102}',
+                        sources=(source,),
+                    )
+                ],
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+            task = task_service.get_task("file", file_name)
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9102)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [RagPromptKind.ANALYSIS.value, RagPromptKind.ARCHITECTURE_REPAIR.value],
+        )
+
+    def test_stage9_json_repair_has_separate_audit_attempt(self):
+        """首次回答语法不合法时只执行一次 JSON_REPAIR，并审计两次调用。"""
+        with workspace_tempdir() as tmp:
+            file_name = "json-repair.txt"
+            Path(tmp, file_name).write_text("json repair", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9201, "name": "唯一候选", "parentId": None}],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:json", text="JSON 来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[FakeRagOutcome(text="```json\n{bad}\n```", sources=(source,))],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9201),
+                        sources=(source,),
+                    )
+                ],
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [RagPromptKind.ANALYSIS.value, RagPromptKind.JSON_REPAIR.value],
+        )
+
+    def test_stage9_audit_failure_preserves_session_and_blocks_downstream_work(self):
+        """原子审计失败必须保留 RAG 现场，并阻断知识库、翻译和成功回调。"""
+        with workspace_tempdir() as tmp:
+            file_name = "audit-failure.txt"
+            Path(tmp, file_name).write_text("audit", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9301, "name": "审计候选", "parentId": None}],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9301),
+                        sources=(RagSource(document_ref="document:audit", text="证据"),),
+                    )
+                ]
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+            with patch.object(
+                task_service,
+                "create_llm_interaction_with_trace",
+                side_effect=OSError("audit unavailable"),
+            ), patch(
+                "app.services.llm_service.analysis_service.enrich_with_translations"
+            ) as mock_translation:
+                self._run_stage9_task(
+                    task_service=task_service,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                )
+            task = task_service.get_task("file", file_name)
+            open_leases = task_service.rag_resource_leases.list_open()
+
+        self.assertEqual(task["status"], "3")
+        self.assertIsNone(rag_factory.ports[0].sessions[0].retain_document_on_close)
+        self.assertEqual(len(knowledge_factory.ports), 0)
+        mock_translation.assert_not_called()
+        self.assertEqual(open_leases[0].status, "audit_failed")
+
+    def test_stage9_retention_required_error_keeps_global_document(self):
+        """永久集合可能已接管文档时，即使 store 抛错也必须保留全局实体。"""
+        with workspace_tempdir() as tmp:
+            file_name = "retention-required.txt"
+            Path(tmp, file_name).write_text("retention", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9401, "name": "保留候选", "parentId": None}],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9401),
+                        sources=(RagSource(document_ref="document:retain", text="证据"),),
+                    )
+                ]
+            )
+            with patch.object(
+                FakeKnowledgeIndexPort,
+                "store_prepared_document",
+                side_effect=KnowledgeIndexRetentionRequiredError("需要人工恢复"),
+            ):
+                self._run_stage9_task(
+                    task_service=task_service,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=FakeKnowledgeIndexFactory(),
+                )
+            task = task_service.get_task("file", file_name)
+
+        self.assertEqual(task["status"], "3")
+        self.assertTrue(rag_factory.ports[0].sessions[0].retain_document_on_close)
+
+    def test_stage9_confirmed_compensation_deletes_untransferred_document(self):
+        """Gateway 明确完成补偿时，失败路径应请求 Session 永久删除全局文档。"""
+        with workspace_tempdir() as tmp:
+            file_name = "released-document.txt"
+            Path(tmp, file_name).write_text("released", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9451, "name": "补偿候选", "parentId": None}],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9451),
+                        sources=(RagSource(document_ref="document:release", text="证据"),),
+                    )
+                ]
+            )
+            with patch.object(
+                FakeKnowledgeIndexPort,
+                "store_prepared_document",
+                side_effect=KnowledgeIndexDocumentReleasedError("集合补偿已完成"),
+            ):
+                self._run_stage9_task(
+                    task_service=task_service,
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=FakeKnowledgeIndexFactory(),
+                )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            lifecycle = task_service.get_llm_interaction_lifecycle_events(
+                interaction["id"]
+            )
+
+        self.assertEqual(task["status"], "3")
+        self.assertFalse(rag_factory.ports[0].sessions[0].retain_document_on_close)
+        self.assertIn(
+            "global_document_delete",
+            [event["operation"] for event in lifecycle],
+        )
+
+    def test_stage9_cleanup_failure_keeps_resource_lease_open(self):
+        """关闭失败应写入审计并保留可巡检租约，不能伪装成资源已关闭。"""
+        with workspace_tempdir() as tmp:
+            file_name = "cleanup-failure.txt"
+            Path(tmp, file_name).write_text("cleanup", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9471, "name": "清理候选", "parentId": None}],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory(
+                cleanup_error_message="删除隔离上下文失败",
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9471),
+                        sources=(RagSource(document_ref="document:cleanup", text="证据"),),
+                    )
+                ],
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            open_leases = task_service.rag_resource_leases.list_open()
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(interaction["workspace_cleanup_status"], "failed")
+        self.assertEqual(open_leases[0].status, "audited")
+        self.assertEqual(open_leases[0].last_error, "删除隔离上下文失败")
+
+    def test_stage9_batch_uses_independent_rag_and_knowledge_leases(self):
+        """批量任务必须为每个文件创建独立 Port，不能复用有状态 Session。"""
+        with workspace_tempdir() as tmp:
+            file_names = ("batch-a.txt", "batch-b.txt")
+            architecture_ids = (9501, 9502)
+            for file_name in file_names:
+                Path(tmp, file_name).write_text(file_name, encoding="utf-8")
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    self._stage9_request(
+                        file_name,
+                        [{"id": architecture_id, "name": f"批量候选{architecture_id}", "parentId": None}],
+                    )["params"][0]
+                    for file_name, architecture_id in zip(file_names, architecture_ids)
+                ],
+            }
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            for params in request_payload["params"]:
+                task_service.create_file_task(
+                    params["fileName"],
+                    {"businessType": "file", "params": [params]},
+                    status="1" if params["fileName"] == file_names[0] else "0",
+                )
+            source = RagSource(document_ref="document:batch", text="批量来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response("ignored.txt", ""),
+                        sources=(source,),
+                    )
+                ]
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service.download_to_temp_file",
+                    side_effect=lambda _url, file_name, *_args, **_kwargs: str(
+                        Path(tmp, file_name)
+                    ),
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service.normalize_file_for_llm",
+                    side_effect=lambda path: path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service.prepare_analysis_file_for_upload",
+                    side_effect=lambda path, *_args: path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service.enrich_with_translations",
+                    side_effect=lambda result, *_args, **_kwargs: result,
+                ),
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_batch_task,
+                )
+
+                run_file_analysis_batch_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                )
+
+            tasks = [task_service.get_task("file", name) for name in file_names]
+
+        self.assertTrue(all(task["status"] == "2" for task in tasks))
+        self.assertEqual(len(rag_factory.ports), 2)
+        self.assertEqual(len(knowledge_factory.ports), 2)
+        self.assertTrue(
+            all(
+                port.sessions[0].retain_document_on_close
+                for port in rag_factory.ports
+            )
+        )
+        self.assertEqual(rag_factory.active_leases, 0)
+        self.assertEqual(knowledge_factory.active_leases, 0)
