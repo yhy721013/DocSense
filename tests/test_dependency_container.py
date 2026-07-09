@@ -31,6 +31,7 @@ from app.container import (
 from app.services.chat import (
     ChatAbortService,
     ChatCommandService,
+    ChatDeleteService,
     ChatHistoryService,
     ChatPersistenceStore,
     ChatRunLockService,
@@ -219,6 +220,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         chat_store = ChatStore(db_path=chat_db_path)
         chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
         chat_history = ChatHistoryService(chat_store)
+        chat_db = ChatDatabaseService(db_path=chat_db_path)
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -229,7 +231,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             kb_service=DatabaseService(
                 db_path=f"{self.runtime_directory}/knowledge.sqlite3"
             ),
-            chat_db=ChatDatabaseService(db_path=chat_db_path),
+            chat_db=chat_db,
             chat_store=chat_store,
             chat_commands=chat_commands,
             chat_history=chat_history,
@@ -241,6 +243,11 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             chat_abort=ChatAbortService(
                 store=chat_store,
                 chat_commands=chat_commands,
+            ),
+            chat_delete=ChatDeleteService(
+                store=chat_store,
+                chat_db=chat_db,
+                conversation_factory=self.chat_conversation_factory,
             ),
             progress_hub=LLMProgressHub(),
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
@@ -278,6 +285,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_history, ChatHistoryService)
         self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
+        self.assertIsInstance(self.services.chat_delete, ChatDeleteService)
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
 

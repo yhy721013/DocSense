@@ -17,9 +17,17 @@ from app.presenters.chat_stream import (
     mark_chat_run_failed,
 )
 from app.services.chat import (
+    ChatDeleteCleanupError,
+    ChatDeleteNotFoundError,
     ChatRunBusyError,
     ChatRunStreamRequest,
     ChatTitleEmptyHistoryError,
+    RESOURCE_DOCUMENT_BINDING,
+    RESOURCE_THREAD,
+    RESOURCE_WORKSPACE,
+    chat_document_binding_lease_id,
+    chat_thread_lease_id,
+    chat_workspace_lease_id,
     record_chat_run_events,
 )
 from app.services.core.progress import normalize_progress
@@ -31,8 +39,6 @@ from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.weaponry_service import run_weaponry_task
 from app.services.llm_service.chat_service import (
     handle_chat_events,
-    delete_chat,
-    ChatNotFoundError,
 )
 from app.services.utils.anythingllm_client import AnythingLLMClient
 
@@ -846,6 +852,10 @@ def _sync_chat_session_refs_from_legacy_record(
     services: ApplicationServices,
     chat_db,
     chat_id: str,
+    run_id: str,
+    kb_service,
+    file_names,
+    file_original_names,
 ) -> None:
     """把当前 legacy 主流程创建的远端引用同步到新会话表。
 
@@ -855,30 +865,51 @@ def _sync_chat_session_refs_from_legacy_record(
     """
     try:
         session = services.chat_store.sessions.get(chat_id)
-        if session is None or (session.workspace_ref and session.thread_ref):
-            return
         legacy_record = chat_db.get_chat(chat_id)
-        if legacy_record is None:
-            logger.debug(
-                "跳过文件对话远端引用同步: legacy记录不存在 chatId=%s",
-                chat_id,
-            )
-            return
-        workspace_ref = str(legacy_record.get("workspace_slug") or "").strip()
-        thread_ref = str(legacy_record.get("thread_slug") or "").strip()
+        workspace_ref = session.workspace_ref if session is not None else ""
+        thread_ref = session.thread_ref if session is not None else ""
+        if legacy_record is not None:
+            workspace_ref = workspace_ref or str(
+                legacy_record.get("workspace_slug") or ""
+            ).strip()
+            thread_ref = thread_ref or str(
+                legacy_record.get("thread_slug") or ""
+            ).strip()
         if not workspace_ref or not thread_ref:
-            logger.warning(
-                "跳过文件对话远端引用同步: legacy记录引用不完整 chatId=%s "
+            logger.debug(
+                "跳过文件对话远端引用和租约同步: refs不完整 chatId=%s "
                 "hasWorkspace=%s hasThread=%s",
                 chat_id,
                 bool(workspace_ref),
                 bool(thread_ref),
             )
             return
-        services.chat_store.sessions.update_refs(
+        if session is None:
+            services.chat_store.sessions.create_or_get(
+                chat_id=chat_id,
+                workspace_ref=workspace_ref,
+                thread_ref=thread_ref,
+            )
+        elif not session.workspace_ref or not session.thread_ref:
+            services.chat_store.sessions.update_refs(
+                chat_id=chat_id,
+                workspace_ref=workspace_ref,
+                thread_ref=thread_ref,
+            )
+        _ensure_chat_remote_resource_leases(
+            services=services,
             chat_id=chat_id,
             workspace_ref=workspace_ref,
             thread_ref=thread_ref,
+        )
+        _sync_chat_documents_and_binding_leases(
+            services=services,
+            kb_service=kb_service,
+            chat_id=chat_id,
+            run_id=run_id,
+            workspace_ref=workspace_ref,
+            file_names=file_names,
+            file_original_names=file_original_names,
         )
         logger.info(
             "文件对话远端引用已同步到本地会话: chatId=%s workspace_ref=%s thread_ref=%s",
@@ -890,12 +921,103 @@ def _sync_chat_session_refs_from_legacy_record(
         logger.exception("同步文件对话远端引用失败: chatId=%s", chat_id)
 
 
+def _ensure_chat_remote_resource_leases(
+    *,
+    services: ApplicationServices,
+    chat_id: str,
+    workspace_ref: str,
+    thread_ref: str,
+) -> None:
+    services.chat_store.resource_leases.ensure_active(
+        lease_id=chat_workspace_lease_id(chat_id),
+        chat_id=chat_id,
+        resource_type=RESOURCE_WORKSPACE,
+        external_ref=workspace_ref,
+    )
+    services.chat_store.resource_leases.ensure_active(
+        lease_id=chat_thread_lease_id(chat_id),
+        chat_id=chat_id,
+        resource_type=RESOURCE_THREAD,
+        external_ref=f"{workspace_ref}::{thread_ref}",
+    )
+
+
+def _sync_chat_documents_and_binding_leases(
+    *,
+    services: ApplicationServices,
+    kb_service,
+    chat_id: str,
+    run_id: str,
+    workspace_ref: str,
+    file_names,
+    file_original_names,
+) -> None:
+    original_names = tuple(file_original_names or ())
+    for index, file_name in enumerate(tuple(file_names or ())):
+        original_name = (
+            original_names[index]
+            if index < len(original_names)
+            else str(file_name or "").strip()
+        )
+        record = kb_service.get_document_record(file_name) if kb_service else None
+        document_ref = _chat_document_ref(record)
+        external_location = _chat_document_external_location(record)
+        services.chat_store.documents.add(
+            chat_id=chat_id,
+            file_name=file_name,
+            original_name=original_name,
+            document_ref=document_ref,
+            external_location=external_location,
+            added_by_run_id=run_id,
+        )
+        if not external_location:
+            logger.warning(
+                "文件对话文档绑定缺少外部位置，暂不创建document_binding租约: chatId=%s fileName=%s",
+                chat_id,
+                file_name,
+            )
+            continue
+        services.chat_store.resource_leases.ensure_active(
+            lease_id=chat_document_binding_lease_id(
+                chat_id=chat_id,
+                file_name=file_name,
+            ),
+            chat_id=chat_id,
+            resource_type=RESOURCE_DOCUMENT_BINDING,
+            external_ref=f"{workspace_ref}::{external_location}",
+        )
+
+
+def _chat_document_ref(record) -> str:
+    if not record:
+        return ""
+    document_ref = str(record.get("document_ref") or "").strip()
+    if document_ref:
+        return document_ref
+    anything_doc_id = str(record.get("anything_doc_id") or "").strip()
+    return f"document:{anything_doc_id}" if anything_doc_id else ""
+
+
+def _chat_document_external_location(record) -> str:
+    if not record:
+        return ""
+    doc_path = str(record.get("doc_path") or "").strip()
+    if doc_path:
+        return doc_path
+    anything_doc_id = str(record.get("anything_doc_id") or "").strip()
+    return f"custom-documents/{anything_doc_id}.json" if anything_doc_id else ""
+
+
 def _sync_chat_session_refs_from_legacy_events(
     *,
     events,
     services: ApplicationServices,
     chat_db,
     chat_id: str,
+    run_id: str,
+    kb_service,
+    file_names,
+    file_original_names,
 ):
     """在不改写 SSE 事件的前提下，为标题生成补齐新会话表远端引用。"""
     for event in events:
@@ -904,6 +1026,10 @@ def _sync_chat_session_refs_from_legacy_events(
                 services=services,
                 chat_db=chat_db,
                 chat_id=chat_id,
+                run_id=run_id,
+                kb_service=kb_service,
+                file_names=file_names,
+                file_original_names=file_original_names,
             )
         yield event
 
@@ -1045,6 +1171,10 @@ def llm_chat():
             services=services,
             chat_db=chat_db,
             chat_id=chat_run_request.chat_id,
+            run_id=chat_run_request.run_id,
+            kb_service=kb_service,
+            file_names=chat_run_request.file_names,
+            file_original_names=chat_run_request.file_original_names,
         )
         stream = record_chat_run_events(
             request=chat_run_request,
@@ -1180,8 +1310,6 @@ def llm_chat_abort():
 @llm_bp.post("/llm/chat/delete")
 def llm_chat_delete():
     services = _services()
-    chat_db = services.chat_db
-    anythingllm_config = services.anythingllm_config
     payload = request.get_json(silent=True) or {}
     logger.info("收到删除对话请求: payload_keys=%s", list(payload.keys()))
 
@@ -1206,10 +1334,22 @@ def llm_chat_delete():
         return jsonify({"error": "chatId不能为空"}), 400
     chat_id = chat_id.strip()
 
-    client = AnythingLLMClient(anythingllm_config)
     try:
-        delete_chat(chat_db=chat_db, client=client, chat_id=chat_id)
-        return jsonify({"chatId": chat_id, "deleted": True, "msg": "对话已删除"})
-    except ChatNotFoundError:
+        result = services.chat_delete.delete_chat(chat_id=chat_id)
+        return jsonify(result.to_response())
+    except ChatDeleteNotFoundError:
         logger.warning("删除对话请求未找到对话: chatId=%s", chat_id)
         return jsonify({"error": "对话不存在"}), 404
+    except ChatDeleteCleanupError as exc:
+        logger.warning(
+            "删除对话远端资源失败: chatId=%s failed_count=%d",
+            exc.chat_id,
+            len(exc.failed_leases),
+        )
+        return jsonify(
+            {
+                "chatId": exc.chat_id,
+                "deleted": False,
+                "error": "对话资源清理失败",
+            }
+        ), 500

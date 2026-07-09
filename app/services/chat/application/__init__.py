@@ -5,6 +5,12 @@ from app.services.chat.application.abort_service import (
     ChatAbortService,
 )
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.application.delete_service import (
+    ChatDeleteCleanupError,
+    ChatDeleteNotFoundError,
+    ChatDeleteResult,
+    ChatDeleteService,
+)
 from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
     ChatRunEventRecorder,
@@ -23,6 +29,10 @@ __all__ = [
     "ChatAbortResult",
     "ChatAbortService",
     "ChatCommandService",
+    "ChatDeleteCleanupError",
+    "ChatDeleteNotFoundError",
+    "ChatDeleteResult",
+    "ChatDeleteService",
     "ChatHistoryService",
     "ChatRunEventRecorder",
     "ChatRunExecutor",

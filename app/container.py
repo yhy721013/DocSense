@@ -28,6 +28,7 @@ from app.ports import (
 from app.services.chat import (
     ChatAbortService,
     ChatCommandService,
+    ChatDeleteService,
     ChatHistoryService,
     ChatPersistenceStore,
     ChatRunLockService,
@@ -115,6 +116,7 @@ class ApplicationServices:
     chat_history: ChatHistoryService
     chat_title: ChatTitleService
     chat_abort: ChatAbortService
+    chat_delete: ChatDeleteService
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
@@ -134,6 +136,7 @@ class ApplicationServices:
             "chat_history": self.chat_history,
             "chat_title": self.chat_title,
             "chat_abort": self.chat_abort,
+            "chat_delete": self.chat_delete,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
@@ -166,6 +169,8 @@ class ApplicationServices:
             raise TypeError("chat_title must be ChatTitleService")
         if not isinstance(self.chat_abort, ChatAbortService):
             raise TypeError("chat_abort must be ChatAbortService")
+        if not isinstance(self.chat_delete, ChatDeleteService):
+            raise TypeError("chat_delete must be ChatDeleteService")
 
 
 def create_application_services() -> ApplicationServices:
@@ -178,6 +183,7 @@ def create_application_services() -> ApplicationServices:
     chat_commands = ChatCommandService(ChatRunLockService(chat_store.db_path))
     chat_history = ChatHistoryService(chat_store)
     chat_conversation_factory = AnythingLLMChatFactory(anythingllm_config)
+    chat_db = ChatDatabaseService(str(CHAT_DB_PATH))
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
@@ -192,7 +198,7 @@ def create_application_services() -> ApplicationServices:
         chat_conversation_factory=chat_conversation_factory,
         task_service=task_service,
         kb_service=kb_service,
-        chat_db=ChatDatabaseService(str(CHAT_DB_PATH)),
+        chat_db=chat_db,
         chat_store=chat_store,
         chat_commands=chat_commands,
         chat_history=chat_history,
@@ -204,6 +210,11 @@ def create_application_services() -> ApplicationServices:
         chat_abort=ChatAbortService(
             store=chat_store,
             chat_commands=chat_commands,
+        ),
+        chat_delete=ChatDeleteService(
+            store=chat_store,
+            chat_db=chat_db,
+            conversation_factory=chat_conversation_factory,
         ),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),

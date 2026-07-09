@@ -682,6 +682,20 @@ class ChatDatabaseService:
                 conn.commit()
         logger.info("已追加对话引用文件: chat_id=%s, new_count=%d", chat_id, len(new_file_original_names))
 
+    def delete_legacy_chat_record(self, chat_id: str) -> None:
+        """Delete only the legacy `chats` row after durable cleanup succeeds.
+
+        The stage-9 delete state machine keeps `chat_sessions`, messages, runs
+        and resource leases as the local audit and recovery source. The older
+        `delete_chat()` method is intentionally retained for compatibility, but
+        new deletion flow must not cascade-delete the recovery records.
+        """
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+                conn.commit()
+        logger.info("宸插垹闄ゆ枃浠跺璇濇棫chats璁板綍: chat_id=%s", chat_id)
+
     def delete_chat(self, chat_id: str) -> None:
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:

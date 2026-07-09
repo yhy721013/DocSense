@@ -5,6 +5,15 @@ from app.services.chat.application.abort_service import (
     ChatAbortService,
 )
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.application.delete_service import (
+    ChatDeleteCleanupError,
+    ChatDeleteNotFoundError,
+    ChatDeleteResult,
+    ChatDeleteService,
+    chat_document_binding_lease_id,
+    chat_thread_lease_id,
+    chat_workspace_lease_id,
+)
 from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
     ChatRunEventRecorder,
@@ -82,6 +91,10 @@ __all__ = [
     "ChatAbortResult",
     "ChatAbortService",
     "ChatCommandService",
+    "ChatDeleteCleanupError",
+    "ChatDeleteNotFoundError",
+    "ChatDeleteResult",
+    "ChatDeleteService",
     "ChatHistoryService",
     "ChatMessage",
     "ChatMessageFile",
@@ -105,6 +118,9 @@ __all__ = [
     "ChatTitleGenerationError",
     "ChatTitleResult",
     "ChatTitleService",
+    "chat_document_binding_lease_id",
+    "chat_thread_lease_id",
+    "chat_workspace_lease_id",
     "DEFAULT_STALE_RUN_SECONDS",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",

@@ -59,6 +59,8 @@ class FakeChatConversationPort:
         state: _FakeChatConversationState | None = None,
         stream_contents: Sequence[str] | None = None,
         standalone_reply: str = "模拟标题",
+        delete_conversation_error_message: str = "",
+        delete_context_error_message: str = "",
     ) -> None:
         """配置后续流式回复和一次性回复。"""
         self._state = state or _FakeChatConversationState()
@@ -68,6 +70,12 @@ class FakeChatConversationPort:
             standalone_reply,
             name="standalone_reply",
         )
+        self._delete_conversation_error_message = str(
+            delete_conversation_error_message or ""
+        ).strip()
+        self._delete_context_error_message = str(
+            delete_context_error_message or ""
+        ).strip()
         self.standalone_prompts = self._state.standalone_prompts
 
     def open_conversation(
@@ -201,6 +209,11 @@ class FakeChatConversationPort:
         """幂等删除测试对话资源。"""
         conversation_ref = session.conversation_ref
         with self._lock:
+            if self._delete_conversation_error_message:
+                return ChatOperationResult(
+                    success=False,
+                    error_message=self._delete_conversation_error_message,
+                )
             if conversation_ref in self._state.deleted_conversations:
                 return ChatOperationResult(success=True, already_applied=True)
             self._require_session(session)
@@ -214,6 +227,11 @@ class FakeChatConversationPort:
         """幂等删除测试上下文资源。"""
         normalized_context_ref = _required_text(context_ref, name="context_ref")
         with self._lock:
+            if self._delete_context_error_message:
+                return ChatOperationResult(
+                    success=False,
+                    error_message=self._delete_context_error_message,
+                )
             if normalized_context_ref in self._state.deleted_contexts:
                 return ChatOperationResult(success=True, already_applied=True)
             if normalized_context_ref not in self._state.known_context_refs:

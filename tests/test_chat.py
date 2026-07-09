@@ -9,14 +9,19 @@ from app.container import ApplicationServices, UploadTaskLimiter
 from app.services.chat import (
     ChatAbortService,
     ChatCommandService,
+    ChatDeleteService,
     ChatHistoryService,
     ChatRunLockService,
     ChatStore,
     ChatStreamEvent,
     ChatTitleService,
+    LEASE_CLOSED,
     MESSAGE_COMMITTED,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
+    RESOURCE_DOCUMENT_BINDING,
+    RESOURCE_THREAD,
+    RESOURCE_WORKSPACE,
 )
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
@@ -36,13 +41,14 @@ def _build_test_services(tmp: str) -> ApplicationServices:
     chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
     chat_history = ChatHistoryService(chat_store)
     chat_conversation_factory = FakeChatConversationFactory()
+    chat_db = ChatDatabaseService(db_path=chat_db_path)
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
         chat_conversation_factory=chat_conversation_factory,
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=DatabaseService(db_path=f"{tmp}/knowledge.sqlite3"),
-        chat_db=ChatDatabaseService(db_path=chat_db_path),
+        chat_db=chat_db,
         chat_store=chat_store,
         chat_commands=chat_commands,
         chat_history=chat_history,
@@ -54,6 +60,11 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         chat_abort=ChatAbortService(
             store=chat_store,
             chat_commands=chat_commands,
+        ),
+        chat_delete=ChatDeleteService(
+            store=chat_store,
+            chat_db=chat_db,
+            conversation_factory=chat_conversation_factory,
         ),
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
@@ -249,18 +260,21 @@ class ChatRouteValidationTests(unittest.TestCase):
         self.assertEqual("hash-alpha.pdf", messages[0].files[0].file_name)
 
     def test_chat_syncs_legacy_remote_refs_into_local_session(self):
+        self._save_document("hash-alpha.pdf", original_name="alpha原名.pdf")
         with patch("app.blueprints.llm.AnythingLLMClient") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             mock_client.create_chat_workspace.return_value = {"slug": "ws-sync"}
+            mock_client.update_embeddings_batch.return_value = True
             mock_client.create_thread.return_value = {"slug": "thread-sync"}
             mock_client.extract_thread_slug.return_value = "thread-sync"
+            mock_client.fetch_workspace_document.return_value = {"docId": "doc-alpha"}
             mock_client.stream_chat_to_thread.return_value = iter(["同步回答"])
 
             resp = self.client.post("/llm/chat", json={
                 "businessType": "chat",
                 "params": {
                     "chatId": "c-sync",
-                    "fileNames": [],
+                    "fileNames": ["hash-alpha.pdf"],
                     "message": "请总结",
                 },
             })
@@ -272,6 +286,17 @@ class ChatRouteValidationTests(unittest.TestCase):
         assert session is not None
         self.assertEqual("ws-sync", session.workspace_ref)
         self.assertEqual("thread-sync", session.thread_ref)
+        documents = self.services.chat_store.documents.list_by_chat("c-sync")
+        leases = self.services.chat_store.resource_leases.list_by_chat("c-sync")
+        self.assertEqual(["hash-alpha.pdf"], [document.file_name for document in documents])
+        self.assertEqual(
+            {
+                RESOURCE_DOCUMENT_BINDING,
+                RESOURCE_THREAD,
+                RESOURCE_WORKSPACE,
+            },
+            {lease.resource_type for lease in leases},
+        )
         mock_client.close.assert_called_once_with()
 
     def test_chat_rejects_duplicate_active_stream(self):
@@ -774,29 +799,41 @@ class ChatDeleteTests(unittest.TestCase):
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
 
-    @patch("app.services.llm_service.chat_service.AnythingLLMClient", autospec=True)
-    def test_delete_existing_chat_returns_200(self, _mock_client_cls):
-        # 先手动创建一条对话记录
-        self.chat_db.create_chat("del-test", ["测试文件.pdf"], "ws-slug", "th-slug")
+    def test_delete_existing_chat_returns_200(self):
+        with self.services.chat_conversation_factory.create() as port:
+            refs = port.open_conversation(
+                context_name="context-delete",
+                conversation_name="thread-delete",
+            )
+        self.chat_db.create_chat(
+            "del-test",
+            ["测试文件.pdf"],
+            refs.context_ref,
+            refs.conversation_ref,
+        )
+        self.services.chat_store.sessions.create_or_get(
+            chat_id="del-test",
+            workspace_ref=refs.context_ref,
+            thread_ref=refs.conversation_ref,
+        )
 
-        # mock AnythingLLMClient 实例方法
-        mock_client = MagicMock()
-        mock_client.delete_thread.return_value = True
-        mock_client.delete_workspace.return_value = True
-
-        with patch("app.blueprints.llm.AnythingLLMClient", return_value=mock_client):
-            resp = self.client.post("/llm/chat/delete", json={
-                "businessType": "chat",
-                "params": {"chatId": "del-test"},
-            })
+        resp = self.client.post("/llm/chat/delete", json={
+            "businessType": "chat",
+            "params": {"chatId": "del-test"},
+        })
 
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertTrue(data["deleted"])
         self.assertEqual(data["chatId"], "del-test")
 
-        # 确认数据库记录已删除
         self.assertIsNone(self.chat_db.get_chat("del-test"))
+        session = self.services.chat_store.sessions.get("del-test")
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual("deleted", session.status)
+        leases = self.services.chat_store.resource_leases.list_by_chat("del-test")
+        self.assertEqual({LEASE_CLOSED}, {lease.status for lease in leases})
 
 
 if __name__ == "__main__":

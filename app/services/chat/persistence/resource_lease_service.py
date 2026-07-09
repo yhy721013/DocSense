@@ -216,6 +216,36 @@ class ChatResourceLeaseService:
             )
             return self._get_with_connection(connection, normalized_lease_id)
 
+    def ensure_active(
+        self,
+        *,
+        lease_id: str,
+        chat_id: str,
+        resource_type: str,
+        run_id: str = "",
+        external_ref: str,
+    ) -> ChatResourceLease:
+        """Create or reuse an active lease without hiding cleanup failures.
+
+        The method is intentionally conservative: it only promotes a planned
+        lease to active. Failed or pending cleanup states are returned as-is so
+        callers cannot accidentally overwrite recovery evidence by "ensuring"
+        a resource that still needs compensation.
+        """
+        lease = self.begin(
+            lease_id=lease_id,
+            chat_id=chat_id,
+            run_id=run_id,
+            resource_type=resource_type,
+            external_ref=external_ref,
+        )
+        if lease.status == LEASE_PLANNED:
+            return self.activate(
+                lease_id=lease.lease_id,
+                external_ref=external_ref,
+            )
+        return lease
+
     def mark_cleanup_pending(self, lease_id: str) -> ChatResourceLease:
         return self._set_status(lease_id, status=LEASE_CLEANUP_PENDING)
 
@@ -258,6 +288,34 @@ class ChatResourceLeaseService:
                 """,
                 tuple(sorted(LEASE_OPEN_STATUSES)),
             ).fetchall()
+        return tuple(self._row(row) for row in rows)
+
+    def list_by_chat(
+        self,
+        chat_id: str,
+        *,
+        include_closed: bool = True,
+    ) -> tuple[ChatResourceLease, ...]:
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        with _connection_scope(self.db_path) as connection:
+            if include_closed:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM chat_resource_leases
+                    WHERE chat_id = ?
+                    ORDER BY resource_type ASC, created_at ASC, lease_id ASC
+                    """,
+                    (normalized_chat_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM chat_resource_leases
+                    WHERE chat_id = ? AND status != ?
+                    ORDER BY resource_type ASC, created_at ASC, lease_id ASC
+                    """,
+                    (normalized_chat_id, LEASE_CLOSED),
+                ).fetchall()
         return tuple(self._row(row) for row in rows)
 
     def _set_status(

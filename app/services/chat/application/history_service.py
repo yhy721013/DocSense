@@ -10,6 +10,7 @@ from app.services.chat.domain.models import (
     MESSAGE_COMMITTED,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
+    SESSION_DELETED,
     ChatMessage,
 )
 from app.services.chat.persistence.store import ChatPersistenceStore
@@ -25,6 +26,13 @@ class ChatHistoryService:
         self._store = store
 
     def list_history(self, chat_id: str) -> list[dict[str, Any]]:
+        session = self._store.sessions.get(chat_id)
+        if session is not None and session.status == SESSION_DELETED:
+            logger.info(
+                "文件对话已删除，历史接口返回空列表: chat_id=%s",
+                chat_id,
+            )
+            return []
         messages = self._store.messages.list_by_chat(chat_id)
         committed = [
             self._present_message(message)
