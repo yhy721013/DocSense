@@ -99,7 +99,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             "fileName": "demo.txt",
             "channel": [{"key": "02", "value": "装发"}],
             "maturity": [{"key": "02", "value": "阶段成果"}],
-            "secrets": [{"key": "02", "value": "公开"}],
+            "security": [{"key": "02", "value": "公开"}],
             "format": [{"key": "03", "value": "文档类"}],
         }
 
@@ -107,7 +107,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             {
                 "channel": "未知渠道",
                 "maturity": "未知成熟度",
-                "secrets": "绝密",
+                "security": "绝密",
                 "format": "未知格式",
             },
             request_params,
@@ -115,26 +115,26 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["channel"], "")
         self.assertEqual(result["maturity"], "")
-        self.assertEqual(result["secrets"], "公开")
+        self.assertEqual(result["security"], "公开")
         self.assertEqual(result["format"], "")
 
-    def test_map_analysis_result_resolves_secret_from_candidate_range(self):
+    def test_map_analysis_result_resolves_security_from_candidate_range(self):
         request_params = {
             "fileName": "demo.txt",
-            "secrets": [
+            "security": [
                 {"key": "02", "value": "公开"},
                 {"key": "03", "value": "秘密"},
             ],
         }
 
-        result = map_analysis_result({"secrets": "秘密"}, request_params)
+        result = map_analysis_result({"security": "秘密"}, request_params)
 
-        self.assertEqual(result["secrets"], "秘密")
+        self.assertEqual(result["security"], "秘密")
 
-    def test_map_analysis_result_infers_secret_from_opening_text(self):
+    def test_map_analysis_result_infers_security_from_opening_text(self):
         request_params = {
             "fileName": "demo.txt",
-            "secrets": [
+            "security": [
                 {"key": "02", "value": "公开"},
                 {"key": "03", "value": "秘密"},
             ],
@@ -143,12 +143,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         result = map_analysis_result({}, request_params, original_text=original_text)
 
-        self.assertEqual(result["secrets"], "秘密")
+        self.assertEqual(result["security"], "秘密")
 
-    def test_map_analysis_result_defaults_secret_to_public_when_missing(self):
+    def test_map_analysis_result_defaults_security_to_public_when_missing(self):
         result = map_analysis_result({}, {"fileName": "demo.txt"}, original_text="普通正文内容。")
 
-        self.assertEqual(result["secrets"], "公开")
+        self.assertEqual(result["security"], "公开")
 
     def test_map_analysis_result_matches_options_after_normalization(self):
         request_params = {
@@ -489,7 +489,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         )
 
         self.assertIn('"country"', prompt)
-        self.assertIn('"secrets"', prompt)
+        self.assertIn('"security"', prompt)
+        self.assertNotIn('"secrets"', prompt)
         self.assertIn('"architectureId"', prompt)
         self.assertIn('"fileDataItem"', prompt)
         self.assertIn('"originalText"', prompt)
@@ -564,20 +565,20 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "fileName": "demo.txt",
                 "country": [{"key": "99", "value": "德国"}],
                 "format": [{"key": "88", "value": "数据库类"}],
-                "secrets": [{"key": "03", "value": "秘密"}],
+                "security": [{"key": "03", "value": "秘密"}],
             }
         )
         lines = prompt.splitlines()
         country_options_line = next(line for line in lines if line.startswith("国家候选:"))
         format_options_line = next(line for line in lines if line.startswith("格式候选:"))
-        secrets_options_line = next(line for line in lines if line.startswith("密级候选:"))
+        security_options_line = next(line for line in lines if line.startswith("密级候选:"))
 
         self.assertIn('"德国"', country_options_line)
         self.assertNotIn('"美国"', country_options_line)
         self.assertIn('"数据库类"', format_options_line)
         self.assertNotIn('"文档类"', format_options_line)
-        self.assertIn('"秘密"', secrets_options_line)
-        self.assertNotIn('"公开"', secrets_options_line)
+        self.assertIn('"秘密"', security_options_line)
+        self.assertNotIn('"公开"', security_options_line)
 
     def test_build_file_analysis_prompt_includes_architecture_classification_rules(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
@@ -594,7 +595,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("分类到最底层的叶子节点", prompt)
         self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
-        self.assertIn("默认为“公开”", prompt)
+        self.assertIn("候选包含“公开”则输出“公开”", prompt)
         self.assertIn("由至少 10 个关键词构成", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
@@ -776,7 +777,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "country": "",
                 "channel": "",
                 "maturity": "",
-                "secrets": "",
+                "security": "",
                 "format": "",
                 "architectureId": architecture_id,
                 "fileDataItem": {
@@ -897,7 +898,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(task["result_payload"]["data"]["country"], "")
         self.assertEqual(task["result_payload"]["data"]["channel"], "")
         self.assertEqual(task["result_payload"]["data"]["maturity"], "")
-        self.assertEqual(task["result_payload"]["data"]["secrets"], "公开")
+        self.assertEqual(task["result_payload"]["data"]["security"], "公开")
+        self.assertNotIn("secrets", task["result_payload"]["data"])
         self.assertEqual(task["result_payload"]["data"]["format"], "")
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
         self.assertTrue(all(item["query_mode"] == "query" for item in attempts))

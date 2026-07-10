@@ -73,7 +73,7 @@ DEFAULT_MATURITY_OPTIONS = [
     {"key": "03", "value": "定型成果"},
 ]
 
-DEFAULT_SECRET_OPTIONS = [
+DEFAULT_SECURITY_OPTIONS = [
     {"key": "02", "value": "公开"},
 ]
 
@@ -123,7 +123,7 @@ def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str,
         "channel": _normalize_range_list(request_params.get("channel"), DEFAULT_CHANNEL_OPTIONS),
         "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
         "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
-        "secrets": _normalize_range_list(request_params.get("secrets"), DEFAULT_SECRET_OPTIONS),
+        "security": _normalize_range_list(request_params.get("security"), DEFAULT_SECURITY_OPTIONS),
         "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
         "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
     }
@@ -379,7 +379,7 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
     return ""
 
 
-def _default_secret_value(options: Iterable[Dict[str, Any]]) -> str:
+def _default_security_value(options: Iterable[Dict[str, Any]]) -> str:
     matched = _match_option_value("公开", options)
     if matched:
         return matched
@@ -668,14 +668,14 @@ def _opening_text(original_text: str, *, max_chars: int = 2000, max_lines: int =
     return original_text[:max_chars]
 
 
-def _extract_secret_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
+def _extract_security_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
     opening = _opening_text(original_text)
     if not opening:
         return ""
     lines = [line.strip() for line in opening.splitlines() if line.strip()]
-    secret_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
+    security_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
     for line in lines:
-        if not secret_label_pattern.search(line):
+        if not security_label_pattern.search(line):
             continue
         matched = _match_option_value_from_text(options, line)
         if matched:
@@ -774,9 +774,9 @@ def map_analysis_result(
     raw_country = _first_non_empty_value(parsed_result, "country", "国家")
     raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
     raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
-    raw_secrets = _first_non_empty_value(parsed_result, "secrets", "secret", "密级", "密级程度")
-    if raw_secrets in (None, "", [], {}):
-        raw_secrets = _first_non_empty_value(file_item, "secrets", "secret", "密级", "密级程度")
+    raw_security = _first_non_empty_value(parsed_result, "security", "密级", "密级程度")
+    if raw_security in (None, "", [], {}):
+        raw_security = _first_non_empty_value(file_item, "security", "密级", "密级程度")
     raw_format = _first_non_empty_value(parsed_result, "format", "格式")
     if raw_format in (None, "", [], {}):
         raw_format = _first_non_empty_value(file_item, "dataFormat", "资料格式")
@@ -784,14 +784,14 @@ def map_analysis_result(
     resolved_country = _match_option_value(raw_country, ranges["country"])
     resolved_channel = _match_option_value(raw_channel, ranges["channel"])
     resolved_maturity = _match_option_value(raw_maturity, ranges["maturity"])
-    resolved_secrets = _match_option_value(raw_secrets, ranges["secrets"])
+    resolved_security = _match_option_value(raw_security, ranges["security"])
     resolved_format = _match_option_value(raw_format, ranges["format"])
 
     for field_name, raw_value, resolved_value in (
         ("country", raw_country, resolved_country),
         ("channel", raw_channel, resolved_channel),
         ("maturity", raw_maturity, resolved_maturity),
-        ("secrets", raw_secrets, resolved_secrets),
+        ("security", raw_security, resolved_security),
         ("format", raw_format, resolved_format),
     ):
         if raw_value not in (None, "", [], {}) and not resolved_value:
@@ -857,10 +857,10 @@ def map_analysis_result(
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
-        "secrets": (
-            resolved_secrets
-            or _extract_secret_from_opening_text(normalized_original_text, ranges["secrets"])
-            or _default_secret_value(ranges["secrets"])
+        "security": (
+            resolved_security
+            or _extract_security_from_opening_text(normalized_original_text, ranges["security"])
+            or _default_security_value(ranges["security"])
         ),
         "format": resolved_format,
         "architectureId": architecture_id,
@@ -1053,7 +1053,7 @@ def _validate_analysis_model_contract(
         "country",
         "channel",
         "maturity",
-        "secrets",
+        "security",
         "format",
         "fileDataItem",
     }
@@ -1075,7 +1075,7 @@ def _validate_analysis_model_contract(
     normalized = dict(parsed_result)
     normalized_file_item = dict(file_item)
     ranges = build_effective_analysis_ranges(request_params)
-    for field_name in ("country", "channel", "maturity", "secrets", "format"):
+    for field_name in ("country", "channel", "maturity", "security", "format"):
         raw_value = parsed_result.get(field_name)
         if raw_value in (None, ""):
             normalized[field_name] = ""
@@ -1427,7 +1427,7 @@ def _store_prepared_analysis_document(
         )
     attributes = {
         key: mapped_result.get(key, "")
-        for key in ("country", "channel", "maturity", "secrets", "format")
+        for key in ("country", "channel", "maturity", "security", "format")
     }
     metadata = KnowledgeDocumentMetadata(
         file_name=file_name,
@@ -1691,8 +1691,8 @@ def _execute_file_analysis_task(
             mapped_result["architectureId"] = architecture_id
             for enum_field in ("country", "channel", "maturity", "format"):
                 mapped_result[enum_field] = normalized_result[enum_field]
-            if normalized_result.get("secrets"):
-                mapped_result["secrets"] = normalized_result["secrets"]
+            if normalized_result.get("security"):
+                mapped_result["security"] = normalized_result["security"]
             mapped_result["fileDataItem"]["dataFormat"] = normalized_result["format"]
         except Exception as exc:
             trace = exc.trace if isinstance(exc, RagOperationError) else (

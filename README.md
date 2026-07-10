@@ -161,7 +161,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
    - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
    - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
-   - `params[].secrets` 表示密级候选范围（字典编码），回调 `data.secrets` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时默认为“公开”。
+   - `params[].security` 表示密级候选范围（字典编码），回调 `data.security` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时默认为“公开”。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
