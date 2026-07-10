@@ -150,7 +150,7 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
-| GET | `/debug/api/callback` | 读取旧版最近一次预览文件 `${DOCSENSE_RUNTIME_DIR}/call_back.json`，暂不浏览历史目录 |
+| GET | `/debug/api/callback` | 默认读取 `${DOCSENSE_RUNTIME_DIR}/callback/` 中最新一条回调记录，也可通过 `record=<json文件名>` 读取指定历史记录 |
 | GET | `/debug/chat` | 本地文件对话调试页，联调 `/llm/chat*` 三个接口 |
 | GET | `/debug/api/chat/bootstrap` | 读取本地会话列表与已解析文件列表，供 `/debug/chat` 初始化使用 |
 
