@@ -909,8 +909,192 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(len(knowledge_factory.ports), 1)
         self.assertEqual(leases, [])
 
+    def test_stage9_non_architecture_field_violations_are_mapped_without_failure(self):
+        """普通字段缺失、未知、越界或不一致时应由 mapper 宽松处理。"""
+        with workspace_tempdir() as tmp:
+            file_name = "relaxed-fields.txt"
+            Path(tmp, file_name).write_text("宽松字段测试", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9051, "name": "父节点", "parentId": None},
+                    {"id": 9052, "name": "子节点", "parentId": 9051},
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:relaxed", text="宽松字段来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=json.dumps(
+                            {
+                                "architectureId": 9051,
+                                "country": {"value": "美国"},
+                                "channel": "候选外渠道",
+                                "format": "文档类",
+                                "fileDataItem": {
+                                    "dataFormat": "图片类",
+                                    "summary": "宽松映射摘要",
+                                },
+                                "unexpectedField": "ignored",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        sources=(source,),
+                    )
+                ]
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=knowledge_factory,
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        data = task["result_payload"]["data"]
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(data["architectureId"], 9051)
+        self.assertEqual(data["country"], "美国")
+        self.assertEqual(data["channel"], "")
+        self.assertEqual(data["maturity"], "")
+        self.assertEqual(data["security"], "公开")
+        self.assertEqual(data["format"], "文档类")
+        self.assertEqual(data["fileDataItem"]["dataFormat"], "文档类")
+        self.assertNotIn("unexpectedField", data)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+        self.assertEqual(len(knowledge_factory.ports), 1)
+
+    def test_stage9_non_object_file_data_item_is_mapped_without_failure(self):
+        """fileDataItem 类型错误不再触发普通字段合同失败。"""
+        with workspace_tempdir() as tmp:
+            file_name = "relaxed-file-item.txt"
+            Path(tmp, file_name).write_text("宽松详细字段测试", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9061, "name": "候选一", "parentId": None},
+                    {"id": 9062, "name": "候选二", "parentId": None},
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:file-item", text="详细字段来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=json.dumps(
+                            {
+                                "architectureId": 9062,
+                                "fileDataItem": ["不是对象"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                        sources=(source,),
+                    )
+                ]
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            task = task_service.get_task("file", file_name)
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9062)
+        self.assertIsInstance(task["result_payload"]["data"]["fileDataItem"], dict)
+        self.assertEqual(task["result_payload"]["data"]["fileDataItem"]["score"], 55)
+
+    def test_stage9_valid_model_architecture_id_wins_over_gjb_heuristic(self):
+        """模型已返回合法候选时，GJB 正文不得覆盖该分类。"""
+        with workspace_tempdir() as tmp:
+            file_name = "valid-model-id.txt"
+            Path(tmp, file_name).write_text("GJB 9001C-2017 国家军用标准", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9071, "name": "普通候选", "parentId": None},
+                    {"id": 9072, "name": "数据标准", "parentId": None},
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:model-first", text="分类来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9071),
+                        sources=(source,),
+                    )
+                ]
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9071)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+
+    def test_stage9_invalid_model_architecture_uses_gjb_candidate_before_repair(self):
+        """数字字符串不合法时应先按 GJB 正文命中数据标准候选。"""
+        with workspace_tempdir() as tmp:
+            file_name = "gjb-fallback.txt"
+            Path(tmp, file_name).write_text("本文件为 GJB 9001C-2017 国家军用标准。", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9081, "name": "普通候选", "parentId": None},
+                    {"id": 9082, "name": "数据标准", "parentId": None},
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:gjb", text="GJB 来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, "9081"),
+                        sources=(source,),
+                    )
+                ]
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9082)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+
     def test_stage9_architecture_repair_has_separate_audit_attempt(self):
-        """多候选缺少 architectureId 时只能通过专用修复调用恢复。"""
+        """多候选缺少 architectureId 时可修复为请求中的父节点。"""
         with workspace_tempdir() as tmp:
             file_name = "architecture-repair.txt"
             Path(tmp, file_name).write_text("architecture", encoding="utf-8")
@@ -918,7 +1102,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 file_name,
                 [
                     {"id": 9101, "name": "候选一", "parentId": None},
-                    {"id": 9102, "name": "候选二", "parentId": None},
+                    {"id": 9102, "name": "候选二", "parentId": 9101},
                 ],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
@@ -933,7 +1117,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 ],
                 ask_outcomes=[
                     FakeRagOutcome(
-                        text='{"architectureId":9102}',
+                        text='{"architectureId":9101}',
                         sources=(source,),
                     )
                 ],
@@ -951,7 +1135,57 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             task = task_service.get_task("file", file_name)
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9102)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9101)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [RagPromptKind.ANALYSIS.value, RagPromptKind.ARCHITECTURE_REPAIR.value],
+        )
+
+    def test_stage9_invalid_architecture_repair_fails_without_knowledge_transfer(self):
+        """二次修复仍越界时任务失败，且不得创建永久知识库 Port。"""
+        with workspace_tempdir() as tmp:
+            file_name = "architecture-repair-failure.txt"
+            Path(tmp, file_name).write_text("普通分类文本", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9151, "name": "候选一", "parentId": None},
+                    {"id": 9152, "name": "候选二", "parentId": None},
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:repair-failure", text="分类来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9999),
+                        sources=(source,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":9999}',
+                        sources=(source,),
+                    )
+                ],
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=knowledge_factory,
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(task["result_payload"]["data"]["status"], "3")
+        self.assertEqual(len(knowledge_factory.ports), 0)
         self.assertEqual(
             [item["prompt_kind"] for item in attempts],
             [RagPromptKind.ANALYSIS.value, RagPromptKind.ARCHITECTURE_REPAIR.value],
