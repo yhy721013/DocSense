@@ -343,6 +343,23 @@ python scripts/inspect_llm_tasks.py
 
 其中 `llm_tasks.rows[]` 的每一项对应一条 LLM 任务记录，常用字段包括 `business_type`、`business_key`、`request_payload`、`status`、`progress`、`result_payload`、`callback_status`、`callback_attempts`、`created_at` 和 `updated_at`。脚本会把 `request_payload`、`result_payload` 这类 JSON 字符串自动展开为对象，便于直接查看原始请求和最终结果。可通过 `--db-path` 和 `--output-dir` 指定其他 SQLite 文件或输出目录。
 
+### `/llm/analysis` 存量 `security` 字段迁移
+
+升级到 `security` 字段后，必须先停止 DocSense，再迁移任务库、知识库 metadata 和回调历史中的旧 `secrets` 键。脚本默认只做全量预检，仅显式传入 `--apply` 时才会备份并改写数据：
+
+```bash
+# 1. DocSense 停服后预检命中数
+.venv/bin/python scripts/migrate_analysis_security.py
+
+# 2. 备份并执行迁移
+.venv/bin/python scripts/migrate_analysis_security.py --apply
+
+# 3. 再次预检，changedTargets 和 renamedKeys 应均为 0
+.venv/bin/python scripts/migrate_analysis_security.py
+```
+
+迁移备份和包含源文件/备份文件哈希的 manifest 写入 `${DOCSENSE_RUNTIME_DIR}/migration_backups/analysis-security-<timestamp>/`。同值新旧双键会保留 `security` 并删除 `secrets`；异值双键或非法 JSON 会在改写前直接终止。脚本不改写 LLM 审计 Prompt、模型原始响应、attempt raw response 和 trace digest，也不扫描历史导出、E2E 快照或方案文档。自定义路径时可使用 `--runtime-dir`、`--task-db` 和 `--knowledge-db`。
+
 本地联调脚本（PowerShell）：
 
 ```powershell
