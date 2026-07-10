@@ -94,11 +94,14 @@ class ChatDocument:
 
 @dataclass(frozen=True)
 class ChatRun:
-    """One execution attempt for `/llm/chat`."""
+    """One internally identified execution attempt for `/llm/chat`.
+
+    ``run_id`` is an implementation key for lifecycle, messages, and external
+    resource leases.  It is intentionally not part of the HTTP or SSE contract.
+    """
 
     run_id: str
     chat_id: str
-    request_id: str
     status: str
     abort_requested: bool
     owner_instance_id: str
@@ -108,6 +111,38 @@ class ChatRun:
     started_at: Optional[str]
     completed_at: Optional[str]
     updated_at: str
+
+
+@dataclass(frozen=True)
+class ChatRunEvent:
+    """One internally persisted event emitted by a file-chat run."""
+
+    run_id: str
+    event_seq: int
+    event_type: str
+    data: Mapping[str, Any]
+    created_at: str
+
+    def __post_init__(self) -> None:
+        run_id = str(self.run_id or "").strip()
+        event_type = str(self.event_type or "").strip()
+        created_at = str(self.created_at or "").strip()
+        if not run_id:
+            raise ValueError("run_id cannot be empty")
+        if isinstance(self.event_seq, bool) or not isinstance(self.event_seq, int):
+            raise TypeError("event_seq must be int")
+        if self.event_seq < 1:
+            raise ValueError("event_seq must be positive")
+        if not event_type:
+            raise ValueError("event_type cannot be empty")
+        if not isinstance(self.data, Mapping):
+            raise TypeError("data must be a mapping")
+        if not created_at:
+            raise ValueError("created_at cannot be empty")
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "event_type", event_type)
+        object.__setattr__(self, "created_at", created_at)
+        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
 
 
 @dataclass(frozen=True)

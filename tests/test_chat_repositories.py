@@ -214,7 +214,6 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         accepted = self.store.runs.create(
             run_id="run-a",
             chat_id="chat-run",
-            request_id="request-a",
             owner_instance_id="instance-a",
         )
         self.store.runs.create(run_id="run-b", chat_id="chat-run")
@@ -246,7 +245,6 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         created = self.store.runs.create(
             run_id="run-identity",
             chat_id="chat-identity",
-            request_id="request-a",
             owner_instance_id="owner-a",
         )
         self.store.runs.mark_running("run-identity")
@@ -254,7 +252,6 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         same = self.store.runs.create(
             run_id="run-identity",
             chat_id="chat-identity",
-            request_id="request-a",
             owner_instance_id="owner-a",
         )
 
@@ -263,17 +260,73 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.runs.create(
                 run_id="run-identity",
-                chat_id="chat-identity",
-                request_id="request-b",
+                chat_id="another-chat",
                 owner_instance_id="owner-a",
             )
         with self.assertRaises(ValueError):
             self.store.runs.create(
                 run_id="run-identity",
                 chat_id="chat-identity",
-                request_id="request-a",
                 owner_instance_id="owner-b",
             )
+
+    def test_legacy_internal_request_id_column_is_ignored(self) -> None:
+        legacy_db_path = f"{self.tmp}/legacy-run-column.sqlite3"
+        with sqlite3.connect(legacy_db_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE chat_sessions (
+                    chat_id TEXT PRIMARY KEY,
+                    workspace_ref TEXT NOT NULL DEFAULT '',
+                    thread_ref TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE chat_runs (
+                    run_id TEXT PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    abort_requested INTEGER NOT NULL DEFAULT 0,
+                    owner_instance_id TEXT NOT NULL DEFAULT '',
+                    heartbeat_at TEXT,
+                    error_message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_sessions (
+                    chat_id, status, created_at, updated_at
+                ) VALUES ('legacy-chat', 'active', 'now', 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_runs (
+                    run_id, chat_id, request_id, status, owner_instance_id,
+                    created_at, updated_at
+                ) VALUES ('legacy-run', 'legacy-chat', 'obsolete-request', 'accepted', '', 'now', 'now')
+                """
+            )
+
+        legacy_store = ChatStore(legacy_db_path)
+        run = legacy_store.runs.get("legacy-run")
+
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual("legacy-run", run.run_id)
+        self.assertFalse(hasattr(run, "request_id"))
 
     def test_terminal_run_status_is_not_reopened(self) -> None:
         self.store.sessions.create_or_get(chat_id="chat-terminal")

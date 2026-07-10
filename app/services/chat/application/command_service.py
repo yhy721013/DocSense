@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import ChatRun
 from app.services.chat.locking.lock_service import ChatRunLockService
 
@@ -105,12 +106,14 @@ class ChatCommandService:
         user_message_id: str,
         assistant_message_id: str,
         assistant_content: str,
+        terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
         return self._lock_service.complete_run_with_messages(
             run_id=run_id,
             user_message_id=user_message_id,
             assistant_message_id=assistant_message_id,
             assistant_content=assistant_content,
+            terminal_event=terminal_event,
         )
 
     def fail_chat_run_with_user(
@@ -119,11 +122,13 @@ class ChatCommandService:
         run_id: str,
         user_message_id: str,
         error_message: str,
+        terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
         return self._lock_service.fail_run_with_user(
             run_id=run_id,
             user_message_id=user_message_id,
             error_message=error_message,
+            terminal_event=terminal_event,
         )
 
     def abort_chat_run_with_user(
@@ -131,10 +136,12 @@ class ChatCommandService:
         *,
         run_id: str,
         user_message_id: str,
+        terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
         return self._lock_service.abort_run_with_user(
             run_id=run_id,
             user_message_id=user_message_id,
+            terminal_event=terminal_event,
         )
 
     def expire_stale_chat_runs(self, *, chat_id: str) -> tuple[ChatRun, ...]:

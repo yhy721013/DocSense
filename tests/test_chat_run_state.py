@@ -35,21 +35,18 @@ class ChatRunLockServiceTests(unittest.TestCase):
         first = self.locks.try_acquire_chat_run(
             chat_id="chat-a",
             run_id="run-a",
-            request_id="request-a",
         )
 
         with self.assertRaises(ChatRunBusyError) as error:
             self.locks.try_acquire_chat_run(
                 chat_id="chat-a",
                 run_id="run-b",
-                request_id="request-b",
             )
 
         completed = self.locks.complete_run("run-a")
         second = self.locks.try_acquire_chat_run(
             chat_id="chat-a",
             run_id="run-b",
-            request_id="request-b",
         )
 
         self.assertEqual(RUN_RUNNING, first.status)

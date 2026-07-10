@@ -27,6 +27,8 @@ from app.services.chat.domain.models import (
     SESSION_ERROR,
     ChatRun,
 )
+from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.persistence.event_repository import ChatRunEventRepository
 from app.services.chat.persistence.repositories import (
     ChatRunRepository,
     _connection_scope,
@@ -124,14 +126,12 @@ class ChatRunLockService:
         *,
         chat_id: str,
         run_id: str | None = None,
-        request_id: str | None = None,
         user_message: str | None = None,
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
     ) -> ChatRun:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_run_id = _optional_text(run_id) or uuid.uuid4().hex
-        normalized_request_id = _optional_text(request_id) or normalized_run_id
         now = _utc_now_iso()
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
 
@@ -195,15 +195,14 @@ class ChatRunLockService:
             connection.execute(
                 """
                 INSERT INTO chat_runs (
-                    run_id, chat_id, request_id, status, abort_requested,
+                    run_id, chat_id, status, abort_requested,
                     owner_instance_id, heartbeat_at, error_message,
                     created_at, started_at, completed_at, updated_at
-                ) VALUES (?, ?, ?, ?, 0, ?, NULL, '', ?, NULL, NULL, ?)
+                ) VALUES (?, ?, ?, 0, ?, NULL, '', ?, NULL, NULL, ?)
                 """,
                 (
                     normalized_run_id,
                     normalized_chat_id,
-                    normalized_request_id,
                     RUN_ACCEPTED,
                     self.owner_instance_id,
                     now,
@@ -253,10 +252,9 @@ class ChatRunLockService:
                     created_at=now,
                 )
             logger.info(
-                "文件对话run锁获取成功: chat_id=%s run_id=%s request_id=%s owner=%s",
+                "文件对话run锁获取成功: chat_id=%s run_id=%s owner=%s",
                 normalized_chat_id,
                 normalized_run_id,
-                normalized_request_id,
                 self.owner_instance_id,
             )
             return self._row(row)
@@ -324,6 +322,7 @@ class ChatRunLockService:
         user_message_id: str,
         assistant_message_id: str,
         assistant_content: str,
+        terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
         """Commit one successful turn and its terminal run state atomically."""
         return self._finish_run_with_user(
@@ -333,6 +332,7 @@ class ChatRunLockService:
             error_message="",
             assistant_message_id=assistant_message_id,
             assistant_content=assistant_content,
+            terminal_event=terminal_event,
         )
 
     def fail_run_with_user(
@@ -341,20 +341,29 @@ class ChatRunLockService:
         run_id: str,
         user_message_id: str,
         error_message: str,
+        terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
         return self._finish_run_with_user(
             run_id=run_id,
             user_message_id=user_message_id,
             terminal_status=RUN_FAILED,
             error_message=_required_text(error_message, name="error_message"),
+            terminal_event=terminal_event,
         )
 
-    def abort_run_with_user(self, *, run_id: str, user_message_id: str) -> ChatRun:
+    def abort_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
         return self._finish_run_with_user(
             run_id=run_id,
             user_message_id=user_message_id,
             terminal_status=RUN_ABORTED,
             error_message="",
+            terminal_event=terminal_event,
         )
 
     def complete_run(self, run_id: str) -> ChatRun:
@@ -625,11 +634,16 @@ class ChatRunLockService:
         error_message: str,
         assistant_message_id: str = "",
         assistant_content: str = "",
+        terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
         normalized_run_id = _required_text(run_id, name="run_id")
         normalized_user_message_id = _required_text(
             user_message_id,
             name="user_message_id",
+        )
+        normalized_terminal_event = self._validate_terminal_event(
+            terminal_event=terminal_event,
+            terminal_status=terminal_status,
         )
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
@@ -711,6 +725,12 @@ class ChatRunLockService:
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_run status was changed concurrently")
+            if normalized_terminal_event is not None:
+                ChatRunEventRepository.append_in_transaction(
+                    connection=connection,
+                    run_id=normalized_run_id,
+                    event=normalized_terminal_event,
+                )
             row = connection.execute(
                 "SELECT * FROM chat_runs WHERE run_id = ?",
                 (normalized_run_id,),
@@ -718,6 +738,29 @@ class ChatRunLockService:
             if row is None:
                 raise ValueError("chat_run 不存在")
             return self._row(row)
+
+    @staticmethod
+    def _validate_terminal_event(
+        *,
+        terminal_event: ChatStreamEvent | None,
+        terminal_status: str,
+    ) -> ChatStreamEvent | None:
+        if terminal_event is None:
+            return None
+        if not isinstance(terminal_event, ChatStreamEvent):
+            raise TypeError("terminal_event must be ChatStreamEvent")
+        expected_type = {
+            RUN_SUCCEEDED: "done",
+            RUN_FAILED: "error",
+            RUN_ABORTED: "aborted",
+        }.get(terminal_status)
+        if expected_type is None:
+            raise ValueError("terminal_status does not support a stream event")
+        if terminal_event.event_type != expected_type:
+            raise ValueError(
+                "terminal_event type does not match the requested run terminal status"
+            )
+        return terminal_event
 
     @staticmethod
     def _get_run_with_connection(
@@ -737,7 +780,6 @@ class ChatRunLockService:
         return ChatRun(
             run_id=row["run_id"],
             chat_id=row["chat_id"],
-            request_id=row["request_id"],
             status=row["status"],
             abort_requested=bool(row["abort_requested"]),
             owner_instance_id=row["owner_instance_id"],

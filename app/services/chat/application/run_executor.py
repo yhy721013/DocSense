@@ -597,20 +597,27 @@ class ChatRunEventRecorder:
                             user_message_id=user_message_id,
                             assistant_message_id=assistant_message_id,
                             assistant_content="".join(assistant_parts),
+                            terminal_event=event,
                         )
                     elif event.event_type == "aborted":
                         chat_commands.abort_chat_run_with_user(
                             run_id=request.run_id,
                             user_message_id=user_message_id,
+                            terminal_event=event,
                         )
                     else:
                         chat_commands.fail_chat_run_with_user(
                             run_id=request.run_id,
                             user_message_id=user_message_id,
                             error_message="chat stream emitted error event",
+                            terminal_event=event,
                         )
                     terminal_event = event.event_type
                 else:
+                    self._store.events.append(
+                        run_id=request.run_id,
+                        event=event,
+                    )
                     last_heartbeat_at = self._heartbeat_if_due(
                         run_id=request.run_id,
                         chat_commands=chat_commands,
@@ -639,10 +646,12 @@ class ChatRunEventRecorder:
                         request.chat_id,
                         request.run_id,
                     )
-                    chat_commands.fail_chat_run_with_user(
+                    self._finish_failed(
+                        request=request,
                         run_id=request.run_id,
                         user_message_id=user_message_id,
                         error_message="chat stream ended without terminal event",
+                        chat_commands=chat_commands,
                     )
         except GeneratorExit:
             if user_written and not terminal_event:
@@ -664,10 +673,12 @@ class ChatRunEventRecorder:
                         request.chat_id,
                         request.run_id,
                     )
-                    chat_commands.fail_chat_run_with_user(
+                    self._finish_failed(
+                        request=request,
                         run_id=request.run_id,
                         user_message_id=user_message_id,
                         error_message="chat stream closed before completion",
+                        chat_commands=chat_commands,
                     )
             raise
         except Exception as exc:
@@ -695,10 +706,12 @@ class ChatRunEventRecorder:
                     request.run_id,
                 )
                 if user_written:
-                    chat_commands.fail_chat_run_with_user(
+                    self._finish_failed(
+                        request=request,
                         run_id=request.run_id,
                         user_message_id=user_message_id,
                         error_message=str(exc) or exc.__class__.__name__,
+                        chat_commands=chat_commands,
                     )
                 else:
                     chat_commands.fail_chat_run(
@@ -765,16 +778,57 @@ class ChatRunEventRecorder:
     ) -> ChatStreamEvent:
         # 中断时保留 user committed，丢弃已输出但不完整的 assistant 片段；
         # 这是本地历史的权威语义，不依赖 AnythingLLM 是否已经写入远端 Thread。
+        event = ChatStreamEvent("aborted", {"chatId": request.chat_id})
         chat_commands.abort_chat_run_with_user(
             run_id=request.run_id,
             user_message_id=user_message_id,
+            terminal_event=event,
         )
         logger.info(
             "文件对话run按中断完成收敛: chat_id=%s run_id=%s",
             request.chat_id,
             request.run_id,
         )
-        return ChatStreamEvent("aborted", {"chatId": request.chat_id})
+        return event
+
+    @staticmethod
+    def _failure_event(*, error_message: str) -> ChatStreamEvent:
+        return ChatStreamEvent("error", {"error": error_message})
+
+    def _finish_failed(
+        self,
+        *,
+        request: ChatRunStreamRequest,
+        run_id: str,
+        user_message_id: str,
+        error_message: str,
+        chat_commands: ChatCommandService,
+    ) -> None:
+        """Persist a non-presented terminal error while preserving run cleanup.
+
+        A client-side disconnect has no final SSE frame in the frozen protocol.
+        The internal ledger still needs a terminal record, but a ledger failure
+        must not leave the active run locked forever.
+        """
+        terminal_event = self._failure_event(error_message=error_message)
+        try:
+            chat_commands.fail_chat_run_with_user(
+                run_id=run_id,
+                user_message_id=user_message_id,
+                error_message=error_message,
+                terminal_event=terminal_event,
+            )
+        except Exception:
+            logger.exception(
+                "终态事件写入失败，降级收敛文件对话run: chat_id=%s run_id=%s",
+                request.chat_id,
+                run_id,
+            )
+            chat_commands.fail_chat_run_with_user(
+                run_id=run_id,
+                user_message_id=user_message_id,
+                error_message=error_message,
+            )
 
     def _abort_requested(self, run_id: str) -> bool:
         run = self._store.runs.get(run_id)

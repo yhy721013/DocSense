@@ -20,10 +20,10 @@ from app.services.chat import (
     ChatDeleteNotFoundError,
     ChatDocumentNotFoundError,
     ChatRunBusyError,
+    ChatRunExecutionLease,
     ChatSessionUnavailableError,
     ChatTitleEmptyHistoryError,
     ChatTitleUnavailableError,
-    record_chat_run_events,
 )
 from app.services.core.progress import normalize_progress
 from app.services.core.settings import (
@@ -966,12 +966,8 @@ def llm_chat():
     )
 
     try:
-        stream = chat_run_executor.stream_chat_run(chat_run_request)
-        stream = record_chat_run_events(
-            request=chat_run_request,
-            events=stream,
-            store=services.chat_store,
-            chat_commands=services.chat_commands,
+        stream = services.chat_dispatcher.dispatch(
+            ChatRunExecutionLease(request=chat_run_request)
         )
         generator = finalize_chat_run_stream(
             stream=stream,

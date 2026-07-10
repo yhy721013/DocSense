@@ -154,7 +154,6 @@ def ensure_chat_schema(db_path: str) -> None:
             CREATE TABLE IF NOT EXISTS chat_runs (
                 run_id TEXT PRIMARY KEY,
                 chat_id TEXT NOT NULL,
-                request_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL CHECK (
                     status IN (
                         'accepted', 'running', 'succeeded', 'failed', 'aborted'
@@ -182,6 +181,20 @@ def ensure_chat_schema(db_path: str) -> None:
                 message TEXT NOT NULL,
                 files_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_run_events (
+                run_id TEXT NOT NULL,
+                event_seq INTEGER NOT NULL CHECK (event_seq > 0),
+                event_type TEXT NOT NULL,
+                data_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, event_seq),
                 FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
                     ON DELETE CASCADE
             )
@@ -268,14 +281,15 @@ def ensure_chat_schema(db_path: str) -> None:
         )
         connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_chat_runs_request_id
-            ON chat_runs (request_id)
+            CREATE INDEX IF NOT EXISTS idx_chat_run_inputs_created_at
+            ON chat_run_inputs (created_at)
             """
         )
         connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_chat_run_inputs_created_at
-            ON chat_run_inputs (created_at)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_run_events_terminal
+            ON chat_run_events (run_id)
+            WHERE event_type IN ('done', 'error', 'aborted')
             """
         )
         connection.execute(
@@ -792,7 +806,6 @@ class ChatRunRepository(_Repository):
         *,
         run_id: str,
         chat_id: str,
-        request_id: str = "",
         status: str = RUN_ACCEPTED,
         owner_instance_id: str = "",
     ) -> ChatRun:
@@ -816,7 +829,6 @@ class ChatRunRepository(_Repository):
                 self._reject_identity_conflict(
                     existing,
                     chat_id=normalized_chat_id,
-                    request_id=_optional_text(request_id),
                     owner_instance_id=_optional_text(owner_instance_id),
                 )
                 logger.debug(
@@ -829,14 +841,13 @@ class ChatRunRepository(_Repository):
             connection.execute(
                 """
                 INSERT INTO chat_runs (
-                    run_id, chat_id, request_id, status, owner_instance_id,
+                    run_id, chat_id, status, owner_instance_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_run_id,
                     normalized_chat_id,
-                    _optional_text(request_id),
                     normalized_status,
                     _optional_text(owner_instance_id),
                     now,
@@ -844,10 +855,9 @@ class ChatRunRepository(_Repository):
                 ),
             )
             logger.info(
-                "创建文件对话run记录: chat_id=%s run_id=%s request_id=%s owner=%s status=%s",
+                "创建文件对话run记录: chat_id=%s run_id=%s owner=%s status=%s",
                 normalized_chat_id,
                 normalized_run_id,
-                _optional_text(request_id),
                 _optional_text(owner_instance_id),
                 normalized_status,
             )
@@ -1021,13 +1031,10 @@ class ChatRunRepository(_Repository):
         row: sqlite3.Row,
         *,
         chat_id: str,
-        request_id: str,
         owner_instance_id: str,
     ) -> None:
         if row["chat_id"] != chat_id:
             raise ValueError("run_id is already bound to another chat_id")
-        if row["request_id"] != request_id:
-            raise ValueError("run_id is already bound to another request_id")
         if row["owner_instance_id"] != owner_instance_id:
             raise ValueError("run_id is already bound to another owner_instance_id")
 
@@ -1047,7 +1054,6 @@ class ChatRunRepository(_Repository):
         return ChatRun(
             run_id=row["run_id"],
             chat_id=row["chat_id"],
-            request_id=row["request_id"],
             status=row["status"],
             abort_requested=bool(row["abort_requested"]),
             owner_instance_id=row["owner_instance_id"],

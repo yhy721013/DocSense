@@ -7,6 +7,10 @@ from app.services.chat.persistence.repositories import (
     ChatSessionRepository,
     ensure_chat_schema,
 )
+from app.services.chat.persistence.event_repository import (
+    ChatRunEventRepository,
+    ChatRunEventStore,
+)
 from app.services.chat.persistence.resource_lease_service import (
     ChatResourceLeaseService,
 )
@@ -17,6 +21,8 @@ __all__ = [
     "ChatMessageRepository",
     "ChatPersistenceStore",
     "ChatResourceLeaseService",
+    "ChatRunEventRepository",
+    "ChatRunEventStore",
     "ChatRunRepository",
     "ChatSessionRepository",
     "ChatStore",

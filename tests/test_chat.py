@@ -17,6 +17,8 @@ from app.services.chat import (
     ChatTitleService,
     DatabaseChatDocumentResolver,
     SynchronousChatRunExecutor,
+    InlineChatRunDispatcher,
+    record_chat_run_events,
 )
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
 from app.services.core.database import ChatDatabaseService, DatabaseService
@@ -39,6 +41,20 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         stream_contents=("第一段", "第二段")
     )
     kb_service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
+    chat_run_executor = SynchronousChatRunExecutor(
+        store=chat_store,
+        chat_commands=chat_commands,
+        conversation_factory=chat_conversation_factory,
+        document_resolver=DatabaseChatDocumentResolver(kb_service),
+    )
+    chat_dispatcher = InlineChatRunDispatcher(
+        execute=lambda lease: record_chat_run_events(
+            request=lease.request,
+            events=chat_run_executor.stream_chat_run(lease.request),
+            store=chat_store,
+            chat_commands=chat_commands,
+        )
+    )
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
@@ -50,12 +66,8 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         chat_db=ChatDatabaseService(db_path=chat_db_path),
         chat_store=chat_store,
         chat_commands=chat_commands,
-        chat_run_executor=SynchronousChatRunExecutor(
-            store=chat_store,
-            chat_commands=chat_commands,
-            conversation_factory=chat_conversation_factory,
-            document_resolver=DatabaseChatDocumentResolver(kb_service),
-        ),
+        chat_run_executor=chat_run_executor,
+        chat_dispatcher=chat_dispatcher,
         chat_history=chat_history,
         chat_title=ChatTitleService(
             store=chat_store,
@@ -159,7 +171,37 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual(["user", "assistant"], [item.role for item in messages])
         self.assertEqual("你好", messages[0].content)
         self.assertEqual("第一段第二段", messages[1].content)
+        self.assertEqual(
+            ["chatInfo", "textChunk", "textChunk", "done"],
+            [
+                event.event_type
+                for event in self.services.chat_store.events.list_by_run(
+                    messages[0].run_id
+                )
+            ],
+        )
         self.assertIsNone(self.services.chat_db.get_chat("chat-empty"))
+
+    def test_chat_sse_contract_does_not_expose_internal_run_identity(self) -> None:
+        response = self._chat(
+            chat_id="chat-contract",
+            file_names=[],
+            message="验证既有 SSE 协议",
+        )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(
+            'event: chatInfo\ndata: {"chatId": "chat-contract", "isNewChat": true}\n\n'
+            'event: textChunk\ndata: {"content": "第一段"}\n\n'
+            'event: textChunk\ndata: {"content": "第二段"}\n\n'
+            'event: done\ndata: {"chatId": "chat-contract"}\n\n',
+            body,
+        )
+        self.assertNotIn("runId", body)
+        self.assertNotIn("requestId", body)
+        self.assertNotIn("\nid:", body)
+        self.assertNotIn("X-Chat-Run-Id", response.headers)
+        self.assertNotIn("X-Request-Id", response.headers)
 
     def test_document_snapshot_is_resolved_inside_application_layer(self) -> None:
         self._save_document()

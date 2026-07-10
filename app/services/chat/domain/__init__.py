@@ -38,6 +38,7 @@ from app.services.chat.domain.models import (
     ChatMessageFile,
     ChatResourceLease,
     ChatRun,
+    ChatRunEvent,
     ChatSession,
 )
 
@@ -47,6 +48,7 @@ __all__ = [
     "ChatMessageFile",
     "ChatResourceLease",
     "ChatRun",
+    "ChatRunEvent",
     "ChatSession",
     "ChatStreamEvent",
     "LEASE_ACTIVE",

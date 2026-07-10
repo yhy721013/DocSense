@@ -5,6 +5,11 @@ from app.services.chat.application.abort_service import (
     ChatAbortService,
 )
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.application.dispatcher import (
+    ChatRunDispatcher,
+    ChatRunExecutionLease,
+    InlineChatRunDispatcher,
+)
 from app.services.chat.application.delete_service import (
     ChatDeleteBusyError,
     ChatDeleteCleanupError,
@@ -49,11 +54,14 @@ __all__ = [
     "ChatDeleteService",
     "ChatHistoryService",
     "ChatRunDocumentSnapshot",
+    "ChatRunDispatcher",
     "ChatRunEventRecorder",
+    "ChatRunExecutionLease",
     "ChatRunExecutor",
     "ChatRunStreamRequest",
     "DatabaseChatDocumentResolver",
     "PreparedChatRun",
+    "InlineChatRunDispatcher",
     "ResolvedChatDocument",
     "SynchronousChatRunExecutor",
     "ChatTitleEmptyHistoryError",

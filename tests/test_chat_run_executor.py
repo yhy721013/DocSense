@@ -9,6 +9,7 @@ from unittest.mock import patch
 from app.ports import ChatDocumentRef
 from app.services.chat import (
     ChatCommandService,
+    ChatRunEventRepository,
     ChatRunLockService,
     ChatRunExecutor,
     ChatRunEventRecorder,
@@ -144,6 +145,10 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.assertEqual(MESSAGE_ROLE_ASSISTANT, messages[1].role)
         self.assertEqual(MESSAGE_COMMITTED, messages[1].status)
         self.assertEqual("你好世界", messages[1].content)
+        self.assertEqual(
+            ["chatInfo", "textChunk", "textChunk", "done"],
+            [event.event_type for event in self.store.events.list_by_run("run-1")],
+        )
 
     def test_error_commits_user_without_partial_assistant(self) -> None:
         events = [
@@ -388,6 +393,89 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(RUN_FAILED, run.status)
         self.assertIsNotNone(run.heartbeat_at)
+        self.assertEqual(
+            ["chatInfo", "error"],
+            [event.event_type for event in self.store.events.list_by_run("run-1")],
+        )
+
+    def test_event_is_persisted_before_it_is_yielded(self) -> None:
+        stream = record_chat_run_events(
+            request=self.request,
+            events=[
+                ChatStreamEvent("textChunk", {"content": "第一段"}),
+                ChatStreamEvent("done", {"chatId": "chat-1"}),
+            ],
+            store=self.store,
+            chat_commands=self.commands,
+        )
+
+        first = next(stream)
+
+        self.assertEqual(ChatStreamEvent("textChunk", {"content": "第一段"}), first)
+        self.assertEqual(
+            ["textChunk"],
+            [event.event_type for event in self.store.events.list_by_run("run-1")],
+        )
+        stream.close()
+
+    def test_terminal_event_failure_rolls_back_message_and_run_terminal_state(self) -> None:
+        self.store.messages.append(
+            message_id="run-1:user",
+            chat_id="chat-1",
+            run_id="run-1",
+            role=MESSAGE_ROLE_USER,
+            content="请总结",
+            status=MESSAGE_PENDING,
+        )
+
+        with patch.object(
+            ChatRunEventRepository,
+            "append_in_transaction",
+            side_effect=RuntimeError("event write failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "event write failed"):
+                self.commands.complete_chat_run_with_messages(
+                    run_id="run-1",
+                    user_message_id="run-1:user",
+                    assistant_message_id="run-1:assistant",
+                    assistant_content="必须回滚",
+                    terminal_event=ChatStreamEvent("done", {"chatId": "chat-1"}),
+                )
+
+        user = self.store.messages.list_by_chat("chat-1")[0]
+        run = self.store.runs.get("run-1")
+        self.assertEqual(MESSAGE_PENDING, user.status)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_RUNNING, run.status)
+        self.assertEqual((), self.store.events.list_by_run("run-1"))
+
+    def test_non_terminal_event_persistence_failure_fails_run_without_yielding_it(self) -> None:
+        with patch.object(
+            self.store.events,
+            "append",
+            side_effect=RuntimeError("event ledger unavailable"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "event ledger unavailable"):
+                list(
+                    record_chat_run_events(
+                        request=self.request,
+                        events=[ChatStreamEvent("textChunk", {"content": "不会展示"})],
+                        store=self.store,
+                        chat_commands=self.commands,
+                    )
+                )
+
+        run = self.store.runs.get("run-1")
+        messages = self.store.messages.list_by_chat("chat-1")
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
+        self.assertEqual([MESSAGE_ROLE_USER], [message.role for message in messages])
+        self.assertEqual(
+            ["error"],
+            [event.event_type for event in self.store.events.list_by_run("run-1")],
+        )
 
     def test_user_pending_append_is_idempotent_after_commit(self) -> None:
         events = [

@@ -5,6 +5,11 @@ from app.services.chat.application.abort_service import (
     ChatAbortService,
 )
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.application.dispatcher import (
+    ChatRunDispatcher,
+    ChatRunExecutionLease,
+    InlineChatRunDispatcher,
+)
 from app.services.chat.application.delete_service import (
     ChatDeleteBusyError,
     ChatDeleteCleanupError,
@@ -78,9 +83,14 @@ from app.services.chat.domain.models import (
     ChatMessageFile,
     ChatResourceLease,
     ChatRun,
+    ChatRunEvent,
     ChatRunInput,
     ChatRunInputFile,
     ChatSession,
+)
+from app.services.chat.persistence.event_repository import (
+    ChatRunEventRepository,
+    ChatRunEventStore,
 )
 from app.services.chat.locking.lock_service import (
     DEFAULT_STALE_RUN_SECONDS,
@@ -124,10 +134,15 @@ __all__ = [
     "ChatResourceLease",
     "ChatResourceLeaseService",
     "ChatRun",
+    "ChatRunEvent",
+    "ChatRunEventRepository",
+    "ChatRunEventStore",
     "ChatRunBusyError",
     "ChatRunDocumentSnapshot",
+    "ChatRunDispatcher",
     "ChatRunInactiveError",
     "ChatRunEventRecorder",
+    "ChatRunExecutionLease",
     "ChatRunExecutor",
     "ChatRunLockService",
     "ChatRunInput",
@@ -183,6 +198,7 @@ __all__ = [
     "SESSION_ERROR",
     "SESSION_STATUSES",
     "PreparedChatRun",
+    "InlineChatRunDispatcher",
     "ResolvedChatDocument",
     "SynchronousChatRunExecutor",
     "ensure_chat_schema",

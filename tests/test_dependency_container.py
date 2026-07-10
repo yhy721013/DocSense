@@ -33,12 +33,15 @@ from app.services.chat import (
     ChatCommandService,
     ChatDeleteService,
     ChatHistoryService,
+    ChatRunDispatcher,
     ChatPersistenceStore,
     ChatRunLockService,
     ChatStore,
     ChatTitleService,
     DatabaseChatDocumentResolver,
     SynchronousChatRunExecutor,
+    InlineChatRunDispatcher,
+    record_chat_run_events,
 )
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -226,6 +229,20 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         kb_service = DatabaseService(
             db_path=f"{self.runtime_directory}/knowledge.sqlite3"
         )
+        chat_run_executor = SynchronousChatRunExecutor(
+            store=chat_store,
+            chat_commands=chat_commands,
+            conversation_factory=self.chat_conversation_factory,
+            document_resolver=DatabaseChatDocumentResolver(kb_service),
+        )
+        chat_dispatcher = InlineChatRunDispatcher(
+            execute=lambda lease: record_chat_run_events(
+                request=lease.request,
+                events=chat_run_executor.stream_chat_run(lease.request),
+                store=chat_store,
+                chat_commands=chat_commands,
+            )
+        )
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -237,12 +254,8 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             chat_db=chat_db,
             chat_store=chat_store,
             chat_commands=chat_commands,
-            chat_run_executor=SynchronousChatRunExecutor(
-                store=chat_store,
-                chat_commands=chat_commands,
-                conversation_factory=self.chat_conversation_factory,
-                document_resolver=DatabaseChatDocumentResolver(kb_service),
-            ),
+            chat_run_executor=chat_run_executor,
+            chat_dispatcher=chat_dispatcher,
             chat_history=chat_history,
             chat_title=ChatTitleService(
                 store=chat_store,
@@ -291,6 +304,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_store, ChatPersistenceStore)
         self.assertIsInstance(self.services.chat_store, ChatStore)
         self.assertIsInstance(self.services.chat_commands, ChatCommandService)
+        self.assertIsInstance(self.services.chat_dispatcher, ChatRunDispatcher)
         self.assertIsInstance(self.services.chat_history, ChatHistoryService)
         self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
@@ -329,6 +343,8 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         for constructor in forbidden_constructors:
             with self.subTest(constructor=constructor):
                 self.assertNotIn(constructor, blueprint_source)
+        self.assertNotIn("record_chat_run_events", blueprint_source)
+        self.assertNotIn("stream_chat_run(chat_run_request)", blueprint_source)
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_analysis_route_injects_factories_without_entering_leases(
