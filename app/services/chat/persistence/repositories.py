@@ -25,11 +25,16 @@ from app.services.chat.domain.models import (
     RUN_SUCCEEDED,
     RUN_TERMINAL_STATUSES,
     SESSION_ACTIVE,
+    SESSION_DELETED,
+    SESSION_DELETING,
+    SESSION_ERROR,
     SESSION_STATUSES,
     ChatDocument,
     ChatMessage,
     ChatMessageFile,
     ChatRun,
+    ChatRunInput,
+    ChatRunInputFile,
     ChatSession,
 )
 
@@ -49,6 +54,13 @@ _MESSAGE_STATUS_TRANSITIONS = {
     MESSAGE_PENDING: frozenset({MESSAGE_COMMITTED, MESSAGE_DISCARDED}),
     MESSAGE_COMMITTED: frozenset(),
     MESSAGE_DISCARDED: frozenset(),
+}
+
+_SESSION_STATUS_TRANSITIONS = {
+    SESSION_ACTIVE: frozenset({SESSION_DELETING}),
+    SESSION_DELETING: frozenset({SESSION_DELETED, SESSION_ERROR}),
+    SESSION_ERROR: frozenset({SESSION_DELETING}),
+    SESSION_DELETED: frozenset(),
 }
 
 
@@ -87,6 +99,13 @@ def _json_loads_object(value: str) -> dict[str, Any]:
     loaded = json.loads(value or "{}")
     if not isinstance(loaded, dict):
         raise ValueError("metadata_json 必须是 JSON 对象")
+    return loaded
+
+
+def _json_loads_list(value: str) -> list[Any]:
+    loaded = json.loads(value or "[]")
+    if not isinstance(loaded, list):
+        raise ValueError("files_json must be a JSON array")
     return loaded
 
 
@@ -152,6 +171,18 @@ def ensure_chat_schema(db_path: str) -> None:
                 completed_at TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_run_inputs (
+                run_id TEXT PRIMARY KEY,
+                message TEXT NOT NULL,
+                files_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
                     ON DELETE CASCADE
             )
             """
@@ -239,6 +270,12 @@ def ensure_chat_schema(db_path: str) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_chat_runs_request_id
             ON chat_runs (request_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_run_inputs_created_at
+            ON chat_run_inputs (created_at)
             """
         )
         connection.execute(
@@ -400,6 +437,13 @@ class ChatSessionRepository(_Repository):
                 )
                 if existing["status"] != normalized_status:
                     raise ValueError("chat_session status 冲突")
+                if existing["status"] != SESSION_ACTIVE and (
+                    (normalized_workspace and normalized_workspace != existing["workspace_ref"])
+                    or (normalized_thread and normalized_thread != existing["thread_ref"])
+                ):
+                    raise ValueError(
+                        "chat_session remote references can only change while active"
+                    )
                 existing_metadata = _json_loads_object(existing["metadata_json"])
                 merged_metadata = dict(existing_metadata)
                 for key, value in (metadata or {}).items():
@@ -483,6 +527,16 @@ class ChatSessionRepository(_Repository):
             ).fetchone()
         return self._row(row) if row is not None else None
 
+    def list_all(self) -> tuple[ChatSession, ...]:
+        with _connection_scope(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chat_sessions
+                ORDER BY updated_at DESC, chat_id ASC
+                """
+            ).fetchall()
+        return tuple(self._row(row) for row in rows)
+
     def update_refs(
         self,
         *,
@@ -499,6 +553,10 @@ class ChatSessionRepository(_Repository):
             ).fetchone()
             if row is None:
                 raise ValueError("chat_session 不存在")
+            if row["status"] != SESSION_ACTIVE:
+                raise ValueError(
+                    "chat_session remote references can only change while active"
+                )
             connection.execute(
                 """
                 UPDATE chat_sessions
@@ -541,13 +599,33 @@ class ChatSessionRepository(_Repository):
             allowed=SESSION_STATUSES,
         )
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT * FROM chat_sessions WHERE chat_id = ?",
+                (normalized_chat_id,),
+            ).fetchone()
+            if current is None:
+                raise ValueError("chat_session does not exist")
+            current_status = current["status"]
+            if current_status == normalized_status:
+                return self._row(current)
+            if normalized_status not in _SESSION_STATUS_TRANSITIONS[current_status]:
+                raise ValueError(
+                    "illegal chat_session status transition: "
+                    f"{current_status} -> {normalized_status}"
+                )
             connection.execute(
                 """
                 UPDATE chat_sessions
                 SET status = ?, updated_at = ?
-                WHERE chat_id = ?
+                WHERE chat_id = ? AND status = ?
                 """,
-                (normalized_status, _utc_now_iso(), normalized_chat_id),
+                (
+                    normalized_status,
+                    _utc_now_iso(),
+                    normalized_chat_id,
+                    current_status,
+                ),
             )
             logger.info(
                 "更新文件对话会话状态: chat_id=%s status=%s",
@@ -637,9 +715,9 @@ class ChatDocumentRepository(_Repository):
                         ELSE chat_documents.external_location
                     END,
                     added_by_run_id = CASE
-                        WHEN chat_documents.added_by_run_id != ''
-                        THEN chat_documents.added_by_run_id
-                        ELSE excluded.added_by_run_id
+                        WHEN excluded.added_by_run_id != ''
+                        THEN excluded.added_by_run_id
+                        ELSE chat_documents.added_by_run_id
                     END
                 """,
                 (
@@ -979,6 +1057,51 @@ class ChatRunRepository(_Repository):
             started_at=row["started_at"],
             completed_at=row["completed_at"],
             updated_at=row["updated_at"],
+        )
+
+
+class ChatRunInputRepository(_Repository):
+    """Repository for immutable request-time `chat_run_inputs` snapshots."""
+
+    def get(self, run_id: str) -> ChatRunInput | None:
+        normalized_run_id = _required_text(run_id, name="run_id")
+        with _connection_scope(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM chat_run_inputs WHERE run_id = ?",
+                (normalized_run_id,),
+            ).fetchone()
+        return self._row(row) if row is not None else None
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> ChatRunInput:
+        files: list[ChatRunInputFile] = []
+        for index, raw_file in enumerate(_json_loads_list(row["files_json"])):
+            if not isinstance(raw_file, Mapping):
+                raise ValueError(f"chat_run_inputs.files_json[{index}] must be object")
+            files.append(
+                ChatRunInputFile(
+                    file_name=_required_text(
+                        str(raw_file.get("file_name") or ""),
+                        name="file_name",
+                    ),
+                    original_name=_required_text(
+                        str(raw_file.get("original_name") or ""),
+                        name="original_name",
+                    ),
+                    document_ref=_required_text(
+                        str(raw_file.get("document_ref") or ""),
+                        name="document_ref",
+                    ),
+                    external_location=_optional_text(
+                        str(raw_file.get("external_location") or ""),
+                    ),
+                )
+            )
+        return ChatRunInput(
+            run_id=row["run_id"],
+            message=row["message"],
+            files=tuple(files),
+            created_at=row["created_at"],
         )
 
 

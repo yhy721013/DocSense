@@ -180,7 +180,7 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual(1, len(documents))
         self.assertEqual("更新原名.pdf", documents[0].original_name)
         self.assertEqual("document:second", documents[0].document_ref)
-        self.assertEqual("run-first", documents[0].added_by_run_id)
+        self.assertEqual("run-second", documents[0].added_by_run_id)
 
     def test_session_create_or_get_enriches_empty_placeholder(self) -> None:
         placeholder = self.store.sessions.create_or_get(chat_id="chat-placeholder")

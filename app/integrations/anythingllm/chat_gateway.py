@@ -83,8 +83,17 @@ class AnythingLLMChatGateway(ChatConversationPort):
         conversation_name: str,
     ) -> ChatSessionRefs:
         """Create or reuse the named chat context, then create a new thread."""
+        workspace: AnythingLLMWorkspace | None = None
+        created_workspace = False
         try:
-            workspace = self._ensure_workspace(context_name)
+            workspace = self._find_workspace(context_name)
+            if workspace is None:
+                workspace = self._workspace_client.create_workspace(
+                    self._required_text(context_name, "context_name"),
+                    settings=self._workspace_settings,
+                    user_id=self._user_id,
+                )
+                created_workspace = True
             thread = self._thread_client.create_thread(
                 workspace.slug,
                 conversation_name,
@@ -95,6 +104,12 @@ class AnythingLLMChatGateway(ChatConversationPort):
                 conversation_ref=thread.slug,
             )
         except AnythingLLMTransportError as exc:
+            if created_workspace and workspace is not None:
+                if not self._compensate_new_workspace(workspace.slug):
+                    raise ChatResourceError(
+                        "new chat workspace compensation failed",
+                        resource_refs=(workspace.slug,),
+                    ) from exc
             raise self._port_error(exc, "open chat conversation") from exc
 
     def attach_documents(
@@ -264,18 +279,29 @@ class AnythingLLMChatGateway(ChatConversationPort):
         except AnythingLLMTransportError as exc:
             raise self._port_error(exc, "delete chat context") from exc
 
-    def _ensure_workspace(self, name: str) -> AnythingLLMWorkspace:
+    def _find_workspace(self, name: str) -> AnythingLLMWorkspace | None:
         normalized_name = self._required_text(name, "context_name")
         for workspace in self._workspace_client.list_workspaces(
             user_id=self._user_id,
         ):
             if workspace.name == normalized_name:
                 return workspace
-        return self._workspace_client.create_workspace(
-            normalized_name,
-            settings=self._workspace_settings,
-            user_id=self._user_id,
-        )
+        return None
+
+    def _compensate_new_workspace(self, workspace_ref: str) -> bool:
+        """Best-effort adapter-local compensation before a ref can be persisted."""
+        try:
+            self._workspace_client.delete_workspace(
+                workspace_ref,
+                user_id=self._user_id,
+            )
+        except AnythingLLMTransportError:
+            logger.exception(
+                "Failed to compensate newly created chat workspace after thread creation failure: workspace_ref=%s",
+                workspace_ref,
+            )
+            return False
+        return True
 
     def _delete_temp_thread(
         self,

@@ -21,7 +21,7 @@ def chat_debug_bootstrap_api():
     services = get_application_services()
     return jsonify(
         load_chat_debug_bootstrap(
-            chat_db=services.chat_db,
+            chat_store=services.chat_store,
             kb_service=services.kb_service,
         )
     )

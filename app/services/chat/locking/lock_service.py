@@ -5,17 +5,26 @@ from __future__ import annotations
 import os
 import socket
 import uuid
+import json
 
 import logging
 import sqlite3
 from datetime import datetime, timezone
 
 from app.services.chat.domain.models import (
+    MESSAGE_COMMITTED,
+    MESSAGE_PENDING,
+    MESSAGE_ROLE_ASSISTANT,
+    RUN_ABORTED,
     RUN_ACCEPTED,
     RUN_ACTIVE_STATUSES,
     RUN_FAILED,
     RUN_RUNNING,
     RUN_SUCCEEDED,
+    SESSION_ACTIVE,
+    SESSION_DELETED,
+    SESSION_DELETING,
+    SESSION_ERROR,
     ChatRun,
 )
 from app.services.chat.persistence.repositories import (
@@ -66,6 +75,24 @@ class ChatRunInactiveError(RuntimeError):
         self.status = status
 
 
+class ChatSessionUnavailableError(RuntimeError):
+    """Raised when a chat session is not allowed to accept a new run."""
+
+    def __init__(self, *, chat_id: str, status: str) -> None:
+        super().__init__("chat session is not active")
+        self.chat_id = chat_id
+        self.status = status
+
+
+class ChatSessionDeleteBusyError(RuntimeError):
+    """Raised when deletion races with an active run or another deletion."""
+
+    def __init__(self, *, chat_id: str, reason: str) -> None:
+        super().__init__(reason)
+        self.chat_id = chat_id
+        self.reason = reason
+
+
 class ChatRunLockService:
     """Acquire and release durable per-chat run ownership."""
 
@@ -98,6 +125,9 @@ class ChatRunLockService:
         chat_id: str,
         run_id: str | None = None,
         request_id: str | None = None,
+        user_message: str | None = None,
+        user_files: tuple[tuple[str, str], ...] = (),
+        input_documents: tuple[tuple[str, str, str, str], ...] = (),
     ) -> ChatRun:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_run_id = _optional_text(run_id) or uuid.uuid4().hex
@@ -125,6 +155,17 @@ class ChatRunLockService:
                 """,
                 (normalized_chat_id, now, now),
             )
+            session_row = connection.execute(
+                "SELECT status FROM chat_sessions WHERE chat_id = ?",
+                (normalized_chat_id,),
+            ).fetchone()
+            if session_row is None:
+                raise ValueError("chat_session was not created")
+            if session_row["status"] != SESSION_ACTIVE:
+                raise ChatSessionUnavailableError(
+                    chat_id=normalized_chat_id,
+                    status=session_row["status"],
+                )
             self._expire_stale_runs(
                 connection,
                 chat_id=normalized_chat_id,
@@ -195,6 +236,22 @@ class ChatRunLockService:
             ).fetchone()
             if row is None:
                 raise ValueError("chat_run was not created")
+            if user_message is not None:
+                self._append_run_input(
+                    connection,
+                    run_id=normalized_run_id,
+                    message=user_message,
+                    documents=input_documents,
+                    created_at=now,
+                )
+                self._append_user_pending(
+                    connection,
+                    chat_id=normalized_chat_id,
+                    run_id=normalized_run_id,
+                    message=user_message,
+                    files=user_files,
+                    created_at=now,
+                )
             logger.info(
                 "文件对话run锁获取成功: chat_id=%s run_id=%s request_id=%s owner=%s",
                 normalized_chat_id,
@@ -203,6 +260,102 @@ class ChatRunLockService:
                 self.owner_instance_id,
             )
             return self._row(row)
+
+    def begin_chat_deletion(self, *, chat_id: str) -> None:
+        """Atomically block new runs and reject deletion while a run is active."""
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
+        now = _utc_now_iso()
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            session = connection.execute(
+                "SELECT status FROM chat_sessions WHERE chat_id = ?",
+                (normalized_chat_id,),
+            ).fetchone()
+            if session is None:
+                raise ValueError("chat_session 不存在")
+            status = session["status"]
+            if status == SESSION_DELETED:
+                return
+            if status == SESSION_DELETING:
+                raise ChatSessionDeleteBusyError(
+                    chat_id=normalized_chat_id,
+                    reason="当前对话正在删除",
+                )
+            self._expire_stale_runs(
+                connection,
+                chat_id=normalized_chat_id,
+                now=now,
+                active_statuses=active_statuses,
+            )
+            active = connection.execute(
+                f"""
+                SELECT run_id FROM chat_runs
+                WHERE chat_id = ? AND status IN ({",".join("?" for _ in active_statuses)})
+                LIMIT 1
+                """,
+                (normalized_chat_id, *active_statuses),
+            ).fetchone()
+            if active is not None:
+                raise ChatSessionDeleteBusyError(
+                    chat_id=normalized_chat_id,
+                    reason="当前对话存在进行中的流式响应，请先中断后删除",
+                )
+            if status not in {SESSION_ACTIVE, SESSION_ERROR}:
+                raise ChatSessionUnavailableError(
+                    chat_id=normalized_chat_id,
+                    status=status,
+                )
+            cursor = connection.execute(
+                """
+                UPDATE chat_sessions
+                SET status = ?, updated_at = ?
+                WHERE chat_id = ? AND status = ?
+                """,
+                (SESSION_DELETING, now, normalized_chat_id, status),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("chat_session status was changed concurrently")
+
+    def complete_run_with_messages(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+    ) -> ChatRun:
+        """Commit one successful turn and its terminal run state atomically."""
+        return self._finish_run_with_user(
+            run_id=run_id,
+            user_message_id=user_message_id,
+            terminal_status=RUN_SUCCEEDED,
+            error_message="",
+            assistant_message_id=assistant_message_id,
+            assistant_content=assistant_content,
+        )
+
+    def fail_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        error_message: str,
+    ) -> ChatRun:
+        return self._finish_run_with_user(
+            run_id=run_id,
+            user_message_id=user_message_id,
+            terminal_status=RUN_FAILED,
+            error_message=_required_text(error_message, name="error_message"),
+        )
+
+    def abort_run_with_user(self, *, run_id: str, user_message_id: str) -> ChatRun:
+        return self._finish_run_with_user(
+            run_id=run_id,
+            user_message_id=user_message_id,
+            terminal_status=RUN_ABORTED,
+            error_message="",
+        )
 
     def complete_run(self, run_id: str) -> ChatRun:
         return self._runs.update_status(run_id=run_id, status=RUN_SUCCEEDED)
@@ -367,6 +520,219 @@ class ChatRunLockService:
         return tuple(stale_run_ids)
 
     @staticmethod
+    def _append_run_input(
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        message: str,
+        documents: tuple[tuple[str, str, str, str], ...],
+        created_at: str,
+    ) -> None:
+        normalized_message = _required_text(message, name="user_message")
+        normalized_documents = tuple(
+            {
+                "file_name": _required_text(file_name, name="file_name"),
+                "original_name": _required_text(
+                    original_name,
+                    name="original_name",
+                ),
+                "document_ref": _required_text(
+                    document_ref,
+                    name="document_ref",
+                ),
+                "external_location": _optional_text(external_location),
+            }
+            for file_name, original_name, document_ref, external_location in documents
+        )
+        if len({item["file_name"] for item in normalized_documents}) != len(
+            normalized_documents
+        ):
+            raise ValueError("input_documents contains duplicate file_name")
+        connection.execute(
+            """
+            INSERT INTO chat_run_inputs (run_id, message, files_json, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                normalized_message,
+                json.dumps(
+                    normalized_documents,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                created_at,
+            ),
+        )
+
+    @staticmethod
+    def _append_user_pending(
+        connection: sqlite3.Connection,
+        *,
+        chat_id: str,
+        run_id: str,
+        message: str,
+        files: tuple[tuple[str, str], ...],
+        created_at: str,
+    ) -> None:
+        normalized_message = _required_text(message, name="user_message")
+        normalized_files = tuple(
+            (_required_text(file_name, name="file_name"), _optional_text(original_name))
+            for file_name, original_name in files
+        )
+        if len({file_name for file_name, _ in normalized_files}) != len(normalized_files):
+            raise ValueError("user_files contains duplicate file_name")
+        sequence_row = connection.execute(
+            """
+            SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+            FROM chat_messages WHERE chat_id = ?
+            """,
+            (chat_id,),
+        ).fetchone()
+        message_id = f"{run_id}:user"
+        connection.execute(
+            """
+            INSERT INTO chat_messages (
+                message_id, chat_id, run_id, role, content,
+                status, sequence_no, created_at
+            ) VALUES (?, ?, ?, 'user', ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                chat_id,
+                run_id,
+                normalized_message,
+                MESSAGE_PENDING,
+                int(sequence_row["next_sequence"]),
+                created_at,
+            ),
+        )
+        for file_name, original_name in normalized_files:
+            connection.execute(
+                """
+                INSERT INTO chat_message_files (message_id, file_name, original_name)
+                VALUES (?, ?, ?)
+                """,
+                (message_id, file_name, original_name),
+            )
+
+    def _finish_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        terminal_status: str,
+        error_message: str,
+        assistant_message_id: str = "",
+        assistant_content: str = "",
+    ) -> ChatRun:
+        normalized_run_id = _required_text(run_id, name="run_id")
+        normalized_user_message_id = _required_text(
+            user_message_id,
+            name="user_message_id",
+        )
+        now = _utc_now_iso()
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = self._get_run_with_connection(connection, normalized_run_id)
+            if run.status not in RUN_ACTIVE_STATUSES:
+                if run.status == terminal_status:
+                    return run
+                raise ChatRunInactiveError(
+                    run_id=normalized_run_id,
+                    status=run.status,
+                )
+            user = connection.execute(
+                """
+                SELECT status FROM chat_messages
+                WHERE message_id = ? AND chat_id = ? AND run_id = ? AND role = 'user'
+                """,
+                (normalized_user_message_id, run.chat_id, normalized_run_id),
+            ).fetchone()
+            if user is None:
+                raise ValueError("chat run user message 不存在")
+            if user["status"] == MESSAGE_PENDING:
+                cursor = connection.execute(
+                    """
+                    UPDATE chat_messages SET status = ?
+                    WHERE message_id = ? AND status = ?
+                    """,
+                    (MESSAGE_COMMITTED, normalized_user_message_id, MESSAGE_PENDING),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("chat user message was changed concurrently")
+            elif user["status"] != MESSAGE_COMMITTED:
+                raise ValueError("chat run user message is not committable")
+            if terminal_status == RUN_SUCCEEDED and assistant_content:
+                existing = connection.execute(
+                    "SELECT message_id FROM chat_messages WHERE message_id = ?",
+                    (assistant_message_id,),
+                ).fetchone()
+                if existing is None:
+                    sequence_row = connection.execute(
+                        """
+                        SELECT COALESCE(MAX(sequence_no), 0) + 1 AS next_sequence
+                        FROM chat_messages WHERE chat_id = ?
+                        """,
+                        (run.chat_id,),
+                    ).fetchone()
+                    connection.execute(
+                        """
+                        INSERT INTO chat_messages (
+                            message_id, chat_id, run_id, role, content,
+                            status, sequence_no, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            _required_text(assistant_message_id, name="assistant_message_id"),
+                            run.chat_id,
+                            normalized_run_id,
+                            MESSAGE_ROLE_ASSISTANT,
+                            assistant_content,
+                            MESSAGE_COMMITTED,
+                            int(sequence_row["next_sequence"]),
+                            now,
+                        ),
+                    )
+            cursor = connection.execute(
+                """
+                UPDATE chat_runs
+                SET status = ?, error_message = ?, completed_at = ?, updated_at = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (
+                    terminal_status,
+                    _optional_text(error_message),
+                    now,
+                    now,
+                    normalized_run_id,
+                    run.status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("chat_run status was changed concurrently")
+            row = connection.execute(
+                "SELECT * FROM chat_runs WHERE run_id = ?",
+                (normalized_run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("chat_run 不存在")
+            return self._row(row)
+
+    @staticmethod
+    def _get_run_with_connection(
+        connection: sqlite3.Connection,
+        run_id: str,
+    ) -> ChatRun:
+        row = connection.execute(
+            "SELECT * FROM chat_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("chat_run 不存在")
+        return ChatRunLockService._row(row)
+
+    @staticmethod
     def _row(row: sqlite3.Row) -> ChatRun:
         return ChatRun(
             run_id=row["run_id"],
@@ -388,5 +754,7 @@ __all__ = [
     "ChatRunBusyError",
     "ChatRunInactiveError",
     "ChatRunLockService",
+    "ChatSessionDeleteBusyError",
+    "ChatSessionUnavailableError",
     "DEFAULT_STALE_RUN_SECONDS",
 ]

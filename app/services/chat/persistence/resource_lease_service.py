@@ -394,7 +394,11 @@ class ChatResourceLeaseService:
     ) -> None:
         if (
             row["chat_id"] != chat_id
-            or row["run_id"] != run_id
+            or (
+                run_id
+                and row["run_id"]
+                and row["run_id"] != run_id
+            )
             or row["resource_type"] != resource_type
             or (
                 row["external_ref"]

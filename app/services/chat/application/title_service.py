@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from app.ports import ChatConversationFactory
 from app.services.chat.application.history_service import ChatHistoryService
+from app.services.chat.domain.models import SESSION_ACTIVE
 from app.services.chat.persistence.store import ChatPersistenceStore
 from app.services.core.prompts import build_chat_title_prompt
 
@@ -33,6 +34,10 @@ class ChatTitleEmptyHistoryError(ValueError):
 
 class ChatTitleGenerationError(RuntimeError):
     """Raised when title generation cannot produce a stable display title."""
+
+
+class ChatTitleUnavailableError(RuntimeError):
+    """Raised when session lifecycle forbids external title generation."""
 
 
 def _required_text(value: str, *, name: str) -> str:
@@ -119,6 +124,10 @@ class ChatTitleService:
                 normalized_chat_id,
             )
             return ChatTitleResult(chat_id=normalized_chat_id, title="")
+        if session.status != SESSION_ACTIVE:
+            raise ChatTitleUnavailableError(
+                "chat session is not available for title generation"
+            )
 
         title_messages = self._history_service.list_title_messages(
             normalized_chat_id,
@@ -204,6 +213,7 @@ class ChatTitleService:
 __all__ = [
     "ChatTitleEmptyHistoryError",
     "ChatTitleGenerationError",
+    "ChatTitleUnavailableError",
     "ChatTitleResult",
     "ChatTitleService",
 ]

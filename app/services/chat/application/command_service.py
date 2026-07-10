@@ -17,9 +17,21 @@ class ChatCommandService:
     def __init__(self, lock_service: ChatRunLockService) -> None:
         self._lock_service = lock_service
 
-    def start_chat_run(self, *, chat_id: str) -> ChatRun:
+    def start_chat_run(
+        self,
+        *,
+        chat_id: str,
+        user_message: str | None = None,
+        user_files: tuple[tuple[str, str], ...] = (),
+        input_documents: tuple[tuple[str, str, str, str], ...] = (),
+    ) -> ChatRun:
         logger.info("准备启动文件对话run: chat_id=%s", chat_id)
-        run = self._lock_service.try_acquire_chat_run(chat_id=chat_id)
+        run = self._lock_service.try_acquire_chat_run(
+            chat_id=chat_id,
+            user_message=user_message,
+            user_files=user_files,
+            input_documents=input_documents,
+        )
         logger.info(
             "文件对话run已启动: chat_id=%s run_id=%s status=%s owner=%s",
             run.chat_id,
@@ -81,6 +93,49 @@ class ChatCommandService:
             run.abort_requested,
         )
         return run
+
+    def begin_chat_deletion(self, *, chat_id: str) -> None:
+        """Atomically stop new runs before the delete workflow touches resources."""
+        self._lock_service.begin_chat_deletion(chat_id=chat_id)
+
+    def complete_chat_run_with_messages(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+    ) -> ChatRun:
+        return self._lock_service.complete_run_with_messages(
+            run_id=run_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            assistant_content=assistant_content,
+        )
+
+    def fail_chat_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        error_message: str,
+    ) -> ChatRun:
+        return self._lock_service.fail_run_with_user(
+            run_id=run_id,
+            user_message_id=user_message_id,
+            error_message=error_message,
+        )
+
+    def abort_chat_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+    ) -> ChatRun:
+        return self._lock_service.abort_run_with_user(
+            run_id=run_id,
+            user_message_id=user_message_id,
+        )
 
     def expire_stale_chat_runs(self, *, chat_id: str) -> tuple[ChatRun, ...]:
         expired_runs = self._lock_service.expire_stale_runs_for_chat(

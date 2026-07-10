@@ -6,24 +6,37 @@ from app.services.chat.application.abort_service import (
 )
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.application.delete_service import (
+    ChatDeleteBusyError,
     ChatDeleteCleanupError,
     ChatDeleteNotFoundError,
     ChatDeleteResult,
     ChatDeleteService,
+)
+from app.services.chat.domain.resource_ids import (
     chat_document_binding_lease_id,
     chat_thread_lease_id,
     chat_workspace_lease_id,
+)
+from app.services.chat.application.document_resolver import (
+    ChatDocumentNotFoundError,
+    ChatDocumentResolver,
+    DatabaseChatDocumentResolver,
+    ResolvedChatDocument,
 )
 from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
     ChatRunEventRecorder,
     ChatRunExecutor,
+    ChatRunDocumentSnapshot,
     ChatRunStreamRequest,
+    PreparedChatRun,
+    SynchronousChatRunExecutor,
     record_chat_run_events,
 )
 from app.services.chat.application.title_service import (
     ChatTitleEmptyHistoryError,
     ChatTitleGenerationError,
+    ChatTitleUnavailableError,
     ChatTitleResult,
     ChatTitleService,
 )
@@ -65,6 +78,8 @@ from app.services.chat.domain.models import (
     ChatMessageFile,
     ChatResourceLease,
     ChatRun,
+    ChatRunInput,
+    ChatRunInputFile,
     ChatSession,
 )
 from app.services.chat.locking.lock_service import (
@@ -72,11 +87,14 @@ from app.services.chat.locking.lock_service import (
     ChatRunBusyError,
     ChatRunInactiveError,
     ChatRunLockService,
+    ChatSessionDeleteBusyError,
+    ChatSessionUnavailableError,
 )
 from app.services.chat.persistence.repositories import (
     ChatDocumentRepository,
     ChatMessageRepository,
     ChatRunRepository,
+    ChatRunInputRepository,
     ChatSessionRepository,
     ensure_chat_schema,
 )
@@ -91,6 +109,9 @@ __all__ = [
     "ChatAbortResult",
     "ChatAbortService",
     "ChatCommandService",
+    "ChatDocumentNotFoundError",
+    "ChatDocumentResolver",
+    "ChatDeleteBusyError",
     "ChatDeleteCleanupError",
     "ChatDeleteNotFoundError",
     "ChatDeleteResult",
@@ -104,23 +125,31 @@ __all__ = [
     "ChatResourceLeaseService",
     "ChatRun",
     "ChatRunBusyError",
+    "ChatRunDocumentSnapshot",
     "ChatRunInactiveError",
     "ChatRunEventRecorder",
     "ChatRunExecutor",
     "ChatRunLockService",
+    "ChatRunInput",
+    "ChatRunInputFile",
+    "ChatRunInputRepository",
     "ChatRunRepository",
     "ChatRunStreamRequest",
+    "ChatSessionDeleteBusyError",
+    "ChatSessionUnavailableError",
     "ChatSession",
     "ChatSessionRepository",
     "ChatStore",
     "ChatStreamEvent",
     "ChatTitleEmptyHistoryError",
     "ChatTitleGenerationError",
+    "ChatTitleUnavailableError",
     "ChatTitleResult",
     "ChatTitleService",
     "chat_document_binding_lease_id",
     "chat_thread_lease_id",
     "chat_workspace_lease_id",
+    "DatabaseChatDocumentResolver",
     "DEFAULT_STALE_RUN_SECONDS",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",
@@ -153,6 +182,9 @@ __all__ = [
     "SESSION_DELETING",
     "SESSION_ERROR",
     "SESSION_STATUSES",
+    "PreparedChatRun",
+    "ResolvedChatDocument",
+    "SynchronousChatRunExecutor",
     "ensure_chat_schema",
     "record_chat_run_events",
 ]

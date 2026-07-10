@@ -2,24 +2,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.chat.persistence.store import ChatPersistenceStore
+from app.services.core.database import DatabaseService
 
 
 def load_chat_debug_bootstrap(
     *,
-    chat_db: ChatDatabaseService,
+    chat_store: ChatPersistenceStore,
     kb_service: DatabaseService,
 ) -> dict[str, Any]:
     try:
-        sessions = [
-            {
-                "chatId": item["chat_id"],
-                "fileNames": item["file_original_names"],
-                "createdAt": item["created_at"],
-                "updatedAt": item["updated_at"],
-            }
-            for item in chat_db.list_chats()
-        ]
+        sessions = []
+        for item in chat_store.sessions.list_all():
+            if item.status == "deleted":
+                continue
+            sessions.append(
+                {
+                    "chatId": item.chat_id,
+                    "fileNames": [
+                        document.file_name
+                        for document in chat_store.documents.list_by_chat(
+                            item.chat_id
+                        )
+                    ],
+                    "createdAt": item.created_at,
+                    "updatedAt": item.updated_at,
+                }
+            )
         available_files = [
             {
                 "fileName": item["file_name"],

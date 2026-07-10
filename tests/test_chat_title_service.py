@@ -12,6 +12,7 @@ from app.services.chat import (
     ChatStore,
     ChatTitleEmptyHistoryError,
     ChatTitleService,
+    ChatTitleUnavailableError,
     MESSAGE_COMMITTED,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
@@ -113,6 +114,20 @@ class ChatTitleServiceTests(unittest.TestCase):
             service.generate_title(chat_id="chat-empty")
 
         self.assertEqual(1, len(factory.ports))
+
+    def test_deleting_session_cannot_create_a_title_resource(self) -> None:
+        service, factory = self._service()
+        self.store.sessions.create_or_get(
+            chat_id="chat-deleting",
+            workspace_ref="workspace-deleting",
+            thread_ref="thread-deleting",
+        )
+        self.store.sessions.set_status(chat_id="chat-deleting", status="deleting")
+
+        with self.assertRaises(ChatTitleUnavailableError):
+            service.generate_title(chat_id="chat-deleting")
+
+        self.assertEqual(0, len(factory.ports))
 
     def test_title_is_cleaned_and_history_is_not_mutated(self) -> None:
         service, factory = self._service(standalone_reply=' 标题： "美日战略对比" \n说明忽略')

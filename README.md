@@ -25,7 +25,7 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库及任务级 Factory 契约 | `rag.py` `knowledge_index.py` |
-| 业务层 | `app/services/llm_service/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排、对话记录及文档动态联动 | `analysis_service.py` `report_service.py` `weaponry_service.py` `chat_service.py` `task_service.py` |
+| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排，以及供应商无关的文件对话应用服务 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
@@ -79,7 +79,6 @@ app/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
       report_service.py             # 报告生成主流程
       weaponry_service.py           # 知识谱系字段提取主流程
-      chat_service.py               # 文件对话主流程（含 SSE 生成、跨工作区引用）
       task_service.py               # 任务状态、结果、回调状态持久化
       translation_service.py        # 翻译服务编排层
     utils/
@@ -202,8 +201,9 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
-   - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染，历史数据在 `AnythingLLM` 保留。
+   - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
    - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件。
+   - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
 
 7. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
@@ -316,6 +316,8 @@ DOCSENSE_RUNTIME_DIR=C:/.me/envs/DocSenseEnv
 - 回调历史：`${DOCSENSE_RUNTIME_DIR}/callback/`
 - SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
 - 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`
+
+文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。数据库迁移、可靠调度与多实例部署尚未启用。
 
 旧的组件级变量仍可作为兼容覆盖项，但一旦配置就会覆盖统一根目录。若希望全部内容位于同一目录，应删除 `DOCSENSE_LLM_TASK_DB`、`DOCSENSE_KNOWLEDGE_BASE_DB`、`KNOWLEDGE_BASE_DB_PATH`、`DOCSENSE_CHAT_DB`、`FILE_DOWNLOAD_DIR`、`DOCSENSE_OCR_CACHE_DIR` 和 `DOCSENSE_MINERU_CACHE_DIR`。
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）

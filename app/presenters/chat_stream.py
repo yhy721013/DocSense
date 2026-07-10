@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
-from app.services.chat import ChatCommandService, ChatStreamEvent
+from app.services.chat import ChatStreamEvent
 
 
 logger = logging.getLogger(__name__)
@@ -29,21 +29,6 @@ def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
             raise TypeError("chat stream must yield ChatStreamEvent")
         logger.debug("展示文件对话SSE事件: event_type=%s", event.event_type)
         yield format_sse_event(event.event_type, event.data)
-
-
-def mark_chat_run_failed(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-    error_message: str,
-) -> None:
-    try:
-        chat_commands.fail_chat_run(
-            run_id=run_id,
-            error_message=error_message,
-        )
-    except Exception:
-        logger.exception("failed to mark chat run failed: run_id=%s", run_id)
 
 
 def close_chat_stream_resource(
@@ -119,6 +104,5 @@ __all__ = [
     "close_chat_stream_resource",
     "finalize_chat_run_stream",
     "format_sse_event",
-    "mark_chat_run_failed",
     "present_chat_stream",
 ]

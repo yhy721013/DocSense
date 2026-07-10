@@ -29,11 +29,13 @@ from app.services.chat import (
     ChatAbortService,
     ChatCommandService,
     ChatDeleteService,
+    DatabaseChatDocumentResolver,
     ChatHistoryService,
     ChatPersistenceStore,
     ChatRunLockService,
     ChatStore,
     ChatTitleService,
+    SynchronousChatRunExecutor,
 )
 from app.services.core.config import (
     AnythingLLMConfig,
@@ -113,6 +115,7 @@ class ApplicationServices:
     chat_db: ChatDatabaseService
     chat_store: ChatPersistenceStore
     chat_commands: ChatCommandService
+    chat_run_executor: SynchronousChatRunExecutor
     chat_history: ChatHistoryService
     chat_title: ChatTitleService
     chat_abort: ChatAbortService
@@ -133,6 +136,7 @@ class ApplicationServices:
             "chat_db": self.chat_db,
             "chat_store": self.chat_store,
             "chat_commands": self.chat_commands,
+            "chat_run_executor": self.chat_run_executor,
             "chat_history": self.chat_history,
             "chat_title": self.chat_title,
             "chat_abort": self.chat_abort,
@@ -163,6 +167,8 @@ class ApplicationServices:
             raise TypeError("chat_store must implement ChatPersistenceStore")
         if not isinstance(self.chat_commands, ChatCommandService):
             raise TypeError("chat_commands must be ChatCommandService")
+        if not isinstance(self.chat_run_executor, SynchronousChatRunExecutor):
+            raise TypeError("chat_run_executor must be SynchronousChatRunExecutor")
         if not isinstance(self.chat_history, ChatHistoryService):
             raise TypeError("chat_history must be ChatHistoryService")
         if not isinstance(self.chat_title, ChatTitleService):
@@ -183,6 +189,12 @@ def create_application_services() -> ApplicationServices:
     chat_commands = ChatCommandService(ChatRunLockService(chat_store.db_path))
     chat_history = ChatHistoryService(chat_store)
     chat_conversation_factory = AnythingLLMChatFactory(anythingllm_config)
+    chat_run_executor = SynchronousChatRunExecutor(
+        store=chat_store,
+        chat_commands=chat_commands,
+        conversation_factory=chat_conversation_factory,
+        document_resolver=DatabaseChatDocumentResolver(kb_service),
+    )
     chat_db = ChatDatabaseService(str(CHAT_DB_PATH))
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
@@ -201,6 +213,7 @@ def create_application_services() -> ApplicationServices:
         chat_db=chat_db,
         chat_store=chat_store,
         chat_commands=chat_commands,
+        chat_run_executor=chat_run_executor,
         chat_history=chat_history,
         chat_title=ChatTitleService(
             store=chat_store,
@@ -213,7 +226,7 @@ def create_application_services() -> ApplicationServices:
         ),
         chat_delete=ChatDeleteService(
             store=chat_store,
-            chat_db=chat_db,
+            chat_commands=chat_commands,
             conversation_factory=chat_conversation_factory,
         ),
         progress_hub=LLMProgressHub(),

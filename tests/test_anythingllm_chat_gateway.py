@@ -247,6 +247,29 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
         self.assertEqual("chat", self.workspace_client.created_settings[0]["chatMode"])
         self.assertEqual(20, self.workspace_client.created_settings[0]["topN"])
 
+    def test_new_workspace_is_compensated_when_thread_creation_fails(self) -> None:
+        self.thread_client.create_error = AnythingLLMProtocolError("thread failed")
+
+        with self.assertRaises(ChatResponseError):
+            self.gateway.open_conversation(
+                context_name="chat-compensate",
+                conversation_name="thread-compensate",
+            )
+
+        self.assertEqual([("slug-1", 7)], self.workspace_client.delete_calls)
+
+    def test_uncompensated_new_workspace_is_exposed_as_recoverable_resource_ref(self) -> None:
+        self.thread_client.create_error = AnythingLLMProtocolError("thread failed")
+        self.workspace_client.delete_error = AnythingLLMProtocolError("delete failed")
+
+        with self.assertRaises(ChatResourceError) as raised:
+            self.gateway.open_conversation(
+                context_name="chat-uncompensated",
+                conversation_name="thread-uncompensated",
+            )
+
+        self.assertEqual(("slug-1",), raised.exception.resource_refs)
+
     def test_attach_documents_binds_locations_and_returns_workspace_snapshot(
         self,
     ) -> None:

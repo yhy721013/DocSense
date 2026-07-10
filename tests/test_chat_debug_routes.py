@@ -1,32 +1,36 @@
 import unittest
-from dataclasses import replace
+import tempfile
 
 from app import create_app
-from app.container import APPLICATION_SERVICES_EXTENSION
-from app.services.core.database import ChatDatabaseService, DatabaseService
-from tests import workspace_tempdir
+from tests.test_chat import _build_test_services
 
 
 class ChatDebugRouteTests(unittest.TestCase):
     def setUp(self):
-        self.app = create_app()
-        self.client = self.app.test_client()
-        self._tempdir = workspace_tempdir()
+        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
-        self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
-        self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
-        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
-        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
-            services,
-            chat_db=self.chat_db,
-            kb_service=self.kb_service,
-        )
+        self.services = _build_test_services(self.tmp)
+        self.chat_store = self.services.chat_store
+        self.kb_service = self.services.kb_service
+        self.app = create_app(services=self.services)
+        self.client = self.app.test_client()
 
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
 
     def test_chat_bootstrap_api_returns_local_sessions_and_files(self):
-        self.chat_db.create_chat("conv-001", ["alpha.pdf"], "ws-1", "th-1")
+        self.chat_store.sessions.create_or_get(
+            chat_id="conv-001",
+            workspace_ref="ws-1",
+            thread_ref="th-1",
+        )
+        self.chat_store.documents.add(
+            chat_id="conv-001",
+            file_name="alpha.pdf",
+            original_name="alpha.pdf",
+            document_ref="document:doc-alpha",
+            external_location="custom-documents/doc-alpha.json",
+        )
         self.kb_service.save_document_record(
             "alpha.pdf",
             12,
@@ -96,7 +100,10 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn("renderSelectedFiles();", html)
         self.assertIn("renderFilePickerOptions(state.availableFiles);", html)
         self.assertIn("state.selectedFileNames = state.selectedFileNames.filter((item) => item !== fileName);", html)
-        self.assertIn("const fileNames = [...state.selectedFileNames];", html)
+        self.assertIn(
+            "const fileNames = state.selectedFileNames.filter((fn) => !sentSet.has(fn));",
+            html,
+        )
         self.assertIn("align-items: start;", html)
         self.assertIn("box-sizing: border-box;", html)
         self.assertIn("display: block;", html)

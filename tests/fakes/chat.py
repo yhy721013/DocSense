@@ -59,6 +59,8 @@ class FakeChatConversationPort:
         state: _FakeChatConversationState | None = None,
         stream_contents: Sequence[str] | None = None,
         standalone_reply: str = "模拟标题",
+        open_conversation_error_message: str = "",
+        open_conversation_resource_refs: Sequence[str] = (),
         delete_conversation_error_message: str = "",
         delete_context_error_message: str = "",
     ) -> None:
@@ -69,6 +71,13 @@ class FakeChatConversationPort:
         self._standalone_reply = _required_content(
             standalone_reply,
             name="standalone_reply",
+        )
+        self._open_conversation_error_message = str(
+            open_conversation_error_message or ""
+        ).strip()
+        self._open_conversation_resource_refs = tuple(
+            str(resource_ref or "").strip()
+            for resource_ref in open_conversation_resource_refs
         )
         self._delete_conversation_error_message = str(
             delete_conversation_error_message or ""
@@ -87,6 +96,11 @@ class FakeChatConversationPort:
         """创建一个可用于后续测试调用的对话引用。"""
         _required_text(context_name, name="context_name")
         _required_text(conversation_name, name="conversation_name")
+        if self._open_conversation_error_message:
+            raise ChatResourceError(
+                self._open_conversation_error_message,
+                resource_refs=self._open_conversation_resource_refs,
+            )
         with self._lock:
             self._state.conversation_sequence += 1
             sequence = self._state.conversation_sequence

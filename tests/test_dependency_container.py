@@ -37,6 +37,8 @@ from app.services.chat import (
     ChatRunLockService,
     ChatStore,
     ChatTitleService,
+    DatabaseChatDocumentResolver,
+    SynchronousChatRunExecutor,
 )
 from app.services.core.database import ChatDatabaseService, DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -221,6 +223,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
         chat_history = ChatHistoryService(chat_store)
         chat_db = ChatDatabaseService(db_path=chat_db_path)
+        kb_service = DatabaseService(
+            db_path=f"{self.runtime_directory}/knowledge.sqlite3"
+        )
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -228,12 +233,16 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             task_service=LLMTaskService(
                 db_path=f"{self.runtime_directory}/tasks.sqlite3"
             ),
-            kb_service=DatabaseService(
-                db_path=f"{self.runtime_directory}/knowledge.sqlite3"
-            ),
+            kb_service=kb_service,
             chat_db=chat_db,
             chat_store=chat_store,
             chat_commands=chat_commands,
+            chat_run_executor=SynchronousChatRunExecutor(
+                store=chat_store,
+                chat_commands=chat_commands,
+                conversation_factory=self.chat_conversation_factory,
+                document_resolver=DatabaseChatDocumentResolver(kb_service),
+            ),
             chat_history=chat_history,
             chat_title=ChatTitleService(
                 store=chat_store,
@@ -246,7 +255,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             ),
             chat_delete=ChatDeleteService(
                 store=chat_store,
-                chat_db=chat_db,
+                chat_commands=chat_commands,
                 conversation_factory=self.chat_conversation_factory,
             ),
             progress_hub=LLMProgressHub(),

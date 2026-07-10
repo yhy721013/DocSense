@@ -15,6 +15,7 @@ from app.ports import (
 from app.services.chat.domain.models import (
     LEASE_CLEANUP_FAILED,
     LEASE_CLOSED,
+    LEASE_PLANNED,
     RESOURCE_DOCUMENT_BINDING,
     RESOURCE_THREAD,
     RESOURCE_WORKSPACE,
@@ -24,8 +25,16 @@ from app.services.chat.domain.models import (
     ChatResourceLease,
     ChatSession,
 )
+from app.services.chat.domain.resource_ids import (
+    chat_thread_lease_id,
+    chat_workspace_lease_id,
+)
+from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.locking.lock_service import (
+    ChatSessionDeleteBusyError,
+    ChatSessionUnavailableError,
+)
 from app.services.chat.persistence.store import ChatPersistenceStore
-from app.services.core.database import ChatDatabaseService
 
 
 logger = logging.getLogger(__name__)
@@ -36,21 +45,6 @@ def _required_text(value: str, *, name: str) -> str:
     if not normalized:
         raise ValueError(f"{name} cannot be empty")
     return normalized
-
-
-def chat_workspace_lease_id(chat_id: str) -> str:
-    return f"chat:{_required_text(chat_id, name='chat_id')}:workspace"
-
-
-def chat_thread_lease_id(chat_id: str) -> str:
-    return f"chat:{_required_text(chat_id, name='chat_id')}:thread"
-
-
-def chat_document_binding_lease_id(*, chat_id: str, file_name: str) -> str:
-    return (
-        f"chat:{_required_text(chat_id, name='chat_id')}:"
-        f"document_binding:{_required_text(file_name, name='file_name')}"
-    )
 
 
 @dataclass(frozen=True)
@@ -70,7 +64,7 @@ class ChatDeleteResult:
 
 
 class ChatDeleteNotFoundError(ValueError):
-    """Raised when neither local authority nor legacy records know the chat."""
+    """Raised when the local authoritative session does not exist."""
 
     def __init__(self, chat_id: str) -> None:
         self.chat_id = chat_id
@@ -95,6 +89,15 @@ class ChatDeleteCleanupError(RuntimeError):
         super().__init__(message)
 
 
+class ChatDeleteBusyError(RuntimeError):
+    """Raised when delete cannot enter its exclusive session state."""
+
+    def __init__(self, *, chat_id: str, reason: str) -> None:
+        self.chat_id = chat_id
+        self.reason = reason
+        super().__init__(reason)
+
+
 class ChatDeleteService:
     """Delete chat resources with a persistent recovery trail.
 
@@ -107,20 +110,21 @@ class ChatDeleteService:
         self,
         *,
         store: ChatPersistenceStore,
-        chat_db: ChatDatabaseService,
+        chat_commands: ChatCommandService,
         conversation_factory: ChatConversationFactory,
     ) -> None:
         self._store = store
-        self._chat_db = chat_db
+        self._chat_commands = chat_commands
         self._conversation_factory = conversation_factory
 
     def delete_chat(self, *, chat_id: str) -> ChatDeleteResult:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         logger.info("收到文件对话删除指令: chat_id=%s", normalized_chat_id)
 
-        session = self._get_or_materialize_session(normalized_chat_id)
+        session = self._store.sessions.get(normalized_chat_id)
+        if session is None:
+            raise ChatDeleteNotFoundError(normalized_chat_id)
         if session.status == SESSION_DELETED:
-            self._delete_legacy_chat_record(normalized_chat_id)
             logger.info(
                 "文件对话已处于deleted状态，删除请求幂等返回: chat_id=%s",
                 normalized_chat_id,
@@ -131,8 +135,41 @@ class ChatDeleteService:
                 msg="对话已删除",
             )
 
+        try:
+            self._chat_commands.begin_chat_deletion(chat_id=normalized_chat_id)
+        except ChatSessionDeleteBusyError as exc:
+            raise ChatDeleteBusyError(
+                chat_id=normalized_chat_id,
+                reason=exc.reason,
+            ) from exc
+        except ChatSessionUnavailableError as exc:
+            raise ChatDeleteBusyError(
+                chat_id=normalized_chat_id,
+                reason=str(exc),
+            ) from exc
+        session = self._store.sessions.get(normalized_chat_id)
+        if session is None:
+            raise ChatDeleteNotFoundError(normalized_chat_id)
+
         self._ensure_reference_leases(session)
         if not session.workspace_ref:
+            open_leases = self._store.resource_leases.list_by_chat(
+                normalized_chat_id,
+                include_closed=False,
+            )
+            if open_leases:
+                self._record_all_open_cleanup_failed(
+                    normalized_chat_id,
+                    error_message="remote resource reference was not persisted",
+                )
+                self._store.sessions.set_status(
+                    chat_id=normalized_chat_id,
+                    status=SESSION_ERROR,
+                )
+                raise ChatDeleteCleanupError(
+                    chat_id=normalized_chat_id,
+                    failed_leases=self._failed_leases(normalized_chat_id),
+                )
             self._mark_deleted(normalized_chat_id)
             logger.info(
                 "文件对话无远端上下文引用，直接标记deleted: chat_id=%s",
@@ -144,10 +181,6 @@ class ChatDeleteService:
                 msg="对话已删除",
             )
 
-        self._store.sessions.set_status(
-            chat_id=normalized_chat_id,
-            status=SESSION_DELETING,
-        )
         logger.info(
             "文件对话进入deleting状态: chat_id=%s workspace_ref=%s thread_ref=%s",
             normalized_chat_id,
@@ -213,32 +246,6 @@ class ChatDeleteService:
             deleted=True,
             msg="对话已删除",
         )
-
-    def _get_or_materialize_session(self, chat_id: str) -> ChatSession:
-        session = self._store.sessions.get(chat_id)
-        legacy_record = self._chat_db.get_chat(chat_id)
-        if session is None and legacy_record is None:
-            logger.info("文件对话删除目标不存在: chat_id=%s", chat_id)
-            raise ChatDeleteNotFoundError(chat_id)
-        if session is None:
-            logger.info(
-                "从legacy chats记录补齐文件对话session: chat_id=%s",
-                chat_id,
-            )
-            return self._store.sessions.create_or_get(
-                chat_id=chat_id,
-                workspace_ref=str(legacy_record.get("workspace_slug") or ""),
-                thread_ref=str(legacy_record.get("thread_slug") or ""),
-            )
-        if legacy_record and (not session.workspace_ref or not session.thread_ref):
-            return self._store.sessions.update_refs(
-                chat_id=chat_id,
-                workspace_ref=session.workspace_ref
-                or str(legacy_record.get("workspace_slug") or ""),
-                thread_ref=session.thread_ref
-                or str(legacy_record.get("thread_slug") or ""),
-            )
-        return session
 
     def _ensure_reference_leases(self, session: ChatSession) -> None:
         if session.workspace_ref:
@@ -371,6 +378,8 @@ class ChatDeleteService:
             if lease.status == LEASE_CLOSED:
                 continue
             if lease.status != LEASE_CLEANUP_FAILED:
+                if lease.status == LEASE_PLANNED:
+                    self._store.resource_leases.mark_cleanup_pending(lease.lease_id)
                 self._store.resource_leases.record_cleanup_failure(
                     lease_id=lease.lease_id,
                     error_message=error_message,
@@ -378,19 +387,14 @@ class ChatDeleteService:
 
     def _mark_deleted(self, chat_id: str) -> None:
         self._store.sessions.set_status(chat_id=chat_id, status=SESSION_DELETED)
-        self._delete_legacy_chat_record(chat_id)
         logger.info("文件对话删除状态机完成: chat_id=%s status=deleted", chat_id)
 
-    def _delete_legacy_chat_record(self, chat_id: str) -> None:
-        self._chat_db.delete_legacy_chat_record(chat_id)
 
 
 __all__ = [
+    "ChatDeleteBusyError",
     "ChatDeleteCleanupError",
     "ChatDeleteNotFoundError",
     "ChatDeleteResult",
     "ChatDeleteService",
-    "chat_document_binding_lease_id",
-    "chat_thread_lease_id",
-    "chat_workspace_lease_id",
 ]

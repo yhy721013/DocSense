@@ -111,6 +111,26 @@ class ChatRun:
 
 
 @dataclass(frozen=True)
+class ChatRunInputFile:
+    """Immutable document identity captured when a run is accepted."""
+
+    file_name: str
+    original_name: str
+    document_ref: str
+    external_location: str
+
+
+@dataclass(frozen=True)
+class ChatRunInput:
+    """Queue-safe message and document snapshot for one accepted run."""
+
+    run_id: str
+    message: str
+    files: tuple[ChatRunInputFile, ...]
+    created_at: str
+
+
+@dataclass(frozen=True)
 class ChatMessageFile:
     """Business file linked to one user message."""
 

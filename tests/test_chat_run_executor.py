@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from app.ports import ChatDocumentRef
 from app.services.chat import (
     ChatCommandService,
     ChatRunLockService,
     ChatRunExecutor,
+    ChatRunEventRecorder,
     ChatRunStreamRequest,
     ChatStreamEvent,
     ChatStore,
+    ResolvedChatDocument,
     MESSAGE_COMMITTED,
     MESSAGE_PENDING,
     MESSAGE_ROLE_ASSISTANT,
@@ -20,8 +24,25 @@ from app.services.chat import (
     RUN_FAILED,
     RUN_RUNNING,
     RUN_SUCCEEDED,
+    SynchronousChatRunExecutor,
     record_chat_run_events,
 )
+from tests.fakes import FakeChatConversationFactory
+
+
+class _StaticDocumentResolver:
+    def resolve_many(self, file_names):
+        return tuple(
+            ResolvedChatDocument(
+                file_name=file_name,
+                original_name=f"{file_name}.original",
+                document=ChatDocumentRef(
+                    document_ref=f"document:{file_name}",
+                    external_location=f"custom-documents/{file_name}.json",
+                ),
+            )
+            for file_name in file_names
+        )
 
 
 class ChatRunStreamRequestTests(unittest.TestCase):
@@ -393,6 +414,207 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         )
 
         self.assertEqual(MESSAGE_COMMITTED, same.status)
+
+    def test_success_terminal_transaction_rolls_back_user_on_assistant_write_error(self) -> None:
+        self.store.messages.append(
+            message_id="run-1:user",
+            chat_id="chat-1",
+            run_id="run-1",
+            role=MESSAGE_ROLE_USER,
+            content="请总结",
+            status=MESSAGE_PENDING,
+        )
+
+        with self.assertRaises(ValueError):
+            self.commands.complete_chat_run_with_messages(
+                run_id="run-1",
+                user_message_id="run-1:user",
+                assistant_message_id="",
+                assistant_content="必须导致事务回滚",
+            )
+
+        user = self.store.messages.list_by_chat("chat-1")[0]
+        run = self.store.runs.get("run-1")
+        self.assertEqual(MESSAGE_PENDING, user.status)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_RUNNING, run.status)
+
+    def test_high_frequency_chunks_do_not_write_a_heartbeat_per_chunk(self) -> None:
+        events = [
+            *(ChatStreamEvent("textChunk", {"content": "x"}) for _ in range(50)),
+            ChatStreamEvent("done", {"chatId": "chat-1"}),
+        ]
+
+        with patch.object(self.commands, "heartbeat_chat_run") as heartbeat:
+            list(
+                ChatRunEventRecorder(
+                    self.store,
+                    heartbeat_interval_seconds=60.0,
+                ).record(
+                    request=self.request,
+                    events=events,
+                    chat_commands=self.commands,
+                )
+            )
+
+        heartbeat.assert_called_once_with(run_id="run-1")
+
+
+class SynchronousChatRunExecutorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.tmp = self._tempdir.__enter__()
+        self.store = ChatStore(f"{self.tmp}/chat.sqlite3")
+        self.commands = ChatCommandService(ChatRunLockService(self.store.db_path))
+        self.resolver = _StaticDocumentResolver()
+
+    def tearDown(self) -> None:
+        self._tempdir.__exit__(None, None, None)
+
+    def test_acceptance_freezes_input_before_stream_and_activates_resource_leases(self) -> None:
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="chat-executor",
+            message="question",
+            file_names=("hash-a.pdf",),
+        )
+
+        accepted_input = self.store.run_inputs.get(prepared.run_id)
+        self.assertIsNotNone(accepted_input)
+        assert accepted_input is not None
+        self.assertEqual("question", accepted_input.message)
+        self.assertEqual("document:hash-a.pdf", accepted_input.files[0].document_ref)
+
+        events = list(
+            record_chat_run_events(
+                request=prepared.request,
+                events=executor.stream_chat_run(prepared.request),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        session = self.store.sessions.get("chat-executor")
+        documents = self.store.documents.list_by_chat("chat-executor")
+        leases = self.store.resource_leases.list_by_chat("chat-executor")
+        self.assertEqual(["chatInfo", "textChunk", "done"], [event.event_type for event in events])
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertTrue(session.workspace_ref)
+        self.assertEqual("document:hash-a.pdf", documents[0].document_ref)
+        self.assertTrue(all(lease.status == "active" for lease in leases))
+        self.assertTrue(all(lease.run_id == prepared.run_id for lease in leases))
+
+    def test_compensated_open_failure_closes_unneeded_planned_leases(self) -> None:
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(
+                open_conversation_error_message="workspace create failed"
+            ),
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="chat-open-fail",
+            message="question",
+            file_names=(),
+        )
+
+        events = list(
+            record_chat_run_events(
+                request=prepared.request,
+                events=executor.stream_chat_run(prepared.request),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        run = self.store.runs.get(prepared.run_id)
+        leases = self.store.resource_leases.list_by_chat("chat-open-fail")
+        self.assertEqual(["error"], [event.event_type for event in events])
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
+        self.assertEqual({"closed"}, {lease.status for lease in leases})
+
+    def test_output_limit_ends_run_with_error_without_partial_assistant(self) -> None:
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(
+                stream_contents=("too-long",)
+            ),
+            document_resolver=self.resolver,
+            max_output_chars=3,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="chat-output-limit",
+            message="question",
+            file_names=(),
+        )
+
+        events = list(
+            record_chat_run_events(
+                request=prepared.request,
+                events=executor.stream_chat_run(prepared.request),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        messages = self.store.messages.list_by_chat("chat-output-limit")
+        run = self.store.runs.get(prepared.run_id)
+        self.assertEqual(["chatInfo", "error"], [event.event_type for event in events])
+        self.assertEqual([MESSAGE_ROLE_USER], [message.role for message in messages])
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
+
+    def test_uncompensated_workspace_reference_is_persisted_for_cleanup(self) -> None:
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(
+                open_conversation_error_message="thread create failed",
+                open_conversation_resource_refs=("workspace-orphan",),
+            ),
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="chat-orphan-workspace",
+            message="question",
+            file_names=(),
+        )
+
+        list(
+            record_chat_run_events(
+                request=prepared.request,
+                events=executor.stream_chat_run(prepared.request),
+                store=self.store,
+                chat_commands=self.commands,
+            )
+        )
+
+        workspace_lease = self.store.resource_leases.get(
+            "chat:chat-orphan-workspace:workspace"
+        )
+        self.assertIsNotNone(workspace_lease)
+        assert workspace_lease is not None
+        self.assertEqual("workspace-orphan", workspace_lease.external_ref)
+        self.assertEqual("active", workspace_lease.status)
+        thread_lease = self.store.resource_leases.get(
+            "chat:chat-orphan-workspace:thread"
+        )
+        self.assertIsNotNone(thread_lease)
+        assert thread_lease is not None
+        self.assertEqual("closed", thread_lease.status)
 
 
 if __name__ == "__main__":

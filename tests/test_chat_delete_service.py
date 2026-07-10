@@ -7,8 +7,11 @@ import unittest
 
 from app.services.chat import (
     ChatDeleteCleanupError,
+    ChatDeleteBusyError,
     ChatDeleteNotFoundError,
     ChatDeleteService,
+    ChatCommandService,
+    ChatRunLockService,
     ChatHistoryService,
     ChatStore,
     LEASE_CLEANUP_FAILED,
@@ -22,7 +25,6 @@ from app.services.chat import (
     chat_thread_lease_id,
     chat_workspace_lease_id,
 )
-from app.services.core.database import ChatDatabaseService
 from tests.fakes import FakeChatConversationFactory
 
 
@@ -32,11 +34,11 @@ class ChatDeleteServiceTests(unittest.TestCase):
         self.tmp = self._tempdir.__enter__()
         self.db_path = f"{self.tmp}/chat.sqlite3"
         self.store = ChatStore(self.db_path)
-        self.chat_db = ChatDatabaseService(self.db_path)
+        self.commands = ChatCommandService(ChatRunLockService(self.db_path))
         self.factory = FakeChatConversationFactory()
         self.service = ChatDeleteService(
             store=self.store,
-            chat_db=self.chat_db,
+            chat_commands=self.commands,
             conversation_factory=self.factory,
         )
 
@@ -49,12 +51,6 @@ class ChatDeleteServiceTests(unittest.TestCase):
                 context_name=f"context-{chat_id}",
                 conversation_name=f"thread-{chat_id}",
             )
-        self.chat_db.create_chat(
-            chat_id,
-            ["delete.pdf"],
-            refs.context_ref,
-            refs.conversation_ref,
-        )
         self.store.sessions.create_or_get(
             chat_id=chat_id,
             workspace_ref=refs.context_ref,
@@ -96,7 +92,6 @@ class ChatDeleteServiceTests(unittest.TestCase):
         self.assertTrue(result.deleted)
         self.assertTrue(repeated.deleted)
         self.assertEqual(second_port_count, len(self.factory.ports))
-        self.assertIsNone(self.chat_db.get_chat("chat-delete"))
         self.assertIsNotNone(session)
         assert session is not None
         self.assertEqual("deleted", session.status)
@@ -108,7 +103,7 @@ class ChatDeleteServiceTests(unittest.TestCase):
         )
         self.service = ChatDeleteService(
             store=self.store,
-            chat_db=self.chat_db,
+            chat_commands=self.commands,
             conversation_factory=self.factory,
         )
         self._create_remote_chat("chat-thread-fail")
@@ -118,7 +113,6 @@ class ChatDeleteServiceTests(unittest.TestCase):
 
         self.assertTrue(result.deleted)
         self.assertEqual({LEASE_CLOSED}, {lease.status for lease in leases})
-        self.assertIsNone(self.chat_db.get_chat("chat-thread-fail"))
 
     def test_context_delete_failure_keeps_cleanup_failed_leases(self) -> None:
         self.factory = FakeChatConversationFactory(
@@ -126,7 +120,7 @@ class ChatDeleteServiceTests(unittest.TestCase):
         )
         self.service = ChatDeleteService(
             store=self.store,
-            chat_db=self.chat_db,
+            chat_commands=self.commands,
             conversation_factory=self.factory,
         )
         self._create_remote_chat("chat-workspace-fail")
@@ -145,7 +139,6 @@ class ChatDeleteServiceTests(unittest.TestCase):
         self.assertIsNotNone(session)
         assert session is not None
         self.assertEqual("error", session.status)
-        self.assertIsNotNone(self.chat_db.get_chat("chat-workspace-fail"))
         self.assertEqual(LEASE_CLOSED, leases[RESOURCE_THREAD].status)
         self.assertEqual(LEASE_CLEANUP_FAILED, leases[RESOURCE_WORKSPACE].status)
         self.assertEqual(
@@ -160,6 +153,8 @@ class ChatDeleteServiceTests(unittest.TestCase):
     def test_deleted_session_history_returns_empty_list(self) -> None:
         refs = self._create_remote_chat("chat-history-delete")
         self.store.runs.create(run_id="run-history-delete", chat_id="chat-history-delete")
+        self.store.runs.mark_running("run-history-delete")
+        self.store.runs.mark_succeeded("run-history-delete")
         self.store.messages.append(
             message_id="message-history-delete",
             chat_id="chat-history-delete",
@@ -180,6 +175,42 @@ class ChatDeleteServiceTests(unittest.TestCase):
     def test_missing_chat_raises_not_found(self) -> None:
         with self.assertRaises(ChatDeleteNotFoundError):
             self.service.delete_chat(chat_id="missing-chat")
+
+    def test_delete_rejects_active_run_without_changing_session_state(self) -> None:
+        self._create_remote_chat("chat-delete-active")
+        self.commands.start_chat_run(
+            chat_id="chat-delete-active",
+            user_message="still running",
+        )
+
+        with self.assertRaises(ChatDeleteBusyError):
+            self.service.delete_chat(chat_id="chat-delete-active")
+
+        session = self.store.sessions.get("chat-delete-active")
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual("active", session.status)
+
+    def test_delete_preserves_unresolved_planned_leases_for_recovery(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-unresolved-resource")
+        self.store.resource_leases.begin(
+            lease_id=chat_workspace_lease_id("chat-unresolved-resource"),
+            chat_id="chat-unresolved-resource",
+            resource_type=RESOURCE_WORKSPACE,
+        )
+
+        with self.assertRaises(ChatDeleteCleanupError):
+            self.service.delete_chat(chat_id="chat-unresolved-resource")
+
+        session = self.store.sessions.get("chat-unresolved-resource")
+        lease = self.store.resource_leases.get(
+            chat_workspace_lease_id("chat-unresolved-resource")
+        )
+        self.assertIsNotNone(session)
+        self.assertIsNotNone(lease)
+        assert session is not None and lease is not None
+        self.assertEqual("error", session.status)
+        self.assertEqual(LEASE_CLEANUP_FAILED, lease.status)
 
 
 if __name__ == "__main__":

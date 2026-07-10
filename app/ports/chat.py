@@ -173,6 +173,18 @@ class ChatConversationConflictError(ChatPortError):
 class ChatResourceError(ChatPortError):
     """文件对话外部资源创建、绑定或清理失败。"""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        resource_refs: Sequence[str] = (),
+    ) -> None:
+        super().__init__(message)
+        self.resource_refs = tuple(
+            _required_text(resource_ref, name="resource_ref")
+            for resource_ref in resource_refs
+        )
+
 
 class ChatResponseError(ChatPortError):
     """外部对话实现返回了无法形成稳定业务结果的响应。"""
