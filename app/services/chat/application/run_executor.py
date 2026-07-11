@@ -30,6 +30,7 @@ from app.services.chat.domain.models import (
     RESOURCE_WORKSPACE,
     SESSION_ACTIVE,
 )
+from app.services.chat.locking.lease import ChatRunLease
 from app.services.chat.persistence.store import ChatPersistenceStore
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
@@ -140,6 +141,18 @@ class PreparedChatRun:
     """Accepted run and immutable execution input handed to the stream layer."""
 
     request: ChatRunStreamRequest
+    execution_lease: ChatRunLease | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, ChatRunStreamRequest):
+            raise TypeError("request must be ChatRunStreamRequest")
+        if self.execution_lease is not None:
+            if not isinstance(self.execution_lease, ChatRunLease):
+                raise TypeError("execution_lease must be ChatRunLease or None")
+            if self.execution_lease.run_id != self.request.run_id:
+                raise ValueError("execution_lease does not match request.run_id")
+            if self.execution_lease.chat_id != self.request.chat_id:
+                raise ValueError("execution_lease does not match request.chat_id")
 
     @property
     def run_id(self) -> str:
@@ -247,15 +260,43 @@ class SynchronousChatRunExecutor:
                 for item in snapshots
             ),
         )
-        return PreparedChatRun(
-            request=ChatRunStreamRequest(
+        request = ChatRunStreamRequest(
+            run_id=run.run_id,
+            chat_id=normalized_chat_id,
+            message=normalized_message,
+            file_names=tuple(item.file_name for item in snapshots),
+            file_original_names=tuple(item.original_name for item in snapshots),
+            documents=snapshots,
+        )
+        # 受理成功后立即签发内部执行租约。该租约不会进入 HTTP/SSE，而是由
+        # dispatcher 传到 recorder，使未来 worker 可以在同一入口使用 fencing。
+        # 若未来协调器在领取阶段失败，必须收敛已创建的 run，不能遗留 409 锁。
+        try:
+            execution_lease = self._chat_commands.issue_execution_lease(
                 run_id=run.run_id,
-                chat_id=normalized_chat_id,
-                message=normalized_message,
-                file_names=tuple(item.file_name for item in snapshots),
-                file_original_names=tuple(item.original_name for item in snapshots),
-                documents=snapshots,
             )
+        except Exception as exc:
+            logger.exception(
+                "文件对话run签发执行租约失败，收敛已受理run: chat_id=%s run_id=%s",
+                normalized_chat_id,
+                run.run_id,
+            )
+            try:
+                self._chat_commands.fail_chat_run_with_user(
+                    run_id=run.run_id,
+                    user_message_id=f"{run.run_id}:user",
+                    error_message=str(exc) or exc.__class__.__name__,
+                )
+            except Exception:
+                logger.exception(
+                    "文件对话run执行租约失败后的终态收敛失败: chat_id=%s run_id=%s",
+                    normalized_chat_id,
+                    run.run_id,
+                )
+            raise
+        return PreparedChatRun(
+            request=request,
+            execution_lease=execution_lease,
         )
 
     def stream_chat_run(
@@ -510,6 +551,7 @@ class ChatRunEventRecorder:
         request: ChatRunStreamRequest,
         events: Iterable[ChatStreamEvent],
         chat_commands: ChatCommandService,
+        execution_lease: ChatRunLease | None = None,
     ) -> Iterator[ChatStreamEvent]:
         user_message_id = self._message_id(request.run_id, MESSAGE_ROLE_USER)
         assistant_message_id = self._message_id(
@@ -521,6 +563,10 @@ class ChatRunEventRecorder:
         assistant_parts: list[str] = []
         last_heartbeat_at: float | None = None
         try:
+            if execution_lease is not None:
+                # 在访问外部会话资源之前校验运行权。当前 SQLite 仅作单实例
+                # 校验；未来协调器会在这里校验实际 token/fencing 信息。
+                chat_commands.validate_execution_lease(lease=execution_lease)
             logger.info(
                 "开始记录文件对话run事件: chat_id=%s run_id=%s file_count=%d",
                 request.chat_id,
@@ -552,6 +598,7 @@ class ChatRunEventRecorder:
                         request=request,
                         user_message_id=user_message_id,
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
                     break
                 try:
@@ -577,6 +624,7 @@ class ChatRunEventRecorder:
                         request=request,
                         user_message_id=user_message_id,
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
                     break
                 if event.event_type == "textChunk":
@@ -598,12 +646,14 @@ class ChatRunEventRecorder:
                             assistant_message_id=assistant_message_id,
                             assistant_content="".join(assistant_parts),
                             terminal_event=event,
+                            **self._execution_lease_kwargs(execution_lease),
                         )
                     elif event.event_type == "aborted":
                         chat_commands.abort_chat_run_with_user(
                             run_id=request.run_id,
                             user_message_id=user_message_id,
                             terminal_event=event,
+                            **self._execution_lease_kwargs(execution_lease),
                         )
                     else:
                         chat_commands.fail_chat_run_with_user(
@@ -611,6 +661,7 @@ class ChatRunEventRecorder:
                             user_message_id=user_message_id,
                             error_message="chat stream emitted error event",
                             terminal_event=event,
+                            **self._execution_lease_kwargs(execution_lease),
                         )
                     terminal_event = event.event_type
                 else:
@@ -622,6 +673,7 @@ class ChatRunEventRecorder:
                         run_id=request.run_id,
                         chat_commands=chat_commands,
                         last_heartbeat_at=last_heartbeat_at,
+                        execution_lease=execution_lease,
                     )
                 yield event
                 if terminal_event:
@@ -639,6 +691,7 @@ class ChatRunEventRecorder:
                         request=request,
                         user_message_id=user_message_id,
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
                 else:
                     logger.warning(
@@ -652,6 +705,7 @@ class ChatRunEventRecorder:
                         user_message_id=user_message_id,
                         error_message="chat stream ended without terminal event",
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
         except GeneratorExit:
             if user_written and not terminal_event:
@@ -666,6 +720,7 @@ class ChatRunEventRecorder:
                         request=request,
                         user_message_id=user_message_id,
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
                 else:
                     logger.warning(
@@ -679,6 +734,7 @@ class ChatRunEventRecorder:
                         user_message_id=user_message_id,
                         error_message="chat stream closed before completion",
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
             raise
         except Exception as exc:
@@ -695,6 +751,7 @@ class ChatRunEventRecorder:
                         request=request,
                         user_message_id=user_message_id,
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
                 else:
                     chat_commands.abort_chat_run(run_id=request.run_id)
@@ -712,6 +769,7 @@ class ChatRunEventRecorder:
                         user_message_id=user_message_id,
                         error_message=str(exc) or exc.__class__.__name__,
                         chat_commands=chat_commands,
+                        execution_lease=execution_lease,
                     )
                 else:
                     chat_commands.fail_chat_run(
@@ -775,6 +833,7 @@ class ChatRunEventRecorder:
         request: ChatRunStreamRequest,
         user_message_id: str,
         chat_commands: ChatCommandService,
+        execution_lease: ChatRunLease | None,
     ) -> ChatStreamEvent:
         # 中断时保留 user committed，丢弃已输出但不完整的 assistant 片段；
         # 这是本地历史的权威语义，不依赖 AnythingLLM 是否已经写入远端 Thread。
@@ -783,6 +842,7 @@ class ChatRunEventRecorder:
             run_id=request.run_id,
             user_message_id=user_message_id,
             terminal_event=event,
+            **self._execution_lease_kwargs(execution_lease),
         )
         logger.info(
             "文件对话run按中断完成收敛: chat_id=%s run_id=%s",
@@ -803,6 +863,7 @@ class ChatRunEventRecorder:
         user_message_id: str,
         error_message: str,
         chat_commands: ChatCommandService,
+        execution_lease: ChatRunLease | None,
     ) -> None:
         """Persist a non-presented terminal error while preserving run cleanup.
 
@@ -817,6 +878,7 @@ class ChatRunEventRecorder:
                 user_message_id=user_message_id,
                 error_message=error_message,
                 terminal_event=terminal_event,
+                **self._execution_lease_kwargs(execution_lease),
             )
         except Exception:
             logger.exception(
@@ -828,6 +890,7 @@ class ChatRunEventRecorder:
                 run_id=run_id,
                 user_message_id=user_message_id,
                 error_message=error_message,
+                **self._execution_lease_kwargs(execution_lease),
             )
 
     def _abort_requested(self, run_id: str) -> bool:
@@ -840,6 +903,7 @@ class ChatRunEventRecorder:
         run_id: str,
         chat_commands: ChatCommandService,
         last_heartbeat_at: float | None,
+        execution_lease: ChatRunLease | None,
     ) -> float:
         now = monotonic()
         if (
@@ -847,8 +911,20 @@ class ChatRunEventRecorder:
             and now - last_heartbeat_at < self._heartbeat_interval_seconds
         ):
             return last_heartbeat_at
-        chat_commands.heartbeat_chat_run(run_id=run_id)
+        chat_commands.heartbeat_chat_run(
+            run_id=run_id,
+            **self._execution_lease_kwargs(execution_lease),
+        )
         return now
+
+    @staticmethod
+    def _execution_lease_kwargs(
+        execution_lease: ChatRunLease | None,
+    ) -> dict[str, ChatRunLease]:
+        """仅在有内部执行租约时把它传给命令层，兼容已有离线调用。"""
+        if execution_lease is None:
+            return {}
+        return {"execution_lease": execution_lease}
 
     @staticmethod
     def _message_id(run_id: str, role: str) -> str:
@@ -871,11 +947,13 @@ def record_chat_run_events(
     events: Iterable[ChatStreamEvent],
     store: ChatPersistenceStore,
     chat_commands: ChatCommandService,
+    execution_lease: ChatRunLease | None = None,
 ) -> Iterator[ChatStreamEvent]:
     return ChatRunEventRecorder(store).record(
         request=request,
         events=events,
         chat_commands=chat_commands,
+        execution_lease=execution_lease,
     )
 
 

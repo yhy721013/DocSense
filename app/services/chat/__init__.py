@@ -1,14 +1,24 @@
 """Public facade for file-chat domain, application and persistence services."""
 
 from app.services.chat.application.abort_service import (
+    AbortNotificationCapabilities,
+    AbortNotifier,
     ChatAbortResult,
     ChatAbortService,
+    PersistedAbortPollingNotifier,
 )
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.application.dispatcher import (
+    ChatRunDispatchCapabilities,
     ChatRunDispatcher,
     ChatRunExecutionLease,
     InlineChatRunDispatcher,
+)
+from app.services.chat.application.cleanup_dispatcher import (
+    ChatCleanupDispatchCapabilities,
+    ChatCleanupDispatcher,
+    ChatCleanupTask,
+    InlineChatCleanupDispatcher,
 )
 from app.services.chat.application.delete_service import (
     ChatDeleteBusyError,
@@ -100,6 +110,13 @@ from app.services.chat.locking.lock_service import (
     ChatSessionDeleteBusyError,
     ChatSessionUnavailableError,
 )
+from app.services.chat.locking.lease import (
+    ChatRunCoordinator,
+    ChatRunLease,
+    ChatRunLeaseCapabilities,
+    ChatRunLeaseLostError,
+    SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES,
+)
 from app.services.chat.persistence.repositories import (
     ChatDocumentRepository,
     ChatMessageRepository,
@@ -111,11 +128,27 @@ from app.services.chat.persistence.repositories import (
 from app.services.chat.persistence.resource_lease_service import (
     ChatResourceLeaseService,
 )
-from app.services.chat.persistence.store import ChatPersistenceStore, ChatStore
+from app.services.chat.persistence.store import (
+    ChatInfrastructureCapabilityError,
+    ChatOutboxMessage,
+    ChatOutboxStore,
+    ChatPersistenceCapabilities,
+    ChatPersistenceConflictError,
+    ChatPersistenceError,
+    ChatPersistenceStore,
+    ChatStore,
+    ChatUniqueConstraintViolation,
+    ChatUnitOfWork,
+    DisabledChatOutbox,
+    SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES,
+    SQLiteChatUnitOfWork,
+)
 
 __all__ = [
     "ChatDocument",
     "ChatDocumentRepository",
+    "AbortNotificationCapabilities",
+    "AbortNotifier",
     "ChatAbortResult",
     "ChatAbortService",
     "ChatCommandService",
@@ -131,6 +164,9 @@ __all__ = [
     "ChatMessageFile",
     "ChatMessageRepository",
     "ChatPersistenceStore",
+    "ChatPersistenceCapabilities",
+    "ChatPersistenceConflictError",
+    "ChatPersistenceError",
     "ChatResourceLease",
     "ChatResourceLeaseService",
     "ChatRun",
@@ -139,12 +175,17 @@ __all__ = [
     "ChatRunEventStore",
     "ChatRunBusyError",
     "ChatRunDocumentSnapshot",
+    "ChatRunDispatchCapabilities",
     "ChatRunDispatcher",
+    "ChatRunCoordinator",
     "ChatRunInactiveError",
     "ChatRunEventRecorder",
     "ChatRunExecutionLease",
     "ChatRunExecutor",
     "ChatRunLockService",
+    "ChatRunLease",
+    "ChatRunLeaseCapabilities",
+    "ChatRunLeaseLostError",
     "ChatRunInput",
     "ChatRunInputFile",
     "ChatRunInputRepository",
@@ -161,6 +202,14 @@ __all__ = [
     "ChatTitleUnavailableError",
     "ChatTitleResult",
     "ChatTitleService",
+    "ChatCleanupDispatchCapabilities",
+    "ChatCleanupDispatcher",
+    "ChatCleanupTask",
+    "ChatInfrastructureCapabilityError",
+    "ChatOutboxMessage",
+    "ChatOutboxStore",
+    "ChatUniqueConstraintViolation",
+    "ChatUnitOfWork",
     "chat_document_binding_lease_id",
     "chat_thread_lease_id",
     "chat_workspace_lease_id",
@@ -199,8 +248,13 @@ __all__ = [
     "SESSION_STATUSES",
     "PreparedChatRun",
     "InlineChatRunDispatcher",
+    "InlineChatCleanupDispatcher",
+    "PersistedAbortPollingNotifier",
     "ResolvedChatDocument",
     "SynchronousChatRunExecutor",
+    "SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES",
+    "SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES",
+    "SQLiteChatUnitOfWork",
     "ensure_chat_schema",
     "record_chat_run_events",
 ]

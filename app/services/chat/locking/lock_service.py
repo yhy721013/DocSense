@@ -28,6 +28,12 @@ from app.services.chat.domain.models import (
     ChatRun,
 )
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.locking.lease import (
+    ChatRunLease,
+    ChatRunLeaseCapabilities,
+    ChatRunLeaseLostError,
+    SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES,
+)
 from app.services.chat.persistence.event_repository import ChatRunEventRepository
 from app.services.chat.persistence.repositories import (
     ChatRunRepository,
@@ -96,7 +102,12 @@ class ChatSessionDeleteBusyError(RuntimeError):
 
 
 class ChatRunLockService:
-    """Acquire and release durable per-chat run ownership."""
+    """SQLite 单实例 run 协调器及其兼容锁服务入口。
+
+    名称保留是为了兼容已存在的应用装配与测试；它并不是分布式锁实现。共享
+    持久化落地后，应由新的 ``ChatRunCoordinator`` 适配器替换本类，并以真实
+    lease/fencing token 把心跳和终态提交收敛为条件更新。
+    """
 
     def __init__(
         self,
@@ -115,11 +126,16 @@ class ChatRunLockService:
         ensure_chat_schema(self.db_path)
         self._runs = ChatRunRepository(self.db_path, initialize=False)
         logger.info(
-            "文件对话run锁服务已初始化: db_path=%s owner=%s stale_after_seconds=%s",
+            "文件对话SQLite单实例run协调器已初始化: db_path=%s owner=%s stale_after_seconds=%s",
             self.db_path,
             self.owner_instance_id,
             self.stale_after_seconds,
         )
+
+    @property
+    def lease_capabilities(self) -> ChatRunLeaseCapabilities:
+        """返回当前 SQLite 实现的真实租约能力，明确不含跨实例 fencing。"""
+        return SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES
 
     def try_acquire_chat_run(
         self,
@@ -392,6 +408,113 @@ class ChatRunLockService:
                 ) from exc
             raise
 
+    def issue_execution_lease(self, *, run_id: str) -> ChatRunLease:
+        """为当前单实例执行器生成内部运行权证明。
+
+        SQLite 适配器不会生成可跨进程校验的 token；返回空 token/fencing 字段是
+        有意为之，调用方必须结合 ``lease_capabilities`` 判断部署能力。这里仍
+        校验 run 归属，避免错误实例误用同一个内部 run 标识。
+        """
+        run = self._get_run_for_execution_lease(run_id)
+        return ChatRunLease(
+            run_id=run.run_id,
+            chat_id=run.chat_id,
+            owner_instance_id=run.owner_instance_id,
+        )
+
+    def validate_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
+        """校验一个内部执行租约仍对应本实例的活跃 run。
+
+        当前校验与后续写入之间无法构成跨实例 fencing 原子条件，因此只可用于
+        ``single_instance`` 模式。未来适配器必须把 lease/fencing 条件合并到
+        heartbeat 和终态 UPDATE 中。
+        """
+        if not isinstance(lease, ChatRunLease):
+            raise TypeError("lease must be ChatRunLease")
+        run = self._runs.get(lease.run_id)
+        if run is None:
+            raise ChatRunLeaseLostError(
+                run_id=lease.run_id,
+                reason="run does not exist",
+            )
+        if run.chat_id != lease.chat_id:
+            raise ChatRunLeaseLostError(
+                run_id=lease.run_id,
+                reason="chat_id does not match",
+            )
+        if run.owner_instance_id != lease.owner_instance_id:
+            raise ChatRunLeaseLostError(
+                run_id=lease.run_id,
+                reason="owner_instance_id does not match",
+            )
+        if run.owner_instance_id != self.owner_instance_id:
+            raise ChatRunLeaseLostError(
+                run_id=lease.run_id,
+                reason="run is owned by another instance",
+            )
+        if run.status not in RUN_ACTIVE_STATUSES:
+            raise ChatRunLeaseLostError(
+                run_id=lease.run_id,
+                reason=f"run is no longer active: {run.status}",
+            )
+        return run
+
+    def heartbeat_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
+        """通过执行租约刷新心跳，保留未来 fencing 条件更新的稳定签名。"""
+        self.validate_execution_lease(lease=lease)
+        return self.heartbeat_run(lease.run_id)
+
+    def complete_run_with_execution_lease(
+        self,
+        *,
+        lease: ChatRunLease,
+        user_message_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """通过执行租约提交成功终态及完整助手消息。"""
+        self.validate_execution_lease(lease=lease)
+        return self.complete_run_with_messages(
+            run_id=lease.run_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+            assistant_content=assistant_content,
+            terminal_event=terminal_event,
+        )
+
+    def fail_run_with_execution_lease(
+        self,
+        *,
+        lease: ChatRunLease,
+        user_message_id: str,
+        error_message: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """通过执行租约提交失败终态，并按既有规则保留 user 消息。"""
+        self.validate_execution_lease(lease=lease)
+        return self.fail_run_with_user(
+            run_id=lease.run_id,
+            user_message_id=user_message_id,
+            error_message=error_message,
+            terminal_event=terminal_event,
+        )
+
+    def abort_run_with_execution_lease(
+        self,
+        *,
+        lease: ChatRunLease,
+        user_message_id: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """通过执行租约提交中断终态，并丢弃未完成助手输出。"""
+        self.validate_execution_lease(lease=lease)
+        return self.abort_run_with_user(
+            run_id=lease.run_id,
+            user_message_id=user_message_id,
+            terminal_event=terminal_event,
+        )
+
     def expire_stale_runs_for_chat(self, *, chat_id: str) -> tuple[ChatRun, ...]:
         """Mark stale active runs for one chat as failed and return them.
 
@@ -527,6 +650,27 @@ class ChatRunLockService:
                 ),
             )
         return tuple(stale_run_ids)
+
+    def _get_run_for_execution_lease(self, run_id: str) -> ChatRun:
+        """读取并校验当前实例可以为其签发内部执行租约的活跃 run。"""
+        normalized_run_id = _required_text(run_id, name="run_id")
+        run = self._runs.get(normalized_run_id)
+        if run is None:
+            raise ChatRunLeaseLostError(
+                run_id=normalized_run_id,
+                reason="run does not exist",
+            )
+        if run.owner_instance_id != self.owner_instance_id:
+            raise ChatRunLeaseLostError(
+                run_id=normalized_run_id,
+                reason="run is owned by another instance",
+            )
+        if run.status not in RUN_ACTIVE_STATUSES:
+            raise ChatRunLeaseLostError(
+                run_id=normalized_run_id,
+                reason=f"run is no longer active: {run.status}",
+            )
+        return run
 
     @staticmethod
     def _append_run_input(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.domain.events import ChatStreamEvent
@@ -19,6 +20,57 @@ def _required_text(value: str, *, name: str) -> str:
     if not normalized:
         raise ValueError(f"{name} cannot be empty")
     return normalized
+
+
+@dataclass(frozen=True)
+class AbortNotificationCapabilities:
+    """取消通知适配器的真实能力声明。
+
+    取消请求的权威事实始终是 ``chat_runs.abort_requested``。通知只用于让正在
+    执行的 worker 更快醒来，因此当前单实例轮询实现不会伪造跨实例实时唤醒。
+    """
+
+    single_instance_only: bool
+    supports_cross_instance_wakeup: bool
+
+
+PERSISTED_ABORT_POLLING_CAPABILITIES = AbortNotificationCapabilities(
+    single_instance_only=True,
+    supports_cross_instance_wakeup=False,
+)
+
+
+@runtime_checkable
+class AbortNotifier(Protocol):
+    """通知执行器检查已持久化取消请求的产品无关边界。"""
+
+    @property
+    def capabilities(self) -> AbortNotificationCapabilities:
+        """返回通知器实际可提供的唤醒能力。"""
+        ...
+
+    def notify_abort_requested(self, *, chat_id: str, run_id: str) -> None:
+        """尽力通知执行器；失败不得撤销已持久化的 abort 事实。"""
+        ...
+
+
+class PersistedAbortPollingNotifier:
+    """当前单实例通知器：不发送信号，由本地执行器轮询持久化标记。
+
+    该空实现刻意存在于容器装配中，避免未来维护者误以为 abort 已具备跨实例
+    pub/sub 能力。替换为真实通知系统时只需实现 ``AbortNotifier``。
+    """
+
+    capabilities = PERSISTED_ABORT_POLLING_CAPABILITIES
+
+    def notify_abort_requested(self, *, chat_id: str, run_id: str) -> None:
+        _required_text(chat_id, name="chat_id")
+        _required_text(run_id, name="run_id")
+        logger.debug(
+            "文件对话中断已持久化，等待本地执行器轮询: chat_id=%s run_id=%s",
+            chat_id,
+            run_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -46,9 +98,18 @@ class ChatAbortService:
         *,
         store: ChatPersistenceStore,
         chat_commands: ChatCommandService,
+        abort_notifier: AbortNotifier | None = None,
     ) -> None:
         self._store = store
         self._chat_commands = chat_commands
+        self._abort_notifier = abort_notifier or PersistedAbortPollingNotifier()
+        if not isinstance(self._abort_notifier, AbortNotifier):
+            raise TypeError("abort_notifier must implement AbortNotifier")
+
+    @property
+    def notifier_capabilities(self) -> AbortNotificationCapabilities:
+        """向容器暴露通知器能力，以便启动时执行部署模式校验。"""
+        return self._abort_notifier.capabilities
 
     def abort_chat(self, *, chat_id: str) -> ChatAbortResult:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
@@ -100,6 +161,19 @@ class ChatAbortService:
             normalized_chat_id,
             requested.run_id,
         )
+        try:
+            # 先持久化再通知：通知丢失时执行器仍会在事件边界读取 abort 标记，
+            # 因而不能把通知异常转换成“中断未受理”的错误响应。
+            self._abort_notifier.notify_abort_requested(
+                chat_id=normalized_chat_id,
+                run_id=requested.run_id,
+            )
+        except Exception:
+            logger.exception(
+                "文件对话中断通知失败，保留持久化标记等待轮询: chat_id=%s run_id=%s",
+                normalized_chat_id,
+                requested.run_id,
+            )
         return ChatAbortResult(
             chat_id=normalized_chat_id,
             aborted=True,
@@ -115,4 +189,11 @@ class ChatAbortService:
         )
 
 
-__all__ = ["ChatAbortResult", "ChatAbortService"]
+__all__ = [
+    "AbortNotificationCapabilities",
+    "AbortNotifier",
+    "ChatAbortResult",
+    "ChatAbortService",
+    "PERSISTED_ABORT_POLLING_CAPABILITIES",
+    "PersistedAbortPollingNotifier",
+]

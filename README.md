@@ -317,7 +317,9 @@ DOCSENSE_RUNTIME_DIR=C:/.me/envs/DocSenseEnv
 - SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
 - 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`
 
-文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。数据库迁移、可靠调度与多实例部署尚未启用。
+文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
+
+为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理，不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
 
 旧的组件级变量仍可作为兼容覆盖项，但一旦配置就会覆盖统一根目录。若希望全部内容位于同一目录，应删除 `DOCSENSE_LLM_TASK_DB`、`DOCSENSE_KNOWLEDGE_BASE_DB`、`KNOWLEDGE_BASE_DB_PATH`、`DOCSENSE_CHAT_DB`、`FILE_DOWNLOAD_DIR`、`DOCSENSE_OCR_CACHE_DIR` 和 `DOCSENSE_MINERU_CACHE_DIR`。
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）

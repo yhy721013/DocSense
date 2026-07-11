@@ -1,14 +1,24 @@
 """Application services for file chat use cases."""
 
 from app.services.chat.application.abort_service import (
+    AbortNotificationCapabilities,
+    AbortNotifier,
     ChatAbortResult,
     ChatAbortService,
+    PersistedAbortPollingNotifier,
 )
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.application.dispatcher import (
+    ChatRunDispatchCapabilities,
     ChatRunDispatcher,
     ChatRunExecutionLease,
     InlineChatRunDispatcher,
+)
+from app.services.chat.application.cleanup_dispatcher import (
+    ChatCleanupDispatchCapabilities,
+    ChatCleanupDispatcher,
+    ChatCleanupTask,
+    InlineChatCleanupDispatcher,
 )
 from app.services.chat.application.delete_service import (
     ChatDeleteBusyError,
@@ -44,6 +54,8 @@ from app.services.chat.application.title_service import (
 __all__ = [
     "ChatAbortResult",
     "ChatAbortService",
+    "AbortNotificationCapabilities",
+    "AbortNotifier",
     "ChatCommandService",
     "ChatDocumentNotFoundError",
     "ChatDocumentResolver",
@@ -54,6 +66,7 @@ __all__ = [
     "ChatDeleteService",
     "ChatHistoryService",
     "ChatRunDocumentSnapshot",
+    "ChatRunDispatchCapabilities",
     "ChatRunDispatcher",
     "ChatRunEventRecorder",
     "ChatRunExecutionLease",
@@ -62,6 +75,11 @@ __all__ = [
     "DatabaseChatDocumentResolver",
     "PreparedChatRun",
     "InlineChatRunDispatcher",
+    "ChatCleanupDispatchCapabilities",
+    "ChatCleanupDispatcher",
+    "ChatCleanupTask",
+    "InlineChatCleanupDispatcher",
+    "PersistedAbortPollingNotifier",
     "ResolvedChatDocument",
     "SynchronousChatRunExecutor",
     "ChatTitleEmptyHistoryError",

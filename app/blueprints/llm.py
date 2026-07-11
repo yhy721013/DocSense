@@ -967,7 +967,10 @@ def llm_chat():
 
     try:
         stream = services.chat_dispatcher.dispatch(
-            ChatRunExecutionLease(request=chat_run_request)
+            ChatRunExecutionLease(
+                request=chat_run_request,
+                ownership_lease=prepared_run.execution_lease,
+            )
         )
         generator = finalize_chat_run_stream(
             stream=stream,
@@ -1000,6 +1003,7 @@ def llm_chat():
                 run_id=chat_run_request.run_id,
                 user_message_id=f"{chat_run_request.run_id}:user",
                 error_message=str(exc) or exc.__class__.__name__,
+                execution_lease=prepared_run.execution_lease,
             )
         finally:
             _release_stream_slot()

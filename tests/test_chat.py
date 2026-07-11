@@ -53,6 +53,7 @@ def _build_test_services(tmp: str) -> ApplicationServices:
             events=chat_run_executor.stream_chat_run(lease.request),
             store=chat_store,
             chat_commands=chat_commands,
+            execution_lease=lease.ownership_lease,
         )
     )
     return ApplicationServices(

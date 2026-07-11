@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, ParamSpec, TypeVar
 
 from flask import current_app
@@ -43,8 +43,10 @@ from app.services.chat import (
 )
 from app.services.core.config import (
     AnythingLLMConfig,
+    ChatInfrastructureConfig,
     LLMIntegrationConfig,
     load_anythingllm_config,
+    load_chat_infrastructure_config,
     load_llm_integration_config,
 )
 from app.services.core.database import ChatDatabaseService, DatabaseService
@@ -129,6 +131,9 @@ class ApplicationServices:
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
+    chat_infrastructure_config: ChatInfrastructureConfig = field(
+        default_factory=ChatInfrastructureConfig.single_instance
+    )
 
     def __post_init__(self) -> None:
         """在应用启动时拒绝缺失关键依赖，避免请求到达后才出现空引用错误。"""
@@ -151,6 +156,7 @@ class ApplicationServices:
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
             "anythingllm_config": self.anythingllm_config,
+            "chat_infrastructure_config": self.chat_infrastructure_config,
         }
         missing = [name for name, value in required_dependencies.items() if value is None]
         if missing:
@@ -185,10 +191,47 @@ class ApplicationServices:
             raise TypeError("chat_abort must be ChatAbortService")
         if not isinstance(self.chat_delete, ChatDeleteService):
             raise TypeError("chat_delete must be ChatDeleteService")
+        if not isinstance(self.chat_infrastructure_config, ChatInfrastructureConfig):
+            raise TypeError(
+                "chat_infrastructure_config must be ChatInfrastructureConfig"
+            )
+        self._validate_chat_infrastructure_capabilities()
+
+    def _validate_chat_infrastructure_capabilities(self) -> None:
+        """按部署模式验证已装配适配器的真实能力，禁止错误模式静默启动。
+
+        该校验位于组合根，业务服务不需要知道 SQLite、同步 dispatcher 或轮询
+        notifier 的具体类型。阶段 13 以后只需替换容器装配和能力声明即可开放
+        新模式，HTTP/SSE 契约与 Chat Application Service 均不受影响。
+        """
+        if (
+            self.chat_infrastructure_config.runtime_mode
+            != "single_instance"
+        ):
+            # ``ChatInfrastructureConfig`` 已在构造期拒绝该路径；保留防御性
+            # 检查，避免未来扩展配置时绕过适配器能力门禁。
+            raise RuntimeError("unsupported chat infrastructure runtime mode")
+
+        capabilities = {
+            "persistence": self.chat_store.capabilities.single_instance_only,
+            "run_lease": self.chat_commands.lease_capabilities.single_instance_only,
+            "run_dispatcher": self.chat_dispatcher.capabilities.single_instance_only,
+            "abort_notifier": self.chat_abort.notifier_capabilities.single_instance_only,
+            "cleanup_dispatcher": self.chat_delete.cleanup_dispatcher_capabilities.single_instance_only,
+        }
+        incompatible = [name for name, value in capabilities.items() if not value]
+        if incompatible:
+            raise RuntimeError(
+                "single_instance 文件对话模式装配了不兼容适配器："
+                + ", ".join(incompatible)
+            )
 
 
 def create_application_services() -> ApplicationServices:
     """根据环境配置创建生产应用容器，不创建 AnythingLLM 网络 Session。"""
+    # 先校验部署模式，再读取任何外部集成配置或创建数据库文件。这样错误地把
+    # SQLite 单实例模式配置成集群时，会在应用启动的最早阶段 fail fast。
+    chat_infrastructure_config = load_chat_infrastructure_config()
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
     task_service = LLMTaskService(llm_config.task_db_path)
@@ -210,6 +253,7 @@ def create_application_services() -> ApplicationServices:
             events=chat_run_executor.stream_chat_run(lease.request),
             store=chat_store,
             chat_commands=chat_commands,
+            execution_lease=lease.ownership_lease,
         )
 
     chat_dispatcher = InlineChatRunDispatcher(execute=execute_inline_chat_run)
@@ -252,12 +296,14 @@ def create_application_services() -> ApplicationServices:
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,
         anythingllm_config=anythingllm_config,
+        chat_infrastructure_config=chat_infrastructure_config,
     )
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "
-        "upload_max_concurrency=%d",
+        "upload_max_concurrency=%d chat_runtime_mode=%s",
         services.knowledge_index_factory is not None,
         services.upload_task_limiter.max_concurrency,
+        services.chat_infrastructure_config.runtime_mode,
     )
     return services
 

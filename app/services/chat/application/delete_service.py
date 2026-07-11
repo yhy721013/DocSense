@@ -30,6 +30,12 @@ from app.services.chat.domain.resource_ids import (
     chat_workspace_lease_id,
 )
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.application.cleanup_dispatcher import (
+    ChatCleanupDispatchCapabilities,
+    ChatCleanupDispatcher,
+    ChatCleanupTask,
+    InlineChatCleanupDispatcher,
+)
 from app.services.chat.locking.lock_service import (
     ChatSessionDeleteBusyError,
     ChatSessionUnavailableError,
@@ -112,10 +118,19 @@ class ChatDeleteService:
         store: ChatPersistenceStore,
         chat_commands: ChatCommandService,
         conversation_factory: ChatConversationFactory,
+        cleanup_dispatcher: ChatCleanupDispatcher | None = None,
     ) -> None:
         self._store = store
         self._chat_commands = chat_commands
         self._conversation_factory = conversation_factory
+        self._cleanup_dispatcher = cleanup_dispatcher or InlineChatCleanupDispatcher()
+        if not isinstance(self._cleanup_dispatcher, ChatCleanupDispatcher):
+            raise TypeError("cleanup_dispatcher must implement ChatCleanupDispatcher")
+
+    @property
+    def cleanup_dispatcher_capabilities(self) -> ChatCleanupDispatchCapabilities:
+        """向容器暴露清理调度能力，避免把同步实现误用于集群模式。"""
+        return self._cleanup_dispatcher.capabilities
 
     def delete_chat(self, *, chat_id: str) -> ChatDeleteResult:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
@@ -189,21 +204,18 @@ class ChatDeleteService:
         )
 
         try:
-            with self._conversation_factory.create() as port:
-                if session.thread_ref:
-                    self._delete_conversation(
-                        chat_id=normalized_chat_id,
-                        port=port,
-                        session=ChatSessionRefs(
-                            context_ref=session.workspace_ref,
-                            conversation_ref=session.thread_ref,
-                        ),
-                    )
-                self._delete_context(
+            # 无论是调用方发起的重复删除，还是未来调度器触发的补偿，远端
+            # 清理都必须经过同一个 dispatcher 边界，不能退回为人工扫描状态表。
+            self._cleanup_dispatcher.dispatch(
+                task=ChatCleanupTask(
                     chat_id=normalized_chat_id,
-                    port=port,
-                    context_ref=session.workspace_ref,
-                )
+                    reason="delete_chat",
+                ),
+                execute=lambda: self._cleanup_remote_resources(
+                    chat_id=normalized_chat_id,
+                    session=session,
+                ),
+            )
         except Exception as exc:
             self._record_all_open_cleanup_failed(
                 normalized_chat_id,
@@ -246,6 +258,33 @@ class ChatDeleteService:
             deleted=True,
             msg="对话已删除",
         )
+
+    def _cleanup_remote_resources(
+        self,
+        *,
+        chat_id: str,
+        session: ChatSession,
+    ) -> None:
+        """执行一次远端资源删除，供同步或未来 worker dispatcher 调用。
+
+        函数本身不决定 HTTP 返回值；所有失败都会回到 ``delete_chat`` 的统一
+        状态收敛逻辑，确保租约先被标记为 ``cleanup_failed`` 再对外报告失败。
+        """
+        with self._conversation_factory.create() as port:
+            if session.thread_ref:
+                self._delete_conversation(
+                    chat_id=chat_id,
+                    port=port,
+                    session=ChatSessionRefs(
+                        context_ref=session.workspace_ref,
+                        conversation_ref=session.thread_ref,
+                    ),
+                )
+            self._delete_context(
+                chat_id=chat_id,
+                port=port,
+                context_ref=session.workspace_ref,
+            )
 
     def _ensure_reference_leases(self, session: ChatSession) -> None:
         if session.workspace_ref:

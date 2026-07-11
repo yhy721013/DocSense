@@ -586,6 +586,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
                 events=executor.stream_chat_run(prepared.request),
                 store=self.store,
                 chat_commands=self.commands,
+                execution_lease=prepared.execution_lease,
             )
         )
 
@@ -599,6 +600,36 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual("document:hash-a.pdf", documents[0].document_ref)
         self.assertTrue(all(lease.status == "active" for lease in leases))
         self.assertTrue(all(lease.run_id == prepared.run_id for lease in leases))
+
+    def test_execution_lease_issue_failure_releases_the_accepted_run(self) -> None:
+        """未来协调器领取失败时不能让已受理 run 永久占用 chatId。"""
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(),
+            document_resolver=self.resolver,
+        )
+
+        with patch.object(
+            self.commands,
+            "issue_execution_lease",
+            side_effect=RuntimeError("lease issue failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "lease issue failed"):
+                executor.prepare_chat_run(
+                    chat_id="chat-lease-issue-failure",
+                    message="question",
+                    file_names=(),
+                )
+
+        self.assertEqual((), self.store.runs.list_active("chat-lease-issue-failure"))
+        messages = self.store.messages.list_by_chat("chat-lease-issue-failure")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+        run = self.store.runs.get(messages[0].run_id)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
 
     def test_compensated_open_failure_closes_unneeded_planned_leases(self) -> None:
         executor = SynchronousChatRunExecutor(

@@ -241,6 +241,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 events=chat_run_executor.stream_chat_run(lease.request),
                 store=chat_store,
                 chat_commands=chat_commands,
+                execution_lease=lease.ownership_lease,
             )
         )
         self.services = ApplicationServices(
