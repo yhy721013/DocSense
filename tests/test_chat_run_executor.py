@@ -18,10 +18,12 @@ from app.services.chat import (
     ChatStore,
     ResolvedChatDocument,
     MESSAGE_COMMITTED,
+    MESSAGE_DISCARDED,
     MESSAGE_PENDING,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
     RUN_ABORTED,
+    RUN_ACCEPTED,
     RUN_FAILED,
     RUN_RUNNING,
     RUN_SUCCEEDED,
@@ -86,8 +88,8 @@ class ChatRunStreamRequestTests(unittest.TestCase):
 
     def test_protocol_accepts_event_stream_executor(self) -> None:
         class FakeExecutor:
-            def stream_chat_run(self, request: ChatRunStreamRequest):
-                yield ChatStreamEvent("done", {"chatId": request.chat_id})
+            def execute_chat_run(self, run_id: str):
+                yield ChatStreamEvent("done", {"chatId": run_id})
 
         self.assertIsInstance(FakeExecutor(), ChatRunExecutor)
 
@@ -231,7 +233,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.assertEqual(RUN_ABORTED, run.status)
         next_run = self.commands.start_chat_run(chat_id="chat-1")
         self.assertNotEqual("run-1", next_run.run_id)
-        self.assertEqual(RUN_RUNNING, next_run.status)
+        self.assertEqual(RUN_ACCEPTED, next_run.status)
 
     def test_abort_request_during_upstream_wait_wins_over_done_event(self) -> None:
         commands = self.commands
@@ -553,8 +555,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
-        self.store = ChatStore(f"{self.tmp}/chat.sqlite3")
-        self.commands = ChatCommandService(ChatRunLockService(self.store.db_path))
+        self.db_path = f"{self.tmp}/chat.sqlite3"
+        self.store = ChatStore(self.db_path)
+        self.commands = ChatCommandService(ChatRunLockService(self.db_path))
         self.resolver = _StaticDocumentResolver()
 
     def tearDown(self) -> None:
@@ -580,18 +583,12 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual("question", accepted_input.message)
         self.assertEqual("document:hash-a.pdf", accepted_input.files[0].document_ref)
 
-        events = list(
-            record_chat_run_events(
-                request=prepared.request,
-                events=executor.stream_chat_run(prepared.request),
-                store=self.store,
-                chat_commands=self.commands,
-                execution_lease=prepared.execution_lease,
-            )
-        )
+        events = list(executor.execute_chat_run(prepared.run_id))
 
         session = self.store.sessions.get("chat-executor")
-        documents = self.store.documents.list_by_chat("chat-executor")
+        documents = self.store.document_bindings.list_current_by_chat(
+            "chat-executor"
+        )
         leases = self.store.resource_leases.list_by_chat("chat-executor")
         self.assertEqual(["chatInfo", "textChunk", "done"], [event.event_type for event in events])
         self.assertIsNotNone(session)
@@ -610,26 +607,55 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
 
+        prepared = executor.prepare_chat_run(
+            chat_id="chat-lease-issue-failure",
+            message="question",
+            file_names=(),
+        )
         with patch.object(
             self.commands,
             "issue_execution_lease",
             side_effect=RuntimeError("lease issue failed"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "lease issue failed"):
-                executor.prepare_chat_run(
-                    chat_id="chat-lease-issue-failure",
-                    message="question",
-                    file_names=(),
-                )
+            events = list(executor.execute_chat_run(prepared.run_id))
 
         self.assertEqual((), self.store.runs.list_active("chat-lease-issue-failure"))
+        self.assertEqual(["error"], [event.event_type for event in events])
         messages = self.store.messages.list_by_chat("chat-lease-issue-failure")
         self.assertEqual(1, len(messages))
-        self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+        self.assertEqual(MESSAGE_DISCARDED, messages[0].status)
         run = self.store.runs.get(messages[0].run_id)
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_FAILED, run.status)
+
+    def test_duplicate_executor_does_not_discard_a_run_claimed_elsewhere(self) -> None:
+        """重复投递领取失败时，不能清理已由其他执行器接管的用户消息。"""
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(),
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="chat-duplicate-claim",
+            message="question",
+            file_names=(),
+        )
+
+        # 模拟未来可靠队列重复投递：第一个执行器已经将 accepted 原子领取为
+        # running，第二个执行器只能报告本次交付未启动，绝不能改写该 run。
+        self.commands.issue_execution_lease(run_id=prepared.run_id)
+        events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(["error"], [event.event_type for event in events])
+        messages = self.store.messages.list_by_chat("chat-duplicate-claim")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_PENDING, messages[0].status)
+        run = self.store.runs.get(prepared.run_id)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_RUNNING, run.status)
 
     def test_compensated_open_failure_closes_unneeded_planned_leases(self) -> None:
         executor = SynchronousChatRunExecutor(
@@ -646,14 +672,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             file_names=(),
         )
 
-        events = list(
-            record_chat_run_events(
-                request=prepared.request,
-                events=executor.stream_chat_run(prepared.request),
-                store=self.store,
-                chat_commands=self.commands,
-            )
-        )
+        events = list(executor.execute_chat_run(prepared.run_id))
 
         run = self.store.runs.get(prepared.run_id)
         leases = self.store.resource_leases.list_by_chat("chat-open-fail")
@@ -679,14 +698,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             file_names=(),
         )
 
-        events = list(
-            record_chat_run_events(
-                request=prepared.request,
-                events=executor.stream_chat_run(prepared.request),
-                store=self.store,
-                chat_commands=self.commands,
-            )
-        )
+        events = list(executor.execute_chat_run(prepared.run_id))
 
         messages = self.store.messages.list_by_chat("chat-output-limit")
         run = self.store.runs.get(prepared.run_id)
@@ -712,14 +724,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             file_names=(),
         )
 
-        list(
-            record_chat_run_events(
-                request=prepared.request,
-                events=executor.stream_chat_run(prepared.request),
-                store=self.store,
-                chat_commands=self.commands,
-            )
-        )
+        list(executor.execute_chat_run(prepared.run_id))
 
         workspace_lease = self.store.resource_leases.get(
             "chat:chat-orphan-workspace:workspace"

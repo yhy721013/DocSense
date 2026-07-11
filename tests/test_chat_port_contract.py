@@ -210,22 +210,30 @@ class ChatPortContractTests(unittest.TestCase):
                 )
             )
 
-    def test_standalone_reply_does_not_mutate_conversation_history(self) -> None:
-        """标题生成等一次性回复不得污染主对话消息快照。"""
+    def test_temporary_reply_does_not_mutate_main_conversation_history(self) -> None:
+        """标题临时会话不得污染主对话，且调用方显式负责删除。"""
         port = FakeChatConversationPort(standalone_reply="标题")
         session = port.open_conversation(
             context_name="chat-c3",
             conversation_name="thread-c3",
         )
 
-        reply = port.generate_standalone_reply(
+        temporary_session = port.open_temporary_conversation(
             context_ref=session.context_ref,
+            conversation_name="title-c3",
+        )
+        reply = port.generate_temporary_reply(
+            session=temporary_session,
             prompt="生成标题",
         )
 
         self.assertEqual("标题", reply)
         self.assertEqual((), port.fetch_messages(session))
         self.assertEqual([(session.context_ref, "生成标题")], port.standalone_prompts)
+        self.assertEqual(
+            ChatOperationResult(success=True),
+            port.delete_conversation(temporary_session),
+        )
 
     def test_delete_operations_are_idempotent(self) -> None:
         """删除对话和上下文都应能重复调用，并明确 already_applied 状态。"""

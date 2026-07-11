@@ -1,7 +1,8 @@
 """Persistence adapters for file chat local authority data."""
 
 from app.services.chat.persistence.repositories import (
-    ChatDocumentRepository,
+    ChatCleanupJobRepository,
+    ChatDocumentBindingRepository,
     ChatMessageRepository,
     ChatRunRepository,
     ChatSessionRepository,
@@ -19,25 +20,21 @@ from app.services.chat.persistence.store import (
     ChatOutboxMessage,
     ChatOutboxStore,
     ChatPersistenceCapabilities,
-    ChatPersistenceConflictError,
     ChatPersistenceError,
     ChatPersistenceStore,
     ChatStore,
-    ChatUniqueConstraintViolation,
-    ChatUnitOfWork,
     DisabledChatOutbox,
     SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES,
-    SQLiteChatUnitOfWork,
 )
 
 __all__ = [
-    "ChatDocumentRepository",
+    "ChatCleanupJobRepository",
+    "ChatDocumentBindingRepository",
     "ChatInfrastructureCapabilityError",
     "ChatMessageRepository",
     "ChatOutboxMessage",
     "ChatOutboxStore",
     "ChatPersistenceCapabilities",
-    "ChatPersistenceConflictError",
     "ChatPersistenceError",
     "ChatPersistenceStore",
     "ChatResourceLeaseService",
@@ -46,10 +43,7 @@ __all__ = [
     "ChatRunRepository",
     "ChatSessionRepository",
     "ChatStore",
-    "ChatUniqueConstraintViolation",
-    "ChatUnitOfWork",
     "DisabledChatOutbox",
     "SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES",
-    "SQLiteChatUnitOfWork",
     "ensure_chat_schema",
 ]

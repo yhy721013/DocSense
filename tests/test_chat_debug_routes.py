@@ -24,7 +24,7 @@ class ChatDebugRouteTests(unittest.TestCase):
             workspace_ref="ws-1",
             thread_ref="th-1",
         )
-        self.chat_store.documents.add(
+        self.chat_store.document_bindings.add(
             chat_id="conv-001",
             file_name="alpha.pdf",
             original_name="alpha.pdf",

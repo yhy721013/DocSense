@@ -20,9 +20,9 @@ from app.services.chat import (
     ChatDeleteNotFoundError,
     ChatDocumentNotFoundError,
     ChatRunBusyError,
-    ChatRunExecutionLease,
     ChatSessionUnavailableError,
     ChatTitleEmptyHistoryError,
+    ChatTitleGenerationError,
     ChatTitleUnavailableError,
 )
 from app.services.core.progress import normalize_progress
@@ -956,54 +956,75 @@ def llm_chat():
     except ValueError as exc:
         _release_stream_slot()
         return jsonify({"error": str(exc)}), 400
+    except Exception:
+        # No Response object exists yet, so Flask cannot call the regular
+        # close hook. Always release the process-local capacity permit before
+        # propagating an unexpected acceptance failure.
+        _release_stream_slot()
+        raise
 
-    chat_run_request = prepared_run.request
     logger.info(
         "文件对话run已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
         chat_id,
-        chat_run_request.run_id,
-        len(chat_run_request.file_names),
+        prepared_run.run_id,
+        len(normalized_file_names),
     )
 
     try:
-        stream = services.chat_dispatcher.dispatch(
-            ChatRunExecutionLease(
-                request=chat_run_request,
-                ownership_lease=prepared_run.execution_lease,
+        stream = services.chat_dispatcher.dispatch(run_id=prepared_run.run_id)
+        stream_started = False
+
+        def generate_sse_response():
+            """Mark execution as started before the inner iterator is consumed."""
+            nonlocal stream_started
+            stream_started = True
+            yield from finalize_chat_run_stream(
+                stream=stream,
+                run_id=prepared_run.run_id,
+                on_close=_release_stream_slot,
             )
-        )
-        generator = finalize_chat_run_stream(
-            stream=stream,
-            run_id=chat_run_request.run_id,
-            on_close=_release_stream_slot,
-        )
+
+        def close_response() -> None:
+            """Release capacity and settle an accepted but never-started run."""
+            if not stream_started:
+                try:
+                    services.chat_commands.discard_unstarted_chat_run(
+                        run_id=prepared_run.run_id,
+                        error_message="SSE response closed before execution started",
+                    )
+                except Exception:
+                    logger.exception(
+                        "未启动文件对话run关闭时收敛失败: chatId=%s runId=%s",
+                        chat_id,
+                        prepared_run.run_id,
+                    )
+            _release_stream_slot()
+
         logger.info(
             "文件对话SSE响应已创建: chatId=%s runId=%s",
             chat_id,
-            chat_run_request.run_id,
+            prepared_run.run_id,
         )
         response = Response(
-            generator,
+            generate_sse_response(),
             mimetype="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
             },
         )
-        response.call_on_close(_release_stream_slot)
+        response.call_on_close(close_response)
         return response
     except Exception as exc:
         logger.exception(
             "文件对话请求在SSE响应创建前失败: chatId=%s runId=%s",
             chat_id,
-            chat_run_request.run_id,
+            prepared_run.run_id,
         )
         try:
-            services.chat_commands.fail_chat_run_with_user(
-                run_id=chat_run_request.run_id,
-                user_message_id=f"{chat_run_request.run_id}:user",
+            services.chat_commands.discard_unstarted_chat_run(
+                run_id=prepared_run.run_id,
                 error_message=str(exc) or exc.__class__.__name__,
-                execution_lease=prepared_run.execution_lease,
             )
         finally:
             _release_stream_slot()
@@ -1042,6 +1063,9 @@ def llm_chat_title():
         return jsonify({"error": str(exc)}), 400
     except ChatTitleUnavailableError as exc:
         return jsonify({"error": str(exc)}), 409
+    except ChatTitleGenerationError as exc:
+        logger.exception("生成文件对话标题失败: chatId=%s", chat_id)
+        return jsonify({"error": str(exc)}), 500
 
     logger.info(
         "返回文件对话标题: chatId=%s title_chars=%d",

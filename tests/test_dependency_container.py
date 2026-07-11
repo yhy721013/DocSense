@@ -30,6 +30,7 @@ from app.container import (
 )
 from app.services.chat import (
     ChatAbortService,
+    ChatCleanupJobExecutor,
     ChatCommandService,
     ChatDeleteService,
     ChatHistoryService,
@@ -41,9 +42,9 @@ from app.services.chat import (
     DatabaseChatDocumentResolver,
     SynchronousChatRunExecutor,
     InlineChatRunDispatcher,
-    record_chat_run_events,
+    InlineChatCleanupDispatcher,
 )
-from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests.fakes import (
@@ -225,7 +226,6 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         chat_store = ChatStore(db_path=chat_db_path)
         chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
         chat_history = ChatHistoryService(chat_store)
-        chat_db = ChatDatabaseService(db_path=chat_db_path)
         kb_service = DatabaseService(
             db_path=f"{self.runtime_directory}/knowledge.sqlite3"
         )
@@ -235,14 +235,15 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             conversation_factory=self.chat_conversation_factory,
             document_resolver=DatabaseChatDocumentResolver(kb_service),
         )
+        chat_cleanup_executor = ChatCleanupJobExecutor(
+            store=chat_store,
+            conversation_factory=self.chat_conversation_factory,
+        )
+        chat_cleanup_dispatcher = InlineChatCleanupDispatcher(
+            execute=chat_cleanup_executor.execute_cleanup_job,
+        )
         chat_dispatcher = InlineChatRunDispatcher(
-            execute=lambda lease: record_chat_run_events(
-                request=lease.request,
-                events=chat_run_executor.stream_chat_run(lease.request),
-                store=chat_store,
-                chat_commands=chat_commands,
-                execution_lease=lease.ownership_lease,
-            )
+            execute=chat_run_executor.execute_chat_run,
         )
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
@@ -252,7 +253,6 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 db_path=f"{self.runtime_directory}/tasks.sqlite3"
             ),
             kb_service=kb_service,
-            chat_db=chat_db,
             chat_store=chat_store,
             chat_commands=chat_commands,
             chat_run_executor=chat_run_executor,
@@ -262,6 +262,8 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 store=chat_store,
                 history_service=chat_history,
                 conversation_factory=self.chat_conversation_factory,
+                cleanup_dispatcher=chat_cleanup_dispatcher,
+                cleanup_executor=chat_cleanup_executor,
             ),
             chat_abort=ChatAbortService(
                 store=chat_store,
@@ -271,7 +273,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 store=chat_store,
                 chat_commands=chat_commands,
                 conversation_factory=self.chat_conversation_factory,
+                cleanup_dispatcher=chat_cleanup_dispatcher,
+                cleanup_executor=chat_cleanup_executor,
             ),
+            chat_cleanup_executor=chat_cleanup_executor,
             progress_hub=LLMProgressHub(),
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
             llm_config=LLMIntegrationConfig(
@@ -335,7 +340,6 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         forbidden_constructors = (
             "LLMTaskService(",
             "DatabaseService(",
-            "ChatDatabaseService(",
             "ChatRunLockService(",
             "LLMProgressHub(",
             "threading.Semaphore(",

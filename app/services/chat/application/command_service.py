@@ -81,6 +81,25 @@ class ChatCommandService:
         )
         return run
 
+    def discard_unstarted_chat_run(
+        self,
+        *,
+        run_id: str,
+        error_message: str,
+    ) -> ChatRun:
+        """Discard a request that was accepted but never reached execution."""
+        run = self._run_coordinator.discard_unstarted_run(
+            run_id=run_id,
+            error_message=error_message,
+        )
+        logger.info(
+            "文件对话未启动run已收敛: chat_id=%s run_id=%s status=%s",
+            run.chat_id,
+            run.run_id,
+            run.status,
+        )
+        return run
+
     def abort_chat_run(self, *, run_id: str) -> ChatRun:
         run = self._run_coordinator.abort_run(run_id)
         logger.info(

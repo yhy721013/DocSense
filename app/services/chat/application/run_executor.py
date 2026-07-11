@@ -17,6 +17,7 @@ from app.services.chat.application.document_resolver import (
 )
 from app.services.chat.domain.resource_ids import (
     chat_document_binding_lease_id,
+    chat_scoped_external_ref,
     chat_thread_lease_id,
     chat_workspace_lease_id,
 )
@@ -30,7 +31,7 @@ from app.services.chat.domain.models import (
     RESOURCE_WORKSPACE,
     SESSION_ACTIVE,
 )
-from app.services.chat.locking.lease import ChatRunLease
+from app.services.chat.locking.lease import ChatRunLease, ChatRunLeaseLostError
 from app.services.chat.persistence.store import ChatPersistenceStore
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
@@ -138,36 +139,31 @@ class ChatRunDocumentSnapshot:
 
 @dataclass(frozen=True)
 class PreparedChatRun:
-    """Accepted run and immutable execution input handed to the stream layer."""
+    """A durably accepted run that can later be executed by its ``run_id``.
 
-    request: ChatRunStreamRequest
-    execution_lease: ChatRunLease | None = None
+    The request snapshot is intentionally absent from this object.  It was
+    atomically persisted during acceptance and must be loaded again by the
+    executor, so an inline HTTP request and a future worker follow the same
+    execution path.
+    """
+
+    run_id: str
+    chat_id: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, ChatRunStreamRequest):
-            raise TypeError("request must be ChatRunStreamRequest")
-        if self.execution_lease is not None:
-            if not isinstance(self.execution_lease, ChatRunLease):
-                raise TypeError("execution_lease must be ChatRunLease or None")
-            if self.execution_lease.run_id != self.request.run_id:
-                raise ValueError("execution_lease does not match request.run_id")
-            if self.execution_lease.chat_id != self.request.chat_id:
-                raise ValueError("execution_lease does not match request.chat_id")
-
-    @property
-    def run_id(self) -> str:
-        return self.request.run_id
+        object.__setattr__(self, "run_id", _required_text(self.run_id, name="run_id"))
+        object.__setattr__(self, "chat_id", _required_text(self.chat_id, name="chat_id"))
 
 
 @runtime_checkable
 class ChatRunExecutor(Protocol):
     """Executes a chat run and yields supplier-neutral stream events."""
 
-    def stream_chat_run(
+    def execute_chat_run(
         self,
-        request: ChatRunStreamRequest,
+        run_id: str,
     ) -> Iterable[ChatStreamEvent]:
-        """Execute one accepted/running run without producing presentation text."""
+        """Load and execute one durably accepted run by its internal key."""
         ...
 
 
@@ -260,43 +256,112 @@ class SynchronousChatRunExecutor:
                 for item in snapshots
             ),
         )
-        request = ChatRunStreamRequest(
+        # The command service stores the complete message and document
+        # snapshot in the acceptance transaction. Passing these objects to the
+        # executor would make a future worker depend on request memory, so the
+        # execution path intentionally receives only the durable run key.
+        return PreparedChatRun(run_id=run.run_id, chat_id=run.chat_id)
+
+    def execute_chat_run(self, run_id: str) -> Iterator[ChatStreamEvent]:
+        """Claim and execute an accepted run from its persisted input snapshot."""
+        normalized_run_id = _required_text(run_id, name="run_id")
+        run = self._store.runs.get(normalized_run_id)
+        run_input = self._store.run_inputs.get(normalized_run_id)
+        if run is None or run_input is None:
+            error_message = "chat run input is unavailable"
+            if run is not None:
+                self._chat_commands.discard_unstarted_chat_run(
+                    run_id=normalized_run_id,
+                    error_message=error_message,
+                )
+            yield ChatStreamEvent("error", {"error": "文件对话执行输入缺失"})
+            return
+
+        request = self._request_from_persisted_input(run_id=normalized_run_id)
+        try:
+            execution_lease = self._chat_commands.issue_execution_lease(
+                run_id=normalized_run_id,
+            )
+        except ChatRunLeaseLostError as exc:
+            # A duplicate executor can observe the same durable run after
+            # another executor has already claimed it.  Never discard the
+            # pending user turn of that legitimate owner merely because this
+            # stale delivery failed to claim execution.
+            logger.warning(
+                "文件对话run已被其他执行路径领取，跳过未启动收敛: "
+                "chat_id=%s run_id=%s reason=%s",
+                run.chat_id,
+                normalized_run_id,
+                exc,
+            )
+            yield ChatStreamEvent("error", {"error": "文件对话执行启动失败"})
+            return
+        except Exception as exc:
+            logger.exception(
+                "文件对话run领取执行权失败: chat_id=%s run_id=%s",
+                run.chat_id,
+                normalized_run_id,
+            )
+            try:
+                self._chat_commands.discard_unstarted_chat_run(
+                    run_id=normalized_run_id,
+                    error_message=str(exc) or exc.__class__.__name__,
+                )
+            except ChatRunLeaseLostError:
+                # The run changed between the failed claim and the attempted
+                # cleanup.  It is now owned by another execution path, so its
+                # pending user turn must remain untouched.
+                logger.warning(
+                    "文件对话run已被其他执行路径领取，跳过未启动收敛: "
+                    "chat_id=%s run_id=%s",
+                    run.chat_id,
+                    normalized_run_id,
+                )
+            except Exception:
+                # Keep the SSE response deterministic even if persistence is
+                # temporarily unavailable.  The existing stale-run reaper is
+                # still responsible for resolving any accepted run that could
+                # not be settled in this request.
+                logger.exception(
+                    "文件对话run领取失败后的未启动收敛异常: chat_id=%s run_id=%s",
+                    run.chat_id,
+                    normalized_run_id,
+                )
+            yield ChatStreamEvent("error", {"error": "文件对话执行启动失败"})
+            return
+
+        yield from record_chat_run_events(
+            request=request,
+            events=self.stream_chat_run(request),
+            store=self._store,
+            chat_commands=self._chat_commands,
+            execution_lease=execution_lease,
+        )
+
+    def _request_from_persisted_input(self, *, run_id: str) -> ChatRunStreamRequest:
+        """Rebuild the execution DTO from immutable acceptance data only."""
+        run = self._store.runs.get(run_id)
+        run_input = self._store.run_inputs.get(run_id)
+        if run is None or run_input is None:
+            raise ValueError("chat run or accepted input does not exist")
+        snapshots = tuple(
+            ChatRunDocumentSnapshot(
+                file_name=item.file_name,
+                original_name=item.original_name,
+                document=ChatDocumentRef(
+                    document_ref=item.document_ref,
+                    external_location=item.external_location,
+                ),
+            )
+            for item in run_input.files
+        )
+        return ChatRunStreamRequest(
             run_id=run.run_id,
-            chat_id=normalized_chat_id,
-            message=normalized_message,
+            chat_id=run.chat_id,
+            message=run_input.message,
             file_names=tuple(item.file_name for item in snapshots),
             file_original_names=tuple(item.original_name for item in snapshots),
             documents=snapshots,
-        )
-        # 受理成功后立即签发内部执行租约。该租约不会进入 HTTP/SSE，而是由
-        # dispatcher 传到 recorder，使未来 worker 可以在同一入口使用 fencing。
-        # 若未来协调器在领取阶段失败，必须收敛已创建的 run，不能遗留 409 锁。
-        try:
-            execution_lease = self._chat_commands.issue_execution_lease(
-                run_id=run.run_id,
-            )
-        except Exception as exc:
-            logger.exception(
-                "文件对话run签发执行租约失败，收敛已受理run: chat_id=%s run_id=%s",
-                normalized_chat_id,
-                run.run_id,
-            )
-            try:
-                self._chat_commands.fail_chat_run_with_user(
-                    run_id=run.run_id,
-                    user_message_id=f"{run.run_id}:user",
-                    error_message=str(exc) or exc.__class__.__name__,
-                )
-            except Exception:
-                logger.exception(
-                    "文件对话run执行租约失败后的终态收敛失败: chat_id=%s run_id=%s",
-                    normalized_chat_id,
-                    run.run_id,
-                )
-            raise
-        return PreparedChatRun(
-            request=request,
-            execution_lease=execution_lease,
         )
 
     def stream_chat_run(
@@ -308,10 +373,9 @@ class SynchronousChatRunExecutor:
             session = self._store.sessions.get(request.chat_id)
             if session is None or session.status != SESSION_ACTIVE:
                 raise ChatResourceError("当前对话不可用于执行")
-            documents = request.documents or tuple(
-                self._snapshot(item)
-                for item in self._document_resolver.resolve_many(request.file_names)
-            )
+            documents = request.documents
+            if request.file_names and not documents:
+                raise ChatResourceError("已受理的文件对话缺少不可变文档快照")
             with self._conversation_factory.create() as conversation:
                 refs, is_new_chat = self._open_or_reuse_conversation(
                     request=request,
@@ -403,7 +467,10 @@ class SynchronousChatRunExecutor:
         )
         self._store.resource_leases.activate(
             lease_id=thread_lease_id,
-            external_ref=f"{refs.context_ref}::{refs.conversation_ref}",
+            external_ref=chat_scoped_external_ref(
+                context_ref=refs.context_ref,
+                resource_ref=refs.conversation_ref,
+            ),
         )
         self._store.sessions.update_refs(
             chat_id=request.chat_id,
@@ -456,17 +523,29 @@ class SynchronousChatRunExecutor:
         documents: Sequence[ChatRunDocumentSnapshot],
         conversation,
     ) -> tuple[str, ...]:
-        known = {
+        current_bindings = {
             item.file_name: item
-            for item in self._store.documents.list_by_chat(request.chat_id)
+            for item in self._store.document_bindings.list_current_by_chat(
+                request.chat_id
+            )
         }
+        # A continuation without explicit ``fileNames`` intentionally selects
+        # the latest head of every business file. Historical revisions remain
+        # attached for audit/cleanup but are never silently added to RAG.
+        if not documents:
+            return tuple(
+                binding.document_ref
+                for binding in current_bindings.values()
+                if binding.document_ref
+            )
         new_documents = [
             item
             for item in documents
             if (
-                item.file_name not in known
-                or known[item.file_name].document_ref != item.document.document_ref
-                or known[item.file_name].external_location
+                item.file_name not in current_bindings
+                or current_bindings[item.file_name].document_ref
+                != item.document.document_ref
+                or current_bindings[item.file_name].external_location
                 != item.document.external_location
             )
         ]
@@ -480,7 +559,13 @@ class SynchronousChatRunExecutor:
                 chat_id=request.chat_id,
                 resource_type=RESOURCE_DOCUMENT_BINDING,
                 run_id=request.run_id,
-                external_ref=f"{refs.context_ref}::{item.document.external_location}",
+                # A document location may legitimately be absent for an
+                # adapter that resolves by document_ref only.  Keep that
+                # optional identity visible in the lease rather than rejecting
+                # the accepted run before the adapter can attach it.
+                external_ref=(
+                    f"{refs.context_ref}::{item.document.external_location}"
+                ),
             )
         attached_by_location: dict[str, ChatDocumentRef] = {}
         if new_documents:
@@ -496,7 +581,7 @@ class SynchronousChatRunExecutor:
                     item.document.external_location,
                     item.document,
                 )
-                stored_document = self._store.documents.add(
+                stored_binding = self._store.document_bindings.add(
                     chat_id=request.chat_id,
                     file_name=item.file_name,
                     original_name=item.original_name,
@@ -514,11 +599,15 @@ class SynchronousChatRunExecutor:
                         f"{refs.context_ref}::{attached_document.external_location}"
                     ),
                 )
-                known[item.file_name] = stored_document
+                current_bindings[item.file_name] = stored_binding
         selected: list[str] = []
         for item in documents:
-            stored = known.get(item.file_name)
-            document_ref = stored.document_ref if stored and stored.document_ref else item.document.document_ref
+            stored = current_bindings.get(item.file_name)
+            document_ref = (
+                stored.document_ref
+                if stored and stored.document_ref
+                else item.document.document_ref
+            )
             selected.append(document_ref)
         return tuple(selected)
 
@@ -665,6 +754,14 @@ class ChatRunEventRecorder:
                         )
                     terminal_event = event.event_type
                 else:
+                    # The current HTTP/SSE path intentionally writes this
+                    # single event before yielding it.  Upstream model streams
+                    # are lazy: collecting a size/time batch here would either
+                    # delay the first token indefinitely or require a producer
+                    # thread that can keep the model running after a client
+                    # disconnect.  ``append_many`` is available to a future
+                    # queue-backed worker, where a durable producer/consumer
+                    # lifecycle can make that trade-off safely.
                     self._store.events.append(
                         run_id=request.run_id,
                         event=event,

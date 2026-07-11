@@ -14,6 +14,7 @@ from app.services.chat.domain.models import (
     LEASE_PLANNED,
     LEASE_STATUSES,
     RESOURCE_TYPES,
+    SESSION_ACTIVE,
     ChatResourceLease,
 )
 from app.services.chat.persistence.repositories import (
@@ -40,6 +41,15 @@ _LEASE_STATUS_TRANSITIONS = {
 }
 
 
+class ChatResourceLeaseSessionUnavailableError(RuntimeError):
+    """Raised when a guarded resource lease races with session deletion."""
+
+    def __init__(self, *, chat_id: str, status: str) -> None:
+        self.chat_id = _required_text(chat_id, name="chat_id")
+        self.status = _required_text(status, name="status")
+        super().__init__("chat session is not active for a new resource lease")
+
+
 class ChatResourceLeaseService:
     """Manage durable leases for chat workspaces, threads and bindings."""
 
@@ -61,6 +71,7 @@ class ChatResourceLeaseService:
         resource_type: str,
         run_id: str = "",
         external_ref: str = "",
+        require_active_session: bool = False,
     ) -> ChatResourceLease:
         normalized_lease_id = _required_text(lease_id, name="lease_id")
         normalized_chat_id = _required_text(chat_id, name="chat_id")
@@ -71,11 +82,28 @@ class ChatResourceLeaseService:
         )
         normalized_run_id = _optional_text(run_id)
         normalized_external_ref = _optional_text(external_ref)
+        if not isinstance(require_active_session, bool):
+            raise TypeError("require_active_session must be bool")
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
             # 租约用于记录远端 workspace/thread/document binding 等副作用资源。
             # 即使后续业务失败，cleanup worker 也可以根据租约表重试清理。
             connection.execute("BEGIN IMMEDIATE")
+            if require_active_session:
+                session_row = connection.execute(
+                    "SELECT status FROM chat_sessions WHERE chat_id = ?",
+                    (normalized_chat_id,),
+                ).fetchone()
+                if session_row is None:
+                    raise ChatResourceLeaseSessionUnavailableError(
+                        chat_id=normalized_chat_id,
+                        status="missing",
+                    )
+                if session_row["status"] != SESSION_ACTIVE:
+                    raise ChatResourceLeaseSessionUnavailableError(
+                        chat_id=normalized_chat_id,
+                        status=session_row["status"],
+                    )
             if normalized_run_id:
                 run_row = connection.execute(
                     "SELECT chat_id FROM chat_runs WHERE run_id = ?",

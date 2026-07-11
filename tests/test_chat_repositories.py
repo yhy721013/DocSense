@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.services.chat import (
+    CLEANUP_REASON_TEMPORARY_THREAD,
     LEASE_CLEANUP_FAILED,
     LEASE_CLEANUP_PENDING,
     LEASE_CLOSED,
@@ -26,21 +27,10 @@ from app.services.chat import (
     ChatStore,
     ensure_chat_schema,
 )
-from app.services.core.database import ChatDatabaseService
-
-
 class ChatRepositorySchemaTests(unittest.TestCase):
-    def test_schema_initialization_is_repeatable_and_keeps_legacy_chats(self) -> None:
+    def test_schema_initialization_is_repeatable_and_creates_authoritative_tables(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db_path = f"{tmp}/chat.sqlite3"
-            legacy = ChatDatabaseService(db_path)
-            legacy.create_chat(
-                "chat-legacy",
-                ["原始.pdf"],
-                "workspace-slug",
-                "thread-slug",
-            )
-
             ensure_chat_schema(db_path)
             ChatStore(db_path)
             ChatStore(db_path)
@@ -56,65 +46,18 @@ class ChatRepositorySchemaTests(unittest.TestCase):
                     ).fetchall()
                 }
 
-            self.assertIn("chats", table_names)
             self.assertIn("chat_sessions", table_names)
-            self.assertIn("chat_documents", table_names)
+            self.assertIn("chat_document_bindings", table_names)
+            self.assertIn("chat_document_heads", table_names)
             self.assertIn("chat_runs", table_names)
+            self.assertIn("chat_run_inputs", table_names)
+            self.assertIn("chat_run_events", table_names)
             self.assertIn("chat_messages", table_names)
             self.assertIn("chat_message_files", table_names)
             self.assertIn("chat_resource_leases", table_names)
-            self.assertEqual("workspace-slug", legacy.get_chat("chat-legacy")["workspace_slug"])
-            self.assertEqual(["原始.pdf"], legacy.get_chat("chat-legacy")["file_original_names"][0])
-            self.assertEqual(["chat-legacy"], [item["chat_id"] for item in legacy.list_chats()])
-
-    def test_chat_database_service_migrates_legacy_chats_schema(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            db_path = f"{tmp}/legacy-chat.sqlite3"
-            with sqlite3.connect(db_path) as connection:
-                connection.execute(
-                    """
-                    CREATE TABLE chats (
-                        chat_id TEXT PRIMARY KEY,
-                        file_original_names TEXT NOT NULL,
-                        workspace_slug TEXT NOT NULL,
-                        thread_slug TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO chats (
-                        chat_id, file_original_names, workspace_slug,
-                        thread_slug, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "legacy-chat",
-                        '[["legacy.pdf"]]',
-                        "legacy-ws",
-                        "legacy-thread",
-                        "2026-07-08T00:00:00+00:00",
-                        "2026-07-08T00:00:00+00:00",
-                    ),
-                )
-
-            legacy = ChatDatabaseService(db_path)
-
-            with sqlite3.connect(db_path) as connection:
-                columns = {
-                    row[1]
-                    for row in connection.execute("PRAGMA table_info(chats)")
-                }
-
-            self.assertIn("turn_timestamps", columns)
-            self.assertEqual([], legacy.get_chat("legacy-chat")["turn_timestamps"])
-            self.assertEqual(
-                ["legacy-chat"],
-                [item["chat_id"] for item in legacy.list_chats()],
-            )
+            self.assertIn("chat_cleanup_jobs", table_names)
+            self.assertIn("chat_schema_migrations", table_names)
+            self.assertNotIn("chats", table_names)
 
     def test_repository_source_does_not_depend_on_anythingllm(self) -> None:
         chat_dir = Path(__file__).resolve().parents[1] / "app" / "services" / "chat"
@@ -134,7 +77,7 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
-    def test_sessions_and_documents_are_idempotent(self) -> None:
+    def test_sessions_and_document_revisions_are_immutable_with_a_current_head(self) -> None:
         session = self.store.sessions.create_or_get(
             chat_id="chat-a",
             workspace_ref="workspace-a",
@@ -157,8 +100,10 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
             )
 
         self.store.runs.create(run_id="run-first", chat_id="chat-a")
+        self.store.runs.mark_running("run-first")
+        self.store.runs.mark_succeeded("run-first")
         self.store.runs.create(run_id="run-second", chat_id="chat-a")
-        first = self.store.documents.add(
+        first = self.store.document_bindings.add(
             chat_id="chat-a",
             file_name="hash.pdf",
             original_name="原名.pdf",
@@ -166,7 +111,7 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
             external_location="custom-documents/first.json",
             added_by_run_id="run-first",
         )
-        second = self.store.documents.add(
+        second = self.store.document_bindings.add(
             chat_id="chat-a",
             file_name="hash.pdf",
             original_name="更新原名.pdf",
@@ -174,13 +119,15 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
             external_location="custom-documents/second.json",
             added_by_run_id="run-second",
         )
-        documents = self.store.documents.list_by_chat("chat-a")
+        documents = self.store.document_bindings.list_by_chat("chat-a")
+        current = self.store.document_bindings.list_current_by_chat("chat-a")
 
-        self.assertEqual(first.created_at, second.created_at)
-        self.assertEqual(1, len(documents))
-        self.assertEqual("更新原名.pdf", documents[0].original_name)
-        self.assertEqual("document:second", documents[0].document_ref)
-        self.assertEqual("run-second", documents[0].added_by_run_id)
+        self.assertNotEqual(first.binding_id, second.binding_id)
+        self.assertEqual(2, len(documents))
+        self.assertEqual("document:first", documents[0].document_ref)
+        self.assertEqual("更新原名.pdf", current[0].original_name)
+        self.assertEqual("document:second", current[0].document_ref)
+        self.assertEqual("run-second", current[0].added_by_run_id)
 
     def test_session_create_or_get_enriches_empty_placeholder(self) -> None:
         placeholder = self.store.sessions.create_or_get(chat_id="chat-placeholder")
@@ -216,14 +163,13 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
             chat_id="chat-run",
             owner_instance_id="instance-a",
         )
-        self.store.runs.create(run_id="run-b", chat_id="chat-run")
-
         running = self.store.runs.mark_running("run-a")
         abort_requested = self.store.runs.request_abort("run-a")
         failed = self.store.runs.mark_failed(
             "run-a",
             error_message="模型响应失败",
         )
+        next_run = self.store.runs.create(run_id="run-b", chat_id="chat-run")
         active_run_ids = [run.run_id for run in self.store.runs.list_active("chat-run")]
 
         self.assertEqual(RUN_ACCEPTED, accepted.status)
@@ -233,7 +179,7 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
         self.assertEqual(RUN_FAILED, failed.status)
         self.assertEqual("模型响应失败", failed.error_message)
         self.assertIsNotNone(failed.completed_at)
-        self.assertEqual(["run-b"], active_run_ids)
+        self.assertEqual([next_run.run_id], active_run_ids)
 
         with self.assertRaises(ValueError):
             self.store.runs.mark_running("run-a")
@@ -467,9 +413,11 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
                 status=MESSAGE_COMMITTED,
             )
         with self.assertRaisesRegex(ValueError, "不属于当前 chat_id"):
-            self.store.documents.add(
+            self.store.document_bindings.add(
                 chat_id="chat-left",
                 file_name="cross.pdf",
+                original_name="cross.pdf",
+                document_ref="document:cross",
                 added_by_run_id="run-right",
             )
         with self.assertRaisesRegex(ValueError, "不属于当前 chat_id"):
@@ -644,40 +592,68 @@ class ChatRepositoryBehaviorTests(unittest.TestCase):
                 external_ref="thread:late",
             )
 
-    def test_delete_chat_clears_legacy_and_stage3_tables(self) -> None:
-        legacy = ChatDatabaseService(self.db_path)
-        legacy.create_chat("chat-delete", ["delete.pdf"], "ws-delete", "th-delete")
-        self.store.sessions.create_or_get(chat_id="chat-delete")
-        self.store.runs.create(run_id="run-delete", chat_id="chat-delete")
-        self.store.documents.add(
-            chat_id="chat-delete",
-            file_name="delete.pdf",
-            original_name="delete.pdf",
+    def test_document_revisions_keep_current_head_after_replacement(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-revision-head")
+        self.store.runs.create(
+            run_id="run-revision-first",
+            chat_id="chat-revision-head",
         )
-        self.store.messages.append(
-            message_id="message-delete",
-            chat_id="chat-delete",
-            run_id="run-delete",
-            role=MESSAGE_ROLE_USER,
-            content="delete",
-            status=MESSAGE_COMMITTED,
-            files=(("delete.pdf", "delete.pdf"),),
+        self.store.runs.mark_running("run-revision-first")
+        self.store.runs.mark_succeeded("run-revision-first")
+        self.store.runs.create(
+            run_id="run-revision-second",
+            chat_id="chat-revision-head",
         )
-        self.store.resource_leases.begin(
-            lease_id="lease-delete",
-            chat_id="chat-delete",
-            run_id="run-delete",
-            resource_type="workspace",
+        self.store.document_bindings.add(
+            chat_id="chat-revision-head",
+            file_name="replace.pdf",
+            original_name="first.pdf",
+            document_ref="document:first",
+            added_by_run_id="run-revision-first",
+        )
+        self.store.document_bindings.add(
+            chat_id="chat-revision-head",
+            file_name="replace.pdf",
+            original_name="second.pdf",
+            document_ref="document:second",
+            added_by_run_id="run-revision-second",
         )
 
-        legacy.delete_chat("chat-delete")
+        history = self.store.document_bindings.list_by_chat("chat-revision-head")
+        current = self.store.document_bindings.list_current_by_chat(
+            "chat-revision-head"
+        )
 
-        self.assertIsNone(legacy.get_chat("chat-delete"))
-        self.assertIsNone(self.store.sessions.get("chat-delete"))
-        self.assertEqual((), self.store.documents.list_by_chat("chat-delete"))
-        self.assertEqual((), self.store.messages.list_by_chat("chat-delete"))
-        self.assertIsNone(self.store.runs.get("run-delete"))
-        self.assertIsNone(self.store.resource_leases.get("lease-delete"))
+        self.assertEqual(2, len(history))
+        self.assertEqual("document:second", current[0].document_ref)
+        self.assertEqual("second.pdf", current[0].original_name)
+
+    def test_cleanup_jobs_are_unique_per_reason_and_resource_lease(self) -> None:
+        """同一对话的多个临时标题线程不能被错误合并为一个重试任务。"""
+        self.store.sessions.create_or_get(chat_id="chat-cleanup-jobs")
+
+        first = self.store.cleanup_jobs.enqueue(
+            chat_id="chat-cleanup-jobs",
+            reason=CLEANUP_REASON_TEMPORARY_THREAD,
+            lease_id="temporary-lease-1",
+        )
+        same = self.store.cleanup_jobs.enqueue(
+            chat_id="chat-cleanup-jobs",
+            reason=CLEANUP_REASON_TEMPORARY_THREAD,
+            lease_id="temporary-lease-1",
+        )
+        second = self.store.cleanup_jobs.enqueue(
+            chat_id="chat-cleanup-jobs",
+            reason=CLEANUP_REASON_TEMPORARY_THREAD,
+            lease_id="temporary-lease-2",
+        )
+
+        self.assertEqual(first.job_id, same.job_id)
+        self.assertNotEqual(first.job_id, second.job_id)
+        self.assertEqual(
+            2,
+            len(self.store.cleanup_jobs.list_by_chat("chat-cleanup-jobs")),
+        )
 
 
 if __name__ == "__main__":

@@ -13,8 +13,13 @@ from datetime import datetime, timezone
 
 from app.services.chat.domain.models import (
     MESSAGE_COMMITTED,
+    MESSAGE_DISCARDED,
     MESSAGE_PENDING,
     MESSAGE_ROLE_ASSISTANT,
+    LEASE_ACTIVE,
+    LEASE_CLEANUP_PENDING,
+    LEASE_PLANNED,
+    RESOURCE_THREAD,
     RUN_ABORTED,
     RUN_ACCEPTED,
     RUN_ACTIVE_STATUSES,
@@ -225,26 +230,12 @@ class ChatRunLockService:
                     now,
                 ),
             )
-            cursor = connection.execute(
-                """
-                UPDATE chat_runs
-                SET status = ?,
-                    heartbeat_at = ?,
-                    started_at = ?,
-                    updated_at = ?
-                WHERE run_id = ? AND status = ?
-                """,
-                (
-                    RUN_RUNNING,
-                    now,
-                    now,
-                    now,
-                    normalized_run_id,
-                    RUN_ACCEPTED,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("chat_run status was changed concurrently")
+            # Acceptance intentionally stops at ``accepted``. The synchronous
+            # executor claims the run immediately before it opens remote
+            # resources, while a future worker will perform the same
+            # conditional transition with a real lease/fencing token. This
+            # prevents a never-consumed HTTP response from being recorded as a
+            # running model invocation.
             row = connection.execute(
                 "SELECT * FROM chat_runs WHERE run_id = ?",
                 (normalized_run_id,),
@@ -314,6 +305,14 @@ class ChatRunLockService:
                 raise ChatSessionDeleteBusyError(
                     chat_id=normalized_chat_id,
                     reason="当前对话存在进行中的流式响应，请先中断后删除",
+                )
+            if self._has_inflight_title_generation(
+                connection=connection,
+                chat_id=normalized_chat_id,
+            ):
+                raise ChatSessionDeleteBusyError(
+                    chat_id=normalized_chat_id,
+                    reason="当前对话正在生成标题，请稍后重试",
                 )
             if status not in {SESSION_ACTIVE, SESSION_ERROR}:
                 raise ChatSessionUnavailableError(
@@ -392,6 +391,64 @@ class ChatRunLockService:
             error_message=_required_text(error_message, name="error_message"),
         )
 
+    def discard_unstarted_run(
+        self,
+        *,
+        run_id: str,
+        error_message: str,
+    ) -> ChatRun:
+        """Fail an accepted-but-never-executed run without exposing its input.
+
+        A browser can disconnect after the HTTP handler accepts a request but
+        before Flask starts iterating the SSE generator. In that case no model
+        request has been made, so the agreed history policy is to discard the
+        pending user message rather than present an unanswered turn.
+        """
+        normalized_run_id = _required_text(run_id, name="run_id")
+        normalized_error = _required_text(error_message, name="error_message")
+        now = _utc_now_iso()
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = self._get_run_with_connection(connection, normalized_run_id)
+            if run.status in {RUN_SUCCEEDED, RUN_FAILED, RUN_ABORTED}:
+                return run
+            if run.status != RUN_ACCEPTED:
+                raise ChatRunLeaseLostError(
+                    run_id=normalized_run_id,
+                    reason=f"run has already started: {run.status}",
+                )
+            connection.execute(
+                """
+                UPDATE chat_messages
+                SET status = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (MESSAGE_DISCARDED, normalized_run_id, MESSAGE_PENDING),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE chat_runs
+                SET status = ?, error_message = ?, completed_at = ?, updated_at = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (
+                    RUN_FAILED,
+                    normalized_error,
+                    now,
+                    now,
+                    normalized_run_id,
+                    RUN_ACCEPTED,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("accepted chat_run was changed concurrently")
+            self._append_internal_failure_event_if_missing(
+                connection=connection,
+                run_id=normalized_run_id,
+                error_message=normalized_error,
+            )
+            return self._get_run_with_connection(connection, normalized_run_id)
+
     def abort_run(self, run_id: str) -> ChatRun:
         return self._runs.mark_aborted(run_id)
 
@@ -409,13 +466,50 @@ class ChatRunLockService:
             raise
 
     def issue_execution_lease(self, *, run_id: str) -> ChatRunLease:
-        """为当前单实例执行器生成内部运行权证明。
+        """Claim one accepted run and issue its internal execution lease.
 
-        SQLite 适配器不会生成可跨进程校验的 token；返回空 token/fencing 字段是
-        有意为之，调用方必须结合 ``lease_capabilities`` 判断部署能力。这里仍
-        校验 run 归属，避免错误实例误用同一个内部 run 标识。
+        The claim is intentionally the only place where ``accepted`` becomes
+        ``running``.  A future shared-persistence adapter will add a lease and
+        fencing predicate to this conditional update; the current adapter keeps
+        the same lifecycle boundary without pretending to support fencing.
         """
-        run = self._get_run_for_execution_lease(run_id)
+        normalized_run_id = _required_text(run_id, name="run_id")
+        now = _utc_now_iso()
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = self._get_run_with_connection(connection, normalized_run_id)
+            if run.owner_instance_id != self.owner_instance_id:
+                raise ChatRunLeaseLostError(
+                    run_id=normalized_run_id,
+                    reason="run is owned by another instance",
+                )
+            if run.status != RUN_ACCEPTED:
+                raise ChatRunLeaseLostError(
+                    run_id=normalized_run_id,
+                    reason=f"run cannot be claimed from status: {run.status}",
+                )
+            cursor = connection.execute(
+                """
+                UPDATE chat_runs
+                SET status = ?, heartbeat_at = ?, started_at = ?, updated_at = ?
+                WHERE run_id = ? AND status = ? AND owner_instance_id = ?
+                """,
+                (
+                    RUN_RUNNING,
+                    now,
+                    now,
+                    now,
+                    normalized_run_id,
+                    RUN_ACCEPTED,
+                    self.owner_instance_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ChatRunLeaseLostError(
+                    run_id=normalized_run_id,
+                    reason="run changed before it could be claimed",
+                )
+            run = self._get_run_with_connection(connection, normalized_run_id)
         return ChatRunLease(
             run_id=run.run_id,
             chat_id=run.chat_id,
@@ -625,6 +719,13 @@ class ChatRunLockService:
                 stale_run_ids.append(row["run_id"])
 
         for stale_run_id in stale_run_ids:
+            stale_row = connection.execute(
+                "SELECT status FROM chat_runs WHERE run_id = ?",
+                (stale_run_id,),
+            ).fetchone()
+            if stale_row is None:
+                continue
+            stale_status = stale_row["status"]
             logger.warning(
                 "文件对话run心跳超时，标记失败释放锁: chat_id=%s run_id=%s stale_after_seconds=%s",
                 chat_id,
@@ -649,28 +750,86 @@ class ChatRunLockService:
                     *active_statuses,
                 ),
             )
+            # A running run has already reached the model-execution boundary,
+            # so its user turn remains visible after recovery. An accepted run
+            # never started execution and follows the explicit discard policy.
+            message_status = (
+                MESSAGE_COMMITTED
+                if stale_status == RUN_RUNNING
+                else MESSAGE_DISCARDED
+            )
+            connection.execute(
+                """
+                UPDATE chat_messages
+                SET status = ?
+                WHERE run_id = ? AND status = ?
+                """,
+                (message_status, stale_run_id, MESSAGE_PENDING),
+            )
+            self._append_internal_failure_event_if_missing(
+                connection=connection,
+                run_id=stale_run_id,
+                error_message="chat run heartbeat expired",
+            )
         return tuple(stale_run_ids)
 
-    def _get_run_for_execution_lease(self, run_id: str) -> ChatRun:
-        """读取并校验当前实例可以为其签发内部执行租约的活跃 run。"""
-        normalized_run_id = _required_text(run_id, name="run_id")
-        run = self._runs.get(normalized_run_id)
-        if run is None:
-            raise ChatRunLeaseLostError(
-                run_id=normalized_run_id,
-                reason="run does not exist",
-            )
-        if run.owner_instance_id != self.owner_instance_id:
-            raise ChatRunLeaseLostError(
-                run_id=normalized_run_id,
-                reason="run is owned by another instance",
-            )
-        if run.status not in RUN_ACTIVE_STATUSES:
-            raise ChatRunLeaseLostError(
-                run_id=normalized_run_id,
-                reason=f"run is no longer active: {run.status}",
-            )
-        return run
+    @staticmethod
+    def _has_inflight_title_generation(
+        *,
+        connection: sqlite3.Connection,
+        chat_id: str,
+    ) -> bool:
+        """Return whether a title owns a temporary-thread lease right now.
+
+        A title records a planned lease before it calls the external provider.
+        Checking that lease in the same transaction that enters ``deleting``
+        closes the otherwise unavoidable check-then-create race between title
+        generation and context deletion.  The deterministic lease prefix is an
+        internal identity contract, never an HTTP-facing value.
+        """
+        rows = connection.execute(
+            """
+            SELECT lease_id
+            FROM chat_resource_leases
+            WHERE chat_id = ?
+              AND run_id = ''
+              AND resource_type = ?
+              AND status IN (?, ?, ?)
+            """,
+            (
+                chat_id,
+                RESOURCE_THREAD,
+                LEASE_PLANNED,
+                LEASE_ACTIVE,
+                LEASE_CLEANUP_PENDING,
+            ),
+        ).fetchall()
+        prefix = f"chat:{chat_id}:temporary_thread:"
+        return any(str(row["lease_id"]).startswith(prefix) for row in rows)
+
+    @staticmethod
+    def _append_internal_failure_event_if_missing(
+        *,
+        connection: sqlite3.Connection,
+        run_id: str,
+        error_message: str,
+    ) -> None:
+        """Append one recovery terminal event without duplicating an existing one."""
+        terminal = connection.execute(
+            """
+            SELECT 1 FROM chat_run_events
+            WHERE run_id = ? AND event_type IN ('done', 'error', 'aborted')
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if terminal is not None:
+            return
+        ChatRunEventRepository.append_in_transaction(
+            connection=connection,
+            run_id=run_id,
+            event=ChatStreamEvent("error", {"error": error_message}),
+        )
 
     @staticmethod
     def _append_run_input(

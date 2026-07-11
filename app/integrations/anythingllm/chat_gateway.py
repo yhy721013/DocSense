@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -17,7 +16,6 @@ from app.integrations.anythingllm.errors import (
 )
 from app.integrations.anythingllm.models import (
     AnythingLLMDocument,
-    AnythingLLMThread,
     AnythingLLMWorkspace,
 )
 from app.integrations.anythingllm.policies import chat_workspace_settings
@@ -199,25 +197,39 @@ class AnythingLLMChatGateway(ChatConversationPort):
         except AnythingLLMTransportError as exc:
             raise self._port_error(exc, "fetch chat messages") from exc
 
-    def generate_standalone_reply(
+    def open_temporary_conversation(
         self,
         *,
         context_ref: str,
-        prompt: str,
-    ) -> str:
-        """Generate a reply in a temporary thread without touching main history."""
+        conversation_name: str,
+    ) -> ChatSessionRefs:
+        """Create a temporary thread whose lifecycle is owned by the caller."""
         normalized_context_ref = self._required_text(context_ref, "context_ref")
-        temp_thread: AnythingLLMThread | None = None
-        task_failed = False
         try:
             temp_thread = self._thread_client.create_thread(
                 normalized_context_ref,
-                f"standalone-{uuid.uuid4().hex}",
+                self._required_text(conversation_name, "conversation_name"),
                 user_id=self._user_id,
             )
+            return ChatSessionRefs(
+                context_ref=normalized_context_ref,
+                conversation_ref=temp_thread.slug,
+            )
+        except AnythingLLMTransportError as exc:
+            raise self._port_error(exc, "create temporary chat thread") from exc
+
+    def generate_temporary_reply(
+        self,
+        *,
+        session: ChatSessionRefs,
+        prompt: str,
+    ) -> str:
+        """Ask a caller-tracked temporary thread for a standalone reply."""
+        self._require_session(session)
+        try:
             answer = self._thread_client.ask(
-                normalized_context_ref,
-                temp_thread.slug,
+                session.context_ref,
+                session.conversation_ref,
                 prompt,
                 mode=self._standalone_mode,
                 user_id=self._user_id,
@@ -227,18 +239,9 @@ class AnythingLLMChatGateway(ChatConversationPort):
                 raise ChatResponseError("standalone chat reply is empty")
             return answer.text
         except ChatResponseError:
-            task_failed = True
             raise
         except AnythingLLMTransportError as exc:
-            task_failed = True
             raise self._port_error(exc, "generate standalone chat reply") from exc
-        finally:
-            if temp_thread is not None:
-                self._delete_temp_thread(
-                    normalized_context_ref,
-                    temp_thread.slug,
-                    task_failed=task_failed,
-                )
 
     def delete_conversation(
         self,
@@ -302,40 +305,6 @@ class AnythingLLMChatGateway(ChatConversationPort):
             )
             return False
         return True
-
-    def _delete_temp_thread(
-        self,
-        workspace_slug: str,
-        thread_slug: str,
-        *,
-        task_failed: bool,
-    ) -> None:
-        try:
-            self._thread_client.delete_thread(
-                workspace_slug,
-                thread_slug,
-                user_id=self._user_id,
-            )
-        except AnythingLLMHTTPError as exc:
-            if exc.status_code == 404:
-                return
-            self._handle_temp_delete_error(exc, task_failed=task_failed)
-        except AnythingLLMTransportError as exc:
-            self._handle_temp_delete_error(exc, task_failed=task_failed)
-
-    def _handle_temp_delete_error(
-        self,
-        exc: AnythingLLMTransportError,
-        *,
-        task_failed: bool,
-    ) -> None:
-        if task_failed:
-            logger.exception(
-                "Failed to delete temporary AnythingLLM chat thread after "
-                "standalone reply failure"
-            )
-            return
-        raise self._port_error(exc, "delete standalone chat thread") from exc
 
     @staticmethod
     def _chat_document_ref(document: AnythingLLMDocument) -> ChatDocumentRef:

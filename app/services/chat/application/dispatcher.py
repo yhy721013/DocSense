@@ -1,4 +1,9 @@
-"""Internal dispatch boundary for one accepted file-chat run."""
+"""Internal dispatch boundary for a durably accepted file-chat run.
+
+The boundary intentionally carries only ``run_id``.  Request snapshots,
+execution leases and provider resources are loaded by the executor, which makes
+the synchronous adapter follow the same shape a future worker will use.
+"""
 
 from __future__ import annotations
 
@@ -6,93 +11,67 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from app.services.chat.application.run_executor import ChatRunStreamRequest
 from app.services.chat.domain.events import ChatStreamEvent
-from app.services.chat.locking.lease import ChatRunLease
+
+
+def _required_text(value: str, *, name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{name} cannot be empty")
+    return normalized
 
 
 @dataclass(frozen=True)
 class ChatRunDispatchCapabilities:
-    """运行调度器的真实能力，用于阻止同步实现被误标为可靠队列。"""
+    """Real capabilities of a run dispatch adapter.
 
-    single_instance_only: bool
-    reliable_delivery: bool
-    supports_external_workers: bool
-
-
-INLINE_CHAT_RUN_DISPATCH_CAPABILITIES = ChatRunDispatchCapabilities(
-    single_instance_only=True,
-    reliable_delivery=False,
-    supports_external_workers=False,
-)
-
-
-@dataclass(frozen=True)
-class ChatRunExecutionLease:
-    """从 HTTP 受理传给内部执行器的不可变输入与运行权证明。
-
-    ``ownership_lease`` 只在服务端内部使用，绝不交给 Presenter 或 HTTP/SSE。
-    它允许未来 worker 在 heartbeat 和终态提交时携带 token/fencing 条件，而
-    当前单实例适配器会使用一个明确无 fencing 的租约对象。
+    The values are intentionally positive capabilities.  A future adapter can
+    support both single-instance and multi-instance deployments without being
+    rejected merely because it is more capable than the current SQLite path.
     """
 
-    request: ChatRunStreamRequest
-    ownership_lease: ChatRunLease | None = None
+    supports_single_instance: bool
+    supports_external_workers: bool
+    reliable_delivery: bool
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.request, ChatRunStreamRequest):
-            raise TypeError("request must be ChatRunStreamRequest")
-        if self.ownership_lease is not None:
-            if not isinstance(self.ownership_lease, ChatRunLease):
-                raise TypeError("ownership_lease must be ChatRunLease or None")
-            if self.ownership_lease.run_id != self.request.run_id:
-                raise ValueError("ownership_lease does not match request.run_id")
-            if self.ownership_lease.chat_id != self.request.chat_id:
-                raise ValueError("ownership_lease does not match request.chat_id")
-
-    @property
-    def run_id(self) -> str:
-        """Return the internal run key without exposing it to HTTP callers."""
-        return self.request.run_id
-
-    @property
-    def chat_id(self) -> str:
-        """Return the external conversation key used by the run."""
-        return self.request.chat_id
+INLINE_CHAT_RUN_DISPATCH_CAPABILITIES = ChatRunDispatchCapabilities(
+    supports_single_instance=True,
+    supports_external_workers=False,
+    reliable_delivery=False,
+)
 
 
 @runtime_checkable
 class ChatRunDispatcher(Protocol):
-    """Dispatches one accepted run and returns its internal domain-event stream."""
+    """Start one accepted run without importing HTTP/SSE presentation code."""
 
     @property
     def capabilities(self) -> ChatRunDispatchCapabilities:
-        """返回该调度器实际提供的执行与投递能力。"""
+        """Return the adapter's verifiable execution capabilities."""
         ...
 
-    def dispatch(self, lease: ChatRunExecutionLease) -> Iterable[ChatStreamEvent]:
-        """Execute or schedule one run without emitting HTTP/SSE presentation text."""
+    def dispatch(self, *, run_id: str) -> Iterable[ChatStreamEvent]:
+        """Execute or relay one run identified by its durable internal key."""
         ...
 
 
 class InlineChatRunDispatcher:
-    """Single-instance synchronous dispatcher; it is not a reliable queue."""
+    """Current synchronous adapter; explicitly not a reliable queue."""
 
     capabilities = INLINE_CHAT_RUN_DISPATCH_CAPABILITIES
 
     def __init__(
         self,
         *,
-        execute: Callable[[ChatRunExecutionLease], Iterable[ChatStreamEvent]],
+        execute: Callable[[str], Iterable[ChatStreamEvent]],
     ) -> None:
         if not callable(execute):
             raise TypeError("execute must be callable")
         self._execute = execute
 
-    def dispatch(self, lease: ChatRunExecutionLease) -> Iterable[ChatStreamEvent]:
-        if not isinstance(lease, ChatRunExecutionLease):
-            raise TypeError("lease must be ChatRunExecutionLease")
-        events = self._execute(lease)
+    def dispatch(self, *, run_id: str) -> Iterable[ChatStreamEvent]:
+        normalized_run_id = _required_text(run_id, name="run_id")
+        events = self._execute(normalized_run_id)
         if not isinstance(events, Iterable):
             raise TypeError("execute must return an iterable of ChatStreamEvent")
         return events
@@ -101,7 +80,6 @@ class InlineChatRunDispatcher:
 __all__ = [
     "ChatRunDispatchCapabilities",
     "ChatRunDispatcher",
-    "ChatRunExecutionLease",
     "INLINE_CHAT_RUN_DISPATCH_CAPABILITIES",
     "InlineChatRunDispatcher",
 ]

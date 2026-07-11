@@ -11,14 +11,16 @@ from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.application.dispatcher import (
     ChatRunDispatchCapabilities,
     ChatRunDispatcher,
-    ChatRunExecutionLease,
     InlineChatRunDispatcher,
 )
 from app.services.chat.application.cleanup_dispatcher import (
     ChatCleanupDispatchCapabilities,
     ChatCleanupDispatcher,
-    ChatCleanupTask,
     InlineChatCleanupDispatcher,
+)
+from app.services.chat.application.cleanup_service import (
+    ChatCleanupJobExecutionError,
+    ChatCleanupJobExecutor,
 )
 from app.services.chat.application.delete_service import (
     ChatDeleteBusyError,
@@ -69,7 +71,6 @@ __all__ = [
     "ChatRunDispatchCapabilities",
     "ChatRunDispatcher",
     "ChatRunEventRecorder",
-    "ChatRunExecutionLease",
     "ChatRunExecutor",
     "ChatRunStreamRequest",
     "DatabaseChatDocumentResolver",
@@ -77,7 +78,8 @@ __all__ = [
     "InlineChatRunDispatcher",
     "ChatCleanupDispatchCapabilities",
     "ChatCleanupDispatcher",
-    "ChatCleanupTask",
+    "ChatCleanupJobExecutionError",
+    "ChatCleanupJobExecutor",
     "InlineChatCleanupDispatcher",
     "PersistedAbortPollingNotifier",
     "ResolvedChatDocument",

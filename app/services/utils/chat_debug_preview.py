@@ -21,7 +21,7 @@ def load_chat_debug_bootstrap(
                     "chatId": item.chat_id,
                     "fileNames": [
                         document.file_name
-                        for document in chat_store.documents.list_by_chat(
+                        for document in chat_store.document_bindings.list_current_by_chat(
                             item.chat_id
                         )
                     ],

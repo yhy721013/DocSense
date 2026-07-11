@@ -22,6 +22,7 @@ from app.services.chat import (
     RESOURCE_THREAD,
     RESOURCE_WORKSPACE,
     chat_document_binding_lease_id,
+    chat_scoped_external_ref,
     chat_thread_lease_id,
     chat_workspace_lease_id,
 )
@@ -66,7 +67,10 @@ class ChatDeleteServiceTests(unittest.TestCase):
             lease_id=chat_thread_lease_id(chat_id),
             chat_id=chat_id,
             resource_type=RESOURCE_THREAD,
-            external_ref=f"{refs.context_ref}::{refs.conversation_ref}",
+            external_ref=chat_scoped_external_ref(
+                context_ref=refs.context_ref,
+                resource_ref=refs.conversation_ref,
+            ),
         )
         self.store.resource_leases.ensure_active(
             lease_id=chat_document_binding_lease_id(

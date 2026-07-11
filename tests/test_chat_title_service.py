@@ -7,15 +7,24 @@ import unittest
 from contextlib import contextmanager
 from typing import Iterator
 
+from app.ports import ChatOperationResult, ChatSessionRefs
 from app.services.chat import (
+    ChatCleanupJobExecutor,
+    ChatCommandService,
+    ChatDeleteBusyError,
+    ChatDeleteService,
     ChatHistoryService,
+    ChatRunLockService,
     ChatStore,
     ChatTitleEmptyHistoryError,
+    ChatTitleGenerationError,
     ChatTitleService,
     ChatTitleUnavailableError,
     MESSAGE_COMMITTED,
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
+    RESOURCE_THREAD,
+    chat_temporary_thread_lease_id,
 )
 from tests.fakes import FakeChatConversationFactory
 
@@ -23,8 +32,24 @@ from tests.fakes import FakeChatConversationFactory
 class _FailingConversation:
     """Conversation fake that simulates model/provider failure."""
 
-    def generate_standalone_reply(self, *, context_ref: str, prompt: str) -> str:
+    def open_temporary_conversation(
+        self,
+        *,
+        context_ref: str,
+        conversation_name: str,
+    ) -> ChatSessionRefs:
+        return ChatSessionRefs(context_ref, f"temporary-{conversation_name}")
+
+    def generate_temporary_reply(
+        self,
+        *,
+        session: ChatSessionRefs,
+        prompt: str,
+    ) -> str:
         raise RuntimeError("model boom")
+
+    def delete_conversation(self, session: ChatSessionRefs) -> ChatOperationResult:
+        return ChatOperationResult(success=True)
 
 
 class _FailingConversationFactory:
@@ -48,9 +73,13 @@ class ChatTitleServiceTests(unittest.TestCase):
         self,
         *,
         standalone_reply: str = "模拟标题",
+        delete_conversation_error_message: str = "",
         max_title_chars: int = 20,
     ) -> tuple[ChatTitleService, FakeChatConversationFactory]:
-        factory = FakeChatConversationFactory(standalone_reply=standalone_reply)
+        factory = FakeChatConversationFactory(
+            standalone_reply=standalone_reply,
+            delete_conversation_error_message=delete_conversation_error_message,
+        )
         history = ChatHistoryService(self.store)
         return (
             ChatTitleService(
@@ -173,6 +202,75 @@ class ChatTitleServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "model boom"):
             service.generate_title(chat_id="chat-error")
+
+    def test_temporary_cleanup_failure_is_durable_and_can_be_retried(self) -> None:
+        """标题线程删除失败不得被吞掉，并保留按 lease 重试的工作项。"""
+        service, factory = self._service(
+            standalone_reply="可恢复标题",
+            delete_conversation_error_message="temporary delete failed",
+        )
+        self._create_session_with_known_context(chat_id="chat-cleanup-fail", factory=factory)
+        self._append_committed_turn(chat_id="chat-cleanup-fail", run_id="run-cleanup")
+
+        with self.assertRaises(ChatTitleGenerationError):
+            service.generate_title(chat_id="chat-cleanup-fail")
+
+        leases = self.store.resource_leases.list_by_chat("chat-cleanup-fail")
+        temporary_lease = next(
+            lease
+            for lease in leases
+            if lease.lease_id.startswith("chat:chat-cleanup-fail:temporary_thread:")
+        )
+        jobs = self.store.cleanup_jobs.list_by_chat("chat-cleanup-fail")
+        self.assertEqual("cleanup_failed", temporary_lease.status)
+        self.assertEqual(1, len(jobs))
+        self.assertEqual("temporary_thread", jobs[0].reason)
+        self.assertEqual("failed", jobs[0].status)
+        self.assertEqual(1, jobs[0].attempt_count)
+
+        # A later maintenance worker receives only ``job_id`` and can recover
+        # the lease without the original title request or a captured callback.
+        recovery = ChatCleanupJobExecutor(
+            store=self.store,
+            conversation_factory=FakeChatConversationFactory(),
+        )
+        requeued = self.store.cleanup_jobs.enqueue(
+            chat_id="chat-cleanup-fail",
+            reason="temporary_thread",
+            lease_id=temporary_lease.lease_id,
+        )
+        completed = recovery.execute_cleanup_job(job_id=requeued.job_id)
+
+        self.assertEqual("succeeded", completed.status)
+        self.assertEqual(
+            "closed",
+            self.store.resource_leases.get(temporary_lease.lease_id).status,
+        )
+
+    def test_delete_is_rejected_while_title_has_a_planned_temporary_lease(self) -> None:
+        """planned lease 使标题创建与删除在 SQLite 临界区互斥。"""
+        factory = FakeChatConversationFactory()
+        self._create_session_with_known_context(chat_id="chat-title-race", factory=factory)
+        lease_id = chat_temporary_thread_lease_id(
+            chat_id="chat-title-race",
+            attempt_id="race-test",
+        )
+        self.store.resource_leases.begin(
+            lease_id=lease_id,
+            chat_id="chat-title-race",
+            resource_type=RESOURCE_THREAD,
+            require_active_session=True,
+        )
+        delete_service = ChatDeleteService(
+            store=self.store,
+            chat_commands=ChatCommandService(
+                ChatRunLockService(f"{self.tmp}/chat.sqlite3")
+            ),
+            conversation_factory=factory,
+        )
+
+        with self.assertRaises(ChatDeleteBusyError):
+            delete_service.delete_chat(chat_id="chat-title-race")
 
 
 if __name__ == "__main__":

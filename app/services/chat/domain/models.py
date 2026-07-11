@@ -62,6 +62,36 @@ LEASE_OPEN_STATUSES = frozenset(
     {LEASE_PLANNED, LEASE_ACTIVE, LEASE_CLEANUP_PENDING, LEASE_CLEANUP_FAILED}
 )
 
+# Cleanup work is persisted independently from a resource lease. A lease tells
+# us *what* remote resource exists; a job records *when and how* compensation
+# should be retried. Keeping the two lifecycles separate lets a future worker
+# safely retry an idempotent cleanup operation without mutating the resource
+# identity itself.
+CLEANUP_JOB_PENDING = "pending"
+CLEANUP_JOB_RUNNING = "running"
+CLEANUP_JOB_SUCCEEDED = "succeeded"
+CLEANUP_JOB_FAILED = "failed"
+CLEANUP_JOB_STATUSES = frozenset(
+    {
+        CLEANUP_JOB_PENDING,
+        CLEANUP_JOB_RUNNING,
+        CLEANUP_JOB_SUCCEEDED,
+        CLEANUP_JOB_FAILED,
+    }
+)
+
+# Cleanup reasons are internal workflow identifiers, not HTTP/API values.  A
+# lease is supplied separately so several temporary threads belonging to one
+# chat can be retried independently without overloading the reason string.
+CLEANUP_REASON_DELETE_CHAT = "delete_chat"
+CLEANUP_REASON_TEMPORARY_THREAD = "temporary_thread"
+CLEANUP_JOB_REASONS = frozenset(
+    {
+        CLEANUP_REASON_DELETE_CHAT,
+        CLEANUP_REASON_TEMPORARY_THREAD,
+    }
+)
+
 
 @dataclass(frozen=True)
 class ChatSession:
@@ -80,9 +110,17 @@ class ChatSession:
 
 
 @dataclass(frozen=True)
-class ChatDocument:
-    """Document bound to a chat session."""
+class ChatDocumentBinding:
+    """One immutable document revision attached to a chat session.
 
+    ``file_name`` is a business-side file key and can be reused when the source
+    file is re-indexed. Therefore it is deliberately **not** the identity of a
+    binding. ``document_ref`` represents the resolved revision that was used by
+    one or more runs, while ``binding_id`` provides a stable local cleanup and
+    audit key.
+    """
+
+    binding_id: str
     chat_id: str
     file_name: str
     original_name: str
@@ -199,6 +237,22 @@ class ChatResourceLease:
     resource_type: str
     external_ref: str
     status: str
+    error_message: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class ChatCleanupJob:
+    """Durable request to compensate or delete chat-owned resources."""
+
+    job_id: str
+    chat_id: str
+    reason: str
+    lease_id: str
+    status: str
+    attempt_count: int
+    next_attempt_at: str
     error_message: str
     created_at: str
     updated_at: str

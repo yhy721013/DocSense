@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from app.services.chat.domain.events import ChatStreamEvent
@@ -22,6 +23,15 @@ class ChatRunEventStore(Protocol):
         """Persist one event before its presentation."""
         ...
 
+    def append_many(
+        self,
+        *,
+        run_id: str,
+        events: Sequence[ChatStreamEvent],
+    ) -> tuple[ChatRunEvent, ...]:
+        """Persist an ordered non-terminal event batch in one transaction."""
+        ...
+
     def list_by_run(self, run_id: str) -> tuple[ChatRunEvent, ...]:
         """Read events in internal sequence order without defining HTTP semantics."""
         ...
@@ -31,14 +41,27 @@ class ChatRunEventRepository(_Repository):
     """Persist strictly ordered stream events for one internally identified run."""
 
     def append(self, *, run_id: str, event: ChatStreamEvent) -> ChatRunEvent:
+        return self.append_many(run_id=run_id, events=(event,))[0]
+
+    def append_many(
+        self,
+        *,
+        run_id: str,
+        events: Sequence[ChatStreamEvent],
+    ) -> tuple[ChatRunEvent, ...]:
+        """Append a contiguous event batch under one SQLite write transaction."""
         normalized_run_id = _required_text(run_id, name="run_id")
-        self._require_event(event)
+        normalized_events = tuple(events)
+        if not normalized_events:
+            return ()
+        if any(not isinstance(event, ChatStreamEvent) for event in normalized_events):
+            raise TypeError("events must contain ChatStreamEvent")
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return self.append_in_transaction(
+            return self.append_many_in_transaction(
                 connection=connection,
                 run_id=normalized_run_id,
-                event=event,
+                events=normalized_events,
             )
 
     @classmethod
@@ -56,8 +79,29 @@ class ChatRunEventRepository(_Repository):
         """
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("connection must be sqlite3.Connection")
+        return cls.append_many_in_transaction(
+            connection=connection,
+            run_id=run_id,
+            events=(event,),
+        )[0]
+
+    @classmethod
+    def append_many_in_transaction(
+        cls,
+        *,
+        connection: sqlite3.Connection,
+        run_id: str,
+        events: Sequence[ChatStreamEvent],
+    ) -> tuple[ChatRunEvent, ...]:
+        """Append an ordered event group using a caller-owned transaction."""
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("connection must be sqlite3.Connection")
         normalized_run_id = _required_text(run_id, name="run_id")
-        cls._require_event(event)
+        normalized_events = tuple(events)
+        if not normalized_events:
+            return ()
+        for event in normalized_events:
+            cls._require_event(event)
         run = connection.execute(
             "SELECT run_id FROM chat_runs WHERE run_id = ?",
             (normalized_run_id,),
@@ -78,30 +122,40 @@ class ChatRunEventRepository(_Repository):
             "SELECT COALESCE(MAX(event_seq), 0) AS event_seq FROM chat_run_events WHERE run_id = ?",
             (normalized_run_id,),
         ).fetchone()
-        event_seq = int(sequence_row["event_seq"]) + 1
-        payload = cls._serialize_data(event)
-        created_at = _utc_now_iso()
-        connection.execute(
-            """
-            INSERT INTO chat_run_events (
-                run_id, event_seq, event_type, data_json, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                normalized_run_id,
-                event_seq,
-                event.event_type,
-                payload,
-                created_at,
-            ),
-        )
-        return ChatRunEvent(
-            run_id=normalized_run_id,
-            event_seq=event_seq,
-            event_type=event.event_type,
-            data=dict(event.data),
-            created_at=created_at,
-        )
+        event_seq = int(sequence_row["event_seq"])
+        records: list[ChatRunEvent] = []
+        terminal_seen = False
+        for event in normalized_events:
+            if terminal_seen:
+                raise ValueError("chat_run batch contains events after a terminal event")
+            event_seq += 1
+            payload = cls._serialize_data(event)
+            created_at = _utc_now_iso()
+            connection.execute(
+                """
+                INSERT INTO chat_run_events (
+                    run_id, event_seq, event_type, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_run_id,
+                    event_seq,
+                    event.event_type,
+                    payload,
+                    created_at,
+                ),
+            )
+            records.append(
+                ChatRunEvent(
+                    run_id=normalized_run_id,
+                    event_seq=event_seq,
+                    event_type=event.event_type,
+                    data=dict(event.data),
+                    created_at=created_at,
+                )
+            )
+            terminal_seen = event.event_type in _TERMINAL_EVENT_TYPES
+        return tuple(records)
 
     def list_by_run(self, run_id: str) -> tuple[ChatRunEvent, ...]:
         normalized_run_id = _required_text(run_id, name="run_id")

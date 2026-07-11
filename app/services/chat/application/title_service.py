@@ -4,12 +4,41 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 
-from app.ports import ChatConversationFactory
+from app.ports import (
+    ChatConversationFactory,
+    ChatConversationNotFoundError,
+    ChatOperationResult,
+    ChatPortError,
+)
 from app.services.chat.application.history_service import ChatHistoryService
-from app.services.chat.domain.models import SESSION_ACTIVE
+from app.services.chat.application.cleanup_dispatcher import (
+    ChatCleanupDispatcher,
+    InlineChatCleanupDispatcher,
+)
+from app.services.chat.application.cleanup_service import (
+    ChatCleanupJobExecutionError,
+    ChatCleanupJobExecutor,
+)
+from app.services.chat.domain.models import (
+    CLEANUP_JOB_SUCCEEDED,
+    CLEANUP_REASON_TEMPORARY_THREAD,
+    LEASE_CLOSED,
+    LEASE_PLANNED,
+    RESOURCE_THREAD,
+    SESSION_ACTIVE,
+    ChatCleanupJob,
+)
+from app.services.chat.domain.resource_ids import (
+    chat_scoped_external_ref,
+    chat_temporary_thread_lease_id,
+)
 from app.services.chat.persistence.store import ChatPersistenceStore
+from app.services.chat.persistence.resource_lease_service import (
+    ChatResourceLeaseSessionUnavailableError,
+)
 from app.services.core.prompts import build_chat_title_prompt
 
 
@@ -89,6 +118,8 @@ class ChatTitleService:
         store: ChatPersistenceStore,
         history_service: ChatHistoryService,
         conversation_factory: ChatConversationFactory,
+        cleanup_dispatcher: ChatCleanupDispatcher | None = None,
+        cleanup_executor: ChatCleanupJobExecutor | None = None,
         history_limit: int = DEFAULT_TITLE_HISTORY_LIMIT,
         message_max_chars: int = DEFAULT_TITLE_MESSAGE_MAX_CHARS,
         max_title_chars: int = DEFAULT_MAX_TITLE_CHARS,
@@ -104,6 +135,20 @@ class ChatTitleService:
         self._store = store
         self._history_service = history_service
         self._conversation_factory = conversation_factory
+        if cleanup_executor is not None and not isinstance(
+            cleanup_executor,
+            ChatCleanupJobExecutor,
+        ):
+            raise TypeError("cleanup_executor must be ChatCleanupJobExecutor")
+        self._cleanup_executor = cleanup_executor or ChatCleanupJobExecutor(
+            store=store,
+            conversation_factory=conversation_factory,
+        )
+        self._cleanup_dispatcher = cleanup_dispatcher or InlineChatCleanupDispatcher(
+            execute=self._cleanup_executor.execute_cleanup_job,
+        )
+        if not isinstance(self._cleanup_dispatcher, ChatCleanupDispatcher):
+            raise TypeError("cleanup_dispatcher must implement ChatCleanupDispatcher")
         self._history_limit = _positive_int(history_limit, name="history_limit")
         self._message_max_chars = _positive_int(
             message_max_chars,
@@ -159,11 +204,11 @@ class ChatTitleService:
             len(title_messages),
             len(prompt),
         )
-        with self._conversation_factory.create() as conversation:
-            raw_title = conversation.generate_standalone_reply(
-                context_ref=session.workspace_ref,
-                prompt=prompt,
-            )
+        raw_title = self._generate_with_tracked_temporary_thread(
+            chat_id=normalized_chat_id,
+            context_ref=session.workspace_ref,
+            prompt=prompt,
+        )
         title = self.clean_title(raw_title, max_chars=self._max_title_chars)
         if not title:
             logger.error(
@@ -179,6 +224,167 @@ class ChatTitleService:
             len(title),
         )
         return ChatTitleResult(chat_id=normalized_chat_id, title=title)
+
+    def _generate_with_tracked_temporary_thread(
+        self,
+        *,
+        chat_id: str,
+        context_ref: str,
+        prompt: str,
+    ) -> str:
+        """Generate a title through a lease-backed temporary conversation.
+
+        The old adapter-owned helper created and deleted this thread internally.
+        That made a delete failure invisible to the local recovery model. The
+        application service now records a planned lease before the remote side
+        effect and retains a cleanup job if the final deletion cannot complete.
+        """
+        attempt_id = uuid.uuid4().hex
+        lease_id = chat_temporary_thread_lease_id(
+            chat_id=chat_id,
+            attempt_id=attempt_id,
+        )
+        try:
+            # The guarded planned lease is the title/delete admission gate.
+            # Delete checks it in the same SQLite critical section used to
+            # enter ``deleting``; therefore a title can never start its remote
+            # thread after deletion has won the race.
+            self._store.resource_leases.begin(
+                lease_id=lease_id,
+                chat_id=chat_id,
+                resource_type=RESOURCE_THREAD,
+                require_active_session=True,
+            )
+        except ChatResourceLeaseSessionUnavailableError as exc:
+            raise ChatTitleUnavailableError(
+                "chat session is not available for title generation"
+            ) from exc
+        temporary_session = None
+        raw_title = ""
+        cleanup_error = ""
+        cleanup_attempted = False
+        generation_error: Exception | None = None
+        try:
+            with self._conversation_factory.create() as conversation:
+                temporary_session = conversation.open_temporary_conversation(
+                    context_ref=context_ref,
+                    conversation_name=f"title-{attempt_id}",
+                )
+                self._store.resource_leases.activate(
+                    lease_id=lease_id,
+                    external_ref=chat_scoped_external_ref(
+                        context_ref=temporary_session.context_ref,
+                        resource_ref=temporary_session.conversation_ref,
+                    ),
+                )
+                raw_title = conversation.generate_temporary_reply(
+                    session=temporary_session,
+                    prompt=prompt,
+                )
+                cleanup_attempted = True
+                cleanup_error = self._delete_temporary_conversation(
+                    conversation=conversation,
+                    temporary_session=temporary_session,
+                    lease_id=lease_id,
+                )
+        except Exception as exc:
+            generation_error = exc
+            raise
+        finally:
+            if temporary_session is None:
+                self._close_unresolved_planned_lease(lease_id)
+            elif not cleanup_attempted:
+                # ``generate_temporary_reply`` failed after the remote thread
+                # was created. Still attempt cleanup, but never replace the
+                # original generation exception with a cleanup exception.
+                cleanup_attempted = True
+                try:
+                    with self._conversation_factory.create() as cleanup_conversation:
+                        cleanup_error = self._delete_temporary_conversation(
+                            conversation=cleanup_conversation,
+                            temporary_session=temporary_session,
+                            lease_id=lease_id,
+                        )
+                except Exception as cleanup_exc:
+                    # Do not replace the model-generation error with a second
+                    # failure while opening a cleanup-only request scope.  The
+                    # durable job recorded below remains the recovery path.
+                    cleanup_error = str(cleanup_exc) or cleanup_exc.__class__.__name__
+            if temporary_session is not None and cleanup_error:
+                cleanup_job = self._record_temporary_cleanup_failure(
+                    chat_id=chat_id,
+                    lease_id=lease_id,
+                    error_message=cleanup_error,
+                )
+                cleanup_job = self._dispatch_temporary_cleanup(cleanup_job)
+                if (
+                    generation_error is None
+                    and cleanup_job.status != CLEANUP_JOB_SUCCEEDED
+                ):
+                    raise ChatTitleGenerationError("标题临时资源清理失败")
+        return raw_title
+
+    def _delete_temporary_conversation(
+        self,
+        *,
+        conversation,
+        temporary_session,
+        lease_id: str,
+    ) -> str:
+        """Delete a tracked title thread and return a stable failure reason."""
+        try:
+            result = conversation.delete_conversation(temporary_session)
+        except ChatConversationNotFoundError:
+            result = ChatOperationResult(success=True, already_applied=True)
+        except ChatPortError as exc:
+            return str(exc) or exc.__class__.__name__
+        except Exception as exc:
+            # Cleanup bookkeeping must survive adapter contract defects as
+            # well as ordinary remote errors.  Returning a stable failure
+            # value lets the caller persist and retry the exact lease.
+            return str(exc) or exc.__class__.__name__
+        if not isinstance(result, ChatOperationResult):
+            return "temporary title delete returned an invalid result"
+        if result.success:
+            self._store.resource_leases.mark_closed(lease_id)
+            return ""
+        return result.error_message
+
+    def _close_unresolved_planned_lease(self, lease_id: str) -> None:
+        lease = self._store.resource_leases.get(lease_id)
+        if lease is not None and lease.status == LEASE_PLANNED:
+            self._store.resource_leases.mark_closed(lease_id)
+
+    def _record_temporary_cleanup_failure(
+        self,
+        *,
+        chat_id: str,
+        lease_id: str,
+        error_message: str,
+    ) -> ChatCleanupJob:
+        lease = self._store.resource_leases.get(lease_id)
+        if lease is not None and lease.status != LEASE_CLOSED:
+            if lease.status == LEASE_PLANNED:
+                self._store.resource_leases.mark_cleanup_pending(lease_id)
+            self._store.resource_leases.record_cleanup_failure(
+                lease_id=lease_id,
+                error_message=error_message,
+            )
+        return self._store.cleanup_jobs.enqueue(
+            chat_id=chat_id,
+            reason=CLEANUP_REASON_TEMPORARY_THREAD,
+            lease_id=lease_id,
+        )
+
+    def _dispatch_temporary_cleanup(
+        self,
+        cleanup_job: ChatCleanupJob,
+    ) -> ChatCleanupJob:
+        """Attempt one immediate cleanup without hiding the durable failure."""
+        try:
+            return self._cleanup_dispatcher.dispatch(job=cleanup_job)
+        except ChatCleanupJobExecutionError as exc:
+            return exc.job
 
     @staticmethod
     def clean_title(

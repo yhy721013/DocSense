@@ -72,7 +72,7 @@ app/
       config.py                     # 环境变量与配置加载
       settings.py                   # 路径常量与限制（上传目录、DB 路径等）
       logging.py                    # 日志初始化
-      database.py                   # 知识库映射及对话记录持久化（architecture_id <-> workspace_slug, chats）
+      database.py                   # 知识库映射持久化（architecture_id <-> workspace_slug）
       progress_hub.py               # 进度发布/订阅中枢
       prompts.py                    # 统一 Prompt 构建
     llm_service/
@@ -202,8 +202,9 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
-   - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件。
+   - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件；本地保留不可变的文件绑定 revision，并以最新 revision 作为后续对话默认引用。
    - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
+   - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
 
 7. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
@@ -319,7 +320,7 @@ DOCSENSE_RUNTIME_DIR=C:/.me/envs/DocSenseEnv
 
 文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
 
-为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理，不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
+为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
 
 旧的组件级变量仍可作为兼容覆盖项，但一旦配置就会覆盖统一根目录。若希望全部内容位于同一目录，应删除 `DOCSENSE_LLM_TASK_DB`、`DOCSENSE_KNOWLEDGE_BASE_DB`、`KNOWLEDGE_BASE_DB_PATH`、`DOCSENSE_CHAT_DB`、`FILE_DOWNLOAD_DIR`、`DOCSENSE_OCR_CACHE_DIR` 和 `DOCSENSE_MINERU_CACHE_DIR`。
 - 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）
@@ -462,6 +463,7 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 - 文件处理与报告生成：`docs/接口文档/文件处理和报告生成.md`
 - 知识谱系解析：`docs/接口文档/知识谱系解析.md`
 - 文件对话：`docs/接口文档/文件对话.md`
+- 文件对话新增接口：`docs/接口文档/文件对话新增接口.md`
 - 节点分类与文档变更：`docs/接口文档/分类节点变更.md`
 
 ## 10. Git 规范

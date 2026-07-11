@@ -27,19 +27,19 @@ from app.ports import (
 )
 from app.services.chat import (
     ChatAbortService,
+    ChatCleanupJobExecutor,
     ChatCommandService,
     ChatDeleteService,
     DatabaseChatDocumentResolver,
     ChatHistoryService,
     ChatPersistenceStore,
     ChatRunDispatcher,
-    ChatRunExecutionLease,
     ChatRunLockService,
     ChatStore,
     ChatTitleService,
     SynchronousChatRunExecutor,
     InlineChatRunDispatcher,
-    record_chat_run_events,
+    InlineChatCleanupDispatcher,
 )
 from app.services.core.config import (
     AnythingLLMConfig,
@@ -49,7 +49,7 @@ from app.services.core.config import (
     load_chat_infrastructure_config,
     load_llm_integration_config,
 )
-from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.settings import CHAT_DB_PATH, KNOWLEDGE_BASE_DB_PATH
 from app.services.llm_service.task_service import LLMTaskService
@@ -118,7 +118,6 @@ class ApplicationServices:
     chat_conversation_factory: ChatConversationFactory
     task_service: LLMTaskService
     kb_service: DatabaseService
-    chat_db: ChatDatabaseService
     chat_store: ChatPersistenceStore
     chat_commands: ChatCommandService
     chat_run_executor: SynchronousChatRunExecutor
@@ -127,6 +126,7 @@ class ApplicationServices:
     chat_title: ChatTitleService
     chat_abort: ChatAbortService
     chat_delete: ChatDeleteService
+    chat_cleanup_executor: ChatCleanupJobExecutor
     progress_hub: LLMProgressHub
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
@@ -143,7 +143,6 @@ class ApplicationServices:
             "chat_conversation_factory": self.chat_conversation_factory,
             "task_service": self.task_service,
             "kb_service": self.kb_service,
-            "chat_db": self.chat_db,
             "chat_store": self.chat_store,
             "chat_commands": self.chat_commands,
             "chat_run_executor": self.chat_run_executor,
@@ -152,6 +151,7 @@ class ApplicationServices:
             "chat_title": self.chat_title,
             "chat_abort": self.chat_abort,
             "chat_delete": self.chat_delete,
+            "chat_cleanup_executor": self.chat_cleanup_executor,
             "progress_hub": self.progress_hub,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
@@ -191,6 +191,8 @@ class ApplicationServices:
             raise TypeError("chat_abort must be ChatAbortService")
         if not isinstance(self.chat_delete, ChatDeleteService):
             raise TypeError("chat_delete must be ChatDeleteService")
+        if not isinstance(self.chat_cleanup_executor, ChatCleanupJobExecutor):
+            raise TypeError("chat_cleanup_executor must be ChatCleanupJobExecutor")
         if not isinstance(self.chat_infrastructure_config, ChatInfrastructureConfig):
             raise TypeError(
                 "chat_infrastructure_config must be ChatInfrastructureConfig"
@@ -213,11 +215,11 @@ class ApplicationServices:
             raise RuntimeError("unsupported chat infrastructure runtime mode")
 
         capabilities = {
-            "persistence": self.chat_store.capabilities.single_instance_only,
-            "run_lease": self.chat_commands.lease_capabilities.single_instance_only,
-            "run_dispatcher": self.chat_dispatcher.capabilities.single_instance_only,
-            "abort_notifier": self.chat_abort.notifier_capabilities.single_instance_only,
-            "cleanup_dispatcher": self.chat_delete.cleanup_dispatcher_capabilities.single_instance_only,
+            "persistence": self.chat_store.capabilities.supports_single_instance,
+            "run_lease": self.chat_commands.lease_capabilities.supports_single_instance,
+            "run_dispatcher": self.chat_dispatcher.capabilities.supports_single_instance,
+            "abort_notifier": self.chat_abort.notifier_capabilities.supports_single_instance,
+            "cleanup_dispatcher": self.chat_delete.cleanup_dispatcher_capabilities.supports_single_instance,
         }
         incompatible = [name for name, value in capabilities.items() if not value]
         if incompatible:
@@ -237,9 +239,16 @@ def create_application_services() -> ApplicationServices:
     task_service = LLMTaskService(llm_config.task_db_path)
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_store = ChatStore(str(CHAT_DB_PATH))
-    chat_commands = ChatCommandService(ChatRunLockService(chat_store.db_path))
+    chat_commands = ChatCommandService(ChatRunLockService(str(CHAT_DB_PATH)))
     chat_history = ChatHistoryService(chat_store)
     chat_conversation_factory = AnythingLLMChatFactory(anythingllm_config)
+    chat_cleanup_executor = ChatCleanupJobExecutor(
+        store=chat_store,
+        conversation_factory=chat_conversation_factory,
+    )
+    chat_cleanup_dispatcher = InlineChatCleanupDispatcher(
+        execute=chat_cleanup_executor.execute_cleanup_job,
+    )
     chat_run_executor = SynchronousChatRunExecutor(
         store=chat_store,
         chat_commands=chat_commands,
@@ -247,17 +256,12 @@ def create_application_services() -> ApplicationServices:
         document_resolver=DatabaseChatDocumentResolver(kb_service),
     )
 
-    def execute_inline_chat_run(lease: ChatRunExecutionLease):
-        return record_chat_run_events(
-            request=lease.request,
-            events=chat_run_executor.stream_chat_run(lease.request),
-            store=chat_store,
-            chat_commands=chat_commands,
-            execution_lease=lease.ownership_lease,
-        )
-
-    chat_dispatcher = InlineChatRunDispatcher(execute=execute_inline_chat_run)
-    chat_db = ChatDatabaseService(str(CHAT_DB_PATH))
+    # The inline dispatcher receives only a durable run_id. Its executor reloads
+    # the accepted snapshot and claims the run at execution time, which keeps
+    # the current synchronous path aligned with a future worker entry point.
+    chat_dispatcher = InlineChatRunDispatcher(
+        execute=chat_run_executor.execute_chat_run,
+    )
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
@@ -272,7 +276,6 @@ def create_application_services() -> ApplicationServices:
         chat_conversation_factory=chat_conversation_factory,
         task_service=task_service,
         kb_service=kb_service,
-        chat_db=chat_db,
         chat_store=chat_store,
         chat_commands=chat_commands,
         chat_run_executor=chat_run_executor,
@@ -282,6 +285,8 @@ def create_application_services() -> ApplicationServices:
             store=chat_store,
             history_service=chat_history,
             conversation_factory=chat_conversation_factory,
+            cleanup_dispatcher=chat_cleanup_dispatcher,
+            cleanup_executor=chat_cleanup_executor,
         ),
         chat_abort=ChatAbortService(
             store=chat_store,
@@ -291,7 +296,10 @@ def create_application_services() -> ApplicationServices:
             store=chat_store,
             chat_commands=chat_commands,
             conversation_factory=chat_conversation_factory,
+            cleanup_dispatcher=chat_cleanup_dispatcher,
+            cleanup_executor=chat_cleanup_executor,
         ),
+        chat_cleanup_executor=chat_cleanup_executor,
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,

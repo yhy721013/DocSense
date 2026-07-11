@@ -9,6 +9,7 @@ from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
 from app.services.chat import (
     ChatAbortService,
+    ChatCleanupJobExecutor,
     ChatCommandService,
     ChatDeleteService,
     ChatHistoryService,
@@ -18,10 +19,12 @@ from app.services.chat import (
     DatabaseChatDocumentResolver,
     SynchronousChatRunExecutor,
     InlineChatRunDispatcher,
-    record_chat_run_events,
+    InlineChatCleanupDispatcher,
+    MESSAGE_COMMITTED,
+    RUN_FAILED,
 )
 from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
-from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests.fakes import (
@@ -47,14 +50,15 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         conversation_factory=chat_conversation_factory,
         document_resolver=DatabaseChatDocumentResolver(kb_service),
     )
+    chat_cleanup_executor = ChatCleanupJobExecutor(
+        store=chat_store,
+        conversation_factory=chat_conversation_factory,
+    )
+    chat_cleanup_dispatcher = InlineChatCleanupDispatcher(
+        execute=chat_cleanup_executor.execute_cleanup_job,
+    )
     chat_dispatcher = InlineChatRunDispatcher(
-        execute=lambda lease: record_chat_run_events(
-            request=lease.request,
-            events=chat_run_executor.stream_chat_run(lease.request),
-            store=chat_store,
-            chat_commands=chat_commands,
-            execution_lease=lease.ownership_lease,
-        )
+        execute=chat_run_executor.execute_chat_run,
     )
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
@@ -62,9 +66,6 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         chat_conversation_factory=chat_conversation_factory,
         task_service=LLMTaskService(db_path=f"{tmp}/tasks.sqlite3"),
         kb_service=kb_service,
-        # This legacy facade remains available to non-chat application paths;
-        # the tests deliberately assert that file chat does not touch it.
-        chat_db=ChatDatabaseService(db_path=chat_db_path),
         chat_store=chat_store,
         chat_commands=chat_commands,
         chat_run_executor=chat_run_executor,
@@ -74,6 +75,8 @@ def _build_test_services(tmp: str) -> ApplicationServices:
             store=chat_store,
             history_service=chat_history,
             conversation_factory=chat_conversation_factory,
+            cleanup_dispatcher=chat_cleanup_dispatcher,
+            cleanup_executor=chat_cleanup_executor,
         ),
         chat_abort=ChatAbortService(
             store=chat_store,
@@ -83,7 +86,10 @@ def _build_test_services(tmp: str) -> ApplicationServices:
             store=chat_store,
             chat_commands=chat_commands,
             conversation_factory=chat_conversation_factory,
+            cleanup_dispatcher=chat_cleanup_dispatcher,
+            cleanup_executor=chat_cleanup_executor,
         ),
+        chat_cleanup_executor=chat_cleanup_executor,
         progress_hub=LLMProgressHub(),
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=LLMIntegrationConfig(
@@ -181,7 +187,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
                 )
             ],
         )
-        self.assertIsNone(self.services.chat_db.get_chat("chat-empty"))
+        self.assertFalse(hasattr(self.services, "chat_db"))
 
     def test_chat_sse_contract_does_not_expose_internal_run_identity(self) -> None:
         response = self._chat(
@@ -215,7 +221,9 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         response.get_data()
-        documents = self.services.chat_store.documents.list_by_chat("chat-doc")
+        documents = self.services.chat_store.document_bindings.list_current_by_chat(
+            "chat-doc"
+        )
         messages = self.services.chat_store.messages.list_by_chat("chat-doc")
         run = next(
             message.run_id
@@ -255,6 +263,34 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         )
 
         self.assertEqual(409, response.status_code)
+
+    def test_sse_close_after_execution_starts_preserves_user_turn(self) -> None:
+        """已领取执行权后连接关闭，用户轮次仍按失败语义保留。"""
+        response = self.client.post(
+            "/llm/chat",
+            json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": "chat-never-started",
+                    "fileNames": [],
+                    "message": "执行已开始后保留",
+                },
+            },
+            buffered=False,
+        )
+
+        response.close()
+
+        messages = self.services.chat_store.messages.list_by_chat(
+            "chat-never-started"
+        )
+        self.assertEqual(1, len(messages))
+        self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
+        run = self.services.chat_store.runs.get(messages[0].run_id)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
+        self.assertEqual((), self.services.chat_store.runs.list_active("chat-never-started"))
 
     def test_global_stream_capacity_returns_429_before_run_acceptance(self) -> None:
         executor = self.services.chat_run_executor
@@ -302,7 +338,12 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         )
         second.get_data()
 
-        document = self.services.chat_store.documents.list_by_chat("chat-revision")[0]
+        documents = self.services.chat_store.document_bindings.list_by_chat(
+            "chat-revision"
+        )
+        document = self.services.chat_store.document_bindings.list_current_by_chat(
+            "chat-revision"
+        )[0]
         binding_leases = [
             lease
             for lease in self.services.chat_store.resource_leases.list_by_chat(
@@ -311,6 +352,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             if lease.resource_type == "document_binding"
         ]
         self.assertEqual("document:doc-v2", document.document_ref)
+        self.assertEqual(2, len(documents))
         self.assertEqual(2, len(binding_leases))
 
     def test_delete_succeeds_for_leases_created_by_the_new_executor(self) -> None:

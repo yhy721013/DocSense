@@ -28,10 +28,12 @@ class ChatRunLeaseCapabilities:
     """一个运行协调适配器真实具备的租约能力。
 
     能力对象用于启动装配和测试门禁，而不是业务分支的替代品。特别是，
-    ``single_instance_only=True`` 明确表示该实现不能用于多副本部署。
+    ``supports_single_instance`` 与 ``supports_shared_instances`` 分别表达
+    适配器已验证的部署能力；未来更强的适配器无需因为否定式字段而被拒绝。
     """
 
-    single_instance_only: bool
+    supports_single_instance: bool
+    supports_shared_instances: bool
     supports_conditional_claim: bool
     supports_lease_renewal: bool
     supports_fencing: bool
@@ -39,7 +41,8 @@ class ChatRunLeaseCapabilities:
 
 
 SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES = ChatRunLeaseCapabilities(
-    single_instance_only=True,
+    supports_single_instance=True,
+    supports_shared_instances=False,
     supports_conditional_claim=True,
     supports_lease_renewal=True,
     supports_fencing=False,
@@ -185,6 +188,15 @@ class ChatRunCoordinator(Protocol):
 
     def fail_run(self, run_id: str, *, error_message: str) -> ChatRun:
         """收敛未进入执行器的失败 run，供受理失败路径使用。"""
+        ...
+
+    def discard_unstarted_run(
+        self,
+        *,
+        run_id: str,
+        error_message: str,
+    ) -> ChatRun:
+        """收敛从未领取执行权的 accepted run，并丢弃 pending 用户消息。"""
         ...
 
     def abort_run(self, run_id: str) -> ChatRun:

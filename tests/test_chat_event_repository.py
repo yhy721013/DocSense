@@ -43,6 +43,22 @@ class ChatRunEventRepositoryTests(unittest.TestCase):
         )
         self.assertEqual({"content": "第一段"}, dict(stored[1].data))
 
+    def test_append_many_assigns_one_contiguous_sequence_in_one_call(self) -> None:
+        records = self.store.events.append_many(
+            run_id="run-events",
+            events=(
+                ChatStreamEvent("chatInfo", {"chatId": "chat-events"}),
+                ChatStreamEvent("textChunk", {"content": "第一段"}),
+                ChatStreamEvent("textChunk", {"content": "第二段"}),
+            ),
+        )
+
+        self.assertEqual([1, 2, 3], [record.event_seq for record in records])
+        self.assertEqual(
+            ["chatInfo", "textChunk", "textChunk"],
+            [event.event_type for event in self.store.events.list_by_run("run-events")],
+        )
+
     def test_only_one_terminal_event_and_no_events_after_it_are_allowed(self) -> None:
         self.store.events.append(
             run_id="run-events",

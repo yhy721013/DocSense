@@ -30,12 +30,14 @@ class AbortNotificationCapabilities:
     执行的 worker 更快醒来，因此当前单实例轮询实现不会伪造跨实例实时唤醒。
     """
 
-    single_instance_only: bool
+    supports_single_instance: bool
+    supports_shared_instances: bool
     supports_cross_instance_wakeup: bool
 
 
 PERSISTED_ABORT_POLLING_CAPABILITIES = AbortNotificationCapabilities(
-    single_instance_only=True,
+    supports_single_instance=True,
+    supports_shared_instances=False,
     supports_cross_instance_wakeup=False,
 )
 

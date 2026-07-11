@@ -2,6 +2,14 @@
 
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (
+    CLEANUP_JOB_FAILED,
+    CLEANUP_JOB_PENDING,
+    CLEANUP_JOB_REASONS,
+    CLEANUP_JOB_RUNNING,
+    CLEANUP_JOB_STATUSES,
+    CLEANUP_JOB_SUCCEEDED,
+    CLEANUP_REASON_DELETE_CHAT,
+    CLEANUP_REASON_TEMPORARY_THREAD,
     LEASE_ACTIVE,
     LEASE_CLEANUP_FAILED,
     LEASE_CLEANUP_PENDING,
@@ -33,7 +41,8 @@ from app.services.chat.domain.models import (
     SESSION_DELETING,
     SESSION_ERROR,
     SESSION_STATUSES,
-    ChatDocument,
+    ChatCleanupJob,
+    ChatDocumentBinding,
     ChatMessage,
     ChatMessageFile,
     ChatResourceLease,
@@ -43,7 +52,8 @@ from app.services.chat.domain.models import (
 )
 
 __all__ = [
-    "ChatDocument",
+    "ChatCleanupJob",
+    "ChatDocumentBinding",
     "ChatMessage",
     "ChatMessageFile",
     "ChatResourceLease",
@@ -51,6 +61,14 @@ __all__ = [
     "ChatRunEvent",
     "ChatSession",
     "ChatStreamEvent",
+    "CLEANUP_JOB_FAILED",
+    "CLEANUP_JOB_PENDING",
+    "CLEANUP_JOB_REASONS",
+    "CLEANUP_JOB_RUNNING",
+    "CLEANUP_JOB_STATUSES",
+    "CLEANUP_JOB_SUCCEEDED",
+    "CLEANUP_REASON_DELETE_CHAT",
+    "CLEANUP_REASON_TEMPORARY_THREAD",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",
     "LEASE_CLEANUP_PENDING",

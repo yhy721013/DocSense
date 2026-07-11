@@ -68,6 +68,7 @@ class ChatAbortServiceTests(unittest.TestCase):
 
     def test_completed_run_returns_false(self) -> None:
         run = self.commands.start_chat_run(chat_id="chat-done")
+        self.commands.issue_execution_lease(run_id=run.run_id)
         completed = self.commands.complete_chat_run(run_id=run.run_id)
 
         result = self.abort.abort_chat(chat_id="chat-done")

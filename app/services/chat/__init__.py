@@ -11,14 +11,16 @@ from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.application.dispatcher import (
     ChatRunDispatchCapabilities,
     ChatRunDispatcher,
-    ChatRunExecutionLease,
     InlineChatRunDispatcher,
 )
 from app.services.chat.application.cleanup_dispatcher import (
     ChatCleanupDispatchCapabilities,
     ChatCleanupDispatcher,
-    ChatCleanupTask,
     InlineChatCleanupDispatcher,
+)
+from app.services.chat.application.cleanup_service import (
+    ChatCleanupJobExecutionError,
+    ChatCleanupJobExecutor,
 )
 from app.services.chat.application.delete_service import (
     ChatDeleteBusyError,
@@ -28,9 +30,12 @@ from app.services.chat.application.delete_service import (
     ChatDeleteService,
 )
 from app.services.chat.domain.resource_ids import (
+    chat_scoped_external_ref,
     chat_document_binding_lease_id,
+    chat_temporary_thread_lease_id,
     chat_thread_lease_id,
     chat_workspace_lease_id,
+    parse_chat_scoped_external_ref,
 )
 from app.services.chat.application.document_resolver import (
     ChatDocumentNotFoundError,
@@ -57,6 +62,14 @@ from app.services.chat.application.title_service import (
 )
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (
+    CLEANUP_JOB_FAILED,
+    CLEANUP_JOB_PENDING,
+    CLEANUP_JOB_REASONS,
+    CLEANUP_JOB_RUNNING,
+    CLEANUP_JOB_STATUSES,
+    CLEANUP_JOB_SUCCEEDED,
+    CLEANUP_REASON_DELETE_CHAT,
+    CLEANUP_REASON_TEMPORARY_THREAD,
     LEASE_ACTIVE,
     LEASE_CLEANUP_FAILED,
     LEASE_CLEANUP_PENDING,
@@ -88,7 +101,8 @@ from app.services.chat.domain.models import (
     SESSION_DELETING,
     SESSION_ERROR,
     SESSION_STATUSES,
-    ChatDocument,
+    ChatCleanupJob,
+    ChatDocumentBinding,
     ChatMessage,
     ChatMessageFile,
     ChatResourceLease,
@@ -118,7 +132,8 @@ from app.services.chat.locking.lease import (
     SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES,
 )
 from app.services.chat.persistence.repositories import (
-    ChatDocumentRepository,
+    ChatCleanupJobRepository,
+    ChatDocumentBindingRepository,
     ChatMessageRepository,
     ChatRunRepository,
     ChatRunInputRepository,
@@ -133,20 +148,18 @@ from app.services.chat.persistence.store import (
     ChatOutboxMessage,
     ChatOutboxStore,
     ChatPersistenceCapabilities,
-    ChatPersistenceConflictError,
     ChatPersistenceError,
     ChatPersistenceStore,
     ChatStore,
-    ChatUniqueConstraintViolation,
-    ChatUnitOfWork,
     DisabledChatOutbox,
     SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES,
-    SQLiteChatUnitOfWork,
 )
 
 __all__ = [
-    "ChatDocument",
-    "ChatDocumentRepository",
+    "ChatCleanupJob",
+    "ChatCleanupJobRepository",
+    "ChatDocumentBinding",
+    "ChatDocumentBindingRepository",
     "AbortNotificationCapabilities",
     "AbortNotifier",
     "ChatAbortResult",
@@ -165,7 +178,6 @@ __all__ = [
     "ChatMessageRepository",
     "ChatPersistenceStore",
     "ChatPersistenceCapabilities",
-    "ChatPersistenceConflictError",
     "ChatPersistenceError",
     "ChatResourceLease",
     "ChatResourceLeaseService",
@@ -180,7 +192,6 @@ __all__ = [
     "ChatRunCoordinator",
     "ChatRunInactiveError",
     "ChatRunEventRecorder",
-    "ChatRunExecutionLease",
     "ChatRunExecutor",
     "ChatRunLockService",
     "ChatRunLease",
@@ -204,18 +215,28 @@ __all__ = [
     "ChatTitleService",
     "ChatCleanupDispatchCapabilities",
     "ChatCleanupDispatcher",
-    "ChatCleanupTask",
+    "ChatCleanupJobExecutionError",
+    "ChatCleanupJobExecutor",
     "ChatInfrastructureCapabilityError",
     "ChatOutboxMessage",
     "ChatOutboxStore",
-    "ChatUniqueConstraintViolation",
-    "ChatUnitOfWork",
     "chat_document_binding_lease_id",
+    "chat_temporary_thread_lease_id",
+    "chat_scoped_external_ref",
     "chat_thread_lease_id",
     "chat_workspace_lease_id",
+    "parse_chat_scoped_external_ref",
     "DatabaseChatDocumentResolver",
     "DEFAULT_STALE_RUN_SECONDS",
     "LEASE_ACTIVE",
+    "CLEANUP_JOB_FAILED",
+    "CLEANUP_JOB_PENDING",
+    "CLEANUP_JOB_REASONS",
+    "CLEANUP_JOB_RUNNING",
+    "CLEANUP_JOB_STATUSES",
+    "CLEANUP_JOB_SUCCEEDED",
+    "CLEANUP_REASON_DELETE_CHAT",
+    "CLEANUP_REASON_TEMPORARY_THREAD",
     "LEASE_CLEANUP_FAILED",
     "LEASE_CLEANUP_PENDING",
     "LEASE_CLOSED",
@@ -254,7 +275,6 @@ __all__ = [
     "SynchronousChatRunExecutor",
     "SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES",
     "SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES",
-    "SQLiteChatUnitOfWork",
     "ensure_chat_schema",
     "record_chat_run_events",
 ]

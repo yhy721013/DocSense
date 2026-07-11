@@ -12,7 +12,7 @@ from app.services.chat import (
     AbortNotificationCapabilities,
     ChatAbortService,
     ChatCleanupDispatchCapabilities,
-    ChatCleanupTask,
+    ChatCleanupJobExecutor,
     ChatCommandService,
     ChatDeleteService,
     ChatInfrastructureCapabilityError,
@@ -21,7 +21,6 @@ from app.services.chat import (
     ChatRunLeaseLostError,
     ChatRunLockService,
     ChatStore,
-    ChatUnitOfWork,
     RESOURCE_WORKSPACE,
     chat_workspace_lease_id,
 )
@@ -38,7 +37,8 @@ class _RecordingAbortNotifier:
     """可观察的通知替身，用于证明 abort 的持久化与通知顺序。"""
 
     capabilities = AbortNotificationCapabilities(
-        single_instance_only=True,
+        supports_single_instance=True,
+        supports_shared_instances=False,
         supports_cross_instance_wakeup=False,
     )
 
@@ -56,18 +56,20 @@ class _RecordingCleanupDispatcher:
     """同步调度替身，验证删除流程不绕过 cleanup dispatcher。"""
 
     capabilities = ChatCleanupDispatchCapabilities(
-        single_instance_only=True,
+        supports_single_instance=True,
         reliable_delivery=False,
         supports_delayed_retry=False,
         supports_external_workers=False,
+        supports_synchronous_completion=True,
     )
 
-    def __init__(self) -> None:
-        self.tasks: list[ChatCleanupTask] = []
+    def __init__(self, *, executor: ChatCleanupJobExecutor) -> None:
+        self._executor = executor
+        self.jobs = []
 
-    def dispatch(self, *, task: ChatCleanupTask, execute):
-        self.tasks.append(task)
-        return execute()
+    def dispatch(self, *, job):
+        self.jobs.append(job)
+        return self._executor.execute_cleanup_job(job_id=job.job_id)
 
 
 class ChatInfrastructureContractTests(unittest.TestCase):
@@ -87,18 +89,14 @@ class ChatInfrastructureContractTests(unittest.TestCase):
         """SQLite 可提供本地事务/条件更新，但不能被误用为可靠 outbox。"""
         capabilities = self.store.capabilities
 
-        self.assertTrue(capabilities.single_instance_only)
-        self.assertTrue(capabilities.transactional_unit_of_work)
-        self.assertTrue(capabilities.conditional_updates)
-        self.assertTrue(capabilities.unique_constraints)
-        self.assertTrue(capabilities.event_ledger)
-        self.assertFalse(capabilities.transactional_outbox)
+        self.assertTrue(capabilities.supports_single_instance)
+        self.assertFalse(capabilities.supports_shared_instances)
+        self.assertTrue(capabilities.supports_atomic_transactions)
+        self.assertTrue(capabilities.supports_conditional_updates)
+        self.assertTrue(capabilities.supports_unique_constraints)
+        self.assertTrue(capabilities.supports_event_ledger)
+        self.assertFalse(capabilities.supports_transactional_outbox)
         self.assertFalse(self.store.outbox.enabled)
-
-        with self.store.open_unit_of_work() as unit_of_work:
-            self.assertIsInstance(unit_of_work, ChatUnitOfWork)
-            self.assertTrue(unit_of_work.active)
-        self.assertFalse(unit_of_work.active)
 
         with self.assertRaises(ChatInfrastructureCapabilityError):
             self.store.outbox.enqueue(
@@ -181,21 +179,25 @@ class ChatInfrastructureContractTests(unittest.TestCase):
             resource_type=RESOURCE_WORKSPACE,
             external_ref=refs.context_ref,
         )
-        dispatcher = _RecordingCleanupDispatcher()
+        cleanup_executor = ChatCleanupJobExecutor(
+            store=self.store,
+            conversation_factory=factory,
+        )
+        dispatcher = _RecordingCleanupDispatcher(executor=cleanup_executor)
         service = ChatDeleteService(
             store=self.store,
             chat_commands=self.commands,
             conversation_factory=factory,
             cleanup_dispatcher=dispatcher,
+            cleanup_executor=cleanup_executor,
         )
 
         result = service.delete_chat(chat_id="chat-cleanup")
 
         self.assertTrue(result.deleted)
-        self.assertEqual(
-            [ChatCleanupTask(chat_id="chat-cleanup", reason="delete_chat")],
-            dispatcher.tasks,
-        )
+        self.assertEqual(1, len(dispatcher.jobs))
+        self.assertEqual("chat-cleanup", dispatcher.jobs[0].chat_id)
+        self.assertEqual("delete_chat", dispatcher.jobs[0].reason)
 
     def test_invalid_chat_runtime_mode_fails_before_external_configuration_load(self) -> None:
         """错误部署模式必须在容器读取 AnythingLLM 配置前 fail fast。"""
