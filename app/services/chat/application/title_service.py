@@ -168,6 +168,11 @@ class ChatTitleService:
             )
             return ChatTitleResult(chat_id=normalized_chat_id, title="")
         if session.status != SESSION_ACTIVE:
+            logger.warning(
+                "标题生成被拒绝：会话当前不可用: chat_id=%s status=%s",
+                normalized_chat_id,
+                session.status,
+            )
             raise ChatTitleUnavailableError(
                 "chat session is not available for title generation"
             )
@@ -216,9 +221,8 @@ class ChatTitleService:
             )
             raise ChatTitleGenerationError("模型未生成标题")
         logger.info(
-            "文件对话标题生成完成: chat_id=%s title=%s title_chars=%d",
+            "文件对话标题生成完成: chat_id=%s title_chars=%d",
             normalized_chat_id,
-            title,
             len(title),
         )
         return ChatTitleResult(chat_id=normalized_chat_id, title=title)
@@ -251,7 +255,17 @@ class ChatTitleService:
                 resource_type=RESOURCE_THREAD,
                 require_active_session=True,
             )
+            logger.info(
+                "标题临时线程计划租约已创建: chat_id=%s lease_id=%s",
+                chat_id,
+                lease_id,
+            )
         except ChatResourceLeaseSessionUnavailableError as exc:
+            logger.warning(
+                "标题生成被拒绝：创建临时线程前会话已不可用: chat_id=%s status=%s",
+                chat_id,
+                exc.status,
+            )
             raise ChatTitleUnavailableError(
                 "chat session is not available for title generation"
             ) from exc
@@ -266,6 +280,11 @@ class ChatTitleService:
                     context_ref=context_ref,
                     conversation_name=f"title-{attempt_id}",
                 )
+                logger.info(
+                    "标题临时线程已创建，准备记录租约身份: chat_id=%s lease_id=%s",
+                    chat_id,
+                    lease_id,
+                )
                 self._store.resource_leases.activate(
                     lease_id=lease_id,
                     external_ref=chat_scoped_external_ref(
@@ -273,9 +292,20 @@ class ChatTitleService:
                         resource_ref=temporary_session.conversation_ref,
                     ),
                 )
+                logger.info(
+                    "标题临时线程租约已激活，开始请求模型回复: chat_id=%s lease_id=%s",
+                    chat_id,
+                    lease_id,
+                )
                 raw_title = conversation.generate_temporary_reply(
                     session=temporary_session,
                     prompt=prompt,
+                )
+                logger.info(
+                    "标题临时线程模型回复已生成: chat_id=%s lease_id=%s reply_chars=%d",
+                    chat_id,
+                    lease_id,
+                    len(raw_title),
                 )
                 cleanup_attempted = True
                 cleanup_error = self._delete_temporary_conversation(
@@ -285,6 +315,12 @@ class ChatTitleService:
                 )
         except Exception as exc:
             generation_error = exc
+            logger.exception(
+                "标题临时线程生成流程发生异常: chat_id=%s lease_id=%s error_type=%s",
+                chat_id,
+                lease_id,
+                exc.__class__.__name__,
+            )
             raise
         finally:
             if temporary_session is None:
@@ -293,6 +329,11 @@ class ChatTitleService:
                 # ``generate_temporary_reply`` 在远端线程创建后失败。仍须尝试清理，
                 # 但绝不能用清理异常替换原始生成异常。
                 cleanup_attempted = True
+                logger.info(
+                    "标题生成异常后开始补偿删除临时线程: chat_id=%s lease_id=%s",
+                    chat_id,
+                    lease_id,
+                )
                 try:
                     with self._conversation_factory.create() as cleanup_conversation:
                         cleanup_error = self._delete_temporary_conversation(
@@ -304,13 +345,32 @@ class ChatTitleService:
                     # 打开仅用于清理的请求作用域时出现的第二个失败，不能替换模型生成
                     # 错误。下方记录的持久化任务仍是恢复路径。
                     cleanup_error = str(cleanup_exc) or cleanup_exc.__class__.__name__
+                    logger.exception(
+                        "标题临时线程补偿删除异常，准备记录可重试任务: chat_id=%s lease_id=%s error_type=%s",
+                        chat_id,
+                        lease_id,
+                        cleanup_exc.__class__.__name__,
+                    )
             if temporary_session is not None and cleanup_error:
+                logger.warning(
+                    "标题临时线程未能立即清理，准备记录可重试任务: chat_id=%s lease_id=%s error_chars=%d",
+                    chat_id,
+                    lease_id,
+                    len(cleanup_error),
+                )
                 cleanup_job = self._record_temporary_cleanup_failure(
                     chat_id=chat_id,
                     lease_id=lease_id,
                     error_message=cleanup_error,
                 )
                 cleanup_job = self._dispatch_temporary_cleanup(cleanup_job)
+                logger.info(
+                    "标题临时线程清理任务已调度: chat_id=%s lease_id=%s job_id=%s status=%s",
+                    chat_id,
+                    lease_id,
+                    cleanup_job.job_id,
+                    cleanup_job.status,
+                )
                 if (
                     generation_error is None
                     and cleanup_job.status != CLEANUP_JOB_SUCCEEDED
@@ -326,27 +386,55 @@ class ChatTitleService:
         lease_id: str,
     ) -> str:
         """删除已跟踪的标题线程，并返回稳定的失败原因。"""
+        logger.info("开始删除标题临时线程: lease_id=%s", lease_id)
         try:
             result = conversation.delete_conversation(temporary_session)
         except ChatConversationNotFoundError:
             result = ChatOperationResult(success=True, already_applied=True)
+            logger.info("标题临时线程已不存在，无需重复删除: lease_id=%s", lease_id)
         except ChatPortError as exc:
+            logger.warning(
+                "删除标题临时线程失败: lease_id=%s error_type=%s",
+                lease_id,
+                exc.__class__.__name__,
+            )
             return str(exc) or exc.__class__.__name__
         except Exception as exc:
             # 清理记账既要覆盖普通远端错误，也要覆盖适配器契约缺陷。返回稳定失败值，
             # 才能让调用方持久化并重试准确的租约。
+            logger.exception(
+                "删除标题临时线程发生未预期异常: lease_id=%s error_type=%s",
+                lease_id,
+                exc.__class__.__name__,
+            )
             return str(exc) or exc.__class__.__name__
         if not isinstance(result, ChatOperationResult):
+            logger.error(
+                "删除标题临时线程失败：端口返回了错误结果类型: lease_id=%s returned_type=%s",
+                lease_id,
+                type(result).__name__,
+            )
             return "temporary title delete returned an invalid result"
         if result.success:
             self._store.resource_leases.mark_closed(lease_id)
+            logger.info(
+                "标题临时线程删除完成: lease_id=%s already_applied=%s",
+                lease_id,
+                result.already_applied,
+            )
             return ""
+        logger.warning(
+            "标题临时线程删除未成功，保留失败原因供后续重试: lease_id=%s error_chars=%d",
+            lease_id,
+            len(result.error_message),
+        )
         return result.error_message
 
     def _close_unresolved_planned_lease(self, lease_id: str) -> None:
         lease = self._store.resource_leases.get(lease_id)
         if lease is not None and lease.status == LEASE_PLANNED:
             self._store.resource_leases.mark_closed(lease_id)
+            logger.info("标题临时线程未创建远端资源，已关闭计划租约: lease_id=%s", lease_id)
 
     def _record_temporary_cleanup_failure(
         self,
@@ -363,20 +451,42 @@ class ChatTitleService:
                 lease_id=lease_id,
                 error_message=error_message,
             )
-        return self._store.cleanup_jobs.enqueue(
+        cleanup_job = self._store.cleanup_jobs.enqueue(
             chat_id=chat_id,
             reason=CLEANUP_REASON_TEMPORARY_THREAD,
             lease_id=lease_id,
         )
+        logger.info(
+            "标题临时线程清理失败已持久化: chat_id=%s lease_id=%s job_id=%s",
+            chat_id,
+            lease_id,
+            cleanup_job.job_id,
+        )
+        return cleanup_job
 
     def _dispatch_temporary_cleanup(
         self,
         cleanup_job: ChatCleanupJob,
     ) -> ChatCleanupJob:
         """尝试一次立即清理，同时不掩盖持久化失败。"""
+        logger.info(
+            "开始内联尝试标题临时线程清理: job_id=%s chat_id=%s",
+            cleanup_job.job_id,
+            cleanup_job.chat_id,
+        )
         try:
-            return self._cleanup_dispatcher.dispatch(job=cleanup_job)
+            result = self._cleanup_dispatcher.dispatch(job=cleanup_job)
+            logger.info(
+                "标题临时线程内联清理执行结束: job_id=%s status=%s",
+                result.job_id,
+                result.status,
+            )
+            return result
         except ChatCleanupJobExecutionError as exc:
+            logger.warning(
+                "标题临时线程内联清理失败，保留可重试任务: job_id=%s",
+                exc.job.job_id,
+            )
             return exc.job
 
     @staticmethod

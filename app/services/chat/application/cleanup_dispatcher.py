@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from app.services.chat.domain.models import ChatCleanupJob
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,9 +73,36 @@ class InlineChatCleanupDispatcher:
     def dispatch(self, *, job: ChatCleanupJob) -> ChatCleanupJob:
         if not isinstance(job, ChatCleanupJob):
             raise TypeError("job must be ChatCleanupJob")
-        result = self._execute(job_id=job.job_id)
+        logger.info(
+            "开始内联调度文件对话清理任务: job_id=%s chat_id=%s reason=%s attempt=%d",
+            job.job_id,
+            job.chat_id,
+            job.reason,
+            job.attempt_count,
+        )
+        try:
+            result = self._execute(job_id=job.job_id)
+        except Exception:
+            logger.exception(
+                "内联执行文件对话清理任务失败: job_id=%s chat_id=%s reason=%s",
+                job.job_id,
+                job.chat_id,
+                job.reason,
+            )
+            raise
         if not isinstance(result, ChatCleanupJob):
+            logger.error(
+                "内联清理执行器返回了错误类型: job_id=%s returned_type=%s",
+                job.job_id,
+                type(result).__name__,
+            )
             raise TypeError("cleanup executor must return ChatCleanupJob")
+        logger.info(
+            "文件对话清理任务内联执行结束: job_id=%s status=%s attempt=%d",
+            result.job_id,
+            result.status,
+            result.attempt_count,
+        )
         return result
 
 

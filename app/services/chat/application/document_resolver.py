@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol, Sequence, runtime_checkable
 
 from app.ports import ChatDocumentRef
 from app.services.core.database import DatabaseService
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChatDocumentNotFoundError(ValueError):
@@ -47,24 +51,44 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
         self,
         file_names: Sequence[str],
     ) -> tuple[ResolvedChatDocument, ...]:
+        logger.info(
+            "开始解析文件对话文档快照: requested_file_count=%d",
+            len(file_names),
+        )
         resolved: list[ResolvedChatDocument] = []
-        for raw_file_name in file_names:
+        for index, raw_file_name in enumerate(file_names):
             file_name = str(raw_file_name or "").strip()
             if not file_name:
+                logger.warning(
+                    "文件对话文档解析被拒绝：文件名为空: index=%d",
+                    index,
+                )
                 raise ValueError("fileNames中包含无效文件名")
             record = self._knowledge_base.get_document_record(file_name)
             if not record:
+                logger.warning(
+                    "文件对话文档解析失败：未找到已解析文件: file_name=%s",
+                    file_name,
+                )
                 raise ChatDocumentNotFoundError(file_name)
             anything_doc_id = str(record.get("anything_doc_id") or "").strip()
             document_ref = str(record.get("document_ref") or "").strip()
             if not document_ref and anything_doc_id:
                 document_ref = f"document:{anything_doc_id}"
             if not document_ref:
+                logger.warning(
+                    "文件对话文档解析失败：文件缺少文档引用: file_name=%s",
+                    file_name,
+                )
                 raise ValueError(f"文件 {file_name} 缺少可用于对话的文档引用")
             external_location = str(record.get("doc_path") or "").strip()
             if not external_location and anything_doc_id:
                 external_location = f"custom-documents/{anything_doc_id}.json"
             if not external_location:
+                logger.warning(
+                    "文件对话文档解析失败：文件缺少文档位置: file_name=%s",
+                    file_name,
+                )
                 raise ValueError(f"文件 {file_name} 缺少可用于对话的文档位置")
             resolved.append(
                 ResolvedChatDocument(
@@ -79,6 +103,10 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
                     ),
                 )
             )
+        logger.info(
+            "文件对话文档快照解析完成: resolved_file_count=%d",
+            len(resolved),
+        )
         return tuple(resolved)
 
 

@@ -83,6 +83,11 @@ class AnythingLLMChatGateway(ChatConversationPort):
         """创建或复用指定名称的对话上下文，并在其中创建新线程。"""
         workspace: AnythingLLMWorkspace | None = None
         created_workspace = False
+        logger.info(
+            "开始准备 AnythingLLM 文件对话会话: context_name=%s conversation_name=%s",
+            context_name,
+            conversation_name,
+        )
         try:
             workspace = self._find_workspace(context_name)
             if workspace is None:
@@ -92,17 +97,41 @@ class AnythingLLMChatGateway(ChatConversationPort):
                     user_id=self._user_id,
                 )
                 created_workspace = True
+                logger.info(
+                    "已创建文件对话工作区，准备创建远端线程: context_name=%s",
+                    context_name,
+                )
+            else:
+                logger.info(
+                    "复用已有文件对话工作区，准备创建远端线程: context_name=%s",
+                    context_name,
+                )
             thread = self._thread_client.create_thread(
                 workspace.slug,
                 conversation_name,
                 user_id=self._user_id,
+            )
+            logger.info(
+                "AnythingLLM 文件对话会话准备完成: context_name=%s created_workspace=%s",
+                context_name,
+                created_workspace,
             )
             return ChatSessionRefs(
                 context_ref=workspace.slug,
                 conversation_ref=thread.slug,
             )
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "准备 AnythingLLM 文件对话会话失败: context_name=%s created_workspace=%s error_type=%s",
+                context_name,
+                created_workspace,
+                exc.__class__.__name__,
+            )
             if created_workspace and workspace is not None:
+                logger.info(
+                    "远端线程创建失败，开始补偿刚创建的文件对话工作区: context_name=%s",
+                    context_name,
+                )
                 if not self._compensate_new_workspace(workspace.slug):
                     raise ChatResourceError(
                         "new chat workspace compensation failed",
@@ -117,6 +146,10 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> tuple[ChatDocumentRef, ...]:
         """将已上传文档的位置绑定到指定对话工作区。"""
         self._require_session(session)
+        logger.info(
+            "开始绑定文件对话文档: requested_document_count=%d",
+            len(documents),
+        )
         try:
             locations = self._document_locations(documents)
             if locations:
@@ -125,14 +158,25 @@ class AnythingLLMChatGateway(ChatConversationPort):
                     adds=locations,
                     user_id=self._user_id,
                 )
-            return tuple(
+            attached_documents = tuple(
                 self._chat_document_ref(document)
                 for document in self._workspace_client.list_documents(
                     session.context_ref,
                     user_id=self._user_id,
                 )
             )
+            logger.info(
+                "文件对话文档绑定完成: requested_document_count=%d workspace_document_count=%d",
+                len(locations),
+                len(attached_documents),
+            )
+            return attached_documents
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "绑定文件对话文档失败: requested_document_count=%d error_type=%s",
+                len(documents),
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "attach chat documents") from exc
 
     def stream_message(
@@ -144,8 +188,18 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> Iterator[ChatChunk]:
         """发送消息并产出领域文本片段，不包含 SSE 格式。"""
         self._require_session(session)
+        logger.info(
+            "开始请求 AnythingLLM 文件对话流: message_chars=%d requested_document_count=%d mode=%s",
+            len(message),
+            len(document_refs),
+            self._stream_mode,
+        )
         try:
             document_ids = self._resolve_document_ids(session, document_refs)
+            logger.debug(
+                "文件对话文档引用已解析为远端文档标识: document_count=%d",
+                len(document_ids),
+            )
             upstream = self._thread_client.stream(
                 session.context_ref,
                 session.conversation_ref,
@@ -157,11 +211,16 @@ class AnythingLLMChatGateway(ChatConversationPort):
         except ChatResourceError:
             raise
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "启动 AnythingLLM 文件对话流失败: error_type=%s",
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "start chat stream") from exc
 
         def _chunks() -> Iterator[ChatChunk]:
             sequence_no = 0
             try:
+                logger.info("开始消费 AnythingLLM 文件对话上游流")
                 with self._closing_iterator(upstream) as chunks:
                     for content in chunks:
                         if content == "":
@@ -172,7 +231,17 @@ class AnythingLLMChatGateway(ChatConversationPort):
                             sequence_no=sequence_no,
                         )
             except AnythingLLMTransportError as exc:
+                logger.warning(
+                    "消费 AnythingLLM 文件对话上游流失败: emitted_chunk_count=%d error_type=%s",
+                    sequence_no,
+                    exc.__class__.__name__,
+                )
                 raise self._port_error(exc, "consume chat stream") from exc
+            finally:
+                logger.info(
+                    "AnythingLLM 文件对话上游流已结束或关闭: emitted_chunk_count=%d",
+                    sequence_no,
+                )
 
         return _chunks()
 
@@ -182,6 +251,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> tuple[ChatMessageSnapshot, ...]:
         """读取并规范化外部线程历史。"""
         self._require_session(session)
+        logger.debug("开始读取 AnythingLLM 文件对话外部历史")
         try:
             history = self._thread_client.history(
                 session.context_ref,
@@ -193,8 +263,17 @@ class AnythingLLMChatGateway(ChatConversationPort):
                 snapshot = self._message_snapshot(item)
                 if snapshot is not None:
                     messages.append(snapshot)
-            return tuple(messages)
+            snapshots = tuple(messages)
+            logger.info(
+                "AnythingLLM 文件对话外部历史读取完成: message_count=%d",
+                len(snapshots),
+            )
+            return snapshots
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "读取 AnythingLLM 文件对话外部历史失败: error_type=%s",
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "fetch chat messages") from exc
 
     def open_temporary_conversation(
@@ -205,17 +284,24 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> ChatSessionRefs:
         """创建临时线程，其完整生命周期由调用方负责。"""
         normalized_context_ref = self._required_text(context_ref, "context_ref")
+        logger.info("开始创建文件对话标题临时线程")
         try:
             temp_thread = self._thread_client.create_thread(
                 normalized_context_ref,
                 self._required_text(conversation_name, "conversation_name"),
                 user_id=self._user_id,
             )
-            return ChatSessionRefs(
+            session = ChatSessionRefs(
                 context_ref=normalized_context_ref,
                 conversation_ref=temp_thread.slug,
             )
+            logger.info("文件对话标题临时线程创建完成")
+            return session
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "创建文件对话标题临时线程失败: error_type=%s",
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "create temporary chat thread") from exc
 
     def generate_temporary_reply(
@@ -226,6 +312,11 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> str:
         """向调用方追踪的临时线程请求一条独立回复。"""
         self._require_session(session)
+        logger.info(
+            "开始请求文件对话标题临时回复: prompt_chars=%d mode=%s",
+            len(prompt),
+            self._standalone_mode,
+        )
         try:
             answer = self._thread_client.ask(
                 session.context_ref,
@@ -236,11 +327,20 @@ class AnythingLLMChatGateway(ChatConversationPort):
                 document_ids=(),
             )
             if not answer.text:
+                logger.warning("文件对话标题临时回复为空")
                 raise ChatResponseError("standalone chat reply is empty")
+            logger.info(
+                "文件对话标题临时回复生成完成: reply_chars=%d",
+                len(answer.text),
+            )
             return answer.text
         except ChatResponseError:
             raise
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "生成文件对话标题临时回复失败: error_type=%s",
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "generate standalone chat reply") from exc
 
     def delete_conversation(
@@ -249,18 +349,29 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> ChatOperationResult:
         """幂等删除远端对话线程。"""
         self._require_session(session)
+        logger.info("开始删除远端文件对话线程")
         try:
             self._thread_client.delete_thread(
                 session.context_ref,
                 session.conversation_ref,
                 user_id=self._user_id,
             )
+            logger.info("远端文件对话线程删除完成")
             return ChatOperationResult(success=True)
         except AnythingLLMHTTPError as exc:
             if exc.status_code == 404:
+                logger.info("远端文件对话线程已不存在，无需重复删除")
                 return ChatOperationResult(success=True, already_applied=True)
+            logger.warning(
+                "删除远端文件对话线程失败: status_code=%s",
+                exc.status_code,
+            )
             raise self._port_error(exc, "delete chat conversation") from exc
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "删除远端文件对话线程失败: error_type=%s",
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "delete chat conversation") from exc
 
     def delete_context(
@@ -269,17 +380,28 @@ class AnythingLLMChatGateway(ChatConversationPort):
     ) -> ChatOperationResult:
         """幂等删除远端对话工作区。"""
         normalized_context_ref = self._required_text(context_ref, "context_ref")
+        logger.info("开始删除远端文件对话工作区")
         try:
             self._workspace_client.delete_workspace(
                 normalized_context_ref,
                 user_id=self._user_id,
             )
+            logger.info("远端文件对话工作区删除完成")
             return ChatOperationResult(success=True)
         except AnythingLLMHTTPError as exc:
             if exc.status_code == 404:
+                logger.info("远端文件对话工作区已不存在，无需重复删除")
                 return ChatOperationResult(success=True, already_applied=True)
+            logger.warning(
+                "删除远端文件对话工作区失败: status_code=%s",
+                exc.status_code,
+            )
             raise self._port_error(exc, "delete chat context") from exc
         except AnythingLLMTransportError as exc:
+            logger.warning(
+                "删除远端文件对话工作区失败: error_type=%s",
+                exc.__class__.__name__,
+            )
             raise self._port_error(exc, "delete chat context") from exc
 
     def _find_workspace(self, name: str) -> AnythingLLMWorkspace | None:
@@ -300,10 +422,10 @@ class AnythingLLMChatGateway(ChatConversationPort):
             )
         except AnythingLLMTransportError:
             logger.exception(
-                "Failed to compensate newly created chat workspace after thread creation failure: workspace_ref=%s",
-                workspace_ref,
+                "远端线程创建失败后，补偿删除新建文件对话工作区失败"
             )
             return False
+        logger.info("远端线程创建失败后，新建文件对话工作区补偿删除完成")
         return True
 
     @staticmethod
@@ -347,6 +469,10 @@ class AnythingLLMChatGateway(ChatConversationPort):
         requested_refs = self._document_refs(document_refs)
         if not requested_refs:
             return ()
+        logger.debug(
+            "开始解析文件对话请求中的文档引用: requested_document_count=%d",
+            len(requested_refs),
+        )
         documents_by_ref = {
             self._chat_document_ref(document).document_ref: document
             for document in self._workspace_client.list_documents(
@@ -363,9 +489,17 @@ class AnythingLLMChatGateway(ChatConversationPort):
                 continue
             document_ids.append(document.id)
         if missing_refs:
+            logger.warning(
+                "文件对话请求引用了未绑定文档: missing_document_count=%d",
+                len(missing_refs),
+            )
             raise ChatResourceError(
                 "requested documents are not attached to this conversation"
             )
+        logger.debug(
+            "文件对话文档引用解析完成: resolved_document_count=%d",
+            len(document_ids),
+        )
         return tuple(document_ids)
 
     @classmethod

@@ -42,7 +42,13 @@ class ChatCommandService:
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
     ) -> ChatRun:
-        logger.info("准备启动文件对话run: chat_id=%s", chat_id)
+        logger.info(
+            "准备启动文件对话运行: chat_id=%s message_chars=%d user_file_count=%d input_document_count=%d",
+            chat_id,
+            len(str(user_message or "")),
+            len(user_files),
+            len(input_documents),
+        )
         run = self._run_coordinator.try_acquire_chat_run(
             chat_id=chat_id,
             user_message=user_message,
@@ -50,7 +56,7 @@ class ChatCommandService:
             input_documents=input_documents,
         )
         logger.info(
-            "文件对话run已启动: chat_id=%s run_id=%s status=%s owner=%s",
+            "文件对话运行已受理: chat_id=%s run_id=%s status=%s owner=%s",
             run.chat_id,
             run.run_id,
             run.status,
@@ -74,10 +80,10 @@ class ChatCommandService:
             error_message=error_message,
         )
         logger.warning(
-            "文件对话run已标记失败: chat_id=%s run_id=%s error=%s",
+            "文件对话运行已标记失败: chat_id=%s run_id=%s error_chars=%d",
             run.chat_id,
             run.run_id,
-            run.error_message,
+            len(run.error_message),
         )
         return run
 
@@ -145,15 +151,32 @@ class ChatCommandService:
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:
         """在删除流程接触资源前，原子阻止新的运行进入会话。"""
+        logger.info("开始请求文件对话删除准入: chat_id=%s", chat_id)
         self._run_coordinator.begin_chat_deletion(chat_id=chat_id)
+        logger.info("文件对话删除准入已完成，会话已阻止新运行: chat_id=%s", chat_id)
 
     def issue_execution_lease(self, *, run_id: str) -> ChatRunLease:
         """为已受理 run 创建内部执行所有权证明，不向 HTTP/SSE 暴露该信息。"""
-        return self._run_coordinator.issue_execution_lease(run_id=run_id)
+        logger.debug("开始领取文件对话运行执行权: run_id=%s", run_id)
+        lease = self._run_coordinator.issue_execution_lease(run_id=run_id)
+        logger.info(
+            "文件对话运行执行权已领取: chat_id=%s run_id=%s owner=%s",
+            lease.chat_id,
+            lease.run_id,
+            lease.owner_instance_id,
+        )
+        return lease
 
     def validate_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
         """在执行开始前验证 worker 仍持有目标 run 的运行权。"""
-        return self._run_coordinator.validate_execution_lease(lease=lease)
+        run = self._run_coordinator.validate_execution_lease(lease=lease)
+        logger.debug(
+            "文件对话执行租约校验通过: chat_id=%s run_id=%s status=%s",
+            run.chat_id,
+            run.run_id,
+            run.status,
+        )
+        return run
 
     def complete_chat_run_with_messages(
         self,
@@ -167,21 +190,29 @@ class ChatCommandService:
     ) -> ChatRun:
         if execution_lease is None:
             self._require_lease_or_allow_single_instance_compatibility()
-            return self._run_coordinator.complete_run_with_messages(
+            run = self._run_coordinator.complete_run_with_messages(
                 run_id=run_id,
                 user_message_id=user_message_id,
                 assistant_message_id=assistant_message_id,
                 assistant_content=assistant_content,
                 terminal_event=terminal_event,
             )
-        self._require_matching_lease(run_id=run_id, lease=execution_lease)
-        return self._run_coordinator.complete_run_with_execution_lease(
-            lease=execution_lease,
-            user_message_id=user_message_id,
-            assistant_message_id=assistant_message_id,
-            assistant_content=assistant_content,
-            terminal_event=terminal_event,
+        else:
+            self._require_matching_lease(run_id=run_id, lease=execution_lease)
+            run = self._run_coordinator.complete_run_with_execution_lease(
+                lease=execution_lease,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                assistant_content=assistant_content,
+                terminal_event=terminal_event,
+            )
+        logger.info(
+            "文件对话运行已提交成功终态和消息: chat_id=%s run_id=%s assistant_chars=%d",
+            run.chat_id,
+            run.run_id,
+            len(assistant_content),
         )
+        return run
 
     def fail_chat_run_with_user(
         self,
@@ -194,19 +225,27 @@ class ChatCommandService:
     ) -> ChatRun:
         if execution_lease is None:
             self._require_lease_or_allow_single_instance_compatibility()
-            return self._run_coordinator.fail_run_with_user(
+            run = self._run_coordinator.fail_run_with_user(
                 run_id=run_id,
                 user_message_id=user_message_id,
                 error_message=error_message,
                 terminal_event=terminal_event,
             )
-        self._require_matching_lease(run_id=run_id, lease=execution_lease)
-        return self._run_coordinator.fail_run_with_execution_lease(
-            lease=execution_lease,
-            user_message_id=user_message_id,
-            error_message=error_message,
-            terminal_event=terminal_event,
+        else:
+            self._require_matching_lease(run_id=run_id, lease=execution_lease)
+            run = self._run_coordinator.fail_run_with_execution_lease(
+                lease=execution_lease,
+                user_message_id=user_message_id,
+                error_message=error_message,
+                terminal_event=terminal_event,
+            )
+        logger.warning(
+            "文件对话运行已提交失败终态: chat_id=%s run_id=%s error_chars=%d",
+            run.chat_id,
+            run.run_id,
+            len(str(error_message or "")),
         )
+        return run
 
     def abort_chat_run_with_user(
         self,
@@ -218,17 +257,24 @@ class ChatCommandService:
     ) -> ChatRun:
         if execution_lease is None:
             self._require_lease_or_allow_single_instance_compatibility()
-            return self._run_coordinator.abort_run_with_user(
+            run = self._run_coordinator.abort_run_with_user(
                 run_id=run_id,
                 user_message_id=user_message_id,
                 terminal_event=terminal_event,
             )
-        self._require_matching_lease(run_id=run_id, lease=execution_lease)
-        return self._run_coordinator.abort_run_with_execution_lease(
-            lease=execution_lease,
-            user_message_id=user_message_id,
-            terminal_event=terminal_event,
+        else:
+            self._require_matching_lease(run_id=run_id, lease=execution_lease)
+            run = self._run_coordinator.abort_run_with_execution_lease(
+                lease=execution_lease,
+                user_message_id=user_message_id,
+                terminal_event=terminal_event,
+            )
+        logger.info(
+            "文件对话运行已提交中断终态: chat_id=%s run_id=%s",
+            run.chat_id,
+            run.run_id,
         )
+        return run
 
     def expire_stale_chat_runs(self, *, chat_id: str) -> tuple[ChatRun, ...]:
         expired_runs = self._run_coordinator.expire_stale_runs_for_chat(

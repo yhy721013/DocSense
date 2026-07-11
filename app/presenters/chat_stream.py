@@ -54,7 +54,7 @@ def close_chat_stream_resource(
         )
     except Exception:
         logger.exception(
-            "failed to close chat stream resource: run_id=%s resource=%s",
+            "关闭文件对话流资源失败: run_id=%s resource=%s",
             run_id,
             label,
         )
@@ -66,6 +66,7 @@ def finalize_chat_run_stream(
     run_id: str,
     on_close: Callable[[], None] | None = None,
 ) -> Iterator[str]:
+    terminal_event_seen = False
     try:
         for event in stream:
             if not isinstance(event, ChatStreamEvent):
@@ -81,6 +82,7 @@ def finalize_chat_run_stream(
             )
             yield format_sse_event(event.event_type, event.data)
             if is_terminal:
+                terminal_event_seen = True
                 logger.info(
                     "文件对话SSE流收到终态事件并准备关闭: run_id=%s event_type=%s",
                     run_id,
@@ -88,6 +90,11 @@ def finalize_chat_run_stream(
                 )
                 break
     finally:
+        if not terminal_event_seen:
+            logger.warning(
+                "文件对话 SSE 流在未观察到终态事件时关闭: run_id=%s",
+                run_id,
+            )
         close_chat_stream_resource(stream, run_id=run_id, label="stream")
         if on_close is not None:
             try:
@@ -95,7 +102,7 @@ def finalize_chat_run_stream(
                 logger.debug("文件对话客户端关闭回调已完成: run_id=%s", run_id)
             except Exception:
                 logger.exception(
-                    "failed to close chat client: run_id=%s",
+                    "执行文件对话客户端关闭回调失败: run_id=%s",
                     run_id,
                 )
 

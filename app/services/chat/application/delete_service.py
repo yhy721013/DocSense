@@ -155,8 +155,10 @@ class ChatDeleteService:
 
         session = self._store.sessions.get(normalized_chat_id)
         if session is None:
+            logger.warning("文件对话删除失败：本地会话不存在: chat_id=%s", normalized_chat_id)
             raise ChatDeleteNotFoundError(normalized_chat_id)
         if session.status == SESSION_DELETED:
+            logger.info("文件对话已处于删除完成状态，无需重复清理: chat_id=%s", normalized_chat_id)
             return ChatDeleteResult(
                 chat_id=normalized_chat_id,
                 deleted=True,
@@ -166,15 +168,26 @@ class ChatDeleteService:
         try:
             self._chat_commands.begin_chat_deletion(chat_id=normalized_chat_id)
         except ChatSessionDeleteBusyError as exc:
+            logger.warning(
+                "文件对话删除被拒绝：会话正被其他操作占用: chat_id=%s reason=%s",
+                normalized_chat_id,
+                exc.reason,
+            )
             raise ChatDeleteBusyError(
                 chat_id=normalized_chat_id,
                 reason=exc.reason,
             ) from exc
         except ChatSessionUnavailableError as exc:
+            logger.warning(
+                "文件对话删除被拒绝：会话状态不可删除: chat_id=%s",
+                normalized_chat_id,
+            )
             raise ChatDeleteBusyError(
                 chat_id=normalized_chat_id,
                 reason=str(exc),
             ) from exc
+
+        logger.info("文件对话已进入删除中状态，开始创建清理任务: chat_id=%s", normalized_chat_id)
 
         # 在任何远端副作用发生前先记录持久化任务。内联适配器调用的执行器与未来工作进程
         # 使用的执行器相同，因此当前同步 API 路径仍保持队列化形态。
@@ -182,9 +195,20 @@ class ChatDeleteService:
             chat_id=normalized_chat_id,
             reason=CLEANUP_REASON_DELETE_CHAT,
         )
+        logger.info(
+            "文件对话删除清理任务已创建或复用: chat_id=%s job_id=%s status=%s",
+            normalized_chat_id,
+            cleanup_job.job_id,
+            cleanup_job.status,
+        )
         try:
             completed_job = self._cleanup_dispatcher.dispatch(job=cleanup_job)
         except ChatCleanupJobExecutionError as exc:
+            logger.warning(
+                "文件对话删除清理执行失败，已保留重试记录: chat_id=%s job_id=%s",
+                normalized_chat_id,
+                exc.job.job_id,
+            )
             self._mark_session_cleanup_error(
                 chat_id=normalized_chat_id,
                 error_message=exc.reason,
@@ -196,6 +220,11 @@ class ChatDeleteService:
         except Exception as exc:
             # 调度失败也会被持久化为租约失败。原始异常保留为服务端诊断原因，而路由仍
             # 返回稳定的清理错误响应。
+            logger.exception(
+                "文件对话删除清理调度发生异常: chat_id=%s job_id=%s",
+                normalized_chat_id,
+                cleanup_job.job_id,
+            )
             self._mark_session_cleanup_error(
                 chat_id=normalized_chat_id,
                 error_message=str(exc) or exc.__class__.__name__,
@@ -206,6 +235,12 @@ class ChatDeleteService:
             ) from exc
 
         if completed_job.status != CLEANUP_JOB_SUCCEEDED:
+            logger.warning(
+                "文件对话删除清理未完成，已保留失败状态: chat_id=%s job_id=%s status=%s",
+                normalized_chat_id,
+                completed_job.job_id,
+                completed_job.status,
+            )
             self._mark_session_cleanup_error(
                 chat_id=normalized_chat_id,
                 error_message=(
@@ -220,6 +255,11 @@ class ChatDeleteService:
 
         failed = self._failed_leases(normalized_chat_id)
         if failed:
+            logger.warning(
+                "文件对话删除清理后仍存在失败租约: chat_id=%s failed_lease_count=%d",
+                normalized_chat_id,
+                len(failed),
+            )
             self._store.sessions.set_status(
                 chat_id=normalized_chat_id,
                 status=SESSION_ERROR,
@@ -242,6 +282,7 @@ class ChatDeleteService:
 
     def _mark_session_cleanup_error(self, *, chat_id: str, error_message: str) -> None:
         """调度失败后保持每一条未解决的本地租约可见。"""
+        marked_lease_count = 0
         for lease in self._store.resource_leases.list_by_chat(
             chat_id,
             include_closed=False,
@@ -255,9 +296,16 @@ class ChatDeleteService:
                     lease_id=lease.lease_id,
                     error_message=error_message,
                 )
+                marked_lease_count += 1
         self._store.sessions.set_status(
             chat_id=chat_id,
             status=SESSION_ERROR,
+        )
+        logger.info(
+            "文件对话删除失败状态已持久化: chat_id=%s marked_lease_count=%d error_chars=%d",
+            chat_id,
+            marked_lease_count,
+            len(str(error_message or "")),
         )
 
     def _failed_leases(self, chat_id: str) -> tuple[ChatResourceLease, ...]:

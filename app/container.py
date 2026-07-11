@@ -206,6 +206,10 @@ class ApplicationServices:
         notifier 的具体类型。阶段 13 以后只需替换容器装配和能力声明即可开放
         新模式，HTTP/SSE 契约与 Chat Application Service 均不受影响。
         """
+        logger.info(
+            "开始校验文件对话基础设施能力: runtime_mode=%s",
+            self.chat_infrastructure_config.runtime_mode,
+        )
         if (
             self.chat_infrastructure_config.runtime_mode
             != "single_instance"
@@ -223,17 +227,32 @@ class ApplicationServices:
         }
         incompatible = [name for name, value in capabilities.items() if not value]
         if incompatible:
+            logger.error(
+                "文件对话基础设施能力校验失败: runtime_mode=%s incompatible_components=%s",
+                self.chat_infrastructure_config.runtime_mode,
+                ",".join(incompatible),
+            )
             raise RuntimeError(
                 "single_instance 文件对话模式装配了不兼容适配器："
                 + ", ".join(incompatible)
             )
+        logger.info(
+            "文件对话基础设施能力校验通过: runtime_mode=%s component_count=%d",
+            self.chat_infrastructure_config.runtime_mode,
+            len(capabilities),
+        )
 
 
 def create_application_services() -> ApplicationServices:
     """根据环境配置创建生产应用容器，不创建 AnythingLLM 网络 Session。"""
+    logger.info("开始创建 DocSense 应用依赖容器")
     # 先校验部署模式，再读取任何外部集成配置或创建数据库文件。这样错误地把
     # SQLite 单实例模式配置成集群时，会在应用启动的最早阶段 fail fast。
     chat_infrastructure_config = load_chat_infrastructure_config()
+    logger.info(
+        "已读取文件对话基础设施配置: runtime_mode=%s",
+        chat_infrastructure_config.runtime_mode,
+    )
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
     task_service = LLMTaskService(llm_config.task_db_path)

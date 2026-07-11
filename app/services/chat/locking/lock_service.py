@@ -266,6 +266,7 @@ class ChatRunLockService:
     def begin_chat_deletion(self, *, chat_id: str) -> None:
         """原子阻止新运行，并在存在活动运行时拒绝删除。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
+        logger.info("开始进入文件对话删除准入临界区: chat_id=%s", normalized_chat_id)
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
@@ -275,11 +276,14 @@ class ChatRunLockService:
                 (normalized_chat_id,),
             ).fetchone()
             if session is None:
+                logger.warning("文件对话删除准入失败：会话不存在: chat_id=%s", normalized_chat_id)
                 raise ValueError("chat_session 不存在")
             status = session["status"]
             if status == SESSION_DELETED:
+                logger.info("文件对话已删除，无需再次进入删除状态: chat_id=%s", normalized_chat_id)
                 return
             if status == SESSION_DELETING:
+                logger.warning("文件对话删除准入被拒绝：会话已处于删除中: chat_id=%s", normalized_chat_id)
                 raise ChatSessionDeleteBusyError(
                     chat_id=normalized_chat_id,
                     reason="当前对话正在删除",
@@ -299,6 +303,11 @@ class ChatRunLockService:
                 (normalized_chat_id, *active_statuses),
             ).fetchone()
             if active is not None:
+                logger.warning(
+                    "文件对话删除准入被拒绝：存在活动运行: chat_id=%s active_run_id=%s",
+                    normalized_chat_id,
+                    active["run_id"],
+                )
                 raise ChatSessionDeleteBusyError(
                     chat_id=normalized_chat_id,
                     reason="当前对话存在进行中的流式响应，请先中断后删除",
@@ -307,11 +316,20 @@ class ChatRunLockService:
                 connection=connection,
                 chat_id=normalized_chat_id,
             ):
+                logger.warning(
+                    "文件对话删除准入被拒绝：标题临时线程仍在生成: chat_id=%s",
+                    normalized_chat_id,
+                )
                 raise ChatSessionDeleteBusyError(
                     chat_id=normalized_chat_id,
                     reason="当前对话正在生成标题，请稍后重试",
                 )
             if status not in {SESSION_ACTIVE, SESSION_ERROR}:
+                logger.warning(
+                    "文件对话删除准入被拒绝：会话状态不允许删除: chat_id=%s status=%s",
+                    normalized_chat_id,
+                    status,
+                )
                 raise ChatSessionUnavailableError(
                     chat_id=normalized_chat_id,
                     status=status,
@@ -326,6 +344,7 @@ class ChatRunLockService:
             )
             if cursor.rowcount != 1:
                 raise ValueError("chat_session status was changed concurrently")
+            logger.info("文件对话已进入删除中状态: chat_id=%s", normalized_chat_id)
 
     def complete_run_with_messages(
         self,
@@ -402,6 +421,11 @@ class ChatRunLockService:
         """
         normalized_run_id = _required_text(run_id, name="run_id")
         normalized_error = _required_text(error_message, name="error_message")
+        logger.info(
+            "开始收敛未启动的文件对话运行: run_id=%s error_chars=%d",
+            normalized_run_id,
+            len(normalized_error),
+        )
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -443,18 +467,38 @@ class ChatRunLockService:
                 run_id=normalized_run_id,
                 error_message=normalized_error,
             )
-            return self._get_run_with_connection(connection, normalized_run_id)
+            settled = self._get_run_with_connection(connection, normalized_run_id)
+            logger.info(
+                "未启动的文件对话运行已收敛: chat_id=%s run_id=%s status=%s",
+                settled.chat_id,
+                settled.run_id,
+                settled.status,
+            )
+            return settled
 
     def abort_run(self, run_id: str) -> ChatRun:
         return self._runs.mark_aborted(run_id)
 
     def request_abort(self, run_id: str) -> ChatRun:
         normalized_run_id = _required_text(run_id, name="run_id")
+        logger.debug("开始写入文件对话中断标记: run_id=%s", normalized_run_id)
         try:
-            return self._runs.request_abort(normalized_run_id)
+            run = self._runs.request_abort(normalized_run_id)
+            logger.info(
+                "文件对话中断标记已在 SQLite 中写入: chat_id=%s run_id=%s status=%s",
+                run.chat_id,
+                run.run_id,
+                run.status,
+            )
+            return run
         except ValueError as exc:
             current = self._runs.get(normalized_run_id)
             if current is not None and current.status not in RUN_ACTIVE_STATUSES:
+                logger.info(
+                    "文件对话中断标记未写入：运行已进入终态: run_id=%s status=%s",
+                    normalized_run_id,
+                    current.status,
+                )
                 raise ChatRunInactiveError(
                     run_id=normalized_run_id,
                     status=current.status,
@@ -469,16 +513,28 @@ class ChatRunLockService:
         支持围栏能力。
         """
         normalized_run_id = _required_text(run_id, name="run_id")
+        logger.debug("开始在 SQLite 中领取文件对话运行执行权: run_id=%s", normalized_run_id)
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = self._get_run_with_connection(connection, normalized_run_id)
             if run.owner_instance_id != self.owner_instance_id:
+                logger.warning(
+                    "文件对话运行执行权领取失败：运行属于其他实例: run_id=%s expected_owner=%s actual_owner=%s",
+                    normalized_run_id,
+                    self.owner_instance_id,
+                    run.owner_instance_id,
+                )
                 raise ChatRunLeaseLostError(
                     run_id=normalized_run_id,
                     reason="run is owned by another instance",
                 )
             if run.status != RUN_ACCEPTED:
+                logger.warning(
+                    "文件对话运行执行权领取失败：运行状态不可领取: run_id=%s status=%s",
+                    normalized_run_id,
+                    run.status,
+                )
                 raise ChatRunLeaseLostError(
                     run_id=normalized_run_id,
                     reason=f"run cannot be claimed from status: {run.status}",
@@ -500,11 +556,21 @@ class ChatRunLockService:
                 ),
             )
             if cursor.rowcount != 1:
+                logger.warning(
+                    "文件对话运行执行权领取失败：状态在领取期间发生变化: run_id=%s",
+                    normalized_run_id,
+                )
                 raise ChatRunLeaseLostError(
                     run_id=normalized_run_id,
                     reason="run changed before it could be claimed",
                 )
             run = self._get_run_with_connection(connection, normalized_run_id)
+        logger.info(
+            "文件对话运行执行权已在 SQLite 中领取: chat_id=%s run_id=%s owner=%s",
+            run.chat_id,
+            run.run_id,
+            run.owner_instance_id,
+        )
         return ChatRunLease(
             run_id=run.run_id,
             chat_id=run.chat_id,
@@ -938,6 +1004,13 @@ class ChatRunLockService:
             terminal_status=terminal_status,
         )
         now = _utc_now_iso()
+        logger.debug(
+            "开始提交文件对话运行终态: run_id=%s terminal_status=%s has_assistant_content=%s has_terminal_event=%s",
+            normalized_run_id,
+            terminal_status,
+            bool(assistant_content),
+            normalized_terminal_event is not None,
+        )
         with _connection_scope(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = self._get_run_with_connection(connection, normalized_run_id)
@@ -1029,7 +1102,15 @@ class ChatRunLockService:
             ).fetchone()
             if row is None:
                 raise ValueError("chat_run 不存在")
-            return self._row(row)
+            completed = self._row(row)
+            logger.info(
+                "文件对话运行终态已写入 SQLite: chat_id=%s run_id=%s status=%s has_error=%s",
+                completed.chat_id,
+                completed.run_id,
+                completed.status,
+                bool(completed.error_message),
+            )
+            return completed
 
     @staticmethod
     def _validate_terminal_event(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
@@ -13,6 +14,7 @@ from app.services.chat.persistence.repositories import _Repository, _required_te
 
 
 _TERMINAL_EVENT_TYPES = frozenset({"aborted", "done", "error"})
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -58,11 +60,18 @@ class ChatRunEventRepository(_Repository):
             raise TypeError("events must contain ChatStreamEvent")
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            return self.append_many_in_transaction(
+            records = self.append_many_in_transaction(
                 connection=connection,
                 run_id=normalized_run_id,
                 events=normalized_events,
             )
+        logger.debug(
+            "文件对话事件批次已写入本地账本: run_id=%s event_count=%d terminal_event=%s",
+            normalized_run_id,
+            len(records),
+            records[-1].event_type if records[-1].event_type in _TERMINAL_EVENT_TYPES else "",
+        )
+        return records
 
     @classmethod
     def append_in_transaction(
@@ -116,6 +125,11 @@ class ChatRunEventRepository(_Repository):
             (normalized_run_id,),
         ).fetchone()
         if terminal is not None:
+            logger.warning(
+                "拒绝追加文件对话事件：运行已存在终态事件: run_id=%s existing_event_type=%s",
+                normalized_run_id,
+                terminal["event_type"],
+            )
             raise ValueError("chat_run already has a terminal event")
         sequence_row = connection.execute(
             "SELECT COALESCE(MAX(event_seq), 0) AS event_seq FROM chat_run_events WHERE run_id = ?",
@@ -126,6 +140,10 @@ class ChatRunEventRepository(_Repository):
         terminal_seen = False
         for event in normalized_events:
             if terminal_seen:
+                logger.warning(
+                    "拒绝追加文件对话事件批次：终态事件后仍包含后续事件: run_id=%s",
+                    normalized_run_id,
+                )
                 raise ValueError("chat_run batch contains events after a terminal event")
             event_seq += 1
             payload = cls._serialize_data(event)
@@ -154,6 +172,11 @@ class ChatRunEventRepository(_Repository):
                 )
             )
             terminal_seen = event.event_type in _TERMINAL_EVENT_TYPES
+        logger.debug(
+            "文件对话事件已加入当前事务，等待提交: run_id=%s event_count=%d",
+            normalized_run_id,
+            len(records),
+        )
         return tuple(records)
 
     def list_by_run(self, run_id: str) -> tuple[ChatRunEvent, ...]:
@@ -168,7 +191,13 @@ class ChatRunEventRepository(_Repository):
                 """,
                 (normalized_run_id,),
             ).fetchall()
-        return tuple(self._row(row) for row in rows)
+        events = tuple(self._row(row) for row in rows)
+        logger.debug(
+            "已读取文件对话内部事件账本: run_id=%s event_count=%d",
+            normalized_run_id,
+            len(events),
+        )
+        return events
 
     @staticmethod
     def _require_event(event: ChatStreamEvent) -> None:

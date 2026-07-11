@@ -1396,10 +1396,25 @@ class ChatCleanupJobRepository(_Repository):
                             CLEANUP_JOB_FAILED,
                         ),
                     )
-                    return self._get_with_connection(
+                    requeued = self._get_with_connection(
                         connection,
                         job_id=job.job_id,
                     )
+                    logger.info(
+                        "已重新激活文件对话清理任务: job_id=%s chat_id=%s reason=%s previous_attempt_count=%d",
+                        requeued.job_id,
+                        requeued.chat_id,
+                        requeued.reason,
+                        job.attempt_count,
+                    )
+                    return requeued
+                logger.debug(
+                    "复用已存在的文件对话清理任务: job_id=%s chat_id=%s reason=%s status=%s",
+                    job.job_id,
+                    job.chat_id,
+                    job.reason,
+                    job.status,
+                )
                 return job
             job_id = uuid.uuid4().hex
             connection.execute(
@@ -1421,7 +1436,15 @@ class ChatCleanupJobRepository(_Repository):
                     now,
                 ),
             )
-            return self._get_with_connection(connection, job_id=job_id)
+            created = self._get_with_connection(connection, job_id=job_id)
+            logger.info(
+                "已创建文件对话清理任务: job_id=%s chat_id=%s reason=%s has_lease=%s",
+                created.job_id,
+                created.chat_id,
+                created.reason,
+                bool(created.lease_id),
+            )
+            return created
 
     def get(self, job_id: str) -> ChatCleanupJob | None:
         normalized_job_id = _required_text(job_id, name="job_id")
@@ -1440,6 +1463,11 @@ class ChatCleanupJobRepository(_Repository):
             connection.execute("BEGIN IMMEDIATE")
             current = self._get_with_connection(connection, job_id=normalized_job_id)
             if current.status == CLEANUP_JOB_SUCCEEDED:
+                logger.debug(
+                    "文件对话清理任务已完成，无需重复领取: job_id=%s chat_id=%s",
+                    current.job_id,
+                    current.chat_id,
+                )
                 return current
             if current.status == CLEANUP_JOB_RUNNING:
                 raise ValueError("cleanup job is already running")
@@ -1463,7 +1491,15 @@ class ChatCleanupJobRepository(_Repository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("cleanup job was changed concurrently")
-            return self._get_with_connection(connection, job_id=normalized_job_id)
+            claimed = self._get_with_connection(connection, job_id=normalized_job_id)
+            logger.info(
+                "已领取文件对话清理任务: job_id=%s chat_id=%s reason=%s attempt=%d",
+                claimed.job_id,
+                claimed.chat_id,
+                claimed.reason,
+                claimed.attempt_count,
+            )
+            return claimed
 
     def mark_succeeded(self, *, job_id: str) -> ChatCleanupJob:
         return self._set_terminal_status(
@@ -1498,7 +1534,9 @@ class ChatCleanupJobRepository(_Repository):
                 """,
                 (CLEANUP_JOB_PENDING, CLEANUP_JOB_FAILED, now),
             ).fetchall()
-        return tuple(self._row(row) for row in rows)
+        jobs = tuple(self._row(row) for row in rows)
+        logger.debug("已查询就绪文件对话清理任务: job_count=%d", len(jobs))
+        return jobs
 
     def list_by_chat(self, chat_id: str) -> tuple[ChatCleanupJob, ...]:
         """读取一个对话的清理审计轨迹，但不通过 HTTP 暴露。"""
@@ -1512,7 +1550,13 @@ class ChatCleanupJobRepository(_Repository):
                 """,
                 (normalized_chat_id,),
             ).fetchall()
-        return tuple(self._row(row) for row in rows)
+        jobs = tuple(self._row(row) for row in rows)
+        logger.debug(
+            "已读取文件对话清理审计记录: chat_id=%s job_count=%d",
+            normalized_chat_id,
+            len(jobs),
+        )
+        return jobs
 
     def _set_terminal_status(
         self,
@@ -1556,7 +1600,16 @@ class ChatCleanupJobRepository(_Repository):
             )
             if cursor.rowcount != 1:
                 raise ValueError("cleanup job was changed concurrently")
-            return self._get_with_connection(connection, job_id=normalized_job_id)
+            completed = self._get_with_connection(connection, job_id=normalized_job_id)
+            logger.info(
+                "文件对话清理任务已进入终态: job_id=%s chat_id=%s status=%s attempt=%d has_error=%s",
+                completed.job_id,
+                completed.chat_id,
+                completed.status,
+                completed.attempt_count,
+                bool(completed.error_message),
+            )
+            return completed
 
     def _get_with_connection(
         self,

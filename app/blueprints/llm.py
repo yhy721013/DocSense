@@ -885,6 +885,12 @@ def llm_chat():
         return jsonify({"error": "message不能为空"}), 400
     message = message.strip()
     if len(message) > CHAT_MAX_MESSAGE_CHARS:
+        logger.warning(
+            "文件对话请求被拒绝：消息长度超过上限: chatId=%s message_length=%d limit=%d",
+            chat_id,
+            len(message),
+            CHAT_MAX_MESSAGE_CHARS,
+        )
         return jsonify({"error": "message超过文件对话长度上限"}), 400
     logger.info(
         "文件对话请求参数校验通过: chatId=%s raw_file_count=%d message_length=%d",
@@ -924,18 +930,35 @@ def llm_chat():
         len(normalized_file_names),
     )
     if len(normalized_file_names) > CHAT_MAX_FILES_PER_REQUEST:
+        logger.warning(
+            "文件对话请求被拒绝：文件数量超过上限: chatId=%s file_count=%d limit=%d",
+            chat_id,
+            len(normalized_file_names),
+            CHAT_MAX_FILES_PER_REQUEST,
+        )
         return jsonify({"error": "fileNames超过文件对话数量上限"}), 400
 
     chat_run_executor = services.chat_run_executor
     if not chat_run_executor.try_acquire_stream_slot():
+        logger.warning(
+            "文件对话请求被拒绝：进程内流并发容量已满: chatId=%s max_concurrent_streams=%d",
+            chat_id,
+            chat_run_executor.max_concurrent_streams,
+        )
         return jsonify({"error": "文件对话并发流已达上限，请稍后重试"}), 429
     stream_slot_acquired = True
+    logger.info(
+        "已获得文件对话进程内流容量许可: chatId=%s max_concurrent_streams=%d",
+        chat_id,
+        chat_run_executor.max_concurrent_streams,
+    )
 
     def _release_stream_slot() -> None:
         nonlocal stream_slot_acquired
         if stream_slot_acquired:
             chat_run_executor.release_stream_slot()
             stream_slot_acquired = False
+            logger.debug("已释放文件对话进程内流容量许可: chatId=%s", chat_id)
 
     try:
         prepared_run = chat_run_executor.prepare_chat_run(
@@ -945,6 +968,10 @@ def llm_chat():
         )
     except ChatDocumentNotFoundError as exc:
         _release_stream_slot()
+        logger.warning(
+            "文件对话请求被拒绝：存在尚未解析的文件: chatId=%s",
+            chat_id,
+        )
         return jsonify({"error": str(exc)}), 404
     except (ChatRunBusyError, ChatSessionUnavailableError):
         _release_stream_slot()
@@ -955,11 +982,17 @@ def llm_chat():
         return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
     except ValueError as exc:
         _release_stream_slot()
+        logger.warning(
+            "文件对话请求被拒绝：输入或受理校验失败: chatId=%s error_type=%s",
+            chat_id,
+            exc.__class__.__name__,
+        )
         return jsonify({"error": str(exc)}), 400
     except Exception:
         # 此时尚未创建 Response 对象，Flask 不会调用常规关闭钩子。向外抛出意外
         # 受理异常前，必须释放进程内并发容量许可。
         _release_stream_slot()
+        logger.exception("文件对话请求受理发生未预期异常: chatId=%s", chat_id)
         raise
 
     logger.info(
@@ -977,6 +1010,11 @@ def llm_chat():
             """在消费内部迭代器前标记执行已开始。"""
             nonlocal stream_started
             stream_started = True
+            logger.info(
+                "文件对话 SSE 事件流开始被客户端消费: chatId=%s runId=%s",
+                chat_id,
+                prepared_run.run_id,
+            )
             yield from finalize_chat_run_stream(
                 stream=stream,
                 run_id=prepared_run.run_id,
@@ -986,6 +1024,11 @@ def llm_chat():
         def close_response() -> None:
             """释放并发容量，并收敛一条已受理但未开始的运行。"""
             if not stream_started:
+                logger.warning(
+                    "文件对话 SSE 响应在执行开始前关闭，准备收敛未启动运行: chatId=%s runId=%s",
+                    chat_id,
+                    prepared_run.run_id,
+                )
                 try:
                     services.chat_commands.discard_unstarted_chat_run(
                         run_id=prepared_run.run_id,
@@ -997,6 +1040,12 @@ def llm_chat():
                         chat_id,
                         prepared_run.run_id,
                     )
+            else:
+                logger.debug(
+                    "文件对话 SSE 响应关闭，运行已开始执行: chatId=%s runId=%s",
+                    chat_id,
+                    prepared_run.run_id,
+                )
             _release_stream_slot()
 
         logger.info(

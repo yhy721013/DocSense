@@ -103,24 +103,48 @@ class ChatCleanupJobExecutor:
         """
         job = self._store.cleanup_jobs.claim(job_id=job_id)
         if job.status == CLEANUP_JOB_SUCCEEDED:
+            logger.debug(
+                "文件对话清理任务已完成，跳过重复执行: job_id=%s chat_id=%s",
+                job.job_id,
+                job.chat_id,
+            )
             return job
+
+        logger.info(
+            "开始执行文件对话清理任务: job_id=%s chat_id=%s reason=%s attempt=%d",
+            job.job_id,
+            job.chat_id,
+            job.reason,
+            job.attempt_count,
+        )
 
         try:
             if job.reason == CLEANUP_REASON_DELETE_CHAT:
+                logger.info(
+                    "执行会话删除后的远端资源清理: job_id=%s chat_id=%s",
+                    job.job_id,
+                    job.chat_id,
+                )
                 self._cleanup_deleted_chat(job)
             elif job.reason == CLEANUP_REASON_TEMPORARY_THREAD:
+                logger.info(
+                    "执行临时标题线程清理: job_id=%s chat_id=%s has_lease=%s",
+                    job.job_id,
+                    job.chat_id,
+                    bool(job.lease_id),
+                )
                 self._cleanup_temporary_thread(job)
             else:  # 防御性保护：拒绝未来应用版本写入的未知任务原因。
                 raise ValueError(f"unsupported cleanup job reason: {job.reason}")
         except Exception as exc:
             failed_job = self._mark_failed(job=job, error=exc)
             logger.warning(
-                "文件对话清理任务失败并已保留重试记录: job_id=%s chat_id=%s reason=%s attempt=%d error=%s",
+                "文件对话清理任务失败并已保留重试记录: job_id=%s chat_id=%s reason=%s attempt=%d error_type=%s",
                 failed_job.job_id,
                 failed_job.chat_id,
                 failed_job.reason,
                 failed_job.attempt_count,
-                failed_job.error_message,
+                exc.__class__.__name__,
             )
             raise ChatCleanupJobExecutionError(
                 job=failed_job,
@@ -145,26 +169,50 @@ class ChatCleanupJobExecutor:
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
+        ready_jobs = self._store.cleanup_jobs.list_ready()[:limit]
+        logger.info(
+            "开始执行就绪文件对话清理任务快照: selected_job_count=%d limit=%d",
+            len(ready_jobs),
+            limit,
+        )
         results: list[ChatCleanupJob] = []
-        for ready_job in self._store.cleanup_jobs.list_ready()[:limit]:
+        for ready_job in ready_jobs:
             try:
                 results.append(self.execute_cleanup_job(job_id=ready_job.job_id))
             except ChatCleanupJobExecutionError as exc:
                 # 继续处理互不依赖的任务。失败任务自身已转为 ``failed`` 状态，并写入
                 # 下次重试时间。
                 results.append(exc.job)
+        logger.info(
+            "就绪文件对话清理任务快照执行结束: processed_job_count=%d succeeded_job_count=%d failed_job_count=%d",
+            len(results),
+            sum(job.status == CLEANUP_JOB_SUCCEEDED for job in results),
+            sum(job.status != CLEANUP_JOB_SUCCEEDED for job in results),
+        )
         return tuple(results)
 
     def _cleanup_deleted_chat(self, job: ChatCleanupJob) -> None:
         session = self._store.sessions.get(job.chat_id)
         if session is None:
             raise ValueError("chat session does not exist for cleanup job")
+        logger.debug(
+            "加载待删除会话的资源租约: chat_id=%s has_workspace=%s has_thread=%s",
+            job.chat_id,
+            bool(session.workspace_ref),
+            bool(session.thread_ref),
+        )
         self._ensure_session_reference_leases(session)
 
         if not session.workspace_ref:
             unresolved = self._open_leases(job.chat_id)
             if unresolved:
+                logger.warning(
+                    "删除会话清理无法继续：本地仍有未关闭租约但缺少工作区引用: chat_id=%s open_lease_count=%d",
+                    job.chat_id,
+                    len(unresolved),
+                )
                 raise ValueError("remote resource reference was not persisted")
+            logger.info("删除会话清理无需调用远端资源: chat_id=%s", job.chat_id)
             return
 
         with self._conversation_factory.create() as conversation:
@@ -185,6 +233,11 @@ class ChatCleanupJobExecutor:
 
         failed = self._failed_leases(job.chat_id)
         if failed:
+            logger.warning(
+                "删除会话清理完成后仍有失败租约: chat_id=%s failed_lease_count=%d",
+                job.chat_id,
+                len(failed),
+            )
             raise RuntimeError("remote resource cleanup failed")
 
     def _cleanup_temporary_thread(self, job: ChatCleanupJob) -> None:
@@ -198,12 +251,22 @@ class ChatCleanupJobExecutor:
         if lease.resource_type != RESOURCE_THREAD:
             raise ValueError("temporary-thread cleanup job targets a non-thread lease")
         if lease.status == LEASE_CLOSED:
+            logger.debug(
+                "临时标题线程租约已关闭，无需重复清理: job_id=%s lease_id=%s",
+                job.job_id,
+                lease.lease_id,
+            )
             return
         if not lease.external_ref:
             # 从未获得远端引用。关闭 planned 租约是安全的；非 planned 租约缺少身份
             # 表明无法自动修复，必须以失败状态保留该问题。
             if lease.status == LEASE_PLANNED:
                 self._store.resource_leases.mark_closed(lease.lease_id)
+                logger.info(
+                    "临时标题线程未创建远端资源，已关闭计划租约: job_id=%s lease_id=%s",
+                    job.job_id,
+                    lease.lease_id,
+                )
                 return
             raise ValueError("temporary-thread resource lease has no external reference")
 
@@ -226,6 +289,11 @@ class ChatCleanupJobExecutor:
             )
             raise RuntimeError(error)
         self._store.resource_leases.mark_closed(lease.lease_id)
+        logger.info(
+            "临时标题线程远端资源清理完成: job_id=%s lease_id=%s",
+            job.job_id,
+            lease.lease_id,
+        )
 
     def _ensure_session_reference_leases(self, session: ChatSession) -> None:
         """在删除远端资源前补齐会话的确定性租约。
@@ -233,6 +301,12 @@ class ChatCleanupJobExecutor:
         新运行会在创建远端资源前创建这些租约。该防御性检查使清理任务保持自包含：
         工作进程只依赖权威的会话和租约记录，不查询任何旧表或请求级状态。
         """
+        logger.debug(
+            "确保删除会话的资源租约完整: chat_id=%s has_workspace=%s has_thread=%s",
+            session.chat_id,
+            bool(session.workspace_ref),
+            bool(session.thread_ref),
+        )
         if session.workspace_ref:
             self._store.resource_leases.ensure_active(
                 lease_id=chat_workspace_lease_id(session.chat_id),
@@ -270,12 +344,13 @@ class ChatCleanupJobExecutor:
                 error_message=error,
             )
             logger.warning(
-                "文件对话主线程删除失败，等待 workspace 删除或后续补偿: chat_id=%s error=%s",
+                "文件对话主线程删除失败，等待工作区删除或后续补偿: chat_id=%s error_chars=%d",
                 chat_id,
-                error,
+                len(error),
             )
             return
         self._store.resource_leases.mark_closed(lease_id)
+        logger.info("文件对话主线程远端资源删除完成: chat_id=%s", chat_id)
 
     def _delete_context(self, *, chat_id: str, conversation, context_ref: str) -> None:
         workspace_lease_id = chat_workspace_lease_id(chat_id)
@@ -296,9 +371,9 @@ class ChatCleanupJobExecutor:
                     error_message=error,
                 )
             logger.warning(
-                "文件对话 workspace 删除失败，已保留全部开放租约: chat_id=%s error=%s",
+                "文件对话工作区删除失败，已保留全部开放租约: chat_id=%s error_chars=%d",
                 chat_id,
-                error,
+                len(error),
             )
             return
 
@@ -307,6 +382,7 @@ class ChatCleanupJobExecutor:
         for lease in self._store.resource_leases.list_by_chat(chat_id):
             if lease.status != LEASE_CLOSED:
                 self._store.resource_leases.mark_closed(lease.lease_id)
+        logger.info("文件对话工作区远端资源删除完成，已关闭本地关联租约: chat_id=%s", chat_id)
 
     @staticmethod
     def _delete_conversation_operation(*, conversation, session: ChatSessionRefs) -> str:
@@ -342,11 +418,19 @@ class ChatCleanupJobExecutor:
             raise ValueError("cleanup job disappeared during execution") from error
         if current.status != CLEANUP_JOB_RUNNING:
             return current
-        return self._store.cleanup_jobs.mark_failed(
+        next_attempt_at = self._next_retry_at(attempt_count=current.attempt_count)
+        failed = self._store.cleanup_jobs.mark_failed(
             job_id=job.job_id,
             error_message=str(error) or error.__class__.__name__,
-            next_attempt_at=self._next_retry_at(attempt_count=current.attempt_count),
+            next_attempt_at=next_attempt_at,
         )
+        logger.info(
+            "文件对话清理任务已安排重试: job_id=%s chat_id=%s next_attempt_at=%s",
+            failed.job_id,
+            failed.chat_id,
+            failed.next_attempt_at,
+        )
+        return failed
 
     def _next_retry_at(self, *, attempt_count: int) -> str:
         # 指数退避可避免未来维护工作进程在远端持续失败时形成紧密循环。新的显式删除

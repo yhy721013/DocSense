@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from app.services.chat.domain.events import ChatStreamEvent
+
+
+logger = logging.getLogger(__name__)
 
 
 def _required_text(value: str, *, name: str) -> str:
@@ -69,9 +73,29 @@ class InlineChatRunDispatcher:
 
     def dispatch(self, *, run_id: str) -> Iterable[ChatStreamEvent]:
         normalized_run_id = _required_text(run_id, name="run_id")
-        events = self._execute(normalized_run_id)
+        logger.info(
+            "开始内联调度文件对话运行: run_id=%s",
+            normalized_run_id,
+        )
+        try:
+            events = self._execute(normalized_run_id)
+        except Exception:
+            logger.exception(
+                "内联调度文件对话运行时创建事件流失败: run_id=%s",
+                normalized_run_id,
+            )
+            raise
         if not isinstance(events, Iterable):
+            logger.error(
+                "内联调度文件对话运行失败：执行器未返回可迭代事件流: run_id=%s returned_type=%s",
+                normalized_run_id,
+                type(events).__name__,
+            )
             raise TypeError("execute must return an iterable of ChatStreamEvent")
+        logger.debug(
+            "文件对话运行已交给内联执行器，等待事件流被消费: run_id=%s",
+            normalized_run_id,
+        )
         return events
 
 

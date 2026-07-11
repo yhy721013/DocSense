@@ -84,9 +84,10 @@ class AnythingLLMChatFactory(ChatConversationFactory):
                 standalone_mode=self._standalone_mode,
             )
             logger.debug(
-                "Created task-scoped AnythingLLM chat gateway: "
-                "has_user_context=%s",
+                "已创建任务级 AnythingLLM 文件对话网关: has_user_context=%s stream_mode=%s standalone_mode=%s",
                 self._user_id is not None,
+                self._stream_mode,
+                self._standalone_mode,
             )
             yield gateway
         except BaseException:
@@ -96,12 +97,11 @@ class AnythingLLMChatFactory(ChatConversationFactory):
             if transport is not None:
                 try:
                     transport.close()
-                    logger.debug("Closed task-scoped AnythingLLM chat transport")
+                    logger.debug("已关闭任务级 AnythingLLM 文件对话传输对象")
                 except Exception:
                     if task_failed:
                         logger.exception(
-                            "Failed to close AnythingLLM chat transport; "
-                            "preserving active task exception"
+                            "关闭任务级 AnythingLLM 文件对话传输对象失败，保留当前业务异常"
                         )
                     else:
                         raise

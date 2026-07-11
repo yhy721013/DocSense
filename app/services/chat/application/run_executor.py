@@ -230,9 +230,27 @@ class SynchronousChatRunExecutor:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_message = _required_text(message, name="message")
         normalized_file_names = _text_tuple(file_names, name="file_names")
+        logger.info(
+            "开始受理文件对话运行: chat_id=%s message_chars=%d requested_file_count=%d",
+            normalized_chat_id,
+            len(normalized_message),
+            len(normalized_file_names),
+        )
         if len(normalized_file_names) > self._max_files_per_request:
+            logger.warning(
+                "文件对话受理被拒绝：文件数量超过上限: chat_id=%s requested_file_count=%d limit=%d",
+                normalized_chat_id,
+                len(normalized_file_names),
+                self._max_files_per_request,
+            )
             raise ValueError("fileNames exceeds the configured chat file limit")
         if len(normalized_message) > self._max_message_chars:
+            logger.warning(
+                "文件对话受理被拒绝：消息长度超过上限: chat_id=%s message_chars=%d limit=%d",
+                normalized_chat_id,
+                len(normalized_message),
+                self._max_message_chars,
+            )
             raise ValueError("message exceeds the configured chat message limit")
         resolved = self._document_resolver.resolve_many(normalized_file_names)
         snapshots = tuple(self._snapshot(document) for document in resolved)
@@ -254,6 +272,12 @@ class SynchronousChatRunExecutor:
                 for item in snapshots
             ),
         )
+        logger.info(
+            "文件对话运行已受理并冻结输入快照: chat_id=%s run_id=%s file_count=%d",
+            run.chat_id,
+            run.run_id,
+            len(snapshots),
+        )
         # 命令服务会在受理事务中保存完整的消息和文档快照。将这些对象直接传给执行器会
         # 让未来工作进程依赖请求内存，因此执行路径刻意只接收持久化运行键。
         return PreparedChatRun(run_id=run.run_id, chat_id=run.chat_id)
@@ -264,6 +288,12 @@ class SynchronousChatRunExecutor:
         run = self._store.runs.get(normalized_run_id)
         run_input = self._store.run_inputs.get(normalized_run_id)
         if run is None or run_input is None:
+            logger.warning(
+                "文件对话运行无法执行：缺少持久化运行或输入快照: run_id=%s has_run=%s has_input=%s",
+                normalized_run_id,
+                run is not None,
+                run_input is not None,
+            )
             error_message = "chat run input is unavailable"
             if run is not None:
                 self._chat_commands.discard_unstarted_chat_run(
@@ -274,9 +304,20 @@ class SynchronousChatRunExecutor:
             return
 
         request = self._request_from_persisted_input(run_id=normalized_run_id)
+        logger.info(
+            "开始领取并执行文件对话运行: chat_id=%s run_id=%s file_count=%d",
+            request.chat_id,
+            request.run_id,
+            len(request.documents),
+        )
         try:
             execution_lease = self._chat_commands.issue_execution_lease(
                 run_id=normalized_run_id,
+            )
+            logger.info(
+                "文件对话运行已领取执行权: chat_id=%s run_id=%s",
+                request.chat_id,
+                request.run_id,
             )
         except ChatRunLeaseLostError as exc:
             # 重复执行器可能在另一执行器已领取后仍观察到同一持久化运行。不能仅因为
@@ -363,15 +404,39 @@ class SynchronousChatRunExecutor:
         try:
             session = self._store.sessions.get(request.chat_id)
             if session is None or session.status != SESSION_ACTIVE:
+                logger.warning(
+                    "文件对话运行被拒绝：会话当前不可执行: chat_id=%s run_id=%s has_session=%s session_status=%s",
+                    request.chat_id,
+                    request.run_id,
+                    session is not None,
+                    session.status if session is not None else "",
+                )
                 raise ChatResourceError("当前对话不可用于执行")
             documents = request.documents
             if request.file_names and not documents:
+                logger.warning(
+                    "文件对话运行缺少已受理文档快照: chat_id=%s run_id=%s requested_file_count=%d",
+                    request.chat_id,
+                    request.run_id,
+                    len(request.file_names),
+                )
                 raise ChatResourceError("已受理的文件对话缺少不可变文档快照")
             with self._conversation_factory.create() as conversation:
+                logger.debug(
+                    "已创建任务级文件对话端口，开始准备远端会话资源: chat_id=%s run_id=%s",
+                    request.chat_id,
+                    request.run_id,
+                )
                 refs, is_new_chat = self._open_or_reuse_conversation(
                     request=request,
                     session=session,
                     conversation=conversation,
+                )
+                logger.info(
+                    "文件对话远端会话资源已准备: chat_id=%s run_id=%s is_new_chat=%s",
+                    request.chat_id,
+                    request.run_id,
+                    is_new_chat,
                 )
                 active_documents = self._attach_new_documents(
                     request=request,
@@ -379,11 +444,22 @@ class SynchronousChatRunExecutor:
                     documents=documents,
                     conversation=conversation,
                 )
+                logger.info(
+                    "文件对话可用文档已准备: chat_id=%s run_id=%s active_document_count=%d",
+                    request.chat_id,
+                    request.run_id,
+                    len(active_documents),
+                )
                 yield ChatStreamEvent(
                     "chatInfo",
                     {"chatId": request.chat_id, "isNewChat": is_new_chat},
                 )
                 output_chars = 0
+                logger.info(
+                    "开始消费文件对话模型流: chat_id=%s run_id=%s",
+                    request.chat_id,
+                    request.run_id,
+                )
                 for chunk in conversation.stream_message(
                     refs,
                     request.message,
@@ -391,11 +467,24 @@ class SynchronousChatRunExecutor:
                 ):
                     output_chars += len(chunk.content)
                     if output_chars > self._max_output_chars:
+                        logger.warning(
+                            "文件对话模型输出超过上限，终止本次运行: chat_id=%s run_id=%s output_chars=%d limit=%d",
+                            request.chat_id,
+                            request.run_id,
+                            output_chars,
+                            self._max_output_chars,
+                        )
                         raise ChatResourceError(
                             "chat output exceeds the configured output limit"
                         )
                     yield ChatStreamEvent("textChunk", {"content": chunk.content})
                 yield ChatStreamEvent("done", {"chatId": request.chat_id})
+                logger.info(
+                    "文件对话模型流正常结束: chat_id=%s run_id=%s output_chars=%d",
+                    request.chat_id,
+                    request.run_id,
+                    output_chars,
+                )
         except GeneratorExit:
             raise
         except Exception:
@@ -414,6 +503,11 @@ class SynchronousChatRunExecutor:
         conversation,
     ) -> tuple[ChatSessionRefs, bool]:
         if session.workspace_ref and session.thread_ref:
+            logger.info(
+                "复用已有文件对话远端会话资源: chat_id=%s run_id=%s",
+                request.chat_id,
+                request.run_id,
+            )
             return (
                 ChatSessionRefs(
                     context_ref=session.workspace_ref,
@@ -435,12 +529,23 @@ class SynchronousChatRunExecutor:
             resource_type=RESOURCE_THREAD,
             run_id=request.run_id,
         )
+        logger.info(
+            "已创建文件对话工作区和线程计划租约: chat_id=%s run_id=%s",
+            request.chat_id,
+            request.run_id,
+        )
         try:
             refs = conversation.open_conversation(
                 context_name=f"chat-{request.chat_id}",
                 conversation_name=f"thread-{request.chat_id}",
             )
         except ChatResourceError as exc:
+            logger.warning(
+                "创建文件对话远端会话资源失败，开始记录可恢复状态: chat_id=%s run_id=%s reported_resource_count=%d",
+                request.chat_id,
+                request.run_id,
+                len(exc.resource_refs),
+            )
             self._record_uncompensated_workspace_reference(
                 request=request,
                 workspace_lease_id=workspace_lease_id,
@@ -466,6 +571,11 @@ class SynchronousChatRunExecutor:
             chat_id=request.chat_id,
             workspace_ref=refs.context_ref,
             thread_ref=refs.conversation_ref,
+        )
+        logger.info(
+            "文件对话远端会话资源已持久化到本地: chat_id=%s run_id=%s",
+            request.chat_id,
+            request.run_id,
         )
         return refs, True
 
@@ -493,9 +603,14 @@ class SynchronousChatRunExecutor:
                     lease_id=workspace_lease_id,
                     external_ref=workspace_ref,
                 )
+            logger.info(
+                "已记录可恢复的文件对话工作区引用: chat_id=%s run_id=%s",
+                request.chat_id,
+                request.run_id,
+            )
         except Exception:
             logger.exception(
-                "failed to persist uncompensated workspace reference: chat_id=%s run_id=%s",
+                "记录可恢复的文件对话工作区引用失败: chat_id=%s run_id=%s",
                 request.chat_id,
                 request.run_id,
             )
@@ -504,6 +619,7 @@ class SynchronousChatRunExecutor:
         lease = self._store.resource_leases.get(lease_id)
         if lease is not None and lease.status == "planned":
             self._store.resource_leases.mark_closed(lease_id)
+            logger.info("远端资源尚未创建，已关闭文件对话计划租约: lease_id=%s", lease_id)
 
     def _attach_new_documents(
         self,
@@ -519,14 +635,28 @@ class SynchronousChatRunExecutor:
                 request.chat_id
             )
         }
+        logger.debug(
+            "开始准备文件对话文档绑定: chat_id=%s run_id=%s requested_document_count=%d current_binding_count=%d",
+            request.chat_id,
+            request.run_id,
+            len(documents),
+            len(current_bindings),
+        )
         # 未显式传入 ``fileNames`` 的续聊会刻意选择每个业务文件的最新版本。历史版本
         # 仍保留绑定以供审计和清理，但绝不会被静默加入 RAG。
         if not documents:
-            return tuple(
+            selected_existing = tuple(
                 binding.document_ref
                 for binding in current_bindings.values()
                 if binding.document_ref
             )
+            logger.info(
+                "续聊未指定新文件，复用当前文档版本: chat_id=%s run_id=%s selected_document_count=%d",
+                request.chat_id,
+                request.run_id,
+                len(selected_existing),
+            )
+            return selected_existing
         new_documents = [
             item
             for item in documents
@@ -538,6 +668,12 @@ class SynchronousChatRunExecutor:
                 != item.document.external_location
             )
         ]
+        logger.info(
+            "已计算本次需要新绑定的文件对话文档: chat_id=%s run_id=%s new_document_count=%d",
+            request.chat_id,
+            request.run_id,
+            len(new_documents),
+        )
         for item in new_documents:
             self._store.resource_leases.begin(
                 lease_id=chat_document_binding_lease_id(
@@ -556,6 +692,12 @@ class SynchronousChatRunExecutor:
             )
         attached_by_location: dict[str, ChatDocumentRef] = {}
         if new_documents:
+            logger.info(
+                "开始调用远端绑定新文件对话文档: chat_id=%s run_id=%s document_count=%d",
+                request.chat_id,
+                request.run_id,
+                len(new_documents),
+            )
             attached = conversation.attach_documents(
                 refs,
                 [item.document for item in new_documents],
@@ -587,6 +729,12 @@ class SynchronousChatRunExecutor:
                     ),
                 )
                 current_bindings[item.file_name] = stored_binding
+            logger.info(
+                "新文件对话文档绑定已持久化: chat_id=%s run_id=%s document_count=%d",
+                request.chat_id,
+                request.run_id,
+                len(new_documents),
+            )
         selected: list[str] = []
         for item in documents:
             stored = current_bindings.get(item.file_name)
@@ -596,6 +744,12 @@ class SynchronousChatRunExecutor:
                 else item.document.document_ref
             )
             selected.append(document_ref)
+        logger.debug(
+            "文件对话文档选择完成: chat_id=%s run_id=%s selected_document_count=%d",
+            request.chat_id,
+            request.run_id,
+            len(selected),
+        )
         return tuple(selected)
 
     @staticmethod
@@ -821,10 +975,10 @@ class ChatRunEventRecorder:
             if not terminal_event and self._abort_requested(request.run_id):
                 terminal_event = "aborted"
                 logger.warning(
-                    "上游异常后检测到中断请求，按中断收敛: chat_id=%s run_id=%s error=%s",
+                    "上游异常后检测到中断请求，按中断收敛: chat_id=%s run_id=%s error_type=%s",
                     request.chat_id,
                     request.run_id,
-                    exc,
+                    exc.__class__.__name__,
                 )
                 if user_written:
                     yield self._finish_aborted(
@@ -866,8 +1020,8 @@ class ChatRunEventRecorder:
         request: ChatRunStreamRequest,
         message_id: str,
     ) -> None:
-                # 用户消息先以待处理状态写入，只有运行明确进入完成、失败或中断等终态后
-                # 才提交为已提交状态。这样可避免进程崩溃时将未完成轮次误暴露给历史接口。
+        # 用户消息先以待处理状态写入，只有运行明确进入完成、失败或中断等终态后
+        # 才提交为已提交状态。这样可避免进程崩溃时将未完成轮次误暴露给历史接口。
         self._store.messages.append(
             message_id=message_id,
             chat_id=request.chat_id,
@@ -893,7 +1047,7 @@ class ChatRunEventRecorder:
     ) -> None:
         if not content:
             logger.info(
-                "跳过空assistant消息入库: chat_id=%s run_id=%s",
+                "跳过空助手消息入库: chat_id=%s run_id=%s",
                 request.chat_id,
                 request.run_id,
             )
@@ -915,8 +1069,8 @@ class ChatRunEventRecorder:
         chat_commands: ChatCommandService,
         execution_lease: ChatRunLease | None,
     ) -> ChatStreamEvent:
-        # 中断时保留 user committed，丢弃已输出但不完整的 assistant 片段；
-        # 这是本地历史的权威语义，不依赖 AnythingLLM 是否已经写入远端 Thread。
+        # 中断时保留已提交的用户消息，丢弃已输出但不完整的助手片段；这是本地历史的
+        # 权威语义，不依赖供应商是否已经写入远端线程。
         event = ChatStreamEvent("aborted", {"chatId": request.chat_id})
         chat_commands.abort_chat_run_with_user(
             run_id=request.run_id,
@@ -959,6 +1113,12 @@ class ChatRunEventRecorder:
                 terminal_event=terminal_event,
                 **self._execution_lease_kwargs(execution_lease),
             )
+            logger.warning(
+                "文件对话运行已按失败路径收敛: chat_id=%s run_id=%s error_chars=%d",
+                request.chat_id,
+                run_id,
+                len(str(error_message or "")),
+            )
         except Exception:
             logger.exception(
                 "终态事件写入失败，降级收敛文件对话run: chat_id=%s run_id=%s",
@@ -970,6 +1130,12 @@ class ChatRunEventRecorder:
                 user_message_id=user_message_id,
                 error_message=error_message,
                 **self._execution_lease_kwargs(execution_lease),
+            )
+            logger.warning(
+                "文件对话运行已使用降级路径收敛失败状态: chat_id=%s run_id=%s error_chars=%d",
+                request.chat_id,
+                run_id,
+                len(str(error_message or "")),
             )
 
     def _abort_requested(self, run_id: str) -> bool:
@@ -1016,8 +1182,9 @@ class ChatRunEventRecorder:
             return
         try:
             close()
+            logger.debug("已关闭文件对话上游事件流: run_id=%s", run_id)
         except Exception:
-            logger.exception("failed to close chat event stream: run_id=%s", run_id)
+            logger.exception("关闭文件对话上游事件流失败: run_id=%s", run_id)
 
 
 def record_chat_run_events(
