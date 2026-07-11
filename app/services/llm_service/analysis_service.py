@@ -54,13 +54,6 @@ DEFAULT_COUNTRY_OPTIONS = [
     {"key": "06", "value": "法国"},
 ]
 
-DEFAULT_CHANNEL_OPTIONS = [
-    {"key": "02", "value": "装发"},
-    {"key": "03", "value": "军情"},
-    {"key": "04", "value": "科技"},
-    {"key": "05", "value": "训练"},
-]
-
 DEFAULT_FORMAT_OPTIONS = [
     {"key": "01", "value": "音频类"},
     {"key": "03", "value": "文档类"},
@@ -73,7 +66,7 @@ DEFAULT_MATURITY_OPTIONS = [
     {"key": "03", "value": "定型成果"},
 ]
 
-DEFAULT_SECRET_OPTIONS = [
+DEFAULT_SECURITY_OPTIONS = [
     {"key": "02", "value": "公开"},
 ]
 
@@ -120,10 +113,11 @@ def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dic
 def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str, list[dict[str, Any]]]:
     return {
         "country": _normalize_range_list(request_params.get("country"), DEFAULT_COUNTRY_OPTIONS),
-        "channel": _normalize_range_list(request_params.get("channel"), DEFAULT_CHANNEL_OPTIONS),
+        # channel 必须完全由调用方提供，缺失或空范围不能回填服务端默认值。
+        "channel": _normalize_range_list(request_params.get("channel"), []),
         "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
         "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
-        "secrets": _normalize_range_list(request_params.get("secrets"), DEFAULT_SECRET_OPTIONS),
+        "security": _normalize_range_list(request_params.get("security"), DEFAULT_SECURITY_OPTIONS),
         "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
         "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
     }
@@ -379,7 +373,7 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
     return ""
 
 
-def _default_secret_value(options: Iterable[Dict[str, Any]]) -> str:
+def _default_security_value(options: Iterable[Dict[str, Any]]) -> str:
     matched = _match_option_value("公开", options)
     if matched:
         return matched
@@ -668,14 +662,14 @@ def _opening_text(original_text: str, *, max_chars: int = 2000, max_lines: int =
     return original_text[:max_chars]
 
 
-def _extract_secret_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
+def _extract_security_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
     opening = _opening_text(original_text)
     if not opening:
         return ""
     lines = [line.strip() for line in opening.splitlines() if line.strip()]
-    secret_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
+    security_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
     for line in lines:
-        if not secret_label_pattern.search(line):
+        if not security_label_pattern.search(line):
             continue
         matched = _match_option_value_from_text(options, line)
         if matched:
@@ -774,9 +768,9 @@ def map_analysis_result(
     raw_country = _first_non_empty_value(parsed_result, "country", "国家")
     raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
     raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
-    raw_secrets = _first_non_empty_value(parsed_result, "secrets", "secret", "密级", "密级程度")
-    if raw_secrets in (None, "", [], {}):
-        raw_secrets = _first_non_empty_value(file_item, "secrets", "secret", "密级", "密级程度")
+    raw_security = _first_non_empty_value(parsed_result, "security", "密级", "密级程度")
+    if raw_security in (None, "", [], {}):
+        raw_security = _first_non_empty_value(file_item, "security", "密级", "密级程度")
     raw_format = _first_non_empty_value(parsed_result, "format", "格式")
     if raw_format in (None, "", [], {}):
         raw_format = _first_non_empty_value(file_item, "dataFormat", "资料格式")
@@ -784,14 +778,14 @@ def map_analysis_result(
     resolved_country = _match_option_value(raw_country, ranges["country"])
     resolved_channel = _match_option_value(raw_channel, ranges["channel"])
     resolved_maturity = _match_option_value(raw_maturity, ranges["maturity"])
-    resolved_secrets = _match_option_value(raw_secrets, ranges["secrets"])
+    resolved_security = _match_option_value(raw_security, ranges["security"])
     resolved_format = _match_option_value(raw_format, ranges["format"])
 
     for field_name, raw_value, resolved_value in (
         ("country", raw_country, resolved_country),
         ("channel", raw_channel, resolved_channel),
         ("maturity", raw_maturity, resolved_maturity),
-        ("secrets", raw_secrets, resolved_secrets),
+        ("security", raw_security, resolved_security),
         ("format", raw_format, resolved_format),
     ):
         if raw_value not in (None, "", [], {}) and not resolved_value:
@@ -857,10 +851,10 @@ def map_analysis_result(
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
-        "secrets": (
-            resolved_secrets
-            or _extract_secret_from_opening_text(normalized_original_text, ranges["secrets"])
-            or _default_secret_value(ranges["secrets"])
+        "security": (
+            resolved_security
+            or _extract_security_from_opening_text(normalized_original_text, ranges["security"])
+            or _default_security_value(ranges["security"])
         ),
         "format": resolved_format,
         "architectureId": architecture_id,
@@ -984,7 +978,7 @@ class AnalysisContractError(ValueError):
 
 
 class ArchitectureContractError(AnalysisContractError):
-    """architectureId 缺失、类型错误、非叶子或超出候选范围。"""
+    """architectureId 缺失、类型错误或超出请求候选范围。"""
 
 
 def _reject_nonstandard_json_constant(value: str) -> None:
@@ -998,7 +992,7 @@ def _parse_strict_json_object(raw_result: Any) -> Dict[str, Any] | None:
     旧实现会从任意文本中截取最外层花括号并反复补 ``}``。这种做法可能把截断回答误判
     为有效业务数据。阶段 9 改为显式发起一次 ``JSON_REPAIR`` 模型调用，因此本地解析器
     必须保持确定性：语法不合法就返回 ``None``，由编排层决定是否修复；合法的空对象
-    仍交给业务契约校验并按 ``business_contract`` 失败，不能伪装成语法问题。
+    则继续进入宽松字段映射和独立的 architectureId 契约处理，不能伪装成语法问题。
     """
     if isinstance(raw_result, dict):
         try:
@@ -1027,87 +1021,13 @@ def _parse_strict_json_object(raw_result: Any) -> Dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _option_values(options: Iterable[Dict[str, Any]]) -> set[str]:
-    """提取非空候选 value；key 仅是请求编码，不属于模型输出契约。"""
-    return {
-        value
-        for item in options
-        if isinstance(item, dict) and (value := _as_text(item.get("value")))
-    }
-
-
-def _validate_analysis_model_contract(
-        parsed_result: Dict[str, Any],
-        request_params: Dict[str, Any],
-) -> Dict[str, Any]:
-    """校验并规范化 architecture 之外的文件分析模型契约。
-
-    五个枚举字段在缺少文档证据时允许为空；一旦模型返回非空值，则必须与请求候选的
-    ``value`` 精确相等。这里不接受候选 key、对象或相似字符串，也不通过正文猜测替换
-    模型返回值，防止“合法化”语义错误。architecture 单独校验，以便只对该字段执行一次
-    受控修复。
-    """
-    if not isinstance(parsed_result, dict) or not parsed_result:
-        raise AnalysisContractError("模型结果必须是非空 JSON 对象")
-    required_keys = {
-        "country",
-        "channel",
-        "maturity",
-        "secrets",
-        "format",
-        "fileDataItem",
-    }
-    missing_keys = sorted(required_keys.difference(parsed_result))
-    if missing_keys:
-        raise AnalysisContractError(
-            f"模型结果缺少必需顶层字段: {', '.join(missing_keys)}"
-        )
-    allowed_keys = required_keys | {"architectureId"}
-    unknown_keys = sorted(set(parsed_result).difference(allowed_keys))
-    if unknown_keys:
-        raise AnalysisContractError(
-            f"模型结果包含未知顶层字段: {', '.join(unknown_keys)}"
-        )
-    file_item = parsed_result.get("fileDataItem")
-    if not isinstance(file_item, dict):
-        raise AnalysisContractError("fileDataItem 必须是 JSON 对象")
-
-    normalized = dict(parsed_result)
-    normalized_file_item = dict(file_item)
-    ranges = build_effective_analysis_ranges(request_params)
-    for field_name in ("country", "channel", "maturity", "secrets", "format"):
-        raw_value = parsed_result.get(field_name)
-        if raw_value in (None, ""):
-            normalized[field_name] = ""
-            continue
-        if not isinstance(raw_value, str):
-            raise AnalysisContractError(f"{field_name} 必须是候选 value 字符串或空字符串")
-        value = raw_value.strip()
-        if value not in _option_values(ranges[field_name]):
-            raise AnalysisContractError(f"{field_name} 不属于请求候选 value")
-        normalized[field_name] = value
-
-    raw_data_format = normalized_file_item.get("dataFormat")
-    if raw_data_format in (None, ""):
-        normalized_file_item["dataFormat"] = normalized["format"]
-    elif not isinstance(raw_data_format, str):
-        raise AnalysisContractError("fileDataItem.dataFormat 必须是字符串")
-    elif raw_data_format.strip() != normalized["format"]:
-        raise AnalysisContractError("fileDataItem.dataFormat 必须与顶层 format 完全一致")
-    else:
-        normalized_file_item["dataFormat"] = raw_data_format.strip()
-    normalized["fileDataItem"] = normalized_file_item
-    return normalized
-
-
 def _architecture_candidates(
         request_params: Dict[str, Any],
 ) -> tuple[list[Dict[str, Any]], set[int]]:
-    """返回有效候选及当前候选图中的叶子 ID 集合。
+    """返回请求中的有效候选及其全部 ID。
 
     当请求只携带一个节点时，无论它在完整体系中是否还有子节点，都按阶段 9 契约直接
-    使用该唯一 ID。多候选时，只排除当前候选列表中明确拥有子节点的节点，避免根据缺失
-    的完整树结构猜测叶子关系。
+    使用该唯一 ID。多候选时允许模型选择请求中任意候选节点，不再由服务端强制要求叶子。
     """
     items: list[Dict[str, Any]] = []
     ids: set[int] = set()
@@ -1123,17 +1043,7 @@ def _architecture_candidates(
         items.append(item)
     if not items:
         raise AnalysisContractError("architectureList 不包含有效候选")
-    if len(ids) == 1:
-        return items, set(ids)
-    parent_ids = {
-        parent_id
-        for item in items
-        if (parent_id := _coerce_int(item.get("parentId"))) in ids
-    }
-    leaf_ids = ids.difference(parent_ids)
-    if not leaf_ids:
-        raise AnalysisContractError("architectureList 无法形成有效叶子候选")
-    return items, leaf_ids
+    return items, ids
 
 
 def _resolve_analysis_architecture_id(
@@ -1150,8 +1060,28 @@ def _resolve_analysis_architecture_id(
     if isinstance(raw_id, bool) or not isinstance(raw_id, int):
         raise ArchitectureContractError("architectureId 必须是数字 ID")
     if raw_id not in allowed_ids:
-        raise ArchitectureContractError("architectureId 不是允许的叶子候选 ID")
+        raise ArchitectureContractError("architectureId 不属于请求 architectureList 候选")
     return raw_id
+
+
+def _match_gjb_architecture_candidate(
+        parsed_result: Dict[str, Any],
+        request_params: Dict[str, Any],
+        original_text: str,
+        candidates: Iterable[Dict[str, Any]],
+) -> int | None:
+    """首次分类不合规时，按正文和摘要线索匹配请求中的数据标准候选。"""
+    file_item = parsed_result.get("fileDataItem")
+    if not isinstance(file_item, dict):
+        file_item = {}
+    return _match_data_standard_architecture_id(
+        candidates,
+        original_text,
+        request_params.get("originalFileName"),
+        _resolve_field(parsed_result, file_item, "summary", "摘要"),
+        _first_non_empty_value(file_item, "keyword", "keywords", "关键词"),
+        _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
+    )
 
 
 def _validate_architecture_repair_result(
@@ -1427,7 +1357,7 @@ def _store_prepared_analysis_document(
         )
     attributes = {
         key: mapped_result.get(key, "")
-        for key in ("country", "channel", "maturity", "secrets", "format")
+        for key in ("country", "channel", "maturity", "security", "format")
     }
     metadata = KnowledgeDocumentMetadata(
         file_name=file_name,
@@ -1646,54 +1576,55 @@ def _execute_file_analysis_task(
                 if parsed_result is None:
                     raise AnalysisContractError("JSON 修复后仍不是严格 JSON 对象")
 
-            normalized_result = _validate_analysis_model_contract(
-                parsed_result,
-                params,
-            )
+            original_text = _read_original_text(llm_file_path)
             try:
                 architecture_id = _resolve_analysis_architecture_id(
-                    normalized_result,
+                    parsed_result,
                     params,
                 )
             except ArchitectureContractError as contract_error:
                 candidates, allowed_ids = _architecture_candidates(params)
-                final_prompt = normalize_rag_prompt(
-                    build_architecture_repair_prompt(
-                        normalized_result,
-                        [
-                            item
-                            for item in candidates
-                            if _coerce_int(item.get("id")) in allowed_ids
-                        ],
-                        str(contract_error),
-                    )
-                )
-                repaired_result = session.ask(
-                    final_prompt,
-                    prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
-                    require_sources=True,
-                    max_attempts=1,
-                )
-                architecture_id = _validate_architecture_repair_result(
-                    repaired_result.text,
+                architecture_id = _match_gjb_architecture_candidate(
+                    parsed_result,
                     params,
+                    original_text,
+                    candidates,
                 )
-            normalized_result["architectureId"] = architecture_id
-            original_text = _read_original_text(llm_file_path)
+                if architecture_id is not None:
+                    logger.info(
+                        "architectureId 首次结果不合规，按 GJB 正文线索命中请求候选: "
+                        "file_name=%s architecture_id=%s",
+                        file_name,
+                        architecture_id,
+                    )
+                else:
+                    final_prompt = normalize_rag_prompt(
+                        build_architecture_repair_prompt(
+                            parsed_result,
+                            [
+                                item
+                                for item in candidates
+                                if _coerce_int(item.get("id")) in allowed_ids
+                            ],
+                            str(contract_error),
+                        )
+                    )
+                    repaired_result = session.ask(
+                        final_prompt,
+                        prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                        require_sources=True,
+                        max_attempts=1,
+                    )
+                    architecture_id = _validate_architecture_repair_result(
+                        repaired_result.text,
+                        params,
+                    )
             mapped_result = map_analysis_result(
-                normalized_result,
+                parsed_result,
                 params,
                 original_text=original_text,
                 resolved_architecture_id=architecture_id,
             )
-            # legacy 映射器默认仍保留 GJB 文本启发式。正式阶段 9 链路显式传入已经完成
-            # 候选契约校验的 ID 和枚举值，禁止映射器通过正文关键词或兼容别名静默补值。
-            mapped_result["architectureId"] = architecture_id
-            for enum_field in ("country", "channel", "maturity", "format"):
-                mapped_result[enum_field] = normalized_result[enum_field]
-            if normalized_result.get("secrets"):
-                mapped_result["secrets"] = normalized_result["secrets"]
-            mapped_result["fileDataItem"]["dataFormat"] = normalized_result["format"]
         except Exception as exc:
             trace = exc.trace if isinstance(exc, RagOperationError) else (
                 session.trace if session is not None else None
