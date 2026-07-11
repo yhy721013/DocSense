@@ -1,4 +1,4 @@
-"""Domain events emitted by file-chat application services."""
+"""文件对话应用服务产出的领域事件。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 @dataclass(frozen=True)
 class ChatStreamEvent:
-    """Supplier-neutral event for one file-chat stream."""
+    """单个文件对话流使用的供应商无关事件。"""
 
     event_type: str
     data: Mapping[str, Any] = field(default_factory=dict)

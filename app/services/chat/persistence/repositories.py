@@ -1,16 +1,23 @@
-"""SQLite repositories for the file-chat local authority tables."""
+"""文件对话本地权威表的 SQLite 仓储实现。"""
 
 from __future__ import annotations
 
 import json
 import logging
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from app.services.chat.domain.models import (
+    CLEANUP_JOB_FAILED,
+    CLEANUP_JOB_PENDING,
+    CLEANUP_JOB_REASONS,
+    CLEANUP_JOB_RUNNING,
+    CLEANUP_JOB_STATUSES,
+    CLEANUP_JOB_SUCCEEDED,
     MESSAGE_COMMITTED,
     MESSAGE_DISCARDED,
     MESSAGE_PENDING,
@@ -25,11 +32,17 @@ from app.services.chat.domain.models import (
     RUN_SUCCEEDED,
     RUN_TERMINAL_STATUSES,
     SESSION_ACTIVE,
+    SESSION_DELETED,
+    SESSION_DELETING,
+    SESSION_ERROR,
     SESSION_STATUSES,
-    ChatDocument,
+    ChatDocumentBinding,
+    ChatCleanupJob,
     ChatMessage,
     ChatMessageFile,
     ChatRun,
+    ChatRunInput,
+    ChatRunInputFile,
     ChatSession,
 )
 
@@ -49,6 +62,13 @@ _MESSAGE_STATUS_TRANSITIONS = {
     MESSAGE_PENDING: frozenset({MESSAGE_COMMITTED, MESSAGE_DISCARDED}),
     MESSAGE_COMMITTED: frozenset(),
     MESSAGE_DISCARDED: frozenset(),
+}
+
+_SESSION_STATUS_TRANSITIONS = {
+    SESSION_ACTIVE: frozenset({SESSION_DELETING}),
+    SESSION_DELETING: frozenset({SESSION_DELETED, SESSION_ERROR}),
+    SESSION_ERROR: frozenset({SESSION_DELETING}),
+    SESSION_DELETED: frozenset(),
 }
 
 
@@ -90,10 +110,20 @@ def _json_loads_object(value: str) -> dict[str, Any]:
     return loaded
 
 
+def _json_loads_list(value: str) -> list[Any]:
+    loaded = json.loads(value or "[]")
+    if not isinstance(loaded, list):
+        raise ValueError("files_json must be a JSON array")
+    return loaded
+
+
 def _connect(db_path: str, *, timeout_seconds: float = 5.0) -> sqlite3.Connection:
     connection = sqlite3.connect(db_path, timeout=max(0.0, timeout_seconds))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    # 有界忙等待超时可使受支持的单实例模式中短暂写入冲突的结果确定。它不能替代队列
+    # 或分布式锁，但可避免相邻请求提交短事务时 SQLite 立即失败。
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
 
@@ -111,245 +141,423 @@ def _connection_scope(db_path: str) -> Iterator[sqlite3.Connection]:
 
 
 def ensure_chat_schema(db_path: str) -> None:
-    """Create all stage-3 chat tables and indexes without mutating old `chats`."""
+    """按顺序应用对话模块的 SQLite 架构迁移。
+
+    当前应用仅支持单个 SQLite 实例，但架构仍需要明确的版本历史。在启动时反复执行
+    无名 ``CREATE TABLE`` 语句，会使人无法判断数据库实际包含哪个数据模型。因此每次
+    新增结构性变更都必须以下方带编号的迁移形式加入。
+    """
     normalized_path = _required_text(db_path, name="db_path")
     Path(normalized_path).parent.mkdir(parents=True, exist_ok=True)
     with _connection_scope(normalized_path) as connection:
+        # WAL 在保留既定单写入者语义的同时改善并发读取。部署说明已禁止将该数据库文件
+        # 放在网络共享目录中。
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-                chat_id TEXT PRIMARY KEY,
-                workspace_ref TEXT NOT NULL DEFAULT '',
-                thread_ref TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL CHECK (
-                    status IN ('active', 'deleting', 'deleted', 'error')
-                ),
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                metadata_json TEXT NOT NULL DEFAULT '{}'
+            CREATE TABLE IF NOT EXISTS chat_schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
             )
             """
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_runs (
-                run_id TEXT PRIMARY KEY,
-                chat_id TEXT NOT NULL,
-                request_id TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL CHECK (
-                    status IN (
-                        'accepted', 'running', 'succeeded', 'failed', 'aborted'
-                    )
-                ),
-                abort_requested INTEGER NOT NULL DEFAULT 0 CHECK (
-                    abort_requested IN (0, 1)
-                ),
-                owner_instance_id TEXT NOT NULL DEFAULT '',
-                heartbeat_at TEXT,
-                error_message TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                started_at TEXT,
-                completed_at TEXT,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
-                    ON DELETE CASCADE
+        applied_versions = {
+            int(row["version"])
+            for row in connection.execute(
+                "SELECT version FROM chat_schema_migrations"
+            ).fetchall()
+        }
+        for version, migration in _CHAT_SCHEMA_MIGRATIONS:
+            if version in applied_versions:
+                continue
+            migration(connection)
+            connection.execute(
+                "INSERT INTO chat_schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, _utc_now_iso()),
             )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_documents (
-                chat_id TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                original_name TEXT NOT NULL DEFAULT '',
-                document_ref TEXT NOT NULL DEFAULT '',
-                external_location TEXT NOT NULL DEFAULT '',
-                added_by_run_id TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                UNIQUE(chat_id, file_name),
-                FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
-                    ON DELETE CASCADE
+            logger.info(
+                "已应用文件对话SQLite schema migration: version=%s db_path=%s",
+                version,
+                normalized_path,
             )
-            """
+
+
+def _create_chat_authority_schema(connection: sqlite3.Connection) -> None:
+    """为全新的开发数据库创建首版权威对话架构。"""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            chat_id TEXT PRIMARY KEY,
+            workspace_ref TEXT NOT NULL DEFAULT '',
+            thread_ref TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK (
+                status IN ('active', 'deleting', 'deleted', 'error')
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                message_id TEXT PRIMARY KEY,
-                chat_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                content TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (
-                    status IN ('pending', 'committed', 'discarded')
-                ),
-                sequence_no INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(chat_id, sequence_no),
-                FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
-                    ON DELETE CASCADE,
-                FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
-                    ON DELETE CASCADE
-            )
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_runs (
+            run_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('accepted', 'running', 'succeeded', 'failed', 'aborted')
+            ),
+            abort_requested INTEGER NOT NULL DEFAULT 0 CHECK (
+                abort_requested IN (0, 1)
+            ),
+            owner_instance_id TEXT NOT NULL DEFAULT '',
+            heartbeat_at TEXT,
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_message_files (
-                message_id TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                original_name TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY(message_id, file_name),
-                FOREIGN KEY(message_id) REFERENCES chat_messages(message_id)
-                    ON DELETE CASCADE
-            )
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_run_inputs (
+            run_id TEXT PRIMARY KEY,
+            message TEXT NOT NULL,
+            files_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chat_resource_leases (
-                lease_id TEXT PRIMARY KEY,
-                chat_id TEXT NOT NULL,
-                run_id TEXT NOT NULL DEFAULT '',
-                resource_type TEXT NOT NULL CHECK (
-                    resource_type IN ('workspace', 'thread', 'document_binding')
-                ),
-                external_ref TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL CHECK (
-                    status IN (
-                        'planned', 'active', 'cleanup_pending',
-                        'closed', 'cleanup_failed'
-                    )
-                ),
-                error_message TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
-                    ON DELETE CASCADE
-            )
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_run_events (
+            run_id TEXT NOT NULL,
+            event_seq INTEGER NOT NULL CHECK (event_seq > 0),
+            event_type TEXT NOT NULL,
+            data_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(run_id, event_seq),
+            FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_runs_chat_status
-            ON chat_runs (chat_id, status, updated_at)
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_document_bindings (
+            binding_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            document_ref TEXT NOT NULL,
+            external_location TEXT NOT NULL DEFAULT '',
+            added_by_run_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(chat_id, file_name, document_ref),
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_runs_request_id
-            ON chat_runs (request_id)
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_document_heads (
+            chat_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            binding_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(chat_id, file_name),
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(binding_id) REFERENCES chat_document_bindings(binding_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_documents_chat
-            ON chat_documents (chat_id, created_at)
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            message_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('pending', 'committed', 'discarded')
+            ),
+            sequence_no INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(chat_id, sequence_no),
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(run_id) REFERENCES chat_runs(run_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_sequence
-            ON chat_messages (chat_id, sequence_no)
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_message_files (
+            message_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            original_name TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(message_id, file_name),
+            FOREIGN KEY(message_id) REFERENCES chat_messages(message_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_chat_resource_leases_status
-            ON chat_resource_leases (status, updated_at)
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_resource_leases (
+            lease_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            run_id TEXT NOT NULL DEFAULT '',
+            resource_type TEXT NOT NULL CHECK (
+                resource_type IN ('workspace', 'thread', 'document_binding')
+            ),
+            external_ref TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'planned', 'active', 'cleanup_pending',
+                    'closed', 'cleanup_failed'
+                )
+            ),
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_documents_run_chat_insert
-            BEFORE INSERT ON chat_documents
-            WHEN NEW.added_by_run_id != '' AND NOT EXISTS (
-                SELECT 1 FROM chat_runs
-                WHERE run_id = NEW.added_by_run_id
-                  AND chat_id = NEW.chat_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_document run_id does not belong to chat_id');
-            END
-            """
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_cleanup_jobs (
+            job_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            lease_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK (
+                status IN ('pending', 'running', 'succeeded', 'failed')
+            ),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+            next_attempt_at TEXT NOT NULL,
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE
         )
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_documents_run_chat_update
-            BEFORE UPDATE OF chat_id, added_by_run_id ON chat_documents
-            WHEN NEW.added_by_run_id != '' AND NOT EXISTS (
-                SELECT 1 FROM chat_runs
-                WHERE run_id = NEW.added_by_run_id
-                  AND chat_id = NEW.chat_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_document run_id does not belong to chat_id');
-            END
-            """
+        """
+    )
+
+
+def _add_chat_constraints_and_indexes(connection: sqlite3.Connection) -> None:
+    """添加约束，防止绕过应用服务直接写入时破坏不变量。"""
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_runs_one_active_per_chat
+        ON chat_runs (chat_id)
+        WHERE status IN ('accepted', 'running')
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_runs_chat_status
+        ON chat_runs (chat_id, status, updated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_run_inputs_created_at
+        ON chat_run_inputs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_run_events_terminal
+        ON chat_run_events (run_id)
+        WHERE event_type IN ('done', 'error', 'aborted')
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_document_bindings_chat
+        ON chat_document_bindings (chat_id, file_name, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_sequence
+        ON chat_messages (chat_id, sequence_no)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_resource_leases_status
+        ON chat_resource_leases (status, updated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_cleanup_jobs_open
+        ON chat_cleanup_jobs (chat_id, reason)
+        WHERE status IN ('pending', 'running')
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_chat_cleanup_jobs_ready
+        ON chat_cleanup_jobs (status, next_attempt_at)
+        """
+    )
+
+
+def _add_integrity_triggers_and_refine_cleanup_job_identity(
+    connection: sqlite3.Connection,
+) -> None:
+    """同时安装完整性触发器并细化清理任务身份。
+
+    一个对话可能存在多个尚未清理的临时标题线程。原先的 ``(chat_id, reason)`` 键会
+    错误合并这些相互独立的清理任务。``lease_id`` 是持久化任务身份的一部分；而对话删除
+    仍使用空租约 ID，因此每个对话仍保持唯一。
+    """
+    connection.execute("DROP INDEX IF EXISTS uq_chat_cleanup_jobs_open")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_cleanup_jobs_open
+        ON chat_cleanup_jobs (chat_id, reason, lease_id)
+        WHERE status IN ('pending', 'running')
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_document_bindings_run_chat_insert
+        BEFORE INSERT ON chat_document_bindings
+        WHEN NEW.added_by_run_id != '' AND NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.added_by_run_id AND chat_id = NEW.chat_id
         )
-        logger.debug("文件对话本地权威表结构已确认: db_path=%s", normalized_path)
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_insert
-            BEFORE INSERT ON chat_messages
-            WHEN NOT EXISTS (
-                SELECT 1 FROM chat_runs
-                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_message run_id does not belong to chat_id');
-            END
-            """
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_document_binding run_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_document_bindings_run_chat_update
+        BEFORE UPDATE OF chat_id, added_by_run_id ON chat_document_bindings
+        WHEN NEW.added_by_run_id != '' AND NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.added_by_run_id AND chat_id = NEW.chat_id
         )
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_update
-            BEFORE UPDATE OF chat_id, run_id ON chat_messages
-            WHEN NOT EXISTS (
-                SELECT 1 FROM chat_runs
-                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_message run_id does not belong to chat_id');
-            END
-            """
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_document_binding run_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_document_heads_binding_chat
+        BEFORE INSERT ON chat_document_heads
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_document_bindings
+            WHERE binding_id = NEW.binding_id AND chat_id = NEW.chat_id
         )
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_run_chat_insert
-            BEFORE INSERT ON chat_resource_leases
-            WHEN NEW.run_id != '' AND NOT EXISTS (
-                SELECT 1 FROM chat_runs
-                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_resource_lease run_id does not belong to chat_id');
-            END
-            """
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_document_head binding_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_document_heads_binding_chat_update
+        BEFORE UPDATE OF chat_id, binding_id ON chat_document_heads
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_document_bindings
+            WHERE binding_id = NEW.binding_id AND chat_id = NEW.chat_id
         )
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_run_chat_update
-            BEFORE UPDATE OF chat_id, run_id ON chat_resource_leases
-            WHEN NEW.run_id != '' AND NOT EXISTS (
-                SELECT 1 FROM chat_runs
-                WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_resource_lease run_id does not belong to chat_id');
-            END
-            """
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_document_head binding_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_insert
+        BEFORE INSERT ON chat_messages
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
         )
-        connection.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_external_ref_immutable
-            BEFORE UPDATE OF external_ref ON chat_resource_leases
-            WHEN OLD.external_ref != '' AND NEW.external_ref != OLD.external_ref
-            BEGIN
-                SELECT RAISE(ABORT, 'chat_resource_lease external_ref is immutable');
-            END
-            """
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_message run_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_messages_run_chat_update
+        BEFORE UPDATE OF chat_id, run_id ON chat_messages
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
         )
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_message run_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_run_chat_insert
+        BEFORE INSERT ON chat_resource_leases
+        WHEN NEW.run_id != '' AND NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_resource_lease run_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_run_chat_update
+        BEFORE UPDATE OF chat_id, run_id ON chat_resource_leases
+        WHEN NEW.run_id != '' AND NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.run_id AND chat_id = NEW.chat_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_resource_lease run_id does not belong to chat_id');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_chat_resource_leases_external_ref_immutable
+        BEFORE UPDATE OF external_ref ON chat_resource_leases
+        WHEN OLD.external_ref != '' AND NEW.external_ref != OLD.external_ref
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_resource_lease external_ref is immutable');
+        END
+        """
+    )
+
+
+_CHAT_SCHEMA_MIGRATIONS = (
+    (1, _create_chat_authority_schema),
+    (2, _add_chat_constraints_and_indexes),
+    (3, _add_integrity_triggers_and_refine_cleanup_job_identity),
+)
 
 
 class _Repository:
@@ -365,7 +573,7 @@ class _Repository:
 
 
 class ChatSessionRepository(_Repository):
-    """Repository for `chat_sessions`."""
+    """`chat_sessions` 表的仓储。"""
 
     def create_or_get(
         self,
@@ -400,6 +608,13 @@ class ChatSessionRepository(_Repository):
                 )
                 if existing["status"] != normalized_status:
                     raise ValueError("chat_session status 冲突")
+                if existing["status"] != SESSION_ACTIVE and (
+                    (normalized_workspace and normalized_workspace != existing["workspace_ref"])
+                    or (normalized_thread and normalized_thread != existing["thread_ref"])
+                ):
+                    raise ValueError(
+                        "chat_session remote references can only change while active"
+                    )
                 existing_metadata = _json_loads_object(existing["metadata_json"])
                 merged_metadata = dict(existing_metadata)
                 for key, value in (metadata or {}).items():
@@ -483,6 +698,16 @@ class ChatSessionRepository(_Repository):
             ).fetchone()
         return self._row(row) if row is not None else None
 
+    def list_all(self) -> tuple[ChatSession, ...]:
+        with _connection_scope(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chat_sessions
+                ORDER BY updated_at DESC, chat_id ASC
+                """
+            ).fetchall()
+        return tuple(self._row(row) for row in rows)
+
     def update_refs(
         self,
         *,
@@ -499,6 +724,10 @@ class ChatSessionRepository(_Repository):
             ).fetchone()
             if row is None:
                 raise ValueError("chat_session 不存在")
+            if row["status"] != SESSION_ACTIVE:
+                raise ValueError(
+                    "chat_session remote references can only change while active"
+                )
             connection.execute(
                 """
                 UPDATE chat_sessions
@@ -541,13 +770,33 @@ class ChatSessionRepository(_Repository):
             allowed=SESSION_STATUSES,
         )
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT * FROM chat_sessions WHERE chat_id = ?",
+                (normalized_chat_id,),
+            ).fetchone()
+            if current is None:
+                raise ValueError("chat_session does not exist")
+            current_status = current["status"]
+            if current_status == normalized_status:
+                return self._row(current)
+            if normalized_status not in _SESSION_STATUS_TRANSITIONS[current_status]:
+                raise ValueError(
+                    "illegal chat_session status transition: "
+                    f"{current_status} -> {normalized_status}"
+                )
             connection.execute(
                 """
                 UPDATE chat_sessions
                 SET status = ?, updated_at = ?
-                WHERE chat_id = ?
+                WHERE chat_id = ? AND status = ?
                 """,
-                (normalized_status, _utc_now_iso(), normalized_chat_id),
+                (
+                    normalized_status,
+                    _utc_now_iso(),
+                    normalized_chat_id,
+                    current_status,
+                ),
             )
             logger.info(
                 "更新文件对话会话状态: chat_id=%s status=%s",
@@ -587,24 +836,38 @@ class ChatSessionRepository(_Repository):
         )
 
 
-class ChatDocumentRepository(_Repository):
-    """Repository for `chat_documents`."""
+class ChatDocumentBindingRepository(_Repository):
+    """持久化不可变文档版本及当前版本投影。
+
+    业务文件名在同一个对话中刻意不唯一：上传替换文档会生成不同的 ``document_ref``。
+    历史绑定保持不可变，以供审计和清理；头表决定后续轮次默认选择哪个版本。
+    """
 
     def add(
         self,
         *,
         chat_id: str,
         file_name: str,
-        original_name: str = "",
-        document_ref: str = "",
+        original_name: str,
+        document_ref: str,
         external_location: str = "",
         added_by_run_id: str = "",
-    ) -> ChatDocument:
+    ) -> ChatDocumentBinding:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_file_name = _required_text(file_name, name="file_name")
+        normalized_original_name = _required_text(
+            original_name,
+            name="original_name",
+        )
+        normalized_document_ref = _required_text(
+            document_ref,
+            name="document_ref",
+        )
+        normalized_location = _optional_text(external_location)
         normalized_added_by_run_id = _optional_text(added_by_run_id)
         now = _utc_now_iso()
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             if normalized_added_by_run_id:
                 run_row = connection.execute(
                     "SELECT chat_id FROM chat_runs WHERE run_id = ?",
@@ -613,89 +876,144 @@ class ChatDocumentRepository(_Repository):
                 if run_row is None:
                     raise ValueError("added_by_run_id 对应的 chat_run 不存在")
                 if run_row["chat_id"] != normalized_chat_id:
-                    raise ValueError("chat_document run_id 不属于当前 chat_id")
-            connection.execute(
+                    raise ValueError(
+                        "chat_document_binding run_id 不属于当前 chat_id"
+                    )
+            existing = connection.execute(
                 """
-                INSERT INTO chat_documents (
-                    chat_id, file_name, original_name, document_ref,
-                    external_location, added_by_run_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(chat_id, file_name) DO UPDATE SET
-                    original_name = CASE
-                        WHEN excluded.original_name != ''
-                        THEN excluded.original_name
-                        ELSE chat_documents.original_name
-                    END,
-                    document_ref = CASE
-                        WHEN excluded.document_ref != ''
-                        THEN excluded.document_ref
-                        ELSE chat_documents.document_ref
-                    END,
-                    external_location = CASE
-                        WHEN excluded.external_location != ''
-                        THEN excluded.external_location
-                        ELSE chat_documents.external_location
-                    END,
-                    added_by_run_id = CASE
-                        WHEN chat_documents.added_by_run_id != ''
-                        THEN chat_documents.added_by_run_id
-                        ELSE excluded.added_by_run_id
-                    END
+                SELECT * FROM chat_document_bindings
+                WHERE chat_id = ? AND file_name = ? AND document_ref = ?
                 """,
                 (
                     normalized_chat_id,
                     normalized_file_name,
-                    _optional_text(original_name),
-                    _optional_text(document_ref),
-                    _optional_text(external_location),
-                    normalized_added_by_run_id,
+                    normalized_document_ref,
+                ),
+            ).fetchone()
+            if existing is None:
+                binding_id = uuid.uuid4().hex
+                connection.execute(
+                    """
+                    INSERT INTO chat_document_bindings (
+                        binding_id, chat_id, file_name, original_name,
+                        document_ref, external_location, added_by_run_id,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        binding_id,
+                        normalized_chat_id,
+                        normalized_file_name,
+                        normalized_original_name,
+                        normalized_document_ref,
+                        normalized_location,
+                        normalized_added_by_run_id,
+                        now,
+                    ),
+                )
+                binding = self._get_by_id_with_connection(
+                    connection,
+                    binding_id=binding_id,
+                )
+            else:
+                binding = self._row(existing)
+                self._reject_identity_conflict(
+                    binding,
+                    original_name=normalized_original_name,
+                    external_location=normalized_location,
+                )
+            connection.execute(
+                """
+                INSERT INTO chat_document_heads (
+                    chat_id, file_name, binding_id, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, file_name) DO UPDATE SET
+                    binding_id = excluded.binding_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_chat_id,
+                    normalized_file_name,
+                    binding.binding_id,
                     now,
                 ),
             )
             logger.info(
-                "绑定文件到本地对话: chat_id=%s file_name=%s original_name=%s added_by_run_id=%s",
+                "绑定文件revision到本地对话: chat_id=%s file_name=%s document_ref=%s binding_id=%s",
                 normalized_chat_id,
                 normalized_file_name,
-                _optional_text(original_name),
-                normalized_added_by_run_id,
+                normalized_document_ref,
+                binding.binding_id,
             )
-            return self._get_with_connection(
-                connection,
-                chat_id=normalized_chat_id,
-                file_name=normalized_file_name,
-            )
+            return binding
 
-    def list_by_chat(self, chat_id: str) -> tuple[ChatDocument, ...]:
+    def list_by_chat(self, chat_id: str) -> tuple[ChatDocumentBinding, ...]:
+        """返回全部历史绑定，供审计和清理使用。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         with _connection_scope(self.db_path) as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM chat_documents
+                SELECT * FROM chat_document_bindings
                 WHERE chat_id = ?
-                ORDER BY created_at ASC, file_name ASC
+                ORDER BY created_at ASC, file_name ASC, binding_id ASC
                 """,
                 (normalized_chat_id,),
             ).fetchall()
         return tuple(self._row(row) for row in rows)
 
-    def _get_with_connection(
+    def list_current_by_chat(
+        self,
+        chat_id: str,
+    ) -> tuple[ChatDocumentBinding, ...]:
+        """返回每个业务文件当前选中的最新版本。"""
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        with _connection_scope(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT binding.*
+                FROM chat_document_heads AS head
+                INNER JOIN chat_document_bindings AS binding
+                    ON binding.binding_id = head.binding_id
+                WHERE head.chat_id = ?
+                ORDER BY head.file_name ASC
+                """,
+                (normalized_chat_id,),
+            ).fetchall()
+        return tuple(self._row(row) for row in rows)
+
+    def _get_by_id_with_connection(
         self,
         connection: sqlite3.Connection,
         *,
-        chat_id: str,
-        file_name: str,
-    ) -> ChatDocument:
+        binding_id: str,
+    ) -> ChatDocumentBinding:
         row = connection.execute(
-            "SELECT * FROM chat_documents WHERE chat_id = ? AND file_name = ?",
-            (chat_id, file_name),
+            "SELECT * FROM chat_document_bindings WHERE binding_id = ?",
+            (binding_id,),
         ).fetchone()
         if row is None:
-            raise ValueError("chat_document 不存在")
+            raise ValueError("chat_document_binding 不存在")
         return self._row(row)
 
     @staticmethod
-    def _row(row: sqlite3.Row) -> ChatDocument:
-        return ChatDocument(
+    def _reject_identity_conflict(
+        binding: ChatDocumentBinding,
+        *,
+        original_name: str,
+        external_location: str,
+    ) -> None:
+        if (
+            binding.original_name != original_name
+            or binding.external_location != external_location
+        ):
+            raise ValueError(
+                "chat_document_binding identity conflicts with an existing revision"
+            )
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> ChatDocumentBinding:
+        return ChatDocumentBinding(
+            binding_id=row["binding_id"],
             chat_id=row["chat_id"],
             file_name=row["file_name"],
             original_name=row["original_name"],
@@ -707,14 +1025,13 @@ class ChatDocumentRepository(_Repository):
 
 
 class ChatRunRepository(_Repository):
-    """Repository for `chat_runs`."""
+    """`chat_runs` 表的仓储。"""
 
     def create(
         self,
         *,
         run_id: str,
         chat_id: str,
-        request_id: str = "",
         status: str = RUN_ACCEPTED,
         owner_instance_id: str = "",
     ) -> ChatRun:
@@ -738,7 +1055,6 @@ class ChatRunRepository(_Repository):
                 self._reject_identity_conflict(
                     existing,
                     chat_id=normalized_chat_id,
-                    request_id=_optional_text(request_id),
                     owner_instance_id=_optional_text(owner_instance_id),
                 )
                 logger.debug(
@@ -751,14 +1067,13 @@ class ChatRunRepository(_Repository):
             connection.execute(
                 """
                 INSERT INTO chat_runs (
-                    run_id, chat_id, request_id, status, owner_instance_id,
+                    run_id, chat_id, status, owner_instance_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_run_id,
                     normalized_chat_id,
-                    _optional_text(request_id),
                     normalized_status,
                     _optional_text(owner_instance_id),
                     now,
@@ -766,10 +1081,9 @@ class ChatRunRepository(_Repository):
                 ),
             )
             logger.info(
-                "创建文件对话run记录: chat_id=%s run_id=%s request_id=%s owner=%s status=%s",
+                "创建文件对话run记录: chat_id=%s run_id=%s owner=%s status=%s",
                 normalized_chat_id,
                 normalized_run_id,
-                _optional_text(request_id),
                 _optional_text(owner_instance_id),
                 normalized_status,
             )
@@ -943,13 +1257,10 @@ class ChatRunRepository(_Repository):
         row: sqlite3.Row,
         *,
         chat_id: str,
-        request_id: str,
         owner_instance_id: str,
     ) -> None:
         if row["chat_id"] != chat_id:
             raise ValueError("run_id is already bound to another chat_id")
-        if row["request_id"] != request_id:
-            raise ValueError("run_id is already bound to another request_id")
         if row["owner_instance_id"] != owner_instance_id:
             raise ValueError("run_id is already bound to another owner_instance_id")
 
@@ -969,7 +1280,6 @@ class ChatRunRepository(_Repository):
         return ChatRun(
             run_id=row["run_id"],
             chat_id=row["chat_id"],
-            request_id=row["request_id"],
             status=row["status"],
             abort_requested=bool(row["abort_requested"]),
             owner_instance_id=row["owner_instance_id"],
@@ -982,8 +1292,357 @@ class ChatRunRepository(_Repository):
         )
 
 
+class ChatRunInputRepository(_Repository):
+    """不可变请求时 `chat_run_inputs` 快照的仓储。"""
+
+    def get(self, run_id: str) -> ChatRunInput | None:
+        normalized_run_id = _required_text(run_id, name="run_id")
+        with _connection_scope(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM chat_run_inputs WHERE run_id = ?",
+                (normalized_run_id,),
+            ).fetchone()
+        return self._row(row) if row is not None else None
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> ChatRunInput:
+        files: list[ChatRunInputFile] = []
+        for index, raw_file in enumerate(_json_loads_list(row["files_json"])):
+            if not isinstance(raw_file, Mapping):
+                raise ValueError(f"chat_run_inputs.files_json[{index}] must be object")
+            files.append(
+                ChatRunInputFile(
+                    file_name=_required_text(
+                        str(raw_file.get("file_name") or ""),
+                        name="file_name",
+                    ),
+                    original_name=_required_text(
+                        str(raw_file.get("original_name") or ""),
+                        name="original_name",
+                    ),
+                    document_ref=_required_text(
+                        str(raw_file.get("document_ref") or ""),
+                        name="document_ref",
+                    ),
+                    external_location=_optional_text(
+                        str(raw_file.get("external_location") or ""),
+                    ),
+                )
+            )
+        return ChatRunInput(
+            run_id=row["run_id"],
+            message=row["message"],
+            files=tuple(files),
+            created_at=row["created_at"],
+        )
+
+
+class ChatCleanupJobRepository(_Repository):
+    """独立于 HTTP 请求持久化可重试的清理任务。
+
+    SQLite 实现刻意不宣称具备可靠的后台投递能力，但会保留足够状态，让未来调度器或
+    工作进程仅凭 ``job_id`` 领取同一条任务，而无需依赖捕获的 Python 回调。
+    """
+
+    def enqueue(
+        self,
+        *,
+        chat_id: str,
+        reason: str,
+        lease_id: str = "",
+    ) -> ChatCleanupJob:
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        normalized_reason = _required_text(reason, name="reason")
+        if normalized_reason not in CLEANUP_JOB_REASONS:
+            raise ValueError(f"cleanup reason is not supported: {normalized_reason}")
+        normalized_lease_id = _optional_text(lease_id)
+        now = _utc_now_iso()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT * FROM chat_cleanup_jobs
+                WHERE chat_id = ? AND reason = ? AND lease_id = ?
+                  AND status IN (?, ?, ?)
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (
+                    normalized_chat_id,
+                    normalized_reason,
+                    normalized_lease_id,
+                    CLEANUP_JOB_PENDING,
+                    CLEANUP_JOB_RUNNING,
+                    CLEANUP_JOB_FAILED,
+                ),
+            ).fetchone()
+            if existing is not None:
+                job = self._row(existing)
+                if job.lease_id != normalized_lease_id:
+                    raise ValueError("cleanup job identity conflicts with an existing open job")
+                if job.status == CLEANUP_JOB_FAILED:
+                    connection.execute(
+                        """
+                        UPDATE chat_cleanup_jobs
+                        SET status = ?, next_attempt_at = ?, error_message = '',
+                            updated_at = ?
+                        WHERE job_id = ? AND status = ?
+                        """,
+                        (
+                            CLEANUP_JOB_PENDING,
+                            now,
+                            now,
+                            job.job_id,
+                            CLEANUP_JOB_FAILED,
+                        ),
+                    )
+                    requeued = self._get_with_connection(
+                        connection,
+                        job_id=job.job_id,
+                    )
+                    logger.info(
+                        "已重新激活文件对话清理任务: job_id=%s chat_id=%s reason=%s previous_attempt_count=%d",
+                        requeued.job_id,
+                        requeued.chat_id,
+                        requeued.reason,
+                        job.attempt_count,
+                    )
+                    return requeued
+                logger.debug(
+                    "复用已存在的文件对话清理任务: job_id=%s chat_id=%s reason=%s status=%s",
+                    job.job_id,
+                    job.chat_id,
+                    job.reason,
+                    job.status,
+                )
+                return job
+            job_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO chat_cleanup_jobs (
+                    job_id, chat_id, reason, lease_id, status,
+                    attempt_count, next_attempt_at, error_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, '', ?, ?)
+                """,
+                (
+                    job_id,
+                    normalized_chat_id,
+                    normalized_reason,
+                    normalized_lease_id,
+                    CLEANUP_JOB_PENDING,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            created = self._get_with_connection(connection, job_id=job_id)
+            logger.info(
+                "已创建文件对话清理任务: job_id=%s chat_id=%s reason=%s has_lease=%s",
+                created.job_id,
+                created.chat_id,
+                created.reason,
+                bool(created.lease_id),
+            )
+            return created
+
+    def get(self, job_id: str) -> ChatCleanupJob | None:
+        normalized_job_id = _required_text(job_id, name="job_id")
+        with _connection_scope(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM chat_cleanup_jobs WHERE job_id = ?",
+                (normalized_job_id,),
+            ).fetchone()
+        return self._row(row) if row is not None else None
+
+    def claim(self, *, job_id: str) -> ChatCleanupJob:
+        """在同一事务中领取就绪任务并计入本次尝试。"""
+        normalized_job_id = _required_text(job_id, name="job_id")
+        now = _utc_now_iso()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get_with_connection(connection, job_id=normalized_job_id)
+            if current.status == CLEANUP_JOB_SUCCEEDED:
+                logger.debug(
+                    "文件对话清理任务已完成，无需重复领取: job_id=%s chat_id=%s",
+                    current.job_id,
+                    current.chat_id,
+                )
+                return current
+            if current.status == CLEANUP_JOB_RUNNING:
+                raise ValueError("cleanup job is already running")
+            if current.status not in {CLEANUP_JOB_PENDING, CLEANUP_JOB_FAILED}:
+                raise ValueError("cleanup job has an unsupported status")
+            if current.next_attempt_at > now:
+                raise ValueError("cleanup job is not ready for another attempt")
+            cursor = connection.execute(
+                """
+                UPDATE chat_cleanup_jobs
+                SET status = ?, attempt_count = attempt_count + 1,
+                    error_message = '', updated_at = ?
+                WHERE job_id = ? AND status = ?
+                """,
+                (
+                    CLEANUP_JOB_RUNNING,
+                    now,
+                    normalized_job_id,
+                    current.status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("cleanup job was changed concurrently")
+            claimed = self._get_with_connection(connection, job_id=normalized_job_id)
+            logger.info(
+                "已领取文件对话清理任务: job_id=%s chat_id=%s reason=%s attempt=%d",
+                claimed.job_id,
+                claimed.chat_id,
+                claimed.reason,
+                claimed.attempt_count,
+            )
+            return claimed
+
+    def mark_succeeded(self, *, job_id: str) -> ChatCleanupJob:
+        return self._set_terminal_status(
+            job_id=job_id,
+            status=CLEANUP_JOB_SUCCEEDED,
+            error_message="",
+        )
+
+    def mark_failed(
+        self,
+        *,
+        job_id: str,
+        error_message: str,
+        next_attempt_at: str | None = None,
+    ) -> ChatCleanupJob:
+        return self._set_terminal_status(
+            job_id=job_id,
+            status=CLEANUP_JOB_FAILED,
+            error_message=_required_text(error_message, name="error_message"),
+            next_attempt_at=next_attempt_at,
+        )
+
+    def list_ready(self) -> tuple[ChatCleanupJob, ...]:
+        """列出可由本地维护执行器处理的持久化任务。"""
+        now = _utc_now_iso()
+        with _connection_scope(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chat_cleanup_jobs
+                WHERE status IN (?, ?) AND next_attempt_at <= ?
+                ORDER BY next_attempt_at ASC, created_at ASC
+                """,
+                (CLEANUP_JOB_PENDING, CLEANUP_JOB_FAILED, now),
+            ).fetchall()
+        jobs = tuple(self._row(row) for row in rows)
+        logger.debug("已查询就绪文件对话清理任务: job_count=%d", len(jobs))
+        return jobs
+
+    def list_by_chat(self, chat_id: str) -> tuple[ChatCleanupJob, ...]:
+        """读取一个对话的清理审计轨迹，但不通过 HTTP 暴露。"""
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        with _connection_scope(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chat_cleanup_jobs
+                WHERE chat_id = ?
+                ORDER BY created_at ASC, job_id ASC
+                """,
+                (normalized_chat_id,),
+            ).fetchall()
+        jobs = tuple(self._row(row) for row in rows)
+        logger.debug(
+            "已读取文件对话清理审计记录: chat_id=%s job_count=%d",
+            normalized_chat_id,
+            len(jobs),
+        )
+        return jobs
+
+    def _set_terminal_status(
+        self,
+        *,
+        job_id: str,
+        status: str,
+        error_message: str,
+        next_attempt_at: str | None = None,
+    ) -> ChatCleanupJob:
+        normalized_job_id = _required_text(job_id, name="job_id")
+        normalized_status = _validate_choice(
+            status,
+            name="status",
+            allowed=CLEANUP_JOB_STATUSES,
+        )
+        if normalized_status not in {CLEANUP_JOB_SUCCEEDED, CLEANUP_JOB_FAILED}:
+            raise ValueError("cleanup job terminal status is invalid")
+        now = _utc_now_iso()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._get_with_connection(connection, job_id=normalized_job_id)
+            if current.status == CLEANUP_JOB_SUCCEEDED:
+                return current
+            if current.status != CLEANUP_JOB_RUNNING:
+                raise ValueError("cleanup job must be running before it can finish")
+            cursor = connection.execute(
+                """
+                UPDATE chat_cleanup_jobs
+                SET status = ?, error_message = ?, next_attempt_at = ?,
+                    updated_at = ?
+                WHERE job_id = ? AND status = ?
+                """,
+                (
+                    normalized_status,
+                    _optional_text(error_message),
+                    _optional_text(next_attempt_at) or now,
+                    now,
+                    normalized_job_id,
+                    CLEANUP_JOB_RUNNING,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("cleanup job was changed concurrently")
+            completed = self._get_with_connection(connection, job_id=normalized_job_id)
+            logger.info(
+                "文件对话清理任务已进入终态: job_id=%s chat_id=%s status=%s attempt=%d has_error=%s",
+                completed.job_id,
+                completed.chat_id,
+                completed.status,
+                completed.attempt_count,
+                bool(completed.error_message),
+            )
+            return completed
+
+    def _get_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        job_id: str,
+    ) -> ChatCleanupJob:
+        row = connection.execute(
+            "SELECT * FROM chat_cleanup_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("chat_cleanup_job 不存在")
+        return self._row(row)
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> ChatCleanupJob:
+        return ChatCleanupJob(
+            job_id=row["job_id"],
+            chat_id=row["chat_id"],
+            reason=row["reason"],
+            lease_id=row["lease_id"],
+            status=row["status"],
+            attempt_count=int(row["attempt_count"]),
+            next_attempt_at=row["next_attempt_at"],
+            error_message=row["error_message"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
 class ChatMessageRepository(_Repository):
-    """Repository for `chat_messages` and `chat_message_files`."""
+    """`chat_messages` 与 `chat_message_files` 表的仓储。"""
 
     def append(
         self,

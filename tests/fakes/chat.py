@@ -59,6 +59,8 @@ class FakeChatConversationPort:
         state: _FakeChatConversationState | None = None,
         stream_contents: Sequence[str] | None = None,
         standalone_reply: str = "模拟标题",
+        open_conversation_error_message: str = "",
+        open_conversation_resource_refs: Sequence[str] = (),
         delete_conversation_error_message: str = "",
         delete_context_error_message: str = "",
     ) -> None:
@@ -69,6 +71,13 @@ class FakeChatConversationPort:
         self._standalone_reply = _required_content(
             standalone_reply,
             name="standalone_reply",
+        )
+        self._open_conversation_error_message = str(
+            open_conversation_error_message or ""
+        ).strip()
+        self._open_conversation_resource_refs = tuple(
+            str(resource_ref or "").strip()
+            for resource_ref in open_conversation_resource_refs
         )
         self._delete_conversation_error_message = str(
             delete_conversation_error_message or ""
@@ -87,6 +96,11 @@ class FakeChatConversationPort:
         """创建一个可用于后续测试调用的对话引用。"""
         _required_text(context_name, name="context_name")
         _required_text(conversation_name, name="conversation_name")
+        if self._open_conversation_error_message:
+            raise ChatResourceError(
+                self._open_conversation_error_message,
+                resource_refs=self._open_conversation_resource_refs,
+            )
         with self._lock:
             self._state.conversation_sequence += 1
             sequence = self._state.conversation_sequence
@@ -182,23 +196,43 @@ class FakeChatConversationPort:
                 ]
             )
 
-    def generate_standalone_reply(
+    def open_temporary_conversation(
         self,
         *,
         context_ref: str,
-        prompt: str,
-    ) -> str:
-        """返回预设一次性回复，并证明它没有写入主对话消息。"""
+        conversation_name: str,
+    ) -> ChatSessionRefs:
+        """创建由标题服务显式清理的临时 thread。"""
         normalized_context_ref = _required_text(context_ref, name="context_ref")
-        normalized_prompt = _required_text(prompt, name="prompt")
+        _required_text(conversation_name, name="conversation_name")
         with self._lock:
             if (
                 normalized_context_ref not in self._state.known_context_refs
                 or normalized_context_ref in self._state.deleted_contexts
             ):
                 raise ChatConversationNotFoundError("目标上下文不存在")
+            self._state.conversation_sequence += 1
+            session = ChatSessionRefs(
+                context_ref=normalized_context_ref,
+                conversation_ref=f"temporary:{self._state.conversation_sequence}",
+            )
+            self._state.sessions_by_conversation[session.conversation_ref] = session
+            self._state.documents_by_conversation[session.conversation_ref] = ()
+            self._state.messages_by_conversation[session.conversation_ref] = []
+            return session
+
+    def generate_temporary_reply(
+        self,
+        *,
+        session: ChatSessionRefs,
+        prompt: str,
+    ) -> str:
+        """返回预设标题回复，并证明它没有写入主对话消息。"""
+        normalized_prompt = _required_text(prompt, name="prompt")
+        with self._lock:
+            known_session = self._require_session(session)
             self._state.standalone_prompts.append(
-                (normalized_context_ref, normalized_prompt)
+                (known_session.context_ref, normalized_prompt)
             )
             return self._standalone_reply
 

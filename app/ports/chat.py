@@ -173,6 +173,18 @@ class ChatConversationConflictError(ChatPortError):
 class ChatResourceError(ChatPortError):
     """文件对话外部资源创建、绑定或清理失败。"""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        resource_refs: Sequence[str] = (),
+    ) -> None:
+        super().__init__(message)
+        self.resource_refs = tuple(
+            _required_text(resource_ref, name="resource_ref")
+            for resource_ref in resource_refs
+        )
+
 
 class ChatResponseError(ChatPortError):
     """外部对话实现返回了无法形成稳定业务结果的响应。"""
@@ -216,13 +228,22 @@ class ChatConversationPort(Protocol):
         """读取目标对话的外部历史快照。"""
         ...
 
-    def generate_standalone_reply(
+    def open_temporary_conversation(
         self,
         *,
         context_ref: str,
+        conversation_name: str,
+    ) -> ChatSessionRefs:
+        """在指定上下文中创建一条可独立追踪的临时对话。"""
+        ...
+
+    def generate_temporary_reply(
+        self,
+        *,
+        session: ChatSessionRefs,
         prompt: str,
     ) -> str:
-        """在不写入主对话历史的前提下生成一次性文本回复。"""
+        """在已追踪的临时线程中生成一条非流式回复。"""
         ...
 
     def delete_conversation(

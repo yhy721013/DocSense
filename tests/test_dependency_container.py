@@ -30,15 +30,21 @@ from app.container import (
 )
 from app.services.chat import (
     ChatAbortService,
+    ChatCleanupJobExecutor,
     ChatCommandService,
     ChatDeleteService,
     ChatHistoryService,
+    ChatRunDispatcher,
     ChatPersistenceStore,
     ChatRunLockService,
     ChatStore,
     ChatTitleService,
+    DatabaseChatDocumentResolver,
+    SynchronousChatRunExecutor,
+    InlineChatRunDispatcher,
+    InlineChatCleanupDispatcher,
 )
-from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests.fakes import (
@@ -118,7 +124,7 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
         transport.close.assert_called_once_with()
 
     def test_transport_construction_failure_is_not_suppressed(self) -> None:
-        """Transport 尚未创建时，Factory 必须原样传播构造异常。"""
+    """传输对象尚未创建时，工厂必须原样传播构造异常。"""
         factory = AnythingLLMGatewayFactory(
             self._config(),
             transport_factory=Mock(side_effect=ValueError("配置无效")),
@@ -165,7 +171,7 @@ class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
 
 
 class AnythingLLMChatFactoryTests(unittest.TestCase):
-    """Verify file-chat factory isolation and lazy transport lifecycle."""
+    """验证文件对话工厂的隔离性与传输对象惰性生命周期。"""
 
     def test_chat_factory_is_lazy_and_closes_transport(self) -> None:
         transport = MagicMock(spec=AnythingLLMTransport)
@@ -220,7 +226,25 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         chat_store = ChatStore(db_path=chat_db_path)
         chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
         chat_history = ChatHistoryService(chat_store)
-        chat_db = ChatDatabaseService(db_path=chat_db_path)
+        kb_service = DatabaseService(
+            db_path=f"{self.runtime_directory}/knowledge.sqlite3"
+        )
+        chat_run_executor = SynchronousChatRunExecutor(
+            store=chat_store,
+            chat_commands=chat_commands,
+            conversation_factory=self.chat_conversation_factory,
+            document_resolver=DatabaseChatDocumentResolver(kb_service),
+        )
+        chat_cleanup_executor = ChatCleanupJobExecutor(
+            store=chat_store,
+            conversation_factory=self.chat_conversation_factory,
+        )
+        chat_cleanup_dispatcher = InlineChatCleanupDispatcher(
+            execute=chat_cleanup_executor.execute_cleanup_job,
+        )
+        chat_dispatcher = InlineChatRunDispatcher(
+            execute=chat_run_executor.execute_chat_run,
+        )
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -228,17 +252,18 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             task_service=LLMTaskService(
                 db_path=f"{self.runtime_directory}/tasks.sqlite3"
             ),
-            kb_service=DatabaseService(
-                db_path=f"{self.runtime_directory}/knowledge.sqlite3"
-            ),
-            chat_db=chat_db,
+            kb_service=kb_service,
             chat_store=chat_store,
             chat_commands=chat_commands,
+            chat_run_executor=chat_run_executor,
+            chat_dispatcher=chat_dispatcher,
             chat_history=chat_history,
             chat_title=ChatTitleService(
                 store=chat_store,
                 history_service=chat_history,
                 conversation_factory=self.chat_conversation_factory,
+                cleanup_dispatcher=chat_cleanup_dispatcher,
+                cleanup_executor=chat_cleanup_executor,
             ),
             chat_abort=ChatAbortService(
                 store=chat_store,
@@ -246,9 +271,12 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             ),
             chat_delete=ChatDeleteService(
                 store=chat_store,
-                chat_db=chat_db,
+                chat_commands=chat_commands,
                 conversation_factory=self.chat_conversation_factory,
+                cleanup_dispatcher=chat_cleanup_dispatcher,
+                cleanup_executor=chat_cleanup_executor,
             ),
+            chat_cleanup_executor=chat_cleanup_executor,
             progress_hub=LLMProgressHub(),
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
             llm_config=LLMIntegrationConfig(
@@ -282,6 +310,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_store, ChatPersistenceStore)
         self.assertIsInstance(self.services.chat_store, ChatStore)
         self.assertIsInstance(self.services.chat_commands, ChatCommandService)
+        self.assertIsInstance(self.services.chat_dispatcher, ChatRunDispatcher)
         self.assertIsInstance(self.services.chat_history, ChatHistoryService)
         self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
@@ -301,7 +330,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertNotIn("requests.Session(", container_source)
 
     def test_blueprint_source_has_no_module_level_service_construction(self) -> None:
-        """Blueprint 只能解析应用容器，不能重新引入模块级数据库或信号量单例。"""
+    """蓝图只能解析应用容器，不能重新引入模块级数据库或信号量单例。"""
         blueprint_source = (
             Path(__file__).resolve().parents[1]
             / "app"
@@ -311,7 +340,6 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         forbidden_constructors = (
             "LLMTaskService(",
             "DatabaseService(",
-            "ChatDatabaseService(",
             "ChatRunLockService(",
             "LLMProgressHub(",
             "threading.Semaphore(",
@@ -320,6 +348,8 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         for constructor in forbidden_constructors:
             with self.subTest(constructor=constructor):
                 self.assertNotIn(constructor, blueprint_source)
+        self.assertNotIn("record_chat_run_events", blueprint_source)
+        self.assertNotIn("stream_chat_run(chat_run_request)", blueprint_source)
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_analysis_route_injects_factories_without_entering_leases(

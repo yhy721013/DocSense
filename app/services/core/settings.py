@@ -46,6 +46,17 @@ def _ensure_parent(path: Path) -> Path:
     return path
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name}必须是正整数") from exc
+    if value < 1:
+        raise RuntimeError(f"{name}必须是正整数")
+    return value
+
+
 # 统一运行时目录。显式配置 DOCSENSE_RUNTIME_DIR 时必须是绝对路径。
 RUNTIME_DIR = _ensure_directory(_resolve_runtime_dir())
 
@@ -77,3 +88,13 @@ SQLITE_EXPORT_DIR = _ensure_directory(RUNTIME_DIR / "sqlite")
 
 # Web UI 限制：单次请求最大 500MB。
 MAX_CONTENT_LENGTH = int(os.getenv("DOCSENSE_MAX_CONTENT_LENGTH", str(500 * 1024 * 1024)))
+
+# SQLite 单实例文件对话的明确资源上限。它们是进程内保护措施，不宣称
+# 具备跨实例配额语义；未来的网关/调度器可复用相同的应用层约束。
+CHAT_MAX_FILES_PER_REQUEST = _positive_int_env("DOCSENSE_CHAT_MAX_FILES", 20)
+CHAT_MAX_MESSAGE_CHARS = _positive_int_env("DOCSENSE_CHAT_MAX_MESSAGE_CHARS", 12_000)
+CHAT_MAX_OUTPUT_CHARS = _positive_int_env("DOCSENSE_CHAT_MAX_OUTPUT_CHARS", 100_000)
+CHAT_MAX_CONCURRENT_STREAMS = _positive_int_env(
+    "DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS",
+    4,
+)

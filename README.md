@@ -25,8 +25,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态、翻译编排，以及文件对话的应用服务、持久化、锁和资源租约 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` `chat/persistence/` |
-| 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置，以及 analysis/report 共享的单并发任务限制器 | `ApplicationServices` `create_application_services()` |
+| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排，以及文件对话应用服务与本地持久化/锁实现 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` `chat/persistence/` |
+| 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
 | 迁移期工具层 | `app/services/utils/` | 回调、文件/OCR 预处理，以及尚未迁移完成的 legacy AnythingLLM Facade/RAG 流程 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
@@ -72,14 +72,13 @@ app/
       config.py                     # 环境变量与配置加载
       settings.py                   # 路径常量与限制（上传目录、DB 路径等）
       logging.py                    # 日志初始化
-      database.py                   # 知识库映射及对话记录持久化（architecture_id <-> workspace_slug, chats）
+      database.py                   # 知识库映射持久化（architecture_id <-> workspace_slug）
       progress_hub.py               # 进度发布/订阅中枢
       prompts.py                    # 统一 Prompt 构建
     llm_service/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
       report_service.py             # 报告生成主流程
       weaponry_service.py           # 知识谱系字段提取主流程
-      chat_service.py               # 文件对话兼容入口与远端资源适配
       task_service.py               # 任务状态、结果、回调状态持久化
       translation_service.py        # 翻译服务编排层
     chat/
@@ -214,10 +213,12 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
-   - 底座按 1 对话 = 1 Workspace + 1 Thread 隔离远端上下文和文档资源。
+   - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
+   - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件；本地保留不可变的文件绑定 revision，并以最新 revision 作为后续对话默认引用。
+   - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
+   - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
    - `POST /llm/chat/title` 仅使用本地已提交消息生成标题；`POST /llm/chat/abort` 向当前活跃 run 写入持久化中断标志，执行器在后续事件边界观察到标志后发送 `aborted` 终态。没有活跃 run 时接口仍返回 HTTP 200，但 `aborted=false`。
-   - 通过增量 `update-embeddings` 的 `adds` 追加引用文件，`fileNames` 仅包含本次新增文件。
    - `POST /llm/chat/delete` 先清理远端 Thread、Workspace 及相关资源租约，全部成功后再把本地会话标记为 `deleted`；清理失败时会保留 `cleanup_failed` 恢复记录，将会话置为 `error` 并返回错误。
 
 7. `/llm/reassign`（分类节点变更）
@@ -355,6 +356,10 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 - 回调历史：`${DOCSENSE_RUNTIME_DIR}/callback/`
 - SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
 - 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`
+
+文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
+
+为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
 
 旧的组件级变量仍可作为兼容覆盖项，一旦配置就会优先于统一根目录。若希望全部内容位于同一目录，应删除这些覆盖项：
 
@@ -519,7 +524,7 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 - 文件处理与报告生成：`docs/接口文档/文件处理和报告生成.md`
 - 知识谱系解析：`docs/接口文档/知识谱系解析.md`
 - 文件对话：`docs/接口文档/文件对话.md`
-- 文件对话新增接口（标题生成与中断）：`docs/接口文档/文件对话新增接口.md`
+- 文件对话新增接口：`docs/接口文档/文件对话新增接口.md`
 - 节点分类与文档变更：`docs/接口文档/分类节点变更.md`
 
 ## 10. Git 规范
