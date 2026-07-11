@@ -1,4 +1,4 @@
-"""Unit tests for the stage-9 file-chat delete state machine."""
+"""阶段 9 文件对话删除状态机的单元测试。"""
 
 from __future__ import annotations
 

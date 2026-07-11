@@ -1,4 +1,4 @@
-"""Domain models and events for file chat."""
+"""文件对话的领域模型与事件。"""
 
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import (

@@ -1,4 +1,4 @@
-"""Tests for aborting active file-chat runs."""
+"""活跃文件对话运行中断功能的测试。"""
 
 from __future__ import annotations
 

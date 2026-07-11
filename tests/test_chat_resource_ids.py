@@ -1,4 +1,4 @@
-"""Unit tests for supplier-neutral file-chat resource identifiers."""
+"""供应商无关文件对话资源标识的单元测试。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from app.services.chat.domain.resource_ids import (
 
 
 class ChatScopedExternalRefTests(unittest.TestCase):
-    """Ensure durable lease serialization never constrains supplier IDs."""
+    """确保持久化租约序列化不会限制供应商标识。"""
 
     def test_round_trip_preserves_references_with_delimiter_characters(self) -> None:
         """外部引用可含任意分隔符，租约恢复仍应准确定位资源。"""

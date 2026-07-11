@@ -1,4 +1,4 @@
-"""Offline tests for the AnythingLLM file-chat gateway."""
+"""AnythingLLM 文件对话网关的离线测试。"""
 
 from __future__ import annotations
 

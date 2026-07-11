@@ -1,4 +1,4 @@
-"""Resolve immutable chat document snapshots from the local knowledge record."""
+"""从本地知识记录解析不可变的文件对话文档快照。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from app.services.core.database import DatabaseService
 
 
 class ChatDocumentNotFoundError(ValueError):
-    """Raised when a requested business file is unavailable for file chat."""
+    """请求的业务文件不可用于文件对话时抛出。"""
 
     def __init__(self, file_name: str) -> None:
         self.file_name = str(file_name or "").strip()
@@ -19,7 +19,7 @@ class ChatDocumentNotFoundError(ValueError):
 
 @dataclass(frozen=True)
 class ResolvedChatDocument:
-    """A request-time snapshot of one document available to the chat adapter."""
+    """请求时刻可供对话适配器使用的一份文档快照。"""
 
     file_name: str
     original_name: str
@@ -28,7 +28,7 @@ class ResolvedChatDocument:
 
 @runtime_checkable
 class ChatDocumentResolver(Protocol):
-    """Resolve business file names without exposing a knowledge DB to routes."""
+    """解析业务文件名，但不向路由层暴露知识库。"""
 
     def resolve_many(
         self,
@@ -38,7 +38,7 @@ class ChatDocumentResolver(Protocol):
 
 
 class DatabaseChatDocumentResolver(ChatDocumentResolver):
-    """Adapter from the local knowledge record to supplier-neutral document DTOs."""
+    """将本地知识记录转换为供应商无关文档 DTO 的适配器。"""
 
     def __init__(self, knowledge_base: DatabaseService) -> None:
         self._knowledge_base = knowledge_base

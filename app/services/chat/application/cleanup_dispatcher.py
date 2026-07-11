@@ -1,8 +1,7 @@
-"""Durable cleanup-job dispatch boundary for file chat.
+"""文件对话持久化清理任务的调度边界。
 
-Jobs are persisted before this boundary is invoked.  Dispatchers therefore
-never receive a captured callback or request-local object; an external worker
-can later load exactly the same job by ``job_id``.
+任务会在调用此边界前完成持久化。因此调度器不会接收捕获的回调或请求级对象；
+未来外部工作进程可以仅凭 ``job_id`` 重新加载同一任务。
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from app.services.chat.domain.models import ChatCleanupJob
 
 @dataclass(frozen=True)
 class ChatCleanupDispatchCapabilities:
-    """Positive delivery capabilities exposed to the composition root."""
+    """向组合根暴露的正向投递能力声明。"""
 
     supports_single_instance: bool
     supports_external_workers: bool
@@ -36,26 +35,24 @@ INLINE_CHAT_CLEANUP_DISPATCH_CAPABILITIES = ChatCleanupDispatchCapabilities(
 
 @runtime_checkable
 class ChatCleanupDispatcher(Protocol):
-    """Notify a scheduler that an already-persisted cleanup job is ready."""
+    """通知调度器：一条已持久化的清理任务已可执行。"""
 
     @property
     def capabilities(self) -> ChatCleanupDispatchCapabilities:
-        """Return verifiable delivery capabilities for this adapter."""
+        """返回该适配器可验证的投递能力。"""
         ...
 
     def dispatch(self, *, job: ChatCleanupJob) -> ChatCleanupJob:
-        """Dispatch a durable job and return its current persisted state."""
+        """调度持久化任务并返回其当前持久化状态。"""
         ...
 
 
 class InlineChatCleanupDispatcher:
-    """Current synchronous-mode notification adapter.
+    """当前同步模式下的通知适配器。
 
-    The adapter holds one application-level executor selected at composition
-    time.  ``dispatch`` passes only the durable job ID to it, so it is neither
-    a fake in-memory queue nor a request-specific callback registry.  Synchronous
-    completion is required by the existing delete API, whose response reports
-    whether remote cleanup has actually completed.
+    适配器持有组合根在装配时选定的应用级执行器。``dispatch`` 只向执行器
+    传递持久化任务 ID，因此它既不是伪造的内存队列，也不是请求专属回调注册表。
+    现有删除接口需要同步完成，因为其响应必须如实说明远端清理是否已经完成。
     """
 
     capabilities = INLINE_CHAT_CLEANUP_DISPATCH_CAPABILITIES

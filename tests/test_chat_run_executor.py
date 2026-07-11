@@ -1,4 +1,4 @@
-"""Tests for the file-chat run execution boundary."""
+"""文件对话运行执行边界的测试。"""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class _StaticDocumentResolver:
 
 
 class ChatRunStreamRequestTests(unittest.TestCase):
-    """Validate queue-safe inputs for future chat run executors."""
+    """校验面向未来运行执行器的队列安全输入。"""
 
     def test_request_normalizes_text_and_file_snapshots(self) -> None:
         request = ChatRunStreamRequest(
@@ -644,7 +644,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
         # 模拟未来可靠队列重复投递：第一个执行器已经将 accepted 原子领取为
-        # running，第二个执行器只能报告本次交付未启动，绝不能改写该 run。
+        # 运行已进入执行中状态后，第二个执行器只能报告本次投递未启动，绝不能改写该运行。
         self.commands.issue_execution_lease(run_id=prepared.run_id)
         events = list(executor.execute_chat_run(prepared.run_id))
 

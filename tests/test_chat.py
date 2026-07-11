@@ -1,4 +1,4 @@
-"""Offline route acceptance tests for the stage-10 file-chat chain."""
+"""阶段 10 文件对话链路的离线路由受理测试。"""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from tests.fakes import (
 
 
 def _build_test_services(tmp: str) -> ApplicationServices:
-    """Create an isolated container whose chat path has no network dependency."""
+    """创建文件对话路径不依赖网络的隔离容器。"""
     chat_db_path = f"{tmp}/chat.sqlite3"
     chat_store = ChatStore(db_path=chat_db_path)
     chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))

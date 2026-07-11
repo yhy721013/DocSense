@@ -1,4 +1,4 @@
-"""Public facade for file-chat domain, application and persistence services."""
+"""文件对话领域、应用与持久化服务的公共导出门面。"""
 
 from app.services.chat.application.abort_service import (
     AbortNotificationCapabilities,

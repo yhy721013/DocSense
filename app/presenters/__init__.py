@@ -1,1 +1,1 @@
-"""Presentation helpers for HTTP-facing adapters."""
+"""面向 HTTP 适配器的展示层辅助工具。"""

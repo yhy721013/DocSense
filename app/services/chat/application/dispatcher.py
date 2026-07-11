@@ -1,8 +1,7 @@
-"""Internal dispatch boundary for a durably accepted file-chat run.
+"""已持久化受理的文件对话运行的内部调度边界。
 
-The boundary intentionally carries only ``run_id``.  Request snapshots,
-execution leases and provider resources are loaded by the executor, which makes
-the synchronous adapter follow the same shape a future worker will use.
+该边界刻意只传递 ``run_id``。请求快照、执行租约和供应商资源均由执行器加载，
+使当前同步适配器与未来工作进程保持相同的调用形态。
 """
 
 from __future__ import annotations
@@ -23,11 +22,10 @@ def _required_text(value: str, *, name: str) -> str:
 
 @dataclass(frozen=True)
 class ChatRunDispatchCapabilities:
-    """Real capabilities of a run dispatch adapter.
+    """运行调度适配器真实具备的能力。
 
-    The values are intentionally positive capabilities.  A future adapter can
-    support both single-instance and multi-instance deployments without being
-    rejected merely because it is more capable than the current SQLite path.
+    字段使用正向能力语义。未来适配器即使同时支持单实例和多实例部署，也不会
+    因能力强于当前 SQLite 路径而被错误拒绝。
     """
 
     supports_single_instance: bool
@@ -43,20 +41,20 @@ INLINE_CHAT_RUN_DISPATCH_CAPABILITIES = ChatRunDispatchCapabilities(
 
 @runtime_checkable
 class ChatRunDispatcher(Protocol):
-    """Start one accepted run without importing HTTP/SSE presentation code."""
+    """启动一条已受理运行，但不导入 HTTP/SSE 展示层代码。"""
 
     @property
     def capabilities(self) -> ChatRunDispatchCapabilities:
-        """Return the adapter's verifiable execution capabilities."""
+        """返回该适配器可验证的执行能力。"""
         ...
 
     def dispatch(self, *, run_id: str) -> Iterable[ChatStreamEvent]:
-        """Execute or relay one run identified by its durable internal key."""
+        """执行或转交一条由持久化内部标识定位的运行。"""
         ...
 
 
 class InlineChatRunDispatcher:
-    """Current synchronous adapter; explicitly not a reliable queue."""
+    """当前同步适配器；明确不属于可靠队列。"""
 
     capabilities = INLINE_CHAT_RUN_DISPATCH_CAPABILITIES
 

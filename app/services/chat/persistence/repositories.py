@@ -1,4 +1,4 @@
-"""SQLite repositories for the file-chat local authority tables."""
+"""文件对话本地权威表的 SQLite 仓储实现。"""
 
 from __future__ import annotations
 
@@ -121,10 +121,8 @@ def _connect(db_path: str, *, timeout_seconds: float = 5.0) -> sqlite3.Connectio
     connection = sqlite3.connect(db_path, timeout=max(0.0, timeout_seconds))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    # A bounded busy timeout makes short write collisions deterministic in the
-    # supported single-instance mode. It is not a substitute for a queue or a
-    # distributed lock, but prevents SQLite from failing immediately while a
-    # neighbouring request commits a small transaction.
+    # 有界忙等待超时可使受支持的单实例模式中短暂写入冲突的结果确定。它不能替代队列
+    # 或分布式锁，但可避免相邻请求提交短事务时 SQLite 立即失败。
     connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
@@ -143,20 +141,17 @@ def _connection_scope(db_path: str) -> Iterator[sqlite3.Connection]:
 
 
 def ensure_chat_schema(db_path: str) -> None:
-    """Apply ordered SQLite schema migrations for the chat module.
+    """按顺序应用对话模块的 SQLite 架构迁移。
 
-    The application is currently limited to a single SQLite instance, but the
-    schema still needs an explicit version history.  Re-running anonymous
-    ``CREATE TABLE`` statements at startup makes it impossible to reason about
-    which data model a database actually contains.  Every new structural
-    change must therefore be added as a numbered migration below.
+    当前应用仅支持单个 SQLite 实例，但架构仍需要明确的版本历史。在启动时反复执行
+    无名 ``CREATE TABLE`` 语句，会使人无法判断数据库实际包含哪个数据模型。因此每次
+    新增结构性变更都必须以下方带编号的迁移形式加入。
     """
     normalized_path = _required_text(db_path, name="db_path")
     Path(normalized_path).parent.mkdir(parents=True, exist_ok=True)
     with _connection_scope(normalized_path) as connection:
-        # WAL improves concurrent reads while retaining the documented
-        # single-writer semantics. The deployment guide already forbids using
-        # this database file on a network share.
+        # WAL 在保留既定单写入者语义的同时改善并发读取。部署说明已禁止将该数据库文件
+        # 放在网络共享目录中。
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(
             """
@@ -188,7 +183,7 @@ def ensure_chat_schema(db_path: str) -> None:
 
 
 def _create_chat_authority_schema(connection: sqlite3.Connection) -> None:
-    """Create the first authoritative chat schema for a fresh development DB."""
+    """为全新的开发数据库创建首版权威对话架构。"""
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -365,7 +360,7 @@ def _create_chat_authority_schema(connection: sqlite3.Connection) -> None:
 
 
 def _add_chat_constraints_and_indexes(connection: sqlite3.Connection) -> None:
-    """Add invariants that protect the application service from bypass writes."""
+    """添加约束，防止绕过应用服务直接写入时破坏不变量。"""
     connection.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_runs_one_active_per_chat
@@ -428,13 +423,11 @@ def _add_chat_constraints_and_indexes(connection: sqlite3.Connection) -> None:
 def _add_integrity_triggers_and_refine_cleanup_job_identity(
     connection: sqlite3.Connection,
 ) -> None:
-    """Install integrity triggers and refine cleanup-job identity together.
+    """同时安装完整性触发器并细化清理任务身份。
 
-    A chat may have more than one outstanding temporary title thread.  The
-    original ``(chat_id, reason)`` key incorrectly merged those independent
-    cleanups.  ``lease_id`` is part of the durable job identity, while chat
-    deletion continues to use the empty lease ID and therefore remains unique
-    per chat.
+    一个对话可能存在多个尚未清理的临时标题线程。原先的 ``(chat_id, reason)`` 键会
+    错误合并这些相互独立的清理任务。``lease_id`` 是持久化任务身份的一部分；而对话删除
+    仍使用空租约 ID，因此每个对话仍保持唯一。
     """
     connection.execute("DROP INDEX IF EXISTS uq_chat_cleanup_jobs_open")
     connection.execute(
@@ -580,7 +573,7 @@ class _Repository:
 
 
 class ChatSessionRepository(_Repository):
-    """Repository for `chat_sessions`."""
+    """`chat_sessions` 表的仓储。"""
 
     def create_or_get(
         self,
@@ -844,12 +837,10 @@ class ChatSessionRepository(_Repository):
 
 
 class ChatDocumentBindingRepository(_Repository):
-    """Persist immutable document revisions and a current-revision projection.
+    """持久化不可变文档版本及当前版本投影。
 
-    A business file name is intentionally not unique within a conversation:
-    uploading a replacement document produces a different ``document_ref``.
-    Historical bindings stay immutable for audit and cleanup, while the head
-    table decides which revision later turns select by default.
+    业务文件名在同一个对话中刻意不唯一：上传替换文档会生成不同的 ``document_ref``。
+    历史绑定保持不可变，以供审计和清理；头表决定后续轮次默认选择哪个版本。
     """
 
     def add(
@@ -957,7 +948,7 @@ class ChatDocumentBindingRepository(_Repository):
             return binding
 
     def list_by_chat(self, chat_id: str) -> tuple[ChatDocumentBinding, ...]:
-        """Return all historical bindings for audit and cleanup."""
+        """返回全部历史绑定，供审计和清理使用。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         with _connection_scope(self.db_path) as connection:
             rows = connection.execute(
@@ -974,7 +965,7 @@ class ChatDocumentBindingRepository(_Repository):
         self,
         chat_id: str,
     ) -> tuple[ChatDocumentBinding, ...]:
-        """Return the latest selected revision for every business file."""
+        """返回每个业务文件当前选中的最新版本。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         with _connection_scope(self.db_path) as connection:
             rows = connection.execute(
@@ -1034,7 +1025,7 @@ class ChatDocumentBindingRepository(_Repository):
 
 
 class ChatRunRepository(_Repository):
-    """Repository for `chat_runs`."""
+    """`chat_runs` 表的仓储。"""
 
     def create(
         self,
@@ -1302,7 +1293,7 @@ class ChatRunRepository(_Repository):
 
 
 class ChatRunInputRepository(_Repository):
-    """Repository for immutable request-time `chat_run_inputs` snapshots."""
+    """不可变请求时 `chat_run_inputs` 快照的仓储。"""
 
     def get(self, run_id: str) -> ChatRunInput | None:
         normalized_run_id = _required_text(run_id, name="run_id")
@@ -1347,12 +1338,10 @@ class ChatRunInputRepository(_Repository):
 
 
 class ChatCleanupJobRepository(_Repository):
-    """Persist retryable cleanup work independently from HTTP requests.
+    """独立于 HTTP 请求持久化可重试的清理任务。
 
-    The SQLite implementation intentionally does not claim reliable background
-    delivery. It does, however, retain enough state for a future scheduler or
-    worker to pick up exactly the same job by ``job_id`` without relying on a
-    captured Python callback.
+    SQLite 实现刻意不宣称具备可靠的后台投递能力，但会保留足够状态，让未来调度器或
+    工作进程仅凭 ``job_id`` 领取同一条任务，而无需依赖捕获的 Python 回调。
     """
 
     def enqueue(
@@ -1444,7 +1433,7 @@ class ChatCleanupJobRepository(_Repository):
         return self._row(row) if row is not None else None
 
     def claim(self, *, job_id: str) -> ChatCleanupJob:
-        """Claim a ready job and count the attempt in the same transaction."""
+        """在同一事务中领取就绪任务并计入本次尝试。"""
         normalized_job_id = _required_text(job_id, name="job_id")
         now = _utc_now_iso()
         with self._connection() as connection:
@@ -1498,7 +1487,7 @@ class ChatCleanupJobRepository(_Repository):
         )
 
     def list_ready(self) -> tuple[ChatCleanupJob, ...]:
-        """List persisted work eligible for a local maintenance runner."""
+        """列出可由本地维护执行器处理的持久化任务。"""
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
             rows = connection.execute(
@@ -1512,7 +1501,7 @@ class ChatCleanupJobRepository(_Repository):
         return tuple(self._row(row) for row in rows)
 
     def list_by_chat(self, chat_id: str) -> tuple[ChatCleanupJob, ...]:
-        """Read a chat's cleanup audit trail without exposing it over HTTP."""
+        """读取一个对话的清理审计轨迹，但不通过 HTTP 暴露。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         with _connection_scope(self.db_path) as connection:
             rows = connection.execute(
@@ -1600,7 +1589,7 @@ class ChatCleanupJobRepository(_Repository):
 
 
 class ChatMessageRepository(_Repository):
-    """Repository for `chat_messages` and `chat_message_files`."""
+    """`chat_messages` 与 `chat_message_files` 表的仓储。"""
 
     def append(
         self,

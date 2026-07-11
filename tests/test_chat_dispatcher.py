@@ -1,4 +1,4 @@
-"""Offline tests for the durable-ID chat execution dispatcher."""
+"""持久化 ID 文件对话执行调度器的离线测试。"""
 
 from __future__ import annotations
 

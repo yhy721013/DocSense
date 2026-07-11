@@ -1,4 +1,4 @@
-"""Application commands for file-chat runs."""
+"""文件对话运行生命周期的应用命令服务。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChatCommandService:
-    """Coordinates durable chat-run lifecycle operations."""
+    """协调持久化文件对话运行的生命周期操作。"""
 
     def __init__(self, run_coordinator: ChatRunCoordinator) -> None:
         """注入 run 协调能力，而不是绑定某个数据库锁实现。
@@ -87,7 +87,7 @@ class ChatCommandService:
         run_id: str,
         error_message: str,
     ) -> ChatRun:
-        """Discard a request that was accepted but never reached execution."""
+        """丢弃已受理但从未进入执行器的请求。"""
         run = self._run_coordinator.discard_unstarted_run(
             run_id=run_id,
             error_message=error_message,
@@ -144,7 +144,7 @@ class ChatCommandService:
         return run
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:
-        """Atomically stop new runs before the delete workflow touches resources."""
+        """在删除流程接触资源前，原子阻止新的运行进入会话。"""
         self._run_coordinator.begin_chat_deletion(chat_id=chat_id)
 
     def issue_execution_lease(self, *, run_id: str) -> ChatRunLease:

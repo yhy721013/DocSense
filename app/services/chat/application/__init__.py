@@ -1,4 +1,4 @@
-"""Application services for file chat use cases."""
+"""文件对话用例的应用服务导出。"""
 
 from app.services.chat.application.abort_service import (
     AbortNotificationCapabilities,

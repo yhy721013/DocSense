@@ -1,4 +1,4 @@
-"""Persistence adapters for file chat local authority data."""
+"""文件对话本地权威数据的持久化适配器。"""
 
 from app.services.chat.persistence.repositories import (
     ChatCleanupJobRepository,

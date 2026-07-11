@@ -1,4 +1,4 @@
-"""Persistent resource leases for file-chat cleanup and recovery."""
+"""用于文件对话清理与恢复的持久化资源租约。"""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ _LEASE_STATUS_TRANSITIONS = {
 
 
 class ChatResourceLeaseSessionUnavailableError(RuntimeError):
-    """Raised when a guarded resource lease races with session deletion."""
+    """受保护资源租约与会话删除操作竞争时抛出。"""
 
     def __init__(self, *, chat_id: str, status: str) -> None:
         self.chat_id = _required_text(chat_id, name="chat_id")
@@ -51,7 +51,7 @@ class ChatResourceLeaseSessionUnavailableError(RuntimeError):
 
 
 class ChatResourceLeaseService:
-    """Manage durable leases for chat workspaces, threads and bindings."""
+    """管理对话工作区、线程与绑定的持久化租约。"""
 
     def __init__(self, db_path: str, *, initialize: bool = True) -> None:
         self.db_path = _required_text(db_path, name="db_path")
@@ -253,12 +253,10 @@ class ChatResourceLeaseService:
         run_id: str = "",
         external_ref: str,
     ) -> ChatResourceLease:
-        """Create or reuse an active lease without hiding cleanup failures.
+        """创建或复用活动租约，且不掩盖清理失败。
 
-        The method is intentionally conservative: it only promotes a planned
-        lease to active. Failed or pending cleanup states are returned as-is so
-        callers cannot accidentally overwrite recovery evidence by "ensuring"
-        a resource that still needs compensation.
+        本方法刻意保守：只会将 planned 租约提升为 active。失败或待清理状态会原样返回，
+        以防调用方在“确保”仍需补偿的资源时意外覆盖恢复依据。
         """
         lease = self.begin(
             lease_id=lease_id,

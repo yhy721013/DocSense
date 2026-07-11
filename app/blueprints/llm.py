@@ -957,9 +957,8 @@ def llm_chat():
         _release_stream_slot()
         return jsonify({"error": str(exc)}), 400
     except Exception:
-        # No Response object exists yet, so Flask cannot call the regular
-        # close hook. Always release the process-local capacity permit before
-        # propagating an unexpected acceptance failure.
+        # 此时尚未创建 Response 对象，Flask 不会调用常规关闭钩子。向外抛出意外
+        # 受理异常前，必须释放进程内并发容量许可。
         _release_stream_slot()
         raise
 
@@ -975,7 +974,7 @@ def llm_chat():
         stream_started = False
 
         def generate_sse_response():
-            """Mark execution as started before the inner iterator is consumed."""
+            """在消费内部迭代器前标记执行已开始。"""
             nonlocal stream_started
             stream_started = True
             yield from finalize_chat_run_stream(
@@ -985,7 +984,7 @@ def llm_chat():
             )
 
         def close_response() -> None:
-            """Release capacity and settle an accepted but never-started run."""
+            """释放并发容量，并收敛一条已受理但未开始的运行。"""
             if not stream_started:
                 try:
                     services.chat_commands.discard_unstarted_chat_run(

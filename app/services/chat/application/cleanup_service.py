@@ -1,10 +1,8 @@
-"""Durable resource-cleanup execution for file-chat workflows.
+"""文件对话工作流的持久化资源清理执行器。
 
-The module owns *how* a persisted cleanup job is executed.  HTTP-facing
-services only decide when a job should be created and how its result maps to
-their existing response contract.  This separation is important because a
-future scheduler can call :meth:`ChatCleanupJobExecutor.execute_cleanup_job`
-with the same durable ``job_id`` without recreating request-local closures.
+本模块负责“如何”执行已持久化的清理任务。面向 HTTP 的服务只负责决定何时创建任务，
+以及如何将执行结果映射到既有响应契约。这样的分层使未来调度器只需使用同一个持久化
+``job_id`` 调用 :meth:`ChatCleanupJobExecutor.execute_cleanup_job`，无需重建请求级闭包。
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ DEFAULT_CLEANUP_RETRY_MAX_SECONDS = 15 * 60
 
 
 class ChatCleanupJobExecutionError(RuntimeError):
-    """Raised after a cleanup attempt has been durably marked as failed."""
+    """清理尝试已被持久化标记为失败后抛出。"""
 
     def __init__(self, *, job: ChatCleanupJob, reason: str) -> None:
         self.job = job
@@ -58,11 +56,10 @@ class ChatCleanupJobExecutionError(RuntimeError):
 
 
 class ChatCleanupJobExecutor:
-    """Execute persisted cleanup jobs through the supplier-neutral Chat Port.
+    """通过供应商无关的 Chat Port 执行持久化清理任务。
 
-    The executor deliberately has no HTTP request, SSE stream, callback or
-    in-memory task state.  Its input is only ``job_id``; all resource identity
-    is reloaded from the authoritative local store before a remote operation.
+    执行器刻意不持有 HTTP 请求、SSE 流、回调或内存任务状态。它只接收 ``job_id``；
+    每次调用远端操作前，都会从本地权威存储重新加载完整的资源身份。
     """
 
     def __init__(
@@ -99,11 +96,10 @@ class ChatCleanupJobExecutor:
         self._retry_max_seconds = retry_max_seconds
 
     def execute_cleanup_job(self, *, job_id: str) -> ChatCleanupJob:
-        """Claim and execute exactly one durable cleanup job.
+        """领取并执行恰好一条持久化清理任务。
 
-        The claim transition makes concurrent schedulers safe at the job level.
-        A failed remote operation is recorded before this method raises, so a
-        caller never has to infer whether retry evidence was written.
+        领取状态迁移保证多个调度器在任务层面的互斥。远端操作失败时，会先写入失败
+        记录再抛出异常，因此调用方无需猜测重试依据是否已落库。
         """
         job = self._store.cleanup_jobs.claim(job_id=job_id)
         if job.status == CLEANUP_JOB_SUCCEEDED:
@@ -114,7 +110,7 @@ class ChatCleanupJobExecutor:
                 self._cleanup_deleted_chat(job)
             elif job.reason == CLEANUP_REASON_TEMPORARY_THREAD:
                 self._cleanup_temporary_thread(job)
-            else:  # Defensive guard for data written by a future application version.
+            else:  # 防御性保护：拒绝未来应用版本写入的未知任务原因。
                 raise ValueError(f"unsupported cleanup job reason: {job.reason}")
         except Exception as exc:
             failed_job = self._mark_failed(job=job, error=exc)
@@ -142,12 +138,10 @@ class ChatCleanupJobExecutor:
         return completed
 
     def execute_ready_cleanup_jobs(self, *, limit: int = 100) -> tuple[ChatCleanupJob, ...]:
-        """Run a bounded snapshot of ready jobs for a future maintenance loop.
+        """执行数量受限的就绪任务快照，供未来维护循环调用。
 
-        The current inline dispatcher invokes a specific newly-created job and
-        does not call this method automatically.  Keeping this maintenance
-        entry point bounded prevents a future scheduler from monopolising a
-        worker when historical failures accumulate.
+        当前内联调度器只执行刚创建的指定任务，不会自动调用本方法。限制单次处理
+        数量，可避免未来调度器在历史失败任务积压时长期占用一个工作进程。
         """
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
@@ -156,8 +150,8 @@ class ChatCleanupJobExecutor:
             try:
                 results.append(self.execute_cleanup_job(job_id=ready_job.job_id))
             except ChatCleanupJobExecutionError as exc:
-                # Continue with independent jobs.  The failed job itself has
-                # already been transitioned to ``failed`` with a retry time.
+                # 继续处理互不依赖的任务。失败任务自身已转为 ``failed`` 状态，并写入
+                # 下次重试时间。
                 results.append(exc.job)
         return tuple(results)
 
@@ -206,9 +200,8 @@ class ChatCleanupJobExecutor:
         if lease.status == LEASE_CLOSED:
             return
         if not lease.external_ref:
-            # No remote reference was ever obtained.  Closing a planned lease
-            # is safe; a non-planned lease without an identity is evidence we
-            # cannot repair automatically and must remain visible as failure.
+            # 从未获得远端引用。关闭 planned 租约是安全的；非 planned 租约缺少身份
+            # 表明无法自动修复，必须以失败状态保留该问题。
             if lease.status == LEASE_PLANNED:
                 self._store.resource_leases.mark_closed(lease.lease_id)
                 return
@@ -235,12 +228,10 @@ class ChatCleanupJobExecutor:
         self._store.resource_leases.mark_closed(lease.lease_id)
 
     def _ensure_session_reference_leases(self, session: ChatSession) -> None:
-        """Backfill deterministic session leases before the delete side effect.
+        """在删除远端资源前补齐会话的确定性租约。
 
-        New runs create these leases before remote resources.  The defensive
-        check keeps cleanup self-contained: the worker can operate from the
-        authoritative session and lease records without consulting any legacy
-        table or request-local state.
+        新运行会在创建远端资源前创建这些租约。该防御性检查使清理任务保持自包含：
+        工作进程只依赖权威的会话和租约记录，不查询任何旧表或请求级状态。
         """
         if session.workspace_ref:
             self._store.resource_leases.ensure_active(
@@ -297,9 +288,8 @@ class ChatCleanupJobExecutor:
             context_ref=context_ref,
         )
         if error:
-            # A workspace owns every child resource.  Once its deletion fails,
-            # all currently open leases describe an unresolved remote state and
-            # must remain retryable instead of only marking document bindings.
+            # 工作区拥有全部子资源。一旦其删除失败，所有仍打开的租约都表示未解决的
+            # 远端状态，必须保持可重试，而不能只标记文档绑定。
             for lease in self._open_leases(chat_id):
                 self._record_cleanup_failure_if_open(
                     lease_id=lease.lease_id,
@@ -312,9 +302,8 @@ class ChatCleanupJobExecutor:
             )
             return
 
-        # Context deletion is authoritative for all child threads and document
-        # bindings, including historical document revisions and temporary title
-        # threads created after the main conversation was opened.
+        # 上下文删除对所有子线程和文档绑定具有权威性，包括历史文档版本以及主对话
+        # 创建后生成的临时标题线程。
         for lease in self._store.resource_leases.list_by_chat(chat_id):
             if lease.status != LEASE_CLOSED:
                 self._store.resource_leases.mark_closed(lease.lease_id)
@@ -360,9 +349,8 @@ class ChatCleanupJobExecutor:
         )
 
     def _next_retry_at(self, *, attempt_count: int) -> str:
-        # Exponential delay protects a future maintenance worker from a tight
-        # remote-failure loop.  A new explicit delete/title request can still
-        # re-enqueue a failed job immediately through the repository.
+        # 指数退避可避免未来维护工作进程在远端持续失败时形成紧密循环。新的显式删除
+        # 或标题请求仍可通过仓储立即重新入队失败任务。
         exponent = max(0, int(attempt_count) - 1)
         delay = min(
             self._retry_base_seconds * (2**exponent),

@@ -1,4 +1,4 @@
-"""AnythingLLM-backed implementation of the file-chat conversation port."""
+"""基于 AnythingLLM 的文件对话端口实现。"""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?(?:</think>|$)")
 
 
 class AnythingLLMChatGateway(ChatConversationPort):
-    """Orchestrate AnythingLLM workspace/thread operations behind Chat Port."""
+    """在文件对话端口之后编排 AnythingLLM 工作区和线程操作。"""
 
     def __init__(
         self,
@@ -54,7 +54,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         stream_mode: str = "query",
         standalone_mode: str = "chat",
     ) -> None:
-        """Bind task-scoped atomic clients and immutable chat policy."""
+        """绑定任务级原子客户端与不可变的对话策略。"""
         if user_id is not None and (
             isinstance(user_id, bool)
             or not isinstance(user_id, int)
@@ -80,7 +80,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         context_name: str,
         conversation_name: str,
     ) -> ChatSessionRefs:
-        """Create or reuse the named chat context, then create a new thread."""
+        """创建或复用指定名称的对话上下文，并在其中创建新线程。"""
         workspace: AnythingLLMWorkspace | None = None
         created_workspace = False
         try:
@@ -115,7 +115,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         session: ChatSessionRefs,
         documents: Sequence[ChatDocumentRef],
     ) -> tuple[ChatDocumentRef, ...]:
-        """Bind uploaded document locations to a conversation workspace."""
+        """将已上传文档的位置绑定到指定对话工作区。"""
         self._require_session(session)
         try:
             locations = self._document_locations(documents)
@@ -142,7 +142,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         *,
         document_refs: Sequence[str] = (),
     ) -> Iterator[ChatChunk]:
-        """Send a message and yield domain chunks without SSE formatting."""
+        """发送消息并产出领域文本片段，不包含 SSE 格式。"""
         self._require_session(session)
         try:
             document_ids = self._resolve_document_ids(session, document_refs)
@@ -180,7 +180,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         self,
         session: ChatSessionRefs,
     ) -> tuple[ChatMessageSnapshot, ...]:
-        """Read and normalize external thread history."""
+        """读取并规范化外部线程历史。"""
         self._require_session(session)
         try:
             history = self._thread_client.history(
@@ -203,7 +203,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         context_ref: str,
         conversation_name: str,
     ) -> ChatSessionRefs:
-        """Create a temporary thread whose lifecycle is owned by the caller."""
+        """创建临时线程，其完整生命周期由调用方负责。"""
         normalized_context_ref = self._required_text(context_ref, "context_ref")
         try:
             temp_thread = self._thread_client.create_thread(
@@ -224,7 +224,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         session: ChatSessionRefs,
         prompt: str,
     ) -> str:
-        """Ask a caller-tracked temporary thread for a standalone reply."""
+        """向调用方追踪的临时线程请求一条独立回复。"""
         self._require_session(session)
         try:
             answer = self._thread_client.ask(
@@ -247,7 +247,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         self,
         session: ChatSessionRefs,
     ) -> ChatOperationResult:
-        """Idempotently delete the remote conversation thread."""
+        """幂等删除远端对话线程。"""
         self._require_session(session)
         try:
             self._thread_client.delete_thread(
@@ -267,7 +267,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         self,
         context_ref: str,
     ) -> ChatOperationResult:
-        """Idempotently delete the remote conversation workspace."""
+        """幂等删除远端对话工作区。"""
         normalized_context_ref = self._required_text(context_ref, "context_ref")
         try:
             self._workspace_client.delete_workspace(
@@ -292,7 +292,7 @@ class AnythingLLMChatGateway(ChatConversationPort):
         return None
 
     def _compensate_new_workspace(self, workspace_ref: str) -> bool:
-        """Best-effort adapter-local compensation before a ref can be persisted."""
+        """在外部引用尚未持久化前，尽力执行适配器内部补偿。"""
         try:
             self._workspace_client.delete_workspace(
                 workspace_ref,

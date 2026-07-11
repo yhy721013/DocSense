@@ -1,4 +1,4 @@
-"""Tests for file-chat title generation service."""
+"""文件对话标题生成服务的测试。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from tests.fakes import FakeChatConversationFactory
 
 
 class _FailingConversation:
-    """Conversation fake that simulates model/provider failure."""
+    """模拟模型或供应商失败的对话替身。"""
 
     def open_temporary_conversation(
         self,
@@ -53,7 +53,7 @@ class _FailingConversation:
 
 
 class _FailingConversationFactory:
-    """Minimal factory satisfying the runtime chat factory protocol."""
+    """满足运行期对话工厂协议的最小工厂。"""
 
     @contextmanager
     def create(self) -> Iterator[_FailingConversation]:
@@ -228,8 +228,8 @@ class ChatTitleServiceTests(unittest.TestCase):
         self.assertEqual("failed", jobs[0].status)
         self.assertEqual(1, jobs[0].attempt_count)
 
-        # A later maintenance worker receives only ``job_id`` and can recover
-        # the lease without the original title request or a captured callback.
+        # 后续维护工作进程只接收 ``job_id``，无需原始标题请求或捕获的回调，
+        # 即可重新加载并恢复该租约。
         recovery = ChatCleanupJobExecutor(
             store=self.store,
             conversation_factory=FakeChatConversationFactory(),
@@ -248,7 +248,7 @@ class ChatTitleServiceTests(unittest.TestCase):
         )
 
     def test_delete_is_rejected_while_title_has_a_planned_temporary_lease(self) -> None:
-        """planned lease 使标题创建与删除在 SQLite 临界区互斥。"""
+    """计划租约使标题创建与删除在 SQLite 临界区互斥。"""
         factory = FakeChatConversationFactory()
         self._create_session_with_known_context(chat_id="chat-title-race", factory=factory)
         lease_id = chat_temporary_thread_lease_id(

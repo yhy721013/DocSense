@@ -1,4 +1,4 @@
-"""Locking services for durable file-chat run ownership."""
+"""用于持久化文件对话运行归属的锁服务。"""
 
 from app.services.chat.locking.lock_service import (
     DEFAULT_STALE_RUN_SECONDS,

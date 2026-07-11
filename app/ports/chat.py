@@ -234,7 +234,7 @@ class ChatConversationPort(Protocol):
         context_ref: str,
         conversation_name: str,
     ) -> ChatSessionRefs:
-        """Create a separately tracked temporary conversation in one context."""
+        """在指定上下文中创建一条可独立追踪的临时对话。"""
         ...
 
     def generate_temporary_reply(
@@ -243,7 +243,7 @@ class ChatConversationPort(Protocol):
         session: ChatSessionRefs,
         prompt: str,
     ) -> str:
-        """Generate one non-streaming reply in a tracked temporary thread."""
+        """在已追踪的临时线程中生成一条非流式回复。"""
         ...
 
     def delete_conversation(

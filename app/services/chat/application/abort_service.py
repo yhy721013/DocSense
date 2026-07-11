@@ -1,4 +1,4 @@
-"""Application service for aborting active file-chat streams."""
+"""用于中断活跃文件对话流的应用服务。"""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ class PersistedAbortPollingNotifier:
 
 @dataclass(frozen=True)
 class ChatAbortResult:
-    """Result returned to `/llm/chat/abort` callers."""
+    """返回给 `/llm/chat/abort` 调用方的结果。"""
 
     chat_id: str
     aborted: bool
@@ -93,7 +93,7 @@ class ChatAbortResult:
 
 
 class ChatAbortService:
-    """Sets durable abort requests for the current active run of one chat."""
+    """为指定对话当前活跃运行写入持久化中断请求。"""
 
     def __init__(
         self,

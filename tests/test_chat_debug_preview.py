@@ -1,4 +1,4 @@
-"""Offline tests for the local-authority file-chat debug bootstrap."""
+"""本地权威文件对话调试初始化数据的离线测试。"""
 
 from __future__ import annotations
 

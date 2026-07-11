@@ -1,4 +1,4 @@
-"""Offline tests for the internal file-chat event ledger."""
+"""文件对话内部事件账本的离线测试。"""
 
 from __future__ import annotations
 

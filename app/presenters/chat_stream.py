@@ -1,4 +1,4 @@
-"""SSE presentation helpers for file-chat streams."""
+"""文件对话流的 SSE 展示层辅助工具。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ _TERMINAL_EVENT_TYPES = frozenset({"aborted", "done", "error"})
 
 
 def format_sse_event(event_type: str, data: Mapping[str, Any] | None = None) -> str:
-    """Format one domain stream event as a Server-Sent Events payload."""
+    """将一个领域流事件格式化为 Server-Sent Events 载荷。"""
     normalized_type = str(event_type or "").strip()
     if not normalized_type:
         raise ValueError("event_type cannot be empty")
@@ -23,7 +23,7 @@ def format_sse_event(event_type: str, data: Mapping[str, Any] | None = None) -> 
 
 
 def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
-    """Convert supplier-neutral chat events to SSE payloads."""
+    """将供应商无关的对话事件转换为 SSE 载荷。"""
     for event in events:
         if not isinstance(event, ChatStreamEvent):
             raise TypeError("chat stream must yield ChatStreamEvent")

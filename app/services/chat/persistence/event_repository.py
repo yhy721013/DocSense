@@ -1,4 +1,4 @@
-"""SQLite-backed internal event ledger for file-chat runs."""
+"""以 SQLite 为后端的文件对话运行内部事件账本。"""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ _TERMINAL_EVENT_TYPES = frozenset({"aborted", "done", "error"})
 
 @runtime_checkable
 class ChatRunEventStore(Protocol):
-    """Internal event-ledger capability used by chat application services."""
+    """对话应用服务使用的内部事件账本能力。"""
 
     def append(self, *, run_id: str, event: ChatStreamEvent) -> ChatRunEvent:
-        """Persist one event before its presentation."""
+        """在展示事件前持久化该事件。"""
         ...
 
     def append_many(
@@ -29,16 +29,16 @@ class ChatRunEventStore(Protocol):
         run_id: str,
         events: Sequence[ChatStreamEvent],
     ) -> tuple[ChatRunEvent, ...]:
-        """Persist an ordered non-terminal event batch in one transaction."""
+        """在一个事务中持久化有序的非终态事件批次。"""
         ...
 
     def list_by_run(self, run_id: str) -> tuple[ChatRunEvent, ...]:
-        """Read events in internal sequence order without defining HTTP semantics."""
+        """按内部序号读取事件，但不定义 HTTP 语义。"""
         ...
 
 
 class ChatRunEventRepository(_Repository):
-    """Persist strictly ordered stream events for one internally identified run."""
+    """为一条内部标识运行持久化严格有序的流事件。"""
 
     def append(self, *, run_id: str, event: ChatStreamEvent) -> ChatRunEvent:
         return self.append_many(run_id=run_id, events=(event,))[0]
@@ -49,7 +49,7 @@ class ChatRunEventRepository(_Repository):
         run_id: str,
         events: Sequence[ChatStreamEvent],
     ) -> tuple[ChatRunEvent, ...]:
-        """Append a contiguous event batch under one SQLite write transaction."""
+        """在一次 SQLite 写事务中追加连续的事件批次。"""
         normalized_run_id = _required_text(run_id, name="run_id")
         normalized_events = tuple(events)
         if not normalized_events:
@@ -72,10 +72,9 @@ class ChatRunEventRepository(_Repository):
         run_id: str,
         event: ChatStreamEvent,
     ) -> ChatRunEvent:
-        """Append an event using the caller's transaction.
+        """使用调用方事务追加一个事件。
 
-        This is used by the SQLite run-lock adapter so a terminal event commits
-        atomically with the run state and locally authoritative messages.
+        SQLite 运行锁适配器使用本方法，使终态事件可与运行状态和本地权威消息原子提交。
         """
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("connection must be sqlite3.Connection")
@@ -93,7 +92,7 @@ class ChatRunEventRepository(_Repository):
         run_id: str,
         events: Sequence[ChatStreamEvent],
     ) -> tuple[ChatRunEvent, ...]:
-        """Append an ordered event group using a caller-owned transaction."""
+        """使用调用方持有的事务追加有序事件组。"""
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("connection must be sqlite3.Connection")
         normalized_run_id = _required_text(run_id, name="run_id")

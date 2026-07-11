@@ -1,4 +1,4 @@
-"""Stable domain models for the file-chat persistence layer."""
+"""文件对话持久化层使用的稳定领域模型。"""
 
 from __future__ import annotations
 
@@ -62,11 +62,9 @@ LEASE_OPEN_STATUSES = frozenset(
     {LEASE_PLANNED, LEASE_ACTIVE, LEASE_CLEANUP_PENDING, LEASE_CLEANUP_FAILED}
 )
 
-# Cleanup work is persisted independently from a resource lease. A lease tells
-# us *what* remote resource exists; a job records *when and how* compensation
-# should be retried. Keeping the two lifecycles separate lets a future worker
-# safely retry an idempotent cleanup operation without mutating the resource
-# identity itself.
+# 清理任务与资源租约独立持久化。租约描述“存在哪个”远端资源；任务记录“何时、如何”
+# 重试补偿。将两种生命周期分离后，未来工作进程可安全重试幂等清理操作，而不会修改
+# 资源身份本身。
 CLEANUP_JOB_PENDING = "pending"
 CLEANUP_JOB_RUNNING = "running"
 CLEANUP_JOB_SUCCEEDED = "succeeded"
@@ -80,9 +78,8 @@ CLEANUP_JOB_STATUSES = frozenset(
     }
 )
 
-# Cleanup reasons are internal workflow identifiers, not HTTP/API values.  A
-# lease is supplied separately so several temporary threads belonging to one
-# chat can be retried independently without overloading the reason string.
+# 清理原因是内部工作流标识，不是 HTTP/API 值。租约单独提供，因此同一对话归属的多个
+# 临时线程可以独立重试，而不会让原因字符串承载过多含义。
 CLEANUP_REASON_DELETE_CHAT = "delete_chat"
 CLEANUP_REASON_TEMPORARY_THREAD = "temporary_thread"
 CLEANUP_JOB_REASONS = frozenset(
@@ -95,7 +92,7 @@ CLEANUP_JOB_REASONS = frozenset(
 
 @dataclass(frozen=True)
 class ChatSession:
-    """Local authoritative session metadata for a file-chat conversation."""
+    """文件对话会话的本地权威元数据。"""
 
     chat_id: str
     workspace_ref: str
@@ -111,13 +108,11 @@ class ChatSession:
 
 @dataclass(frozen=True)
 class ChatDocumentBinding:
-    """One immutable document revision attached to a chat session.
+    """附加到对话会话的一条不可变文档版本。
 
-    ``file_name`` is a business-side file key and can be reused when the source
-    file is re-indexed. Therefore it is deliberately **not** the identity of a
-    binding. ``document_ref`` represents the resolved revision that was used by
-    one or more runs, while ``binding_id`` provides a stable local cleanup and
-    audit key.
+    ``file_name`` 是业务侧文件键，源文件重新索引时可复用，因此刻意不作为绑定身份。
+    ``document_ref`` 表示一个或多个运行实际使用的解析版本，``binding_id`` 则提供
+    稳定的本地清理和审计键。
     """
 
     binding_id: str
@@ -132,10 +127,10 @@ class ChatDocumentBinding:
 
 @dataclass(frozen=True)
 class ChatRun:
-    """One internally identified execution attempt for `/llm/chat`.
+    """`/llm/chat` 的一次内部标识执行尝试。
 
-    ``run_id`` is an implementation key for lifecycle, messages, and external
-    resource leases.  It is intentionally not part of the HTTP or SSE contract.
+    ``run_id`` 是用于生命周期、消息和外部资源租约的实现键，刻意不属于 HTTP 或 SSE
+    契约的一部分。
     """
 
     run_id: str
@@ -153,7 +148,7 @@ class ChatRun:
 
 @dataclass(frozen=True)
 class ChatRunEvent:
-    """One internally persisted event emitted by a file-chat run."""
+    """一次文件对话运行产出的内部持久化事件。"""
 
     run_id: str
     event_seq: int
@@ -185,7 +180,7 @@ class ChatRunEvent:
 
 @dataclass(frozen=True)
 class ChatRunInputFile:
-    """Immutable document identity captured when a run is accepted."""
+    """受理运行时捕获的不可变文档身份。"""
 
     file_name: str
     original_name: str
@@ -195,7 +190,7 @@ class ChatRunInputFile:
 
 @dataclass(frozen=True)
 class ChatRunInput:
-    """Queue-safe message and document snapshot for one accepted run."""
+    """一条已受理运行可安全入队的消息与文档快照。"""
 
     run_id: str
     message: str
@@ -205,7 +200,7 @@ class ChatRunInput:
 
 @dataclass(frozen=True)
 class ChatMessageFile:
-    """Business file linked to one user message."""
+    """关联到一条用户消息的业务文件。"""
 
     message_id: str
     file_name: str
@@ -214,7 +209,7 @@ class ChatMessageFile:
 
 @dataclass(frozen=True)
 class ChatMessage:
-    """Locally persisted chat message."""
+    """本地持久化的对话消息。"""
 
     message_id: str
     chat_id: str
@@ -229,7 +224,7 @@ class ChatMessage:
 
 @dataclass(frozen=True)
 class ChatResourceLease:
-    """Persistent external-resource lease for chat cleanup and recovery."""
+    """用于对话清理与恢复的持久化外部资源租约。"""
 
     lease_id: str
     chat_id: str
@@ -244,7 +239,7 @@ class ChatResourceLease:
 
 @dataclass(frozen=True)
 class ChatCleanupJob:
-    """Durable request to compensate or delete chat-owned resources."""
+    """用于补偿或删除对话所属资源的持久化请求。"""
 
     job_id: str
     chat_id: str

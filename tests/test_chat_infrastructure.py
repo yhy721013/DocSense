@@ -86,7 +86,7 @@ class ChatInfrastructureContractTests(unittest.TestCase):
         self._tempdir.__exit__(None, None, None)
 
     def test_sqlite_store_declares_limits_and_refuses_uninstalled_outbox(self) -> None:
-        """SQLite 可提供本地事务/条件更新，但不能被误用为可靠 outbox。"""
+    """SQLite 可提供本地事务和条件更新，但不能被误用为可靠发件箱。"""
         capabilities = self.store.capabilities
 
         self.assertTrue(capabilities.supports_single_instance)

@@ -1,8 +1,7 @@
-"""HTTP-facing deletion workflow for file-chat sessions.
+"""面向 HTTP 的文件对话会话删除工作流。
 
-This service owns session admission and the frozen delete response semantics.
-Actual remote resource deletion lives in ``cleanup_service`` and is invoked by
-the replaceable cleanup dispatcher with a durable job ID.
+本服务负责会话准入与已冻结的删除响应语义。实际的远端资源删除由
+``cleanup_service`` 负责，并通过可替换的清理调度器使用持久化任务 ID 调用。
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ def _required_text(value: str, *, name: str) -> str:
 
 @dataclass(frozen=True)
 class ChatDeleteResult:
-    """API-facing result for a successful idempotent delete request."""
+    """成功且幂等的删除请求面向 API 的结果。"""
 
     chat_id: str
     deleted: bool
@@ -65,7 +64,7 @@ class ChatDeleteResult:
 
 
 class ChatDeleteNotFoundError(ValueError):
-    """Raised when the local authoritative session does not exist."""
+    """本地权威会话不存在时抛出。"""
 
     def __init__(self, chat_id: str) -> None:
         self.chat_id = chat_id
@@ -73,7 +72,7 @@ class ChatDeleteNotFoundError(ValueError):
 
 
 class ChatDeleteCleanupError(RuntimeError):
-    """Raised after cleanup failure has been persisted for retry and audit."""
+    """清理失败已持久化以供重试和审计后抛出。"""
 
     def __init__(
         self,
@@ -83,14 +82,13 @@ class ChatDeleteCleanupError(RuntimeError):
     ) -> None:
         self.chat_id = chat_id
         self.failed_leases = failed_leases
-        # Remote resource references are operational/audit data rather than
-        # public API content.  Keep the frozen error payload stable and avoid
-        # leaking supplier-side identifiers through the HTTP error message.
+        # 远端资源引用属于运维和审计数据，而非公开 API 内容。应保持已冻结的错误载荷稳定，
+        # 并避免通过 HTTP 错误消息泄露供应商侧标识。
         super().__init__("对话资源清理失败")
 
 
 class ChatDeleteBusyError(RuntimeError):
-    """Raised when delete cannot enter its exclusive session state."""
+    """删除操作无法进入会话独占状态时抛出。"""
 
     def __init__(self, *, chat_id: str, reason: str) -> None:
         self.chat_id = chat_id
@@ -99,13 +97,11 @@ class ChatDeleteBusyError(RuntimeError):
 
 
 class ChatDeleteService:
-    """Accept a delete request and synchronously observe its durable cleanup.
+    """受理删除请求，并同步等待其持久化清理结果。
 
-    The current public endpoint promises a completed delete only after remote
-    cleanup succeeds.  Therefore the single-instance composition must install
-    a dispatcher with ``supports_synchronous_completion=True``.  A future
-    asynchronous scheduler can reuse the cleanup executor, but cannot silently
-    replace this endpoint's semantics without an explicitly designed API change.
+    当前公开接口只会在远端清理成功后承诺删除完成。因此单实例组合必须注入
+    ``supports_synchronous_completion=True`` 的调度器。未来异步调度器可以复用清理
+    执行器，但不得在未明确设计 API 变更的情况下悄然替换本接口的语义。
     """
 
     def __init__(
@@ -150,7 +146,7 @@ class ChatDeleteService:
 
     @property
     def cleanup_dispatcher_capabilities(self) -> ChatCleanupDispatchCapabilities:
-        """Expose actual dispatch behaviour for composition-root validation."""
+        """暴露实际调度行为，供组合根校验。"""
         return self._cleanup_dispatcher.capabilities
 
     def delete_chat(self, *, chat_id: str) -> ChatDeleteResult:
@@ -180,9 +176,8 @@ class ChatDeleteService:
                 reason=str(exc),
             ) from exc
 
-        # The durable job is recorded before any remote side effect.  The
-        # inline adapter invokes the same job executor that a future worker
-        # will use, keeping the current synchronous API path queue-shaped.
+        # 在任何远端副作用发生前先记录持久化任务。内联适配器调用的执行器与未来工作进程
+        # 使用的执行器相同，因此当前同步 API 路径仍保持队列化形态。
         cleanup_job = self._store.cleanup_jobs.enqueue(
             chat_id=normalized_chat_id,
             reason=CLEANUP_REASON_DELETE_CHAT,
@@ -199,9 +194,8 @@ class ChatDeleteService:
                 failed_leases=self._failed_leases(normalized_chat_id),
             ) from exc
         except Exception as exc:
-            # Dispatch failures are also persisted as lease failures.  The
-            # original exception remains the cause for server-side diagnosis,
-            # while the route retains its stable cleanup-error response.
+            # 调度失败也会被持久化为租约失败。原始异常保留为服务端诊断原因，而路由仍
+            # 返回稳定的清理错误响应。
             self._mark_session_cleanup_error(
                 chat_id=normalized_chat_id,
                 error_message=str(exc) or exc.__class__.__name__,
@@ -247,7 +241,7 @@ class ChatDeleteService:
         )
 
     def _mark_session_cleanup_error(self, *, chat_id: str, error_message: str) -> None:
-        """Keep every unresolved local lease visible after a failed dispatch."""
+        """调度失败后保持每一条未解决的本地租约可见。"""
         for lease in self._store.resource_leases.list_by_chat(
             chat_id,
             include_closed=False,

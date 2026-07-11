@@ -1,4 +1,4 @@
-"""Durable ChatRun locking for file-chat request isolation."""
+"""用于文件对话请求隔离的持久化 ChatRun 锁服务。"""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _parse_utc(value: str | None) -> datetime | None:
 
 
 class ChatRunBusyError(RuntimeError):
-    """Raised when a chat already has an active run."""
+    """一个对话已存在活动运行时抛出。"""
 
     def __init__(self, *, chat_id: str, active_run_id: str) -> None:
         super().__init__("current chat already has an active run")
@@ -80,7 +80,7 @@ class ChatRunBusyError(RuntimeError):
 
 
 class ChatRunInactiveError(RuntimeError):
-    """Raised when an abort request races with a terminal chat run."""
+    """中断请求与已终态的对话运行竞争时抛出。"""
 
     def __init__(self, *, run_id: str, status: str) -> None:
         super().__init__("chat run is no longer active")
@@ -89,7 +89,7 @@ class ChatRunInactiveError(RuntimeError):
 
 
 class ChatSessionUnavailableError(RuntimeError):
-    """Raised when a chat session is not allowed to accept a new run."""
+    """对话会话不允许受理新运行时抛出。"""
 
     def __init__(self, *, chat_id: str, status: str) -> None:
         super().__init__("chat session is not active")
@@ -98,7 +98,7 @@ class ChatSessionUnavailableError(RuntimeError):
 
 
 class ChatSessionDeleteBusyError(RuntimeError):
-    """Raised when deletion races with an active run or another deletion."""
+    """删除操作与活动运行或另一删除操作竞争时抛出。"""
 
     def __init__(self, *, chat_id: str, reason: str) -> None:
         super().__init__(reason)
@@ -107,11 +107,11 @@ class ChatSessionDeleteBusyError(RuntimeError):
 
 
 class ChatRunLockService:
-    """SQLite 单实例 run 协调器及其兼容锁服务入口。
+    """SQLite 单实例运行协调器及其兼容锁服务入口。
 
     名称保留是为了兼容已存在的应用装配与测试；它并不是分布式锁实现。共享
     持久化落地后，应由新的 ``ChatRunCoordinator`` 适配器替换本类，并以真实
-    lease/fencing token 把心跳和终态提交收敛为条件更新。
+    租约和围栏令牌把心跳和终态提交收敛为条件更新。
     """
 
     def __init__(
@@ -139,7 +139,7 @@ class ChatRunLockService:
 
     @property
     def lease_capabilities(self) -> ChatRunLeaseCapabilities:
-        """返回当前 SQLite 实现的真实租约能力，明确不含跨实例 fencing。"""
+        """返回当前 SQLite 实现的真实租约能力，明确不含跨实例围栏。"""
         return SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES
 
     def try_acquire_chat_run(
@@ -157,8 +157,8 @@ class ChatRunLockService:
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
 
         with _connection_scope(self.db_path) as connection:
-            # BEGIN IMMEDIATE 在 SQLite 中会立即取得写锁，保证“检查活跃 run”和
-            # “插入新 run”处于同一个临界区。后续替换为 PostgreSQL/Redis 时，
+            # ``BEGIN IMMEDIATE`` 语句会在 SQLite 中立即取得写锁，保证“检查活动运行”和
+            # “插入新运行”处于同一个临界区。后续替换为 PostgreSQL 或 Redis 时，
             # 这里就是分布式互斥语义的边界。
             connection.execute("BEGIN IMMEDIATE")
             logger.info(
@@ -230,12 +230,9 @@ class ChatRunLockService:
                     now,
                 ),
             )
-            # Acceptance intentionally stops at ``accepted``. The synchronous
-            # executor claims the run immediately before it opens remote
-            # resources, while a future worker will perform the same
-            # conditional transition with a real lease/fencing token. This
-            # prevents a never-consumed HTTP response from being recorded as a
-            # running model invocation.
+            # 受理流程刻意停在 ``accepted``。同步执行器会在打开远端资源前立即领取运行；
+            # 未来工作进程也会使用真实租约和围栏令牌执行相同的条件迁移。这样可避免从未
+            # 被消费的 HTTP 响应被记录为正在运行的模型调用。
             row = connection.execute(
                 "SELECT * FROM chat_runs WHERE run_id = ?",
                 (normalized_run_id,),
@@ -267,7 +264,7 @@ class ChatRunLockService:
             return self._row(row)
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:
-        """Atomically block new runs and reject deletion while a run is active."""
+        """原子阻止新运行，并在存在活动运行时拒绝删除。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
         now = _utc_now_iso()
@@ -339,7 +336,7 @@ class ChatRunLockService:
         assistant_content: str,
         terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
-        """Commit one successful turn and its terminal run state atomically."""
+        """原子提交一轮成功对话及其运行终态。"""
         return self._finish_run_with_user(
             run_id=run_id,
             user_message_id=user_message_id,
@@ -397,12 +394,11 @@ class ChatRunLockService:
         run_id: str,
         error_message: str,
     ) -> ChatRun:
-        """Fail an accepted-but-never-executed run without exposing its input.
+        """将已受理但从未执行的运行标记失败，且不暴露其输入。
 
-        A browser can disconnect after the HTTP handler accepts a request but
-        before Flask starts iterating the SSE generator. In that case no model
-        request has been made, so the agreed history policy is to discard the
-        pending user message rather than present an unanswered turn.
+        浏览器可能在 HTTP 处理器受理请求后、Flask 开始迭代 SSE 生成器前断开连接。
+        此时尚未发生模型请求，因此既定历史策略是丢弃待处理用户消息，而不是展示没有
+        回答的一轮对话。
         """
         normalized_run_id = _required_text(run_id, name="run_id")
         normalized_error = _required_text(error_message, name="error_message")
@@ -466,12 +462,11 @@ class ChatRunLockService:
             raise
 
     def issue_execution_lease(self, *, run_id: str) -> ChatRunLease:
-        """Claim one accepted run and issue its internal execution lease.
+        """领取一条已受理运行，并签发其内部执行租约。
 
-        The claim is intentionally the only place where ``accepted`` becomes
-        ``running``.  A future shared-persistence adapter will add a lease and
-        fencing predicate to this conditional update; the current adapter keeps
-        the same lifecycle boundary without pretending to support fencing.
+        领取操作是 ``accepted`` 变为 ``running`` 的唯一位置。未来共享持久化适配器
+        会在该条件更新中加入租约与围栏条件；当前适配器保持相同生命周期边界，且不假装
+        支持围栏能力。
         """
         normalized_run_id = _required_text(run_id, name="run_id")
         now = _utc_now_iso()
@@ -517,11 +512,10 @@ class ChatRunLockService:
         )
 
     def validate_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
-        """校验一个内部执行租约仍对应本实例的活跃 run。
+        """校验一个内部执行租约仍对应本实例的活动运行。
 
-        当前校验与后续写入之间无法构成跨实例 fencing 原子条件，因此只可用于
-        ``single_instance`` 模式。未来适配器必须把 lease/fencing 条件合并到
-        heartbeat 和终态 UPDATE 中。
+        当前校验与后续写入之间无法构成跨实例围栏原子条件，因此只可用于单实例模式。
+        未来适配器必须把租约与围栏条件合并到心跳和终态更新中。
         """
         if not isinstance(lease, ChatRunLease):
             raise TypeError("lease must be ChatRunLease")
@@ -554,7 +548,7 @@ class ChatRunLockService:
         return run
 
     def heartbeat_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
-        """通过执行租约刷新心跳，保留未来 fencing 条件更新的稳定签名。"""
+        """通过执行租约刷新心跳，保留未来围栏条件更新的稳定签名。"""
         self.validate_execution_lease(lease=lease)
         return self.heartbeat_run(lease.run_id)
 
@@ -585,7 +579,7 @@ class ChatRunLockService:
         error_message: str,
         terminal_event: ChatStreamEvent | None = None,
     ) -> ChatRun:
-        """通过执行租约提交失败终态，并按既有规则保留 user 消息。"""
+        """通过执行租约提交失败终态，并按既有规则保留用户消息。"""
         self.validate_execution_lease(lease=lease)
         return self.fail_run_with_user(
             run_id=lease.run_id,
@@ -610,12 +604,10 @@ class ChatRunLockService:
         )
 
     def expire_stale_runs_for_chat(self, *, chat_id: str) -> tuple[ChatRun, ...]:
-        """Mark stale active runs for one chat as failed and return them.
+        """将一个对话中的过期活动运行标记为失败并返回它们。
 
-        `/llm/chat` already expires stale runs before acquiring a new lock. Abort
-        must apply the same rule before reporting that an active stream can be
-        interrupted; otherwise a crashed worker would receive `aborted: true`
-        even though no executor remains to observe the abort flag.
+        `/llm/chat` 会在领取新锁前使过期运行失效。中断操作在报告活动流可中断前也必须
+        使用同一规则；否则已崩溃工作进程会被标记为已中断，但已不存在执行器读取中断标记。
         """
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         if self.stale_after_seconds is None:
@@ -750,9 +742,8 @@ class ChatRunLockService:
                     *active_statuses,
                 ),
             )
-            # A running run has already reached the model-execution boundary,
-            # so its user turn remains visible after recovery. An accepted run
-            # never started execution and follows the explicit discard policy.
+            # 运行中状态已到达模型执行边界，因此恢复后其用户轮次仍应可见。已受理状态
+            # 从未开始执行，应遵循明确的丢弃策略。
             message_status = (
                 MESSAGE_COMMITTED
                 if stale_status == RUN_RUNNING
@@ -779,13 +770,11 @@ class ChatRunLockService:
         connection: sqlite3.Connection,
         chat_id: str,
     ) -> bool:
-        """Return whether a title owns a temporary-thread lease right now.
+        """返回当前是否有标题生成占用临时线程租约。
 
-        A title records a planned lease before it calls the external provider.
-        Checking that lease in the same transaction that enters ``deleting``
-        closes the otherwise unavoidable check-then-create race between title
-        generation and context deletion.  The deterministic lease prefix is an
-        internal identity contract, never an HTTP-facing value.
+        标题生成会在调用外部供应商前记录 planned 租约。在进入 ``deleting`` 的同一事务中
+        检查该租约，可消除标题生成与上下文删除间原本不可避免的“检查后创建”竞争。
+        确定性租约前缀是内部身份契约，绝不属于面向 HTTP 的值。
         """
         rows = connection.execute(
             """
@@ -814,7 +803,7 @@ class ChatRunLockService:
         run_id: str,
         error_message: str,
     ) -> None:
-        """Append one recovery terminal event without duplicating an existing one."""
+        """追加一条恢复用终态事件，且不重复已有事件。"""
         terminal = connection.execute(
             """
             SELECT 1 FROM chat_run_events

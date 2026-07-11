@@ -256,9 +256,8 @@ def create_application_services() -> ApplicationServices:
         document_resolver=DatabaseChatDocumentResolver(kb_service),
     )
 
-    # The inline dispatcher receives only a durable run_id. Its executor reloads
-    # the accepted snapshot and claims the run at execution time, which keeps
-    # the current synchronous path aligned with a future worker entry point.
+    # 内联调度器只接收持久化 run_id。执行器会重新加载已受理快照，并在执行时领取运行权，
+    # 因而当前同步路径与未来工作进程入口保持一致。
     chat_dispatcher = InlineChatRunDispatcher(
         execute=chat_run_executor.execute_chat_run,
     )

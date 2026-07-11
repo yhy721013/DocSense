@@ -124,7 +124,7 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
         transport.close.assert_called_once_with()
 
     def test_transport_construction_failure_is_not_suppressed(self) -> None:
-        """Transport 尚未创建时，Factory 必须原样传播构造异常。"""
+    """传输对象尚未创建时，工厂必须原样传播构造异常。"""
         factory = AnythingLLMGatewayFactory(
             self._config(),
             transport_factory=Mock(side_effect=ValueError("配置无效")),
@@ -171,7 +171,7 @@ class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
 
 
 class AnythingLLMChatFactoryTests(unittest.TestCase):
-    """Verify file-chat factory isolation and lazy transport lifecycle."""
+    """验证文件对话工厂的隔离性与传输对象惰性生命周期。"""
 
     def test_chat_factory_is_lazy_and_closes_transport(self) -> None:
         transport = MagicMock(spec=AnythingLLMTransport)
@@ -330,7 +330,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertNotIn("requests.Session(", container_source)
 
     def test_blueprint_source_has_no_module_level_service_construction(self) -> None:
-        """Blueprint 只能解析应用容器，不能重新引入模块级数据库或信号量单例。"""
+    """蓝图只能解析应用容器，不能重新引入模块级数据库或信号量单例。"""
         blueprint_source = (
             Path(__file__).resolve().parents[1]
             / "app"

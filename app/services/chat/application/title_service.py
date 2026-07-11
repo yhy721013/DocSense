@@ -1,4 +1,4 @@
-"""Application service for generating file-chat display titles."""
+"""用于生成文件对话展示标题的应用服务。"""
 
 from __future__ import annotations
 
@@ -58,15 +58,15 @@ _THINK_PATTERN = re.compile(r"<think>[\s\S]*?(?:</think>|$)", flags=re.IGNORECAS
 
 
 class ChatTitleEmptyHistoryError(ValueError):
-    """Raised when an existing chat has no committed messages for title input."""
+    """已有对话没有可用于标题输入的已提交消息时抛出。"""
 
 
 class ChatTitleGenerationError(RuntimeError):
-    """Raised when title generation cannot produce a stable display title."""
+    """标题生成无法得到稳定展示标题时抛出。"""
 
 
 class ChatTitleUnavailableError(RuntimeError):
-    """Raised when session lifecycle forbids external title generation."""
+    """会话生命周期禁止调用外部标题生成时抛出。"""
 
 
 def _required_text(value: str, *, name: str) -> str:
@@ -84,7 +84,7 @@ def _positive_int(value: int, *, name: str) -> int:
 
 @dataclass(frozen=True)
 class ChatTitleResult:
-    """API-facing result for `/llm/chat/title`."""
+    """面向 `/llm/chat/title` 接口的结果。"""
 
     chat_id: str
     title: str
@@ -98,18 +98,16 @@ class ChatTitleResult:
         object.__setattr__(self, "title", str(self.title or "").strip())
 
     def to_response(self) -> dict[str, str]:
-        """Return the exact public JSON payload shape."""
+        """返回严格符合公开接口的 JSON 载荷形状。"""
         return {"chatId": self.chat_id, "title": self.title}
 
 
 class ChatTitleService:
-    """Generate short titles from local committed chat history.
+    """根据本地已提交的对话历史生成短标题。
 
-    The service intentionally depends on the supplier-neutral Chat Port instead
-    of `AnythingLLMClient`. It reads only local committed messages, builds a
-    bounded prompt, and asks the adapter for a standalone reply in the existing
-    workspace so the title prompt is never appended to the main conversation
-    thread.
+    本服务刻意依赖供应商无关的 Chat Port，而不是 `AnythingLLMClient`。它仅读取
+    本地已提交消息、构造长度受控的提示词，并让适配器在既有工作区创建独立回复，
+    从而确保标题提示词不会被追加到主对话线程。
     """
 
     def __init__(
@@ -160,7 +158,7 @@ class ChatTitleService:
         )
 
     def generate_title(self, *, chat_id: str) -> ChatTitleResult:
-        """Generate a display title for one chat without mutating history."""
+        """在不修改历史记录的前提下，为一个对话生成展示标题。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         session = self._store.sessions.get(normalized_chat_id)
         if session is None:
@@ -232,12 +230,11 @@ class ChatTitleService:
         context_ref: str,
         prompt: str,
     ) -> str:
-        """Generate a title through a lease-backed temporary conversation.
+        """通过由租约保护的临时对话生成标题。
 
-        The old adapter-owned helper created and deleted this thread internally.
-        That made a delete failure invisible to the local recovery model. The
-        application service now records a planned lease before the remote side
-        effect and retains a cleanup job if the final deletion cannot complete.
+        旧的适配器内部辅助方法会自行创建和删除该线程，导致删除失败无法被本地恢复模型
+        感知。现在应用服务会在远端副作用发生前记录 planned 租约，若最终删除未完成，
+        则保留清理任务。
         """
         attempt_id = uuid.uuid4().hex
         lease_id = chat_temporary_thread_lease_id(
@@ -245,10 +242,9 @@ class ChatTitleService:
             attempt_id=attempt_id,
         )
         try:
-            # The guarded planned lease is the title/delete admission gate.
-            # Delete checks it in the same SQLite critical section used to
-            # enter ``deleting``; therefore a title can never start its remote
-            # thread after deletion has won the race.
+            # 受保护的 planned 租约是标题和删除操作的准入闸门。删除操作会在进入
+            # ``deleting`` 的同一个 SQLite 临界区检查它，因此删除抢占成功后，标题
+            # 绝不会再创建远端线程。
             self._store.resource_leases.begin(
                 lease_id=lease_id,
                 chat_id=chat_id,
@@ -294,9 +290,8 @@ class ChatTitleService:
             if temporary_session is None:
                 self._close_unresolved_planned_lease(lease_id)
             elif not cleanup_attempted:
-                # ``generate_temporary_reply`` failed after the remote thread
-                # was created. Still attempt cleanup, but never replace the
-                # original generation exception with a cleanup exception.
+                # ``generate_temporary_reply`` 在远端线程创建后失败。仍须尝试清理，
+                # 但绝不能用清理异常替换原始生成异常。
                 cleanup_attempted = True
                 try:
                     with self._conversation_factory.create() as cleanup_conversation:
@@ -306,9 +301,8 @@ class ChatTitleService:
                             lease_id=lease_id,
                         )
                 except Exception as cleanup_exc:
-                    # Do not replace the model-generation error with a second
-                    # failure while opening a cleanup-only request scope.  The
-                    # durable job recorded below remains the recovery path.
+                    # 打开仅用于清理的请求作用域时出现的第二个失败，不能替换模型生成
+                    # 错误。下方记录的持久化任务仍是恢复路径。
                     cleanup_error = str(cleanup_exc) or cleanup_exc.__class__.__name__
             if temporary_session is not None and cleanup_error:
                 cleanup_job = self._record_temporary_cleanup_failure(
@@ -331,7 +325,7 @@ class ChatTitleService:
         temporary_session,
         lease_id: str,
     ) -> str:
-        """Delete a tracked title thread and return a stable failure reason."""
+        """删除已跟踪的标题线程，并返回稳定的失败原因。"""
         try:
             result = conversation.delete_conversation(temporary_session)
         except ChatConversationNotFoundError:
@@ -339,9 +333,8 @@ class ChatTitleService:
         except ChatPortError as exc:
             return str(exc) or exc.__class__.__name__
         except Exception as exc:
-            # Cleanup bookkeeping must survive adapter contract defects as
-            # well as ordinary remote errors.  Returning a stable failure
-            # value lets the caller persist and retry the exact lease.
+            # 清理记账既要覆盖普通远端错误，也要覆盖适配器契约缺陷。返回稳定失败值，
+            # 才能让调用方持久化并重试准确的租约。
             return str(exc) or exc.__class__.__name__
         if not isinstance(result, ChatOperationResult):
             return "temporary title delete returned an invalid result"
@@ -380,7 +373,7 @@ class ChatTitleService:
         self,
         cleanup_job: ChatCleanupJob,
     ) -> ChatCleanupJob:
-        """Attempt one immediate cleanup without hiding the durable failure."""
+        """尝试一次立即清理，同时不掩盖持久化失败。"""
         try:
             return self._cleanup_dispatcher.dispatch(job=cleanup_job)
         except ChatCleanupJobExecutionError as exc:
@@ -392,7 +385,7 @@ class ChatTitleService:
         *,
         max_chars: int = DEFAULT_MAX_TITLE_CHARS,
     ) -> str:
-        """Normalize model output into a single bounded display title."""
+        """将模型输出规范化为单个长度受限的展示标题。"""
         max_title_chars = _positive_int(max_chars, name="max_chars")
         text = str(raw_title or "")
         text = _THINK_PATTERN.sub("", text)
@@ -400,8 +393,7 @@ class ChatTitleService:
         if text.startswith("```"):
             text = re.sub(r"^```(?:\w+)?", "", text).strip()
             text = re.sub(r"```$", "", text).strip()
-        # Models sometimes return a sentence and then explanations. The first
-        # non-empty line is the only defensible title candidate.
+        # 模型有时会先返回一句标题，再给出解释。首个非空行才是唯一合理的标题候选。
         for line in text.splitlines():
             candidate = line.strip()
             if candidate:

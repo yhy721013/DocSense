@@ -67,7 +67,7 @@ class ChatDtoContractTests(unittest.TestCase):
         self.assertEqual((document,), snapshot.linked_documents)
 
     def test_invalid_roles_timestamps_and_empty_chunks_are_rejected(self) -> None:
-        """DTO 在端口边界拒绝模糊状态，而不是把脏数据留给适配器解释。"""
+    """数据传输对象在端口边界拒绝模糊状态，而不是把脏数据留给适配器解释。"""
         with self.assertRaises(ValueError):
             ChatMessageSnapshot(role="system", content="隐藏消息")
         with self.assertRaises(ValueError):
@@ -116,7 +116,7 @@ class ChatPortContractTests(unittest.TestCase):
     """验证文件对话 Port 的 Fake 可替换性、流式边界和资源语义。"""
 
     def test_fake_implements_runtime_checkable_protocols(self) -> None:
-        """Fake 必须能直接注入只依赖 Protocol 的业务服务。"""
+    """替身对象必须能直接注入只依赖协议的业务服务。"""
         port = FakeChatConversationPort()
         factory = FakeChatConversationFactory()
 

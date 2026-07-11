@@ -1,4 +1,4 @@
-"""Offline tests for stage-3 file-chat repositories."""
+"""阶段 3 文件对话仓储的离线测试。"""
 
 from __future__ import annotations
 

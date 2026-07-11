@@ -1,4 +1,4 @@
-"""Execution boundary for one file-chat run."""
+"""单次文件对话运行的执行边界。"""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def _text_tuple(values: Sequence[str], *, name: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class ChatRunStreamRequest:
-    """Application input required to execute one file-chat stream."""
+    """执行一次文件对话流所需的应用层输入。"""
 
     run_id: str
     chat_id: str
@@ -120,7 +120,7 @@ class ChatRunStreamRequest:
 
 @dataclass(frozen=True)
 class ChatRunDocumentSnapshot:
-    """Immutable document identity used by one synchronous chat execution."""
+    """一次同步对话执行使用的不可变文档身份快照。"""
 
     file_name: str
     original_name: str
@@ -139,12 +139,10 @@ class ChatRunDocumentSnapshot:
 
 @dataclass(frozen=True)
 class PreparedChatRun:
-    """A durably accepted run that can later be executed by its ``run_id``.
+    """已持久化受理、可随后通过 ``run_id`` 执行的运行。
 
-    The request snapshot is intentionally absent from this object.  It was
-    atomically persisted during acceptance and must be loaded again by the
-    executor, so an inline HTTP request and a future worker follow the same
-    execution path.
+    此对象刻意不携带请求快照。快照会在受理时原子持久化，执行器必须重新加载，
+    从而使内联 HTTP 请求与未来工作进程走同一条执行路径。
     """
 
     run_id: str
@@ -157,18 +155,18 @@ class PreparedChatRun:
 
 @runtime_checkable
 class ChatRunExecutor(Protocol):
-    """Executes a chat run and yields supplier-neutral stream events."""
+    """执行对话运行并产出供应商无关的流事件。"""
 
     def execute_chat_run(
         self,
         run_id: str,
     ) -> Iterable[ChatStreamEvent]:
-        """Load and execute one durably accepted run by its internal key."""
+        """通过内部键加载并执行一条已持久化受理的运行。"""
         ...
 
 
 class SynchronousChatRunExecutor:
-    """Single-instance executor that owns the new supplier-neutral chat path."""
+    """承担新供应商无关对话路径的单实例执行器。"""
 
     def __init__(
         self,
@@ -210,15 +208,15 @@ class SynchronousChatRunExecutor:
 
     @property
     def max_concurrent_streams(self) -> int:
-        """Return the explicit single-process stream capacity."""
+        """返回显式配置的单进程流并发容量。"""
         return self._max_concurrent_streams
 
     def try_acquire_stream_slot(self) -> bool:
-        """Reserve one synchronous stream slot without blocking a web worker."""
+        """不阻塞 Web 工作进程地预留一个同步流槽位。"""
         return self._stream_slots.acquire(blocking=False)
 
     def release_stream_slot(self) -> None:
-        """Release a slot reserved by the route once its SSE iterable closes."""
+        """路由对应的 SSE 可迭代对象关闭后释放其预留槽位。"""
         self._stream_slots.release()
 
     def prepare_chat_run(
@@ -228,7 +226,7 @@ class SynchronousChatRunExecutor:
         message: str,
         file_names: Sequence[str],
     ) -> PreparedChatRun:
-        """Resolve immutable inputs and atomically accept a new single-chat run."""
+        """解析不可变输入，并原子受理一条新的单会话运行。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_message = _required_text(message, name="message")
         normalized_file_names = _text_tuple(file_names, name="file_names")
@@ -256,14 +254,12 @@ class SynchronousChatRunExecutor:
                 for item in snapshots
             ),
         )
-        # The command service stores the complete message and document
-        # snapshot in the acceptance transaction. Passing these objects to the
-        # executor would make a future worker depend on request memory, so the
-        # execution path intentionally receives only the durable run key.
+        # 命令服务会在受理事务中保存完整的消息和文档快照。将这些对象直接传给执行器会
+        # 让未来工作进程依赖请求内存，因此执行路径刻意只接收持久化运行键。
         return PreparedChatRun(run_id=run.run_id, chat_id=run.chat_id)
 
     def execute_chat_run(self, run_id: str) -> Iterator[ChatStreamEvent]:
-        """Claim and execute an accepted run from its persisted input snapshot."""
+        """从持久化输入快照中领取并执行一条已受理运行。"""
         normalized_run_id = _required_text(run_id, name="run_id")
         run = self._store.runs.get(normalized_run_id)
         run_input = self._store.run_inputs.get(normalized_run_id)
@@ -283,10 +279,8 @@ class SynchronousChatRunExecutor:
                 run_id=normalized_run_id,
             )
         except ChatRunLeaseLostError as exc:
-            # A duplicate executor can observe the same durable run after
-            # another executor has already claimed it.  Never discard the
-            # pending user turn of that legitimate owner merely because this
-            # stale delivery failed to claim execution.
+            # 重复执行器可能在另一执行器已领取后仍观察到同一持久化运行。不能仅因为
+            # 这次过期投递未领取到执行权，就丢弃合法所有者的待处理用户轮次。
             logger.warning(
                 "文件对话run已被其他执行路径领取，跳过未启动收敛: "
                 "chat_id=%s run_id=%s reason=%s",
@@ -308,9 +302,8 @@ class SynchronousChatRunExecutor:
                     error_message=str(exc) or exc.__class__.__name__,
                 )
             except ChatRunLeaseLostError:
-                # The run changed between the failed claim and the attempted
-                # cleanup.  It is now owned by another execution path, so its
-                # pending user turn must remain untouched.
+                # 运行状态在领取失败与尝试收敛之间已发生变化。它现已归另一条执行路径
+                # 所有，因此其待处理用户轮次必须保持不变。
                 logger.warning(
                     "文件对话run已被其他执行路径领取，跳过未启动收敛: "
                     "chat_id=%s run_id=%s",
@@ -318,10 +311,8 @@ class SynchronousChatRunExecutor:
                     normalized_run_id,
                 )
             except Exception:
-                # Keep the SSE response deterministic even if persistence is
-                # temporarily unavailable.  The existing stale-run reaper is
-                # still responsible for resolving any accepted run that could
-                # not be settled in this request.
+                # 即便持久化暂时不可用，也要保持 SSE 响应确定。既有的过期运行回收器
+                # 仍负责收敛本次请求中无法完成的已受理运行。
                 logger.exception(
                     "文件对话run领取失败后的未启动收敛异常: chat_id=%s run_id=%s",
                     run.chat_id,
@@ -339,7 +330,7 @@ class SynchronousChatRunExecutor:
         )
 
     def _request_from_persisted_input(self, *, run_id: str) -> ChatRunStreamRequest:
-        """Rebuild the execution DTO from immutable acceptance data only."""
+        """仅根据不可变受理数据重建执行 DTO。"""
         run = self._store.runs.get(run_id)
         run_input = self._store.run_inputs.get(run_id)
         if run is None or run_input is None:
@@ -368,7 +359,7 @@ class SynchronousChatRunExecutor:
         self,
         request: ChatRunStreamRequest,
     ) -> Iterator[ChatStreamEvent]:
-        """Create/reuse resources, bind new documents, and emit supplier-neutral events."""
+        """创建或复用资源、绑定新文档，并产出供应商无关事件。"""
         try:
             session = self._store.sessions.get(request.chat_id)
             if session is None or session.status != SESSION_ACTIVE:
@@ -459,8 +450,7 @@ class SynchronousChatRunExecutor:
             if not exc.resource_refs:
                 self._close_planned_lease(workspace_lease_id)
             raise
-        # Save remote references before changing the session. If the following
-        # session update fails, cleanup can still discover both resources.
+        # 变更会话前先保存远端引用。若后续会话更新失败，清理流程仍可发现这两类资源。
         self._store.resource_leases.activate(
             lease_id=workspace_lease_id,
             external_ref=refs.context_ref,
@@ -486,7 +476,7 @@ class SynchronousChatRunExecutor:
         workspace_lease_id: str,
         resource_refs: Sequence[str],
     ) -> None:
-        """Persist a recoverable workspace reference reported by the adapter."""
+        """持久化由适配器报告且可恢复的工作区引用。"""
         if not resource_refs:
             return
         workspace_ref = resource_refs[0]
@@ -529,9 +519,8 @@ class SynchronousChatRunExecutor:
                 request.chat_id
             )
         }
-        # A continuation without explicit ``fileNames`` intentionally selects
-        # the latest head of every business file. Historical revisions remain
-        # attached for audit/cleanup but are never silently added to RAG.
+        # 未显式传入 ``fileNames`` 的续聊会刻意选择每个业务文件的最新版本。历史版本
+        # 仍保留绑定以供审计和清理，但绝不会被静默加入 RAG。
         if not documents:
             return tuple(
                 binding.document_ref
@@ -559,10 +548,8 @@ class SynchronousChatRunExecutor:
                 chat_id=request.chat_id,
                 resource_type=RESOURCE_DOCUMENT_BINDING,
                 run_id=request.run_id,
-                # A document location may legitimately be absent for an
-                # adapter that resolves by document_ref only.  Keep that
-                # optional identity visible in the lease rather than rejecting
-                # the accepted run before the adapter can attach it.
+                # 仅按 document_ref 解析的适配器可以合法地没有文档位置。应在租约中
+                # 保留该可选身份，而不是在适配器有机会绑定前拒绝已受理运行。
                 external_ref=(
                     f"{refs.context_ref}::{item.document.external_location}"
                 ),
@@ -621,7 +608,7 @@ class SynchronousChatRunExecutor:
 
 
 class ChatRunEventRecorder:
-    """Persist local authoritative messages while preserving stream events."""
+    """在保留流事件的同时持久化本地权威消息。"""
 
     def __init__(
         self,
@@ -754,14 +741,10 @@ class ChatRunEventRecorder:
                         )
                     terminal_event = event.event_type
                 else:
-                    # The current HTTP/SSE path intentionally writes this
-                    # single event before yielding it.  Upstream model streams
-                    # are lazy: collecting a size/time batch here would either
-                    # delay the first token indefinitely or require a producer
-                    # thread that can keep the model running after a client
-                    # disconnect.  ``append_many`` is available to a future
-                    # queue-backed worker, where a durable producer/consumer
-                    # lifecycle can make that trade-off safely.
+                    # 当前 HTTP/SSE 路径刻意在产出前写入这个单事件。上游模型流是惰性的：
+                    # 在此处按大小或时间聚合，要么会无限延迟首个 token，要么需要生产者线程
+                    # 在客户端断开后继续运行模型。未来基于队列的工作进程可使用
+                    # ``append_many``，在持久化生产者/消费者生命周期下安全地权衡这一点。
                     self._store.events.append(
                         run_id=request.run_id,
                         event=event,
@@ -883,8 +866,8 @@ class ChatRunEventRecorder:
         request: ChatRunStreamRequest,
         message_id: str,
     ) -> None:
-        # user 消息先以 pending 写入，只有 run 明确进入 done/error/aborted 等终态
-        # 后才提交为 committed。这样可以避免进程崩溃时把未完成轮次误暴露给历史接口。
+                # 用户消息先以待处理状态写入，只有运行明确进入完成、失败或中断等终态后
+                # 才提交为已提交状态。这样可避免进程崩溃时将未完成轮次误暴露给历史接口。
         self._store.messages.append(
             message_id=message_id,
             chat_id=request.chat_id,
@@ -962,11 +945,10 @@ class ChatRunEventRecorder:
         chat_commands: ChatCommandService,
         execution_lease: ChatRunLease | None,
     ) -> None:
-        """Persist a non-presented terminal error while preserving run cleanup.
+        """在保留运行收敛能力的同时，持久化未展示的终态错误。
 
-        A client-side disconnect has no final SSE frame in the frozen protocol.
-        The internal ledger still needs a terminal record, but a ledger failure
-        must not leave the active run locked forever.
+        已冻结协议中，客户端断开连接不会产生最后一个 SSE 帧。内部事件账本仍需记录
+        终态，但账本写入失败不能使活动运行永久保持锁定。
         """
         terminal_event = self._failure_event(error_message=error_message)
         try:
