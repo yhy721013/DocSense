@@ -118,6 +118,14 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["security"], "公开")
         self.assertEqual(result["format"], "")
 
+    def test_map_analysis_result_keeps_channel_empty_without_request_candidates(self):
+        result = map_analysis_result(
+            {"channel": "装发"},
+            {"fileName": "demo.txt", "channel": []},
+        )
+
+        self.assertEqual(result["channel"], "")
+
     def test_map_analysis_result_resolves_security_from_candidate_range(self):
         request_params = {
             "fileName": "demo.txt",
@@ -554,27 +562,40 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
     def test_build_file_analysis_prompt_uses_default_ranges_when_missing(self):
         prompt = build_file_analysis_prompt({"fileName": "demo.txt"})
+        channel_options_line = next(
+            line for line in prompt.splitlines() if line.startswith("渠道候选:")
+        )
+
         self.assertIn('"音频类"', prompt)
         self.assertIn('"文档类"', prompt)
         self.assertIn('"图片类"', prompt)
         self.assertIn('"军事基地"', prompt)
+        self.assertEqual(channel_options_line, "渠道候选: []")
+        self.assertIn(
+            "当 channel 候选为空时，channel 输出空字符串",
+            prompt,
+        )
 
     def test_build_file_analysis_prompt_uses_explicit_ranges_over_defaults(self):
         prompt = build_file_analysis_prompt(
             {
                 "fileName": "demo.txt",
                 "country": [{"key": "99", "value": "德国"}],
+                "channel": [{"key": "98", "value": "公开发布"}],
                 "format": [{"key": "88", "value": "数据库类"}],
                 "security": [{"key": "03", "value": "秘密"}],
             }
         )
         lines = prompt.splitlines()
         country_options_line = next(line for line in lines if line.startswith("国家候选:"))
+        channel_options_line = next(line for line in lines if line.startswith("渠道候选:"))
         format_options_line = next(line for line in lines if line.startswith("格式候选:"))
         security_options_line = next(line for line in lines if line.startswith("密级候选:"))
 
         self.assertIn('"德国"', country_options_line)
         self.assertNotIn('"美国"', country_options_line)
+        self.assertIn('"公开发布"', channel_options_line)
+        self.assertNotIn('"装发"', channel_options_line)
         self.assertIn('"数据库类"', format_options_line)
         self.assertNotIn('"文档类"', format_options_line)
         self.assertIn('"秘密"', security_options_line)

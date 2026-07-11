@@ -54,13 +54,6 @@ DEFAULT_COUNTRY_OPTIONS = [
     {"key": "06", "value": "法国"},
 ]
 
-DEFAULT_CHANNEL_OPTIONS = [
-    {"key": "02", "value": "装发"},
-    {"key": "03", "value": "军情"},
-    {"key": "04", "value": "科技"},
-    {"key": "05", "value": "训练"},
-]
-
 DEFAULT_FORMAT_OPTIONS = [
     {"key": "01", "value": "音频类"},
     {"key": "03", "value": "文档类"},
@@ -120,7 +113,8 @@ def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dic
 def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str, list[dict[str, Any]]]:
     return {
         "country": _normalize_range_list(request_params.get("country"), DEFAULT_COUNTRY_OPTIONS),
-        "channel": _normalize_range_list(request_params.get("channel"), DEFAULT_CHANNEL_OPTIONS),
+        # channel 必须完全由调用方提供，缺失或空范围不能回填服务端默认值。
+        "channel": _normalize_range_list(request_params.get("channel"), []),
         "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
         "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
         "security": _normalize_range_list(request_params.get("security"), DEFAULT_SECURITY_OPTIONS),
