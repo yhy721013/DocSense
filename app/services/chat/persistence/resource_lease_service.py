@@ -1,4 +1,4 @@
-"""Persistent resource leases for file-chat cleanup and recovery."""
+"""用于文件对话清理与恢复的持久化资源租约。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from app.services.chat.domain.models import (
     LEASE_PLANNED,
     LEASE_STATUSES,
     RESOURCE_TYPES,
+    SESSION_ACTIVE,
     ChatResourceLease,
 )
 from app.services.chat.persistence.repositories import (
@@ -40,8 +41,17 @@ _LEASE_STATUS_TRANSITIONS = {
 }
 
 
+class ChatResourceLeaseSessionUnavailableError(RuntimeError):
+    """受保护资源租约与会话删除操作竞争时抛出。"""
+
+    def __init__(self, *, chat_id: str, status: str) -> None:
+        self.chat_id = _required_text(chat_id, name="chat_id")
+        self.status = _required_text(status, name="status")
+        super().__init__("chat session is not active for a new resource lease")
+
+
 class ChatResourceLeaseService:
-    """Manage durable leases for chat workspaces, threads and bindings."""
+    """管理对话工作区、线程与绑定的持久化租约。"""
 
     def __init__(self, db_path: str, *, initialize: bool = True) -> None:
         self.db_path = _required_text(db_path, name="db_path")
@@ -61,6 +71,7 @@ class ChatResourceLeaseService:
         resource_type: str,
         run_id: str = "",
         external_ref: str = "",
+        require_active_session: bool = False,
     ) -> ChatResourceLease:
         normalized_lease_id = _required_text(lease_id, name="lease_id")
         normalized_chat_id = _required_text(chat_id, name="chat_id")
@@ -71,11 +82,28 @@ class ChatResourceLeaseService:
         )
         normalized_run_id = _optional_text(run_id)
         normalized_external_ref = _optional_text(external_ref)
+        if not isinstance(require_active_session, bool):
+            raise TypeError("require_active_session must be bool")
         now = _utc_now_iso()
         with _connection_scope(self.db_path) as connection:
             # 租约用于记录远端 workspace/thread/document binding 等副作用资源。
             # 即使后续业务失败，cleanup worker 也可以根据租约表重试清理。
             connection.execute("BEGIN IMMEDIATE")
+            if require_active_session:
+                session_row = connection.execute(
+                    "SELECT status FROM chat_sessions WHERE chat_id = ?",
+                    (normalized_chat_id,),
+                ).fetchone()
+                if session_row is None:
+                    raise ChatResourceLeaseSessionUnavailableError(
+                        chat_id=normalized_chat_id,
+                        status="missing",
+                    )
+                if session_row["status"] != SESSION_ACTIVE:
+                    raise ChatResourceLeaseSessionUnavailableError(
+                        chat_id=normalized_chat_id,
+                        status=session_row["status"],
+                    )
             if normalized_run_id:
                 run_row = connection.execute(
                     "SELECT chat_id FROM chat_runs WHERE run_id = ?",
@@ -103,10 +131,11 @@ class ChatResourceLeaseService:
                             "非 planned chat_resource_lease 不能补写 external_ref"
                         )
                     logger.info(
-                        "补写文件对话资源租约external_ref: lease_id=%s chat_id=%s resource_type=%s",
+                        "已补充文件对话资源租约的远端引用: lease_id=%s chat_id=%s resource_type=%s has_external_ref=%s",
                         normalized_lease_id,
                         normalized_chat_id,
                         normalized_type,
+                        True,
                     )
                     cursor = connection.execute(
                         """
@@ -152,12 +181,12 @@ class ChatResourceLeaseService:
                 ),
             )
             logger.info(
-                "创建文件对话资源租约: lease_id=%s chat_id=%s run_id=%s resource_type=%s external_ref=%s",
+                "已创建文件对话资源租约: lease_id=%s chat_id=%s run_id=%s resource_type=%s has_external_ref=%s",
                 normalized_lease_id,
                 normalized_chat_id,
                 normalized_run_id,
                 normalized_type,
-                normalized_external_ref,
+                bool(normalized_external_ref),
             )
             return self._get_with_connection(connection, normalized_lease_id)
 
@@ -179,9 +208,9 @@ class ChatResourceLeaseService:
                 ):
                     raise ValueError("chat_resource_lease external_ref 冲突")
                 logger.debug(
-                    "文件对话资源租约已处于active: lease_id=%s external_ref=%s",
+                    "文件对话资源租约已处于活动状态: lease_id=%s has_external_ref=%s",
                     normalized_lease_id,
-                    current.external_ref,
+                    bool(current.external_ref),
                 )
                 return current
             if current.status != LEASE_PLANNED:
@@ -210,9 +239,9 @@ class ChatResourceLeaseService:
             if cursor.rowcount != 1:
                 raise ValueError("chat_resource_lease status was changed concurrently")
             logger.info(
-                "激活文件对话资源租约: lease_id=%s external_ref=%s",
+                "已激活文件对话资源租约: lease_id=%s has_external_ref=%s",
                 normalized_lease_id,
-                resolved_external_ref,
+                bool(resolved_external_ref),
             )
             return self._get_with_connection(connection, normalized_lease_id)
 
@@ -225,12 +254,10 @@ class ChatResourceLeaseService:
         run_id: str = "",
         external_ref: str,
     ) -> ChatResourceLease:
-        """Create or reuse an active lease without hiding cleanup failures.
+        """创建或复用活动租约，且不掩盖清理失败。
 
-        The method is intentionally conservative: it only promotes a planned
-        lease to active. Failed or pending cleanup states are returned as-is so
-        callers cannot accidentally overwrite recovery evidence by "ensuring"
-        a resource that still needs compensation.
+        本方法刻意保守：只会将 planned 租约提升为 active。失败或待清理状态会原样返回，
+        以防调用方在“确保”仍需补偿的资源时意外覆盖恢复依据。
         """
         lease = self.begin(
             lease_id=lease_id,
@@ -362,11 +389,11 @@ class ChatResourceLeaseService:
             if cursor.rowcount != 1:
                 raise ValueError("chat_resource_lease status was changed concurrently")
             logger.info(
-                "文件对话资源租约状态变更: lease_id=%s %s->%s error=%s",
+                "文件对话资源租约状态变更: lease_id=%s previous_status=%s current_status=%s has_error=%s",
                 normalized_lease_id,
                 current.status,
                 normalized_status,
-                _optional_text(error_message),
+                bool(_optional_text(error_message)),
             )
             return self._get_with_connection(connection, normalized_lease_id)
 
@@ -394,7 +421,11 @@ class ChatResourceLeaseService:
     ) -> None:
         if (
             row["chat_id"] != chat_id
-            or row["run_id"] != run_id
+            or (
+                run_id
+                and row["run_id"]
+                and row["run_id"] != run_id
+            )
             or row["resource_type"] != resource_type
             or (
                 row["external_ref"]

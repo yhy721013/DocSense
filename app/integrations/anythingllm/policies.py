@@ -58,11 +58,10 @@ def document_rag_workspace_settings() -> dict[str, object]:
 
 
 def chat_workspace_settings() -> dict[str, object]:
-    """Return the workspace settings used by the file-chat conversation flow.
+    """返回文件对话流程使用的工作区配置。
 
-    This function is the single integration-layer owner of the legacy
-    `/llm/chat` workspace policy. It returns a fresh dict on every call so
-    request-scoped gateways cannot mutate shared configuration.
+    此函数是 legacy `/llm/chat` 工作区策略在集成层的唯一归属；每次调用
+    都返回新的字典，避免请求级网关修改共享配置。
     """
     return {
         "similarityThreshold": 0.0,

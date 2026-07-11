@@ -1,4 +1,4 @@
-"""SSE presentation helpers for file-chat streams."""
+"""文件对话流的 SSE 展示层辅助工具。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
-from app.services.chat import ChatCommandService, ChatStreamEvent
+from app.services.chat import ChatStreamEvent
 
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ _TERMINAL_EVENT_TYPES = frozenset({"aborted", "done", "error"})
 
 
 def format_sse_event(event_type: str, data: Mapping[str, Any] | None = None) -> str:
-    """Format one domain stream event as a Server-Sent Events payload."""
+    """将一个领域流事件格式化为 Server-Sent Events 载荷。"""
     normalized_type = str(event_type or "").strip()
     if not normalized_type:
         raise ValueError("event_type cannot be empty")
@@ -23,27 +23,12 @@ def format_sse_event(event_type: str, data: Mapping[str, Any] | None = None) -> 
 
 
 def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
-    """Convert supplier-neutral chat events to SSE payloads."""
+    """将供应商无关的对话事件转换为 SSE 载荷。"""
     for event in events:
         if not isinstance(event, ChatStreamEvent):
             raise TypeError("chat stream must yield ChatStreamEvent")
         logger.debug("展示文件对话SSE事件: event_type=%s", event.event_type)
         yield format_sse_event(event.event_type, event.data)
-
-
-def mark_chat_run_failed(
-    *,
-    chat_commands: ChatCommandService,
-    run_id: str,
-    error_message: str,
-) -> None:
-    try:
-        chat_commands.fail_chat_run(
-            run_id=run_id,
-            error_message=error_message,
-        )
-    except Exception:
-        logger.exception("failed to mark chat run failed: run_id=%s", run_id)
 
 
 def close_chat_stream_resource(
@@ -69,7 +54,7 @@ def close_chat_stream_resource(
         )
     except Exception:
         logger.exception(
-            "failed to close chat stream resource: run_id=%s resource=%s",
+            "关闭文件对话流资源失败: run_id=%s resource=%s",
             run_id,
             label,
         )
@@ -81,6 +66,7 @@ def finalize_chat_run_stream(
     run_id: str,
     on_close: Callable[[], None] | None = None,
 ) -> Iterator[str]:
+    terminal_event_seen = False
     try:
         for event in stream:
             if not isinstance(event, ChatStreamEvent):
@@ -96,6 +82,7 @@ def finalize_chat_run_stream(
             )
             yield format_sse_event(event.event_type, event.data)
             if is_terminal:
+                terminal_event_seen = True
                 logger.info(
                     "文件对话SSE流收到终态事件并准备关闭: run_id=%s event_type=%s",
                     run_id,
@@ -103,6 +90,11 @@ def finalize_chat_run_stream(
                 )
                 break
     finally:
+        if not terminal_event_seen:
+            logger.warning(
+                "文件对话 SSE 流在未观察到终态事件时关闭: run_id=%s",
+                run_id,
+            )
         close_chat_stream_resource(stream, run_id=run_id, label="stream")
         if on_close is not None:
             try:
@@ -110,7 +102,7 @@ def finalize_chat_run_stream(
                 logger.debug("文件对话客户端关闭回调已完成: run_id=%s", run_id)
             except Exception:
                 logger.exception(
-                    "failed to close chat client: run_id=%s",
+                    "执行文件对话客户端关闭回调失败: run_id=%s",
                     run_id,
                 )
 
@@ -119,6 +111,5 @@ __all__ = [
     "close_chat_stream_resource",
     "finalize_chat_run_stream",
     "format_sse_event",
-    "mark_chat_run_failed",
     "present_chat_stream",
 ]

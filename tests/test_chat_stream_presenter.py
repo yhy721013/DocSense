@@ -1,4 +1,4 @@
-"""SSE presenter tests for file-chat domain events."""
+"""文件对话领域事件的 SSE 展示层测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from app.services.chat import ChatStreamEvent
 
 
 class ChatStreamPresenterTests(unittest.TestCase):
-    """Verify that SSE formatting stays outside chat application services."""
+    """验证 SSE 格式化逻辑不进入文件对话应用服务。"""
 
     def test_format_sse_event_keeps_chinese_json(self) -> None:
         self.assertEqual(

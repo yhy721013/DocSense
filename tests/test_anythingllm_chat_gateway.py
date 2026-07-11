@@ -1,4 +1,4 @@
-"""Offline tests for the AnythingLLM file-chat gateway."""
+"""AnythingLLM 文件对话网关的离线测试。"""
 
 from __future__ import annotations
 
@@ -247,6 +247,29 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
         self.assertEqual("chat", self.workspace_client.created_settings[0]["chatMode"])
         self.assertEqual(20, self.workspace_client.created_settings[0]["topN"])
 
+    def test_new_workspace_is_compensated_when_thread_creation_fails(self) -> None:
+        self.thread_client.create_error = AnythingLLMProtocolError("thread failed")
+
+        with self.assertRaises(ChatResponseError):
+            self.gateway.open_conversation(
+                context_name="chat-compensate",
+                conversation_name="thread-compensate",
+            )
+
+        self.assertEqual([("slug-1", 7)], self.workspace_client.delete_calls)
+
+    def test_uncompensated_new_workspace_is_exposed_as_recoverable_resource_ref(self) -> None:
+        self.thread_client.create_error = AnythingLLMProtocolError("thread failed")
+        self.workspace_client.delete_error = AnythingLLMProtocolError("delete failed")
+
+        with self.assertRaises(ChatResourceError) as raised:
+            self.gateway.open_conversation(
+                context_name="chat-uncompensated",
+                conversation_name="thread-uncompensated",
+            )
+
+        self.assertEqual(("slug-1",), raised.exception.resource_refs)
+
     def test_attach_documents_binds_locations_and_returns_workspace_snapshot(
         self,
     ) -> None:
@@ -363,23 +386,29 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
         self.assertEqual(" answer ", messages[1].content)
         self.assertEqual(123, messages[1].timestamp_ms)
 
-    def test_generate_standalone_reply_deletes_temporary_thread(self) -> None:
+    def test_temporary_reply_leaves_thread_cleanup_to_the_application_layer(self) -> None:
         self.thread_client.answer = AnythingLLMAnswer(
             text="title",
             raw_text="title",
             sources=(),
         )
 
-        reply = self.gateway.generate_standalone_reply(
+        temporary_session = self.gateway.open_temporary_conversation(
             context_ref="workspace-a",
+            conversation_name="title-a",
+        )
+        reply = self.gateway.generate_temporary_reply(
+            session=temporary_session,
             prompt="make a title",
         )
 
         self.assertEqual("title", reply)
         temp_thread = self.thread_client.created_threads[0][1]
-        self.assertTrue(temp_thread.startswith("standalone-"))
+        self.assertEqual("title-a", temp_thread)
         self.assertEqual(temp_thread, self.thread_client.ask_calls[0]["thread_slug"])
         self.assertEqual("chat", self.thread_client.ask_calls[0]["mode"])
+        self.assertEqual([], self.thread_client.deleted_threads)
+        self.gateway.delete_conversation(temporary_session)
         self.assertEqual(
             [("workspace-a", temp_thread, 7)],
             self.thread_client.deleted_threads,

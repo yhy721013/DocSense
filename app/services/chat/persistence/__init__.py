@@ -1,24 +1,49 @@
-"""Persistence adapters for file chat local authority data."""
+"""文件对话本地权威数据的持久化适配器。"""
 
 from app.services.chat.persistence.repositories import (
-    ChatDocumentRepository,
+    ChatCleanupJobRepository,
+    ChatDocumentBindingRepository,
     ChatMessageRepository,
     ChatRunRepository,
     ChatSessionRepository,
     ensure_chat_schema,
 )
+from app.services.chat.persistence.event_repository import (
+    ChatRunEventRepository,
+    ChatRunEventStore,
+)
 from app.services.chat.persistence.resource_lease_service import (
     ChatResourceLeaseService,
 )
-from app.services.chat.persistence.store import ChatPersistenceStore, ChatStore
+from app.services.chat.persistence.store import (
+    ChatInfrastructureCapabilityError,
+    ChatOutboxMessage,
+    ChatOutboxStore,
+    ChatPersistenceCapabilities,
+    ChatPersistenceError,
+    ChatPersistenceStore,
+    ChatStore,
+    DisabledChatOutbox,
+    SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES,
+)
 
 __all__ = [
-    "ChatDocumentRepository",
+    "ChatCleanupJobRepository",
+    "ChatDocumentBindingRepository",
+    "ChatInfrastructureCapabilityError",
     "ChatMessageRepository",
+    "ChatOutboxMessage",
+    "ChatOutboxStore",
+    "ChatPersistenceCapabilities",
+    "ChatPersistenceError",
     "ChatPersistenceStore",
     "ChatResourceLeaseService",
+    "ChatRunEventRepository",
+    "ChatRunEventStore",
     "ChatRunRepository",
     "ChatSessionRepository",
     "ChatStore",
+    "DisabledChatOutbox",
+    "SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES",
     "ensure_chat_schema",
 ]

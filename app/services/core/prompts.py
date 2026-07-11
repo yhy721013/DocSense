@@ -118,7 +118,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "country": "",
         "channel": "",
         "maturity": "",
-        "secrets": "",
+        "security": "",
         "format": "",
         "architectureId": "",
         "fileDataItem": {
@@ -175,9 +175,9 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         f"originalFileName: {request_params.get('originalFileName', '')}\n"
         "【输出契约】\n"
         "1. 必须只输出 JSON，不要输出 Markdown、解释文本、候选列表或思考过程。\n"
-        "2. 顶层键只能是：country, channel, maturity, secrets, format, architectureId, fileDataItem。\n"
+        "2. 顶层键只能是：country, channel, maturity, security, format, architectureId, fileDataItem。\n"
         "3. 不要直接原样返回候选对象、候选数组、key/value 对象或中文键名。\n"
-        "4. country/channel/maturity/secrets/format 只能输出候选项中的 value 字符串；secrets 表示文件密级，必须根据文档开头、首页、页眉或标题附近的密级/保密说明判断；找不到相关说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value；fileDataItem.dataFormat 必须与顶层 format 完全一致，也只能输出格式候选中的 value；不能输出 key，也不能输出对象。\n"
+        "4. country/maturity/security/format 只能输出候选项中的 value 字符串或者空字符串；channel 规则见第 12 条；security 表示文件密级，必须根据文档开头、首页、页眉或标题附近的密级/保密说明判断；找不到相关说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value；fileDataItem.dataFormat 必须与顶层 format 完全一致，也只能输出格式候选中的 value；不能输出 key，也不能输出对象。\n"
         "5. architectureId 只能输出候选 architectureList 中的叶子 id 数字；无法匹配时输出空字符串，禁止使用 1 或任意候选作为默认值。\n"
         "6. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
@@ -185,8 +185,9 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断；source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
         "10. documentOverview 字段为文件概述，必须按资料原有目录、章节或标题层级进行概述，全文不超过 1000 字。优先说明全文整体结构，例如全文共多少章、核心内容集中在哪些章节；再按章节顺序概述各章主题、关键对象、重要结论或核心信息。不要机械复述目录，不要编造原文不存在的章节或内容；若资料无清晰目录结构，则按可识别的标题层级或内容模块进行概述。示例1：全文共 8 个章节。第一章主要包括 a、b、c 等内容；第二章主要描述……；第三章围绕 d、e 等内容展开；其余章节分别介绍……。示例2：全文共 8 个章节，核心内容集中在第 3 至第 7 章。第 1、2 章介绍基本概念和背景，第 8 章为结束语。第 3 章包括 a、b 等内容；第 4 章主要描述……；第 5 章主要描述……。\n"
         "11. fileDataItem.dataTime 必须输出文档中明确提到的资料年代，输出格式为 yyyy-MM-dd，找不到时输出空字符串。\n"
+        "12. channel 字段表示“资料来源机构”，当 channel 候选为空时，channel 输出空字符串；当 channel 候选不为空时，必须从候选中选择一个 value 输出，不能输出 key，也不能输出对象。\n"
         + data_standard_contract
-        + "12. fileDataItem.language 表示“原始资料正文的主要语种”，不是本次回答语言、摘要语言、翻译结果语言、文件名语言或提示词语言。\n"
+        + "13. fileDataItem.language 表示“原始资料正文的主要语种”，不是本次回答语言、摘要语言、翻译结果语言、文件名语言或提示词语言。\n"
         + "【正反例】\n"
         "- 正确：\"country\": \"美国\"\n"
         "- 错误：\"country\": {\"key\": \"02\", \"value\": \"美国\"}\n"
@@ -202,13 +203,13 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + _format_options("国家候选", ranges["country"])
         + _format_options("渠道候选", ranges["channel"])
         + _format_options("成熟度候选", ranges["maturity"])
-        + _format_options("密级候选", ranges["secrets"])
+        + _format_options("密级候选", ranges["security"])
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：密级、资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + data_standard_priority
-        + "【抽取字段解释】secrets：文件密级，只能从密级候选 value 中选取；优先依据文档开头内容判断，文档没有密级/保密说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value。keyword：文档中提到的关键信息或主题，由至少 10 个关键词构成，关键词需要涵盖文章中提到的内容，按照占比从高到低排列；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
+        + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；优先依据文档开头内容判断，文档没有密级/保密说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value。keyword：文档中提到的关键信息或主题，由至少 10 个关键词构成，关键词需要涵盖文章中提到的内容，按照占比从高到低排列；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         + "【输出前自检清单】\n"
-        + "1. country/channel/maturity/secrets/format 是否都为候选 value 或空字符串；secrets 缺少文档开头密级说明时是否已按默认规则输出（候选包含“公开”则输出“公开”，否则输出候选第一个 value）；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
+        + "1. country/channel/maturity/security/format 是否都为候选 value 或空字符串；security 缺少文档开头密级说明时是否已按默认规则输出（候选包含“公开”则输出“公开”，否则输出候选第一个 value）；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
         + "2. architectureId 是否为有文档证据支持的候选叶子 id；不得使用候选外 ID 或默认值。\n"
         + "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”。\n"
         + "4. fileDataItem.dataTime 是否为 yyyy-MM-dd 或空字符串。\n"
