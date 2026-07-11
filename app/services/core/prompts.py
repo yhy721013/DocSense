@@ -177,7 +177,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "1. 必须只输出 JSON，不要输出 Markdown、解释文本、候选列表或思考过程。\n"
         "2. 顶层键只能是：country, channel, maturity, security, format, architectureId, fileDataItem。\n"
         "3. 不要直接原样返回候选对象、候选数组、key/value 对象或中文键名。\n"
-        "4. country/channel/maturity/security/format 只能输出候选项中的 value 字符串或者空字符串；security 表示文件密级，必须根据文档开头、首页、页眉或标题附近的密级/保密说明判断；找不到相关说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value；fileDataItem.dataFormat 必须与顶层 format 完全一致，也只能输出格式候选中的 value；不能输出 key，也不能输出对象。\n"
+        "4. country/maturity/security/format 只能输出候选项中的 value 字符串或者空字符串；channel 规则见第 12 条；security 表示文件密级，必须根据文档开头、首页、页眉或标题附近的密级/保密说明判断；找不到相关说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value；fileDataItem.dataFormat 必须与顶层 format 完全一致，也只能输出格式候选中的 value；不能输出 key，也不能输出对象。\n"
         "5. architectureId 只能输出候选 architectureList 中的叶子 id 数字；无法匹配时输出空字符串，禁止使用 1 或任意候选作为默认值。\n"
         "6. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
