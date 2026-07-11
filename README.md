@@ -1,13 +1,13 @@
 # DocSense - 甲方协议 LLM 接口后端
 
-DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理能力；同时提供本地调试页，用于查看最近一次已落盘的回调结果，以及联调文件对话模块。
+DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理能力；同时提供调试路由，用于查看已落盘的回调结果及联调文件对话模块。`/debug/*` 不属于甲方协议或生产回调链路，当前也不会随 `APP_DEBUG=false` 自动关闭，部署时必须在网络或反向代理层限制访问。
 
 ## 1. 核心能力
 
 - 文件解析：`POST /llm/analysis`
 - 报告生成：`POST /llm/generate-report`
 - 武器装备知识谱系解析：`POST /llm/weaponry`
-- 文件内容对话：`POST /llm/chat`（附加历史查询 `GET /llm/chat/history` 及删除 `POST /llm/chat/delete`）
+- 文件内容对话：`POST /llm/chat`（附加标题生成 `POST /llm/chat/title`、历史查询 `GET /llm/chat/history`、生成中断 `POST /llm/chat/abort` 及删除 `POST /llm/chat/delete`）
 - 分类节点变更：`POST /llm/reassign`
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
@@ -24,32 +24,32 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
-| 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库及任务级 Factory 契约 | `rag.py` `knowledge_index.py` |
-| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排，以及供应商无关的文件对话应用服务 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
+| 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
+| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排，以及文件对话应用服务与本地持久化/锁实现 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` `chat/persistence/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
 | 迁移期工具层 | `app/services/utils/` | 回调、文件/OCR 预处理，以及尚未迁移完成的 legacy AnythingLLM Facade/RAG 流程 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
-| 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `pdf_handler.py` |
+| 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `mhtml_handler.py` `txt_handler.py` |
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> llm_service`：蓝图只负责协议入口，不承载长流程业务。
+1. `blueprints -> llm_service/chat application`：大部分后台长流程已下沉至服务层；`/llm/reassign` 的同步编排及部分文件对话协议桥接仍位于蓝图中。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
-4. `integrations.anythingllm -> ports`：Gateway 实现端口，Factory 为每个后台任务创建独立 Transport。
+4. `integrations.anythingllm -> ports`：Gateway 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，legacy report/weaponry 链路不经过该 Factory。
 5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
 6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
 7. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
 
-### 2.3 请求到回调的链路
+### 2.3 analysis/report/weaponry 请求到回调的链路
 
 ```text
 Client Request
   -> app/blueprints/llm.py
     -> LLMTaskService 创建/更新任务
     -> 后台线程执行 llm_service 任务
-      -> utils 下载/预处理/调用 AnythingLLM
+      -> ports/integrations 或迁移期 utils 下载、预处理并调用 AnythingLLM
       -> core.progress_hub 推送 WS 进度
       -> 组装业务结果并写入任务库
       -> utils.callback_client 回调业务系统
@@ -60,8 +60,8 @@ Client Request
 ```text
 app/
   __init__.py                       # Flask App 工厂，安装依赖容器并注册蓝图
-  container.py                      # 应用装配根、ApplicationServices 与上传并发限制器
-  ports/                            # 供应商无关 Port、DTO 与任务级 Factory Protocol
+  container.py                      # 应用装配根、ApplicationServices 与 analysis/report 任务限制器
+  ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
   integrations/
     anythingllm/                    # Transport、策略、原子 Client、Gateway 与任务级 Factory
   blueprints/
@@ -81,6 +81,10 @@ app/
       weaponry_service.py           # 知识谱系字段提取主流程
       task_service.py               # 任务状态、结果、回调状态持久化
       translation_service.py        # 翻译服务编排层
+    chat/
+      application/                  # 对话命令、历史、标题、中断、删除与运行执行器
+      persistence/                  # 本地消息、会话及资源租约持久化
+      locking/                      # 会话级锁服务
     utils/
       anythingllm_client.py         # AnythingLLM HTTP 客户端
       callback_client.py            # 回调发送
@@ -100,17 +104,18 @@ run.py                              # 服务启动入口
 docs/接口文档/
   文件处理和报告生成.md
   知识谱系解析.md
+  文件对话.md
+  文件对话新增接口.md
+  分类节点变更.md
 scripts/                            # 本地联调脚本
 tests/                              # unittest 测试用例
 clean.py                            # 清理测试数据
-environment.yml                     # Conda环境依赖（Conda安装）
-requirements.txt                    # Conda环境依赖（Pip安装）
-requirements-venv.txt               # Venv环境依赖（Pip安装）
+requirements.txt                    # 当前根目录实际提供的 Python 依赖清单
 ```
 
 ## 4. 任务模型与状态
 
-所有任务统一持久化到任务库（默认 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`），查询键如下：
+`file`、`report`、`weaponry` 三类异步回调任务统一持久化到任务库（默认 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`），查询键如下；文件对话使用独立的对话库，title/history/abort/delete/reassign 不进入该任务模型。
 
 - `file`：`fileName`
 - `report`：`reportId`
@@ -126,11 +131,14 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 
 回调状态（任务表 `callback_status`）：
 
-- `pending`：未回调或未配置回调地址
+- `pending`：任务初始回调状态，尚未记录回调成功、失败或跳过
 - `success`：回调成功
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
+- `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
-## 5. 接口行为说明（与代码一致）
+`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。`skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过 check-task 自动补发。
+
+## 5. 接口行为说明（按当前代码核对）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -140,17 +148,19 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
 | WS | `/llm/progress` | 进度订阅/查询/取消订阅 |
 | POST | `/llm/chat` | 基于指定文件内容发起对话请求（SSE 流式响应下发） |
-| GET | `/llm/chat/history` | 查询指定会话的完整聊天历史消息记录 |
-| POST | `/llm/chat/delete` | 对应彻底释放删除聊天的底座资源（工作区与 Thread 隔离模型） |
-| POST | `/llm/reassign` | 调整和修改文档分类节点，实时重定向嵌入其 RAG 工作区数据位置 |
+| POST | `/llm/chat/title` | 根据指定会话的本地已提交消息生成标题 |
+| GET | `/llm/chat/history` | 查询指定会话在本地持久化的已提交消息 |
+| POST | `/llm/chat/abort` | 请求中断指定会话当前活跃的生成任务 |
+| POST | `/llm/chat/delete` | 清理远端资源，全部成功后将本地会话标记为 `deleted` |
+| POST | `/llm/reassign` | 调整文档分类节点并迁移其 RAG workspace 关联 |
 
 本地调试路由（非甲方协议接口）：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/debug/callback` | 本地回调结果调试页，面向人工阅读 |
-| GET | `/debug/api/callback` | 读取旧版最近一次预览文件 `${DOCSENSE_RUNTIME_DIR}/call_back.json`，暂不浏览历史目录 |
-| GET | `/debug/chat` | 本地文件对话调试页，联调 `/llm/chat*` 三个接口 |
+| GET | `/debug/api/callback` | 默认读取 `${DOCSENSE_RUNTIME_DIR}/callback/` 中最新一条回调记录，也可通过 `record=<json文件名>` 读取指定历史记录 |
+| GET | `/debug/chat` | 本地文件对话调试页，联调发送、历史、删除三个接口；当前未接入标题生成和中断接口 |
 | GET | `/debug/api/chat/bootstrap` | 读取本地会话列表与已解析文件列表，供 `/debug/chat` 初始化使用 |
 
 关键补充：
@@ -160,32 +170,34 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
    - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
    - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
-   - `params[].secrets` 表示密级候选范围（字典编码），回调 `data.secrets` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时默认为“公开”。
+   - `params[].channel` 表示资料来源机构候选范围（字典编码），服务端只使用请求中提供的候选，不再注入“装发、军情、科技、训练”等默认值；未传、传空数组或没有有效候选对象时，Prompt 要求模型输出空字符串，回调 `data.channel` 也返回空字符串。
+   - `params[].security` 表示密级候选范围（字典编码），回调 `data.security` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时，候选包含“公开”则返回“公开”，否则返回密级候选中的第一个 `value`。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
-   - 多节点分类时优先返回最具体叶子节点；叶子证据不足时返回最深可靠父节点；多个兄弟节点都可能时返回最近公共父节点。
-   - 当最终分类名称严格符合 `*-基础数据`、`*-战技指标`、`*-运用数据` 或 `*-效能数据` 时，回调 `data.architectureId` 仍返回该具体子分类 ID；知识库关系表、AnythingLLM workspace 和向量 metadata 则统一按对应的武器装备父节点 ID 存储，便于 `/llm/weaponry` 检索该装备的全部文档。
-   - 多节点分类时优先返回最具体叶子节点；命中非叶子节点时需回退到该分支下的“其他”叶子节点（节点名称或路径包含“其他”），仍无对应“其他”时回退到 1。
-   - 文档内容明确为 GJB、国军标、国家军用标准相关资料，且候选中存在 `数据标准` 节点时，优先返回该节点 `id`。
-   - `fileDataItem.score` 为必填离散评分，只返回 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料。
+   - 主 Prompt 的多节点分类合同是：`architectureId` 必须返回有唯一文档证据支持的候选叶子节点 ID；叶子证据不足、无法区分或无法匹配时保持为空，不得返回父节点、公共父节点或任意默认值。
+   - 当前服务端尚未验证候选是否为叶子：单候选会直接返回该节点 ID；多候选成功路径要求非空 `architectureId`，并只校验它是请求 `architectureList` 中的整数候选。因而主 Prompt 输出的空值会先被视为合同不合规，非叶子候选却可能通过校验；这两点都是当前实现限制，不代表主 Prompt 的目标口径。首次结果不合规时，服务端会先尝试下述 GJB 确定性兜底，未命中再发起一次 architecture repair，repair 仍不合规才将任务置为失败。
+   - GJB、国军标、国家军用标准资料应归类到候选中“数据标准”下有证据支持的叶子节点，禁止返回“数据标准”父节点。当前服务端的 GJB 兜底会按候选顺序选择名称或路径包含“数据标准”的首个节点，尚未区分父节点与叶子节点；调用方应保证数据标准叶子结构完整，并避免泛化父节点排在可命中的叶子节点之前，但最终仍应以主 Prompt 合同作为验收口径。
+   - 当最终分类名称严格符合 `<武器装备名称>-基础数据`、`<武器装备名称>-战技指标`、`<武器装备名称>-运用数据` 或 `<武器装备名称>-效能数据` 时，回调 `data.architectureId` 返回具体子分类 ID；本地知识库关系和 AnythingLLM workspace 按解析出的装备级父节点 ID 归并。业务 metadata 以 DocSense 本地数据库为准，AnythingLLM 上传 metadata 当前仅写入用于来源追踪的 `docSource`，不写入分类 ID。
+   - 主 Prompt 要求 `fileDataItem.score` 必填且只能是 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料；服务端映射会将缺失、无法转为数值、数值不是整数值或候选外的评分归一化为 `55`，可转换为整值的 `95.0`、`"95"` 等输入会保留为对应整数档位。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。
 
 2. `/llm/generate-report`
    - `filePathList` 支持多文件，统一汇总后生成 HTML 报告。
    - `mhtml/mht` 文件会先归一化再参与报告生成。
    - `templateOutline` 表示 Word 模板文件下载地址；服务端会下载 `.docx` 模板并提取其中的文字内容作为报告大纲要求，再进入原有报告生成流程。
+   - 当前仍使用 legacy RAG 链路：若底层返回 `None`，服务会把空内容包装为 HTML 并仍按 `status=1` 落库/回调，因此验收必须检查报告正文，不能只看任务状态；该链路当前也未清理临时 Workspace/Thread 或显式关闭 AnythingLLM Client。
 
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
    - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时只解析列表选中的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并严格校验文件已解析且属于当前 `architectureId`。
-   - 指定文件范围时会创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束后自动删除，原类别 workspace 不做增删。
+   - 指定文件范围时会创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束时会在 `finally` 中尝试删除，失败只记录 warning，可能残留临时 workspace；原类别 workspace 不做选中文档增删。
    - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
-   - 字段抽取默认采用“目标证据 + 术语规则”分池检索：目标 workspace 检索目标 PDF 证据，默认 `topN=8`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
-   - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取，并在回调中扩展为多行二维 `tableFieldList`，例如“每种雷达一行、各指标为列”。
-   - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语临时移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束后再恢复目标 workspace，避免术语文档占满目标证据检索结果。
-   - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息，但仍保留目标证据过滤和术语文档临时清理/恢复。
+   - 字段抽取默认采用“目标证据 + 术语规则”分池检索：普通 `INPUT` 字段的目标证据默认 `topN=8`，`TABLE` 字段默认 `topN=16`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
+   - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取。只有成功解析出有效行时，回调才扩展为多行二维 `tableFieldList`；否则保留原始列模板。
+   - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束时会尝试恢复，失败只记录 warning，不能视为强恢复保证。
+   - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时跳过字段阶段的术语向量检索和 Prompt 注入，但准备阶段仍可能上传或复用术语 workspace，并处理目标 workspace 中混入的术语文档。
    - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
    - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 优先返回 `documents.original_name` 文件原名，`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表；文件映射缺失时文件名字段回退为 AnythingLLM 返回的内部来源名。
    - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
@@ -205,42 +217,61 @@ requirements-venv.txt               # Venv环境依赖（Pip安装）
    - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件；本地保留不可变的文件绑定 revision，并以最新 revision 作为后续对话默认引用。
    - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
+   - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
+   - `POST /llm/chat/title` 仅使用本地已提交消息生成标题；`POST /llm/chat/abort` 向当前活跃 run 写入持久化中断标志，执行器在后续事件边界观察到标志后发送 `aborted` 终态。没有活跃 run 时接口仍返回 HTTP 200，但 `aborted=false`。
+   - `POST /llm/chat/delete` 先清理远端 Thread、Workspace 及相关资源租约，全部成功后再把本地会话标记为 `deleted`；清理失败时会保留 `cleanup_failed` 恢复记录，将会话置为 `error` 并返回错误。
 
 7. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
    - 安全方面要求调用前必须传输且一致匹配底库中存证的 `oldArchitectureId`。
+   - 当前实现会尝试从旧 workspace 删除文档、加入新 workspace，再更新本地分类；但尚未校验 AnythingLLM 删除/添加操作返回的布尔结果，`doc_path` 为空时也会跳过远端迁移。因此接口返回成功不等于远端 embedding 必然迁移成功，验收时还需核对 workspace 与本地映射。
 
 ## 6. 快速启动
 
 1. 安装依赖
 
-Conda环境使用：
+仓库根目录当前只提供 `requirements.txt`，未提供 `environment.yml` 或 `requirements-venv.txt`。macOS 建议使用根目录 `.venv`：
 
 ```bash
-conda env create -f environment.yml
-conda activate DocSense
-uv pip install -r requirements.txt
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-Venv环境可使用：
+Windows 可使用：
 
-```bash
-pip install -r requirements-venv.txt
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
+
+下文的裸 `python` 命令均假设当前终端已经激活根目录 `.venv`；未激活时，macOS 使用 `.venv/bin/python`，Windows 使用 `.\.venv\Scripts\python.exe`。
+
+扫描 PDF 的内置 OCR 还依赖系统安装的 Tesseract 及所配置语言的数据包；`requirements.txt` 只安装 Python 依赖，不安装这些系统组件。默认 analysis 扫描件引擎为 MinerU，需要相应的本地运行环境，或通过 `DOCSENSE_MINERU_API_URL` 复用外部 MinerU API；MinerU 或内置 OCR 失败时，代码会按既有降级链路继续处理原 PDF。
 
 2. 配置环境变量（建议使用 `.env`）
 
-必填（最小可用）：
+启动代码当前直接读取以下变量且未在代码中提供兜底值，使用 `run.py` 前必须通过环境变量或 `.env` 配置：
 
+- `ANYTHINGLLM_BASE_URL`
 - `ANYTHINGLLM_API_KEY`
+- `APP_HOST`
+- `APP_PORT`
+- `APP_DEBUG`
 
-常用：
+`.env.example` 提供的示例值包括：
 
-- `ANYTHINGLLM_BASE_URL`（默认 `http://localhost:3001/api/v1`）
-- `CALLBACK_URL`（不配置则不主动回调外部系统）
-- `APP_HOST`（默认 `0.0.0.0`）
-- `APP_PORT`（默认 `5001`）
-- `APP_DEBUG`（默认 `true`）
+- `ANYTHINGLLM_BASE_URL=http://localhost:3001/api/v1`
+- `APP_HOST=0.0.0.0`
+- `APP_PORT=5001`
+- `APP_DEBUG=true`
+
+其他常用配置：
+
+- `CALLBACK_URL`（可选；不配置则不主动回调外部系统，并将已完成任务标记为 `callback_status=skipped`。`.env.example` 中的“必须填写”注释与当前代码不一致，以此处及代码行为为准）
+
+在 macOS 上复制 `.env.example` 后，必须将其中启用的 Windows 路径 `DOCSENSE_RUNTIME_DIR=C:/DocSenseRuntime` 改为 macOS 绝对路径，或注释/删除该行以使用仓库根目录 `.runtime`；其他平台相关路径也应按实际环境调整。
 
 Weaponry 可选配置：
 
@@ -255,14 +286,14 @@ Weaponry 可选配置：
 python run.py
 ```
 
-默认监听：`http://0.0.0.0:5001`
+按 `.env.example` 的 `APP_HOST`、`APP_PORT` 示例值配置时，监听地址为 `http://0.0.0.0:5001`。
 
 4. 本地调试页面（可选）
 
-回调调试页前提：
+回调调试页可用性：
 
-- 已配置 `CALLBACK_URL`
-- 至少发生过一次文件解析、报告生成或武器装备知识谱系解析回调
+- 页面和数据接口始终可访问；没有回调历史时会展示空状态
+- 如需由当前服务产生新的回调历史，需要配置 `CALLBACK_URL`，并触发一次文件解析、报告生成或武器装备知识谱系解析回调
 
 回调调试页访问：
 
@@ -298,15 +329,23 @@ python run.py
 - SSE 主输出在聊天主区域实时显示，调试事件收纳于折叠详情中
 - 该调试页仅用于本地联调文件对话模块，不参与甲方真实回调链路
 
+安全说明：`/debug/*` 路由当前始终注册，`APP_DEBUG=false` 只关闭 Flask 调试模式，不会关闭这些路由。生产部署必须通过防火墙、监听地址或反向代理限制访问，不能把 `APP_DEBUG=false` 当作调试路由访问控制。
+
 ## 7. 运行时路径与持久化
 
-所有运行时文件统一派生自绝对根目录 `DOCSENSE_RUNTIME_DIR`。Windows 推荐使用正斜杠，例如：
+未配置组件级兼容覆盖项时，运行时文件统一派生自绝对根目录 `DOCSENSE_RUNTIME_DIR`。Windows 推荐使用正斜杠，例如：
 
 ```env
 DOCSENSE_RUNTIME_DIR=C:/.me/envs/DocSenseEnv
 ```
 
-显式配置时必须使用绝对路径；未配置时为了向后兼容，默认使用仓库根目录 `.runtime`。目录结构如下：
+macOS 使用 POSIX 绝对路径，例如：
+
+```env
+DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
+```
+
+显式配置时必须使用当前平台可识别的绝对路径；`.env.example` 中启用的 `C:/DocSenseRuntime` 仅适用于 Windows，在 macOS 上必须修改或注释。未配置时为了向后兼容，默认使用仓库根目录 `.runtime`。目录结构如下：
 
 - 任务库：`${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`
 - 知识库映射库：`${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3`
@@ -322,14 +361,16 @@ DOCSENSE_RUNTIME_DIR=C:/.me/envs/DocSenseEnv
 
 为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
 
-旧的组件级变量仍可作为兼容覆盖项，但一旦配置就会覆盖统一根目录。若希望全部内容位于同一目录，应删除 `DOCSENSE_LLM_TASK_DB`、`DOCSENSE_KNOWLEDGE_BASE_DB`、`KNOWLEDGE_BASE_DB_PATH`、`DOCSENSE_CHAT_DB`、`FILE_DOWNLOAD_DIR`、`DOCSENSE_OCR_CACHE_DIR` 和 `DOCSENSE_MINERU_CACHE_DIR`。
-- 任务库：`.runtime/llm_tasks.sqlite3`（`DOCSENSE_LLM_TASK_DB`）
-- 知识库映射库：`.runtime/knowledge_base.sqlite3`（`DOCSENSE_KNOWLEDGE_BASE_DB`）
-- 对话状态库：`.runtime/chat_sessions.sqlite3`（`DOCSENSE_CHAT_DB`）
-- 下载缓存目录：`FILE_DOWNLOAD_DIR`（用于任务下载源文件）
-- MinerU Markdown 缓存目录：`.runtime/mineru_markdown`（`DOCSENSE_MINERU_CACHE_DIR`）
-- 回调历史目录：`.runtime/callback/`
-- 旧版最近一次回调预览：`.runtime/call_back.json`（历史兼容遗留文件，当前新回调和 debug 页不再更新或读取）
+旧的组件级变量仍可作为兼容覆盖项，一旦配置就会优先于统一根目录。若希望全部内容位于同一目录，应删除这些覆盖项：
+
+- 任务库：`DOCSENSE_LLM_TASK_DB`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`
+- 知识库映射库：`DOCSENSE_KNOWLEDGE_BASE_DB` 或兼容变量 `KNOWLEDGE_BASE_DB_PATH`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3`
+- 对话状态库：`DOCSENSE_CHAT_DB`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`
+- 下载缓存：`FILE_DOWNLOAD_DIR`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/llm_downloads/`
+- OCR Markdown 缓存：`DOCSENSE_OCR_CACHE_DIR`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/ocr_markdown/`
+- MinerU Markdown 缓存：`DOCSENSE_MINERU_CACHE_DIR`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/mineru_markdown/`
+- 回调历史固定为 `${DOCSENSE_RUNTIME_DIR}/callback/`
+- 旧版最近一次回调预览固定为 `${DOCSENSE_RUNTIME_DIR}/call_back.json`；这是历史兼容遗留文件，当前新回调和 debug 页不再更新或读取
 
 ## 8. 本地联调与测试
 
@@ -347,6 +388,23 @@ python scripts/inspect_llm_tasks.py
 - `tables`：每张表的表名、建表 SQL、列定义、行数和完整行数据
 
 其中 `llm_tasks.rows[]` 的每一项对应一条 LLM 任务记录，常用字段包括 `business_type`、`business_key`、`request_payload`、`status`、`progress`、`result_payload`、`callback_status`、`callback_attempts`、`created_at` 和 `updated_at`。脚本会把 `request_payload`、`result_payload` 这类 JSON 字符串自动展开为对象，便于直接查看原始请求和最终结果。可通过 `--db-path` 和 `--output-dir` 指定其他 SQLite 文件或输出目录。
+
+### `/llm/analysis` 存量 `security` 字段迁移
+
+升级到 `security` 字段后，必须先停止 DocSense，再迁移任务库、知识库 metadata 和回调历史中的旧 `secrets` 键。脚本默认只做全量预检，仅显式传入 `--apply` 时才会备份并改写数据：
+
+```bash
+# 1. DocSense 停服后预检命中数
+.venv/bin/python scripts/migrate_analysis_security.py
+
+# 2. 备份并执行迁移
+.venv/bin/python scripts/migrate_analysis_security.py --apply
+
+# 3. 再次预检，changedTargets 和 renamedKeys 应均为 0
+.venv/bin/python scripts/migrate_analysis_security.py
+```
+
+迁移备份和包含源文件/备份文件哈希的 manifest 写入 `${DOCSENSE_RUNTIME_DIR}/migration_backups/analysis-security-<timestamp>/`。同值新旧双键会保留 `security` 并删除 `secrets`；异值双键或非法 JSON 会在改写前直接终止。脚本不改写 LLM 审计 Prompt、模型原始响应、attempt raw response 和 trace digest，也不扫描历史导出、E2E 快照或方案文档。自定义路径时可使用 `--runtime-dir`、`--task-db` 和 `--knowledge-db`。
 
 本地联调脚本（PowerShell）：
 
@@ -372,16 +430,18 @@ zsh scripts/test_llm_check_task.sh
 zsh scripts/test_llm_progress.sh
 ```
 
-脚本默认行为：
+HTTP/WS 请求 wrapper 的默认行为：
 
-- 自动读取仓库根目录 `.env`，不存在时回退 `.env.example`
-- `test_llm_analysis.sh` 默认请求 `POST /llm/analysis`
-- `test_llm_report.sh` 默认请求 `POST /llm/generate-report`
-- `test_llm_weaponry.sh` 默认请求 `POST /llm/weaponry`
-- `test_llm_check_task.sh` 默认请求 `POST /llm/check-task`
-- `test_llm_progress.sh` 默认连接 `WS /llm/progress`
+- `test_llm_analysis`、`test_llm_report`、`test_llm_weaponry`、`test_llm_check_task`、`test_llm_progress` 的 zsh/PowerShell wrapper 会读取仓库根目录 `.env`，不存在时回退 `.env.example`；`start_test_file_server` 不读取环境文件，`mock_callback_server.py` 只通过 `python-dotenv` 读取 `.env`
+- `test_llm_analysis.sh` 默认使用本地 `tests/fixtures/llm/analysis_request.json` 请求 `POST /llm/analysis`
+- `test_llm_report.sh` 默认使用本地 `tests/fixtures/llm/report_request.json` 请求 `POST /llm/generate-report`
+- `test_llm_weaponry.sh` 默认使用本地 `tests/fixtures/llm/weaponry_request.json` 请求 `POST /llm/weaponry`
+- `test_llm_check_task.sh` 默认使用本地 `tests/fixtures/llm/check_task_file_request.json` 请求 `POST /llm/check-task`
+- `test_llm_progress.sh` 默认使用同一 check-task 请求文件连接 `WS /llm/progress`
 
-可选参数示例：
+`tests/fixtures/llm/*.json` 当前受 `.gitignore` 规则排除，仓库未跟踪上述默认请求文件；当前工作区可能存在个人联调产物，但不能假设干净克隆后可用。运行脚本前需要自行创建相应 JSON，或把请求文件路径作为第二个参数显式传入。
+
+可选参数示例（先自行创建这些本地请求 JSON，或替换为实际 payload 路径）：
 
 ```bash
 zsh scripts/start_test_file_server.sh 8000 tests/fixtures/files
@@ -409,6 +469,7 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
 `test_llm_weaponry_directory` 会自动为指定目录启动临时静态文件服务，按文件串行执行 `/llm/analysis -> /llm/weaponry -> /llm/check-task`，并输出：
 
 - 主表：`qwen3-4b-new.csv`
+- Markdown 主表：`qwen3-4b-new.md`
 - 来源核验表：`qwen3-4b-new_source_audit.csv/json`
 - 运行记录：`qwen3-4b-new_manifest.json`
 - 每个文件的请求、响应、任务结果与知识库映射快照
@@ -428,17 +489,12 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
 
 测试文件批量武器装备字段抽取复现流程：
 
-1. 启动依赖服务：确认 AnythingLLM `3001` 可用，启动 DocSense 时建议使用 `APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py`，同时启动 `python scripts/mock_callback_server.py` 和指向 `测试文件-水面装备/` 的静态文件服务。
-2. 批量 runner 启动前先检查 `${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3` 和 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`：本轮要使用的临时 `architectureId` 不应已有 workspace/document 记录；若已有记录，应停止并更换一组未占用的临时 ID，避免旧文档污染。
-3. 扫描 `terms/` 下全部 `.md` 文件，上传到 AnythingLLM 并记录每个术语文件的 `doc_path`。术语文件只用于字段口径、别名和单位参考，不作为装备事实来源。
-4. 对 `测试文件-水面装备/` 下每个目标 PDF 串行执行：
-   - 构造 `/llm/analysis` 请求，`filePath` 使用静态文件 URL，`originalFileName` 使用原始 PDF 文件名，`architectureList` 只传一个临时节点，使该 PDF 固定入库到对应 `architectureId`。
-   - 轮询 `/llm/check-task`，直到 `businessType=file` 的 `status=2`；随后核验知识库映射中该 `architectureId` 只关联当前 PDF。
-   - 将第 3 步记录的全部术语 `doc_path` 临时加入当前 PDF 的 workspace。`/llm/weaponry` 内部会把 `term_rule_*.md` 与目标证据分池处理，任务结束后应从目标 workspace 移除术语。
-   - 构造 `/llm/weaponry` 请求，75 个字段均使用 `fieldType="INPUT"`、`templateClassifyId=1772442376645740`，`analyseData` 和 `analyseDataSource` 保持空。`fieldDescription` 必须写明唯一目标 PDF 文件名，并声明 `terms/` 只作术语参考，找不到目标 PDF 明确依据时返回“未找到”。
-   - 轮询 `/llm/check-task`，直到 `businessType=weaponry` 的 `status=2`；从 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3` 的任务结果中读取 `weaponryTemplateFieldList`。
-   - 抽取每个字段的 `analyseData` 写入汇总表；同步保留 `analyseDataSource` 到核验表。若接口、模型或内容安全检查导致字段未返回，汇总表填“未找到明确依据”，并在 manifest 或日志中记录失败字段与错误原因。
-5. 汇总产物建议固定为三类文件：主表 `qwen3-4b-new.csv`（列为 `文件名` 加 75 个字段）、来源核验表 `qwen3-4b-new_source_audit.csv/json`、运行记录 `qwen3-4b-new_manifest.json`。主表必须覆盖 `PDF 数量 x 75` 个字段槽位；来源核验表用于抽样确认来源文件不是 `term_rule_*.md`。
+1. 确认 AnythingLLM 可用并启动 DocSense，目录批跑建议使用 `APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py`。只有在 `.env` 配置了本地 mock 的 `CALLBACK_URL` 且需要核验真实回调时，才需要另行启动 `python scripts/mock_callback_server.py`。
+2. 先执行带 `--dry-run` 的目录 wrapper，核对扫描文件、输出目录和临时 `architectureId`。runner 会读取知识库映射并自动避开已存在的 ID；如使用自定义 `--architecture-base`，仍应检查 dry-run manifest 是否符合预期。
+3. 去掉 `--dry-run` 执行目录 wrapper。未提供 `--static-base` 时，runner 会自动为目标目录启动临时静态文件服务；提供该参数时才复用调用方已有的文件服务。
+4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、轮询 `/llm/check-task`、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并轮询终态。请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造。
+5. 术语规则由 `/llm/weaponry` 服务自动处理：目标 workspace 没有术语文档时，会从 `WEAPONRY_TERMS_DIR` 指向的本地目录上传或复用规则，并加入独立的 `WEAPONRY_TERMS_WORKSPACE_NAME` workspace；如果目标 workspace 已混入术语文档，则任务期间临时移除并在结束后恢复。不要手工把术语规则加入目标 workspace。
+6. runner 持续写出 `qwen3-4b-new.csv`、`qwen3-4b-new.md`、来源核验表、manifest 和逐文件快照；来源核验表用于确认装备事实来源不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。
 
@@ -448,7 +504,6 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 2. 若联调回调型业务，触发一次 `/llm/analysis`、`/llm/generate-report` 或 `/llm/weaponry`
 3. 打开 `http://127.0.0.1:5001/debug/callback`
 4. 若要比对原始回调报文，优先查看 `${DOCSENSE_RUNTIME_DIR}/callback/` 下按业务键和时间戳保存的历史 JSON
-4. 页面默认展示最新回调；若要比对历史报文，可在页面中选择记录，或查看 `.runtime/callback/` 下按业务键和时间戳保存的历史 JSON
 5. 若联调文件对话，先确保至少有一个已解析文件，再打开 `http://127.0.0.1:5001/debug/chat`
 6. 在 `/debug/chat` 中可直接完成发送消息、查看历史、删除会话三类联调
 
@@ -456,6 +511,12 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
+```
+
+当前完整测试集中有用例直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`；未准备这些本地请求文件时，完整发现命令会因 fixture 缺失失败。除此之外，当前分支的完整测试仍有其他既有失败，因此不能把上述命令当作全绿基线；应按实际运行结果区分通过项和失败项。核对 analysis service 合同、候选默认值、callback debug 路由和 security 迁移时，可运行不依赖这些本地请求文件的定向测试：
+
+```bash
+.venv/bin/python -m unittest tests.test_analysis_service tests.test_range_defaults tests.test_callback_debug_routes tests.test_migrate_analysis_security
 ```
 
 ## 9. 协议文档
