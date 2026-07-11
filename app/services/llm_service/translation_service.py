@@ -62,7 +62,7 @@ class LLMTranslationService:
             try:
                 self._progress_callback(progress, message)
             except Exception as e:
-                logger.error("进度回调失败: %s", e)
+                logger.error("翻译进度回调执行失败: error_type=%s", type(e).__name__)
 
     def _default_fast_translate(self) -> bool:
         """
@@ -78,7 +78,7 @@ class LLMTranslationService:
             return False
 
         logger.warning(
-            "DOCSENSE_TRANSLATION_MODE=%s 无效，默认使用 machine 机器翻译",
+            "环境变量 DOCSENSE_TRANSLATION_MODE 配置无效，默认使用机器翻译: mode=%s",
             mode,
         )
         return True
@@ -142,7 +142,11 @@ class LLMTranslationService:
 
             return bilingual_html_content, monolingual_html_content
         except Exception as e:
-            logger.exception("文档翻译失败：%s, error=%s", file_path, e)
+            logger.exception(
+                "文档翻译失败: file_name=%s error_type=%s",
+                Path(file_path).name,
+                type(e).__name__,
+            )
             self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
@@ -175,7 +179,7 @@ class LLMTranslationService:
                 return f'<div class="translated-text">{self._escape_html(translated)}</div>'
             return translated
         except Exception as e:
-            logger.error("文本翻译失败: %s", e)
+            logger.error("文本翻译失败: error_type=%s", type(e).__name__)
             return ""
 
 

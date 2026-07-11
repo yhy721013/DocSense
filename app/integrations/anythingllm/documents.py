@@ -108,12 +108,12 @@ class AnythingLLMDocumentClient:
 
         file_size = path.stat().st_size
         logger.info(
-            "开始上传 AnythingLLM 文档: file_name=%s file_size=%d "
-            "max_attempts=%d metadata_keys=%s has_user_context=%s",
+            "开始上传 AnythingLLM 文档: file_name=%s file_size_bytes=%d "
+            "max_attempts=%d metadata_key_count=%d has_user_context=%s",
             path.name,
             file_size,
             self._upload_max_retries + 1,
-            metadata_keys,
+            len(metadata_keys),
             user_id is not None,
         )
 
@@ -132,12 +132,12 @@ class AnythingLLMDocumentClient:
                     )
                 document = self._parse_upload_response(body)
                 logger.info(
-                    "AnythingLLM 文档上传完成: file_name=%s document_id=%s "
-                    "location=%s document_ref=%s attempt=%d",
+                    "AnythingLLM 文档上传完成: file_name=%s has_document_id=%s "
+                    "has_document_location=%s has_document_ref=%s attempt=%d",
                     path.name,
-                    document.id,
-                    document.location,
-                    document.document_ref,
+                    bool(document.id),
+                    bool(document.location),
+                    bool(document.document_ref),
                     attempt + 1,
                 )
                 return document
@@ -146,7 +146,7 @@ class AnythingLLMDocumentClient:
                     raise
                 delay = self._upload_retry_base_delay * (2**attempt)
                 logger.warning(
-                    "AnythingLLM Document Processor 暂时不可用，准备重试上传: "
+                    "AnythingLLM 文档处理服务暂时不可用，准备重试上传: "
                     "file_name=%s attempt=%d/%d delay_seconds=%.1f status_code=%s",
                     path.name,
                     attempt + 1,
@@ -225,9 +225,9 @@ class AnythingLLMDocumentClient:
             raise ValueError("只能删除有效的 custom-documents 全局文档位置")
 
         logger.info(
-            "开始永久删除 AnythingLLM 全局文档: location=%s "
+            "开始永久删除 AnythingLLM 全局文档: has_document_location=%s "
             "has_user_context=%s",
-            normalized_location,
+            bool(normalized_location),
             user_id is not None,
         )
         body = self._transport.delete_json(
@@ -239,8 +239,8 @@ class AnythingLLMDocumentClient:
         if payload.get("error") or payload.get("success") is not True:
             raise AnythingLLMProtocolError("AnythingLLM 未确认全局文档已永久删除")
         logger.info(
-            "AnythingLLM 全局文档永久删除完成: location=%s has_user_context=%s",
-            normalized_location,
+            "AnythingLLM 全局文档永久删除完成: has_document_location=%s has_user_context=%s",
+            bool(normalized_location),
             user_id is not None,
         )
 

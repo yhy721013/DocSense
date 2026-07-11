@@ -160,7 +160,11 @@ class ChunkProcessor:
 
         # 【核心修复】如果段落数量不匹配，优先检查是否是模型输出格式问题
         if len(cleaned_paragraphs) != original_paragraph_count:
-            logger.warning(f"[警告] 段落数量不匹配：期望 {original_paragraph_count}, 实际 {len(cleaned_paragraphs)}")
+            logger.warning(
+                "翻译结果段落数量不匹配: expected_count=%d actual_count=%d",
+                original_paragraph_count,
+                len(cleaned_paragraphs),
+            )
 
             # 【新增】尝试重新解析：有些模型会用单换行分隔段落
             if len(cleaned_paragraphs) < original_paragraph_count:
@@ -170,7 +174,10 @@ class ChunkProcessor:
 
                 # 如果这样能获得更多段落，使用新的分割结果
                 if len(cleaned_paragraphs_alt) > len(cleaned_paragraphs):
-                    logger.info(f"[信息] 使用单换行符重新分割，获得 {len(cleaned_paragraphs_alt)} 个段落")
+                    logger.info(
+                        "已改用单换行符重新分割翻译结果: paragraph_count=%d",
+                        len(cleaned_paragraphs_alt),
+                    )
                     cleaned_paragraphs = cleaned_paragraphs_alt
 
             # 智能调整段落数量
@@ -216,7 +223,12 @@ class ChunkProcessor:
 
         # 【关键修复】如果差异太大（>30%），说明模型严重漏译，不要强行适配
         if abs(current_count - target_count) / max(target_count, 1) > 0.3:
-            logger.warning(f"[警告] 段落数量差异过大 ({current_count} vs {target_count})，返回原始结果")
+            logger.warning(
+                "翻译结果段落数量差异过大，返回原始结果: "
+                "actual_count=%d expected_count=%d",
+                current_count,
+                target_count,
+            )
             return paragraphs
 
         # 如果段落太多，合并相邻段落

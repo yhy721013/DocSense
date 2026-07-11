@@ -27,7 +27,12 @@ def main() -> None:
     debug = os.environ.get("APP_DEBUG").strip().lower() in ("true", "1", "yes")
 
     # 开发与生产模式均使用 Flask 内置服务器
-    logger.info("Starting server on %s:%s (debug=%s)", host, port, debug)
+    logger.info(
+        "Flask 服务准备启动: host=%s port=%s debug_enabled=%s",
+        host,
+        port,
+        debug,
+    )
     app.run(host=host, port=port, debug=debug, threaded=True)
 
 

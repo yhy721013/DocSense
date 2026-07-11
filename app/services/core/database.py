@@ -42,7 +42,7 @@ class DatabaseService:
                 """)
                 self._ensure_documents_schema(conn)
                 conn.commit()
-            logger.info("数据库初始化完成: %s", self.db_path)
+            logger.info("本地数据库初始化完成: db_path=%s", self.db_path)
 
     def _ensure_documents_schema(self, conn: sqlite3.Connection) -> None:
         """把历史 ``documents`` 表向前迁移到当前结构。
@@ -57,18 +57,18 @@ class DatabaseService:
 
         if "original_name" not in columns:
             conn.execute("ALTER TABLE documents ADD COLUMN original_name TEXT NOT NULL DEFAULT ''")
-            logger.info("已为 documents 表补充 original_name 列: %s", self.db_path)
+            logger.info("已补齐文档表原始文件名字段: db_path=%s", self.db_path)
 
         if "doc_path" not in columns:
             conn.execute("ALTER TABLE documents ADD COLUMN doc_path TEXT")
-            logger.info("已为 documents 表补充 doc_path 列: %s", self.db_path)
+            logger.info("已补齐文档表外部文档路径字段: db_path=%s", self.db_path)
 
         if "metadata_json" not in columns:
             conn.execute(
                 "ALTER TABLE documents "
                 "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
             )
-            logger.info("已为 documents 表补充 metadata_json 列: %s", self.db_path)
+            logger.info("已补齐文档表元数据字段: db_path=%s", self.db_path)
 
         conn.execute(
             """
@@ -144,7 +144,7 @@ class DatabaseService:
         )
         conn.execute(f"DROP TABLE {legacy_table}")
         logger.info(
-            "documents 表身份约束迁移完成: uniqueness=(architecture_id,file_name) db_path=%s",
+            "文档表唯一约束迁移完成: constraint=(architecture_id,file_name) db_path=%s",
             self.db_path,
         )
 
@@ -346,13 +346,11 @@ class DatabaseService:
                     metadata_json=metadata_json,
                 )
         logger.info(
-            "永久知识库本地记录已原子提交: architecture_id=%s workspace_slug=%s "
-            "file_name=%s document_id=%s metadata_keys=%s",
+            "永久知识库本地记录已提交: architecture_id=%s file_name=%s "
+            "metadata_key_count=%d",
             architecture_id,
-            normalized["workspace_slug"],
             normalized["file_name"],
-            normalized["anything_doc_id"],
-            tuple(sorted(str(key) for key in (metadata or {}).keys())),
+            len(metadata or {}),
         )
 
     def delete_document_by_location(
@@ -381,11 +379,11 @@ class DatabaseService:
                 )
                 deleted_count = int(cursor.rowcount)
         logger.info(
-            "永久知识库本地文档解绑完成: workspace_slug=%s doc_path=%s "
-            "deleted_count=%d",
-            normalized_workspace,
-            normalized_path,
+            "永久知识库本地文档解绑完成: deleted_count=%d "
+            "has_workspace_ref=%s has_document_path=%s",
             deleted_count,
+            bool(normalized_workspace),
+            bool(normalized_path),
         )
         return deleted_count
 
@@ -492,7 +490,7 @@ class DatabaseService:
                             """,
                             (file_name, architecture_id),
                         )
-                logger.info("已删除文档记录: %s", file_name)
+                logger.info("本地文档记录已删除: file_name=%s", file_name)
             except Exception:
                 logger.exception("删除文档记录失败: file_name=%s", file_name)
                 raise
@@ -527,7 +525,11 @@ class DatabaseService:
                     f"UPDATE documents SET architecture_id = ? WHERE {where_clause}",
                     parameters,
                 )
-            logger.info("已更新文档类别: file_name=%s, new_architecture_id=%s", file_name, new_architecture_id)
+            logger.info(
+                "本地文档分类已更新: file_name=%s target_architecture_id=%s",
+                file_name,
+                new_architecture_id,
+            )
 
     def get_original_name(self, file_name: str) -> str:
         """根据哈希文件名查询原始文件名，若无记录则回退返回 file_name 本身"""

@@ -399,7 +399,7 @@ class LLMTaskService:
             raise RuntimeError("任务写入完成后未能读取事务内快照")
         task = self._row_to_task(row)
         logger.info(
-            "创建/更新任务: type=%s key=%s execution_id=%s status=%s",
+            "任务已创建或更新: business_type=%s business_key=%s execution_id=%s status=%s",
             business_type,
             business_key,
             execution_id,
@@ -750,7 +750,7 @@ class LLMTaskService:
             reused=not created,
         )
         logger.info(
-            "LLM交互原子审计已提交: interaction_id=%s business_type=%s "
+            "LLM 交互原子审计已提交: interaction_id=%s business_type=%s "
             "business_key=%s status=%s attempts_count=%s lifecycle_count=%s "
             "audit_status=%s created=%s reused=%s execution_id=%s",
             interaction_id,
@@ -824,7 +824,8 @@ class LLMTaskService:
             )
             interaction_id = int(cursor.lastrowid)
         logger.info(
-            "LLM交互已持久化: id=%s, type=%s, key=%s, status=%s",
+            "LLM 交互记录已持久化: interaction_id=%s business_type=%s "
+            "business_key=%s status=%s",
             interaction_id,
             business_type,
             business_key,
@@ -1142,7 +1143,12 @@ class LLMTaskService:
                 """,
                 (status, 1.0, message, self._serialize(result_payload), now, business_type, business_key),
             )
-        logger.info("任务结果已标记: type=%s, key=%s, status=%s", business_type, business_key, status)
+        logger.info(
+            "任务业务结果已标记: business_type=%s business_key=%s status=%s",
+            business_type,
+            business_key,
+            status,
+        )
 
     def update_task_progress(
         self,
@@ -1240,7 +1246,12 @@ class LLMTaskService:
             callback_status="failed",
             error=error,
         )
-        logger.warning("回调失败: type=%s, key=%s, error=%s", business_type, business_key, error)
+        logger.warning(
+            "外部回调失败已记录: business_type=%s business_key=%s error_chars=%d",
+            business_type,
+            business_key,
+            len(str(error or "")),
+        )
 
     def mark_callback_success(self, business_type: str, business_key: str) -> None:
         """记录一次实际成功的回调，成功后状态不可再次改写。"""
@@ -1250,7 +1261,11 @@ class LLMTaskService:
             callback_status="success",
             error="",
         )
-        logger.info("回调成功: type=%s, key=%s", business_type, business_key)
+        logger.info(
+            "外部回调成功已记录: business_type=%s business_key=%s",
+            business_type,
+            business_key,
+        )
 
     def mark_callback_skipped(self, business_type: str, business_key: str) -> bool:
         """把未配置回调的任务幂等标记为 ``skipped``。
@@ -1305,7 +1320,7 @@ class LLMTaskService:
 
         if not transition_succeeded:
             logger.warning(
-                "忽略回调跳过标记，保留已发生的回调结果: type=%s key=%s "
+                "忽略无需回调标记，保留已发生的回调结果: business_type=%s business_key=%s "
                 "callback_status=%s",
                 business_type,
                 business_key,
@@ -1313,7 +1328,7 @@ class LLMTaskService:
             )
             return False
         logger.info(
-            "任务无需回调，状态已幂等标记为 skipped: type=%s key=%s",
+            "任务无需回调，状态已幂等标记为 skipped: business_type=%s business_key=%s",
             business_type,
             business_key,
         )

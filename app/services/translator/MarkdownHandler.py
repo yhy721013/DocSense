@@ -45,7 +45,7 @@ class MarkdownHandler:
         :param output_dir: 输出根目录（可选，默认使用 MinerUConverter 的默认目录）
         :return: Markdown 文件路径
         """
-        logger.info("Step 1: Convert document to Markdown via MinerU")
+        logger.info("开始使用 MinerU 将文档转换为 Markdown")
 
         if output_dir:
             original_output_dir = self.mineru_converter.output_dir
@@ -87,14 +87,14 @@ class MarkdownHandler:
                 with open(new_md_path, 'w', encoding='utf-8') as f:
                     f.write(md_content)
                 
-                logger.info("MinerU MD 文件已复制到: %s", new_md_path)
+                logger.info("MinerU Markdown 文件已复制到输出目录: file_name=%s", new_md_path.name)
                 md_path = str(new_md_path)
             else:
                 md_path = str(original_md_path)
         else:
             md_path = str(original_md_path)
 
-        logger.info("MinerU done, Markdown: %s", md_path)
+        logger.info("MinerU 文档转换完成: markdown_file=%s", Path(md_path).name)
         return md_path
 
     def process(
@@ -118,7 +118,7 @@ class MarkdownHandler:
             base, _ = os.path.splitext(markdown_path)
             output_path = f"{base}_translated.txt"
 
-        logger.info("Processing Markdown: %s", markdown_path)
+        logger.info("开始翻译 Markdown 文档: file_name=%s", os.path.basename(markdown_path))
 
         # 读取 Markdown 文件
         with open(markdown_path, 'r', encoding='utf-8') as f:
@@ -162,7 +162,7 @@ class MarkdownHandler:
             f.write("".join(results))
 
         tracker.mark_completed()
-        logger.info("TXT saved to: %s", output_path)
+        logger.info("Markdown 翻译结果已保存为 TXT: output_file=%s", os.path.basename(output_path))
         return output_path
 
     def convert_to_html(
@@ -184,7 +184,7 @@ class MarkdownHandler:
         """
         os.makedirs(output_dir, exist_ok=True)
 
-        logger.info("步骤 2: 将 Markdown 转换为 HTML 并翻译: %s", markdown_path)
+        logger.info("开始将 Markdown 转换为 HTML 并翻译: file_name=%s", os.path.basename(markdown_path))
 
         # 读取 Markdown 文件
         with open(markdown_path, 'r', encoding='utf-8') as f:
@@ -223,8 +223,8 @@ class MarkdownHandler:
             f.write(monolingual_html_content)
 
         tracker.mark_completed()
-        logger.info("双语 HTML 已保存至：%s", bilingual_output_path)
-        logger.info("单语 HTML 已保存至：%s", monolingual_output_path)
+        logger.info("双语 HTML 已保存: output_file=%s", os.path.basename(bilingual_output_path))
+        logger.info("单语 HTML 已保存: output_file=%s", os.path.basename(monolingual_output_path))
         return bilingual_output_path, monolingual_output_path
 
     def _convert_bilingual_to_monolingual(self, bilingual_html: str) -> str:
@@ -382,8 +382,8 @@ class MarkdownHandler:
                         bilingual_fragment = f'<span class="translated-text">{self._escape_html(original_text)}</span>'
                     translated_fragments.append(bilingual_fragment)
                     logger.debug(
-                        "HTML 翻译进度 [%s] %.1f%% | 片段 %d/%d [中文跳过]",
-                        progress_bar,
+                        "HTML 翻译进度更新，中文片段无需翻译: progress_percent=%.1f "
+                        "fragment=%d/%d",
                         current_progress,
                         processed + 1,
                         total_frags,
@@ -405,8 +405,8 @@ class MarkdownHandler:
 
                     translated_fragments.append(bilingual_fragment)
                     logger.debug(
-                        "HTML 翻译进度 [%s] %.1f%% | 片段 %d/%d 已翻译 %d 字",
-                        progress_bar,
+                        "HTML 翻译进度更新: progress_percent=%.1f fragment=%d/%d "
+                        "translated_chars=%d",
                         current_progress,
                         processed + 1,
                         total_frags,
@@ -417,7 +417,11 @@ class MarkdownHandler:
                 tracker.update_paragraph(processed)
 
             except Exception as e:
-                logger.warning("HTML 翻译失败，片段 %d: %s", idx, e)
+                logger.warning(
+                    "HTML 文本片段翻译失败，保留原文: fragment_index=%d error_type=%s",
+                    idx,
+                    type(e).__name__,
+                )
                 # 失败时保留原文
                 translated_fragments.append(f'<span class="original-text">{self._escape_html(fragment)}</span>')
                 processed += 1
@@ -499,12 +503,21 @@ class MarkdownHandler:
 
                         img_name = os.path.basename(img_src)
                         img_size_kb = len(img_data) / 1024
-                        logger.debug("图片已转换：%s (%.2f KB)", img_name, img_size_kb)
+                        logger.debug(
+                            "图片已转换为 Base64 编码: image_name=%s size_kb=%.2f",
+                            img_name,
+                            img_size_kb,
+                        )
 
                         return new_img_tag
 
                     except Exception as e:
-                        logger.warning("图片转换失败 %s: %s", os.path.basename(img_src), e)
+                        logger.warning(
+                            "图片转换为 Base64 编码失败，保留原始引用: "
+                            "image_name=%s error_type=%s",
+                            os.path.basename(img_src),
+                            type(e).__name__,
+                        )
                         return img_tag
 
             # 对于网络图片或已经是 data URI 的图片，保持不变
@@ -572,9 +585,9 @@ class MarkdownHandler:
         for idx, para in enumerate(paragraphs):
             if not para.strip():
                 translated_paragraphs.append("")
-                logger.debug("空段落：%d", idx + 1)
+                logger.debug("跳过空段落: paragraph_index=%d", idx + 1)
             elif self._is_chinese_text(para):
-                logger.debug("段落 %d 为中文，跳过翻译", idx + 1)
+                logger.debug("段落为中文，跳过翻译: paragraph_index=%d", idx + 1)
                 translated_paragraphs.append(para)
             else:
                 try:
@@ -584,12 +597,20 @@ class MarkdownHandler:
                         fast_translate=fast_translate
                     )
                     translated_paragraphs.append(translated_para)
-                    logger.debug("段落 %d 翻译完成：%d 字", idx + 1, len(translated_para))
+                    logger.debug(
+                        "段落翻译完成: paragraph_index=%d translated_chars=%d",
+                        idx + 1,
+                        len(translated_para),
+                    )
                     tracker.update_paragraph(idx + 1)
                 except Exception as e:
                     fallback_text = f"[翻译失败：{str(e)}]"
                     translated_paragraphs.append(fallback_text)
-                    logger.warning("段落 %d 翻译失败：%s", idx + 1, fallback_text)
+                    logger.warning(
+                        "段落翻译失败，已写入失败占位文本: paragraph_index=%d error_type=%s",
+                        idx + 1,
+                        type(e).__name__,
+                    )
                     tracker.update_paragraph(idx + 1)
 
         return translated_paragraphs
@@ -620,7 +641,7 @@ class MarkdownHandler:
             if not para.strip():
                 processed_paragraphs.append("")
             elif self._is_chinese_text(para):
-                logger.debug("段落 %d 为中文，跳过翻译", idx + 1)
+                logger.debug("段落为中文，跳过翻译: paragraph_index=%d", idx + 1)
                 processed_paragraphs.append(para)
             else:
                 processed_paragraphs.append(None)  # 占位，稍后填充
@@ -635,7 +656,11 @@ class MarkdownHandler:
             target_lang
         )
 
-        logger.info("批量翻译：%d 段，分为 %d 个批次", len(translation_needed), len(chunks))
+        logger.info(
+            "开始批量翻译段落: paragraph_count=%d batch_count=%d",
+            len(translation_needed),
+            len(chunks),
+        )
 
         # 3. 逐批翻译
         translated_idx = 0
@@ -644,8 +669,7 @@ class MarkdownHandler:
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
             logger.debug(
-                "批量翻译进度 [%s] %.1f%% | 批次 %d/%d",
-                progress_bar,
+                "批量翻译进度更新: progress_percent=%.1f batch=%d/%d",
                 current_progress,
                 chunk_idx + 1,
                 len(chunks),
@@ -672,18 +696,32 @@ class MarkdownHandler:
                     if para_local_idx < len(translated_paras):
                         translated_para = translated_paras[para_local_idx]
                         processed_paragraphs[original_idx] = translated_para
-                        logger.debug("段落 %d 翻译完成：%d 字", original_idx + 1, len(translated_para))
+                        logger.debug(
+                            "批量段落翻译完成: paragraph_index=%d translated_chars=%d",
+                            original_idx + 1,
+                            len(translated_para),
+                        )
                     else:
                         # 段落数量确实不匹配时的容错
                         fallback_text = f"[部分翻译失败：期望{len(chunk['paragraph_indices'])}段，实际{len(translated_paras)}段]"
                         processed_paragraphs[original_idx] = fallback_text
-                        logger.warning("段落 %d 部分翻译失败：%s", original_idx + 1, fallback_text)
+                        logger.warning(
+                            "批量翻译结果缺少对应段落，已写入失败占位文本: "
+                            "paragraph_index=%d expected_count=%d actual_count=%d",
+                            original_idx + 1,
+                            len(chunk["paragraph_indices"]),
+                            len(translated_paras),
+                        )
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
             except Exception as e:
-                logger.warning("批次 %d 翻译失败，改为逐段回退：%s", chunk_idx + 1, e)
+                logger.warning(
+                    "批量翻译失败，改为逐段回退: batch_index=%d error_type=%s",
+                    chunk_idx + 1,
+                    type(e).__name__,
+                )
                 # 失败回退：逐段翻译
                 for para_local_idx, global_para_idx in enumerate(chunk["paragraph_indices"]):
                     original_idx, _ = translation_needed[global_para_idx]
@@ -695,11 +733,20 @@ class MarkdownHandler:
                             fast_translate=False
                         )
                         processed_paragraphs[original_idx] = translated_para
-                        logger.debug("段落 %d 回退翻译完成：%d 字", original_idx + 1, len(translated_para))
+                        logger.debug(
+                            "逐段回退翻译完成: paragraph_index=%d translated_chars=%d",
+                            original_idx + 1,
+                            len(translated_para),
+                        )
                     except Exception as e2:
                         fallback_text = f"[翻译失败：{str(e2)}]"
                         processed_paragraphs[original_idx] = fallback_text
-                        logger.warning("段落 %d 回退翻译失败：%s", original_idx + 1, fallback_text)
+                        logger.warning(
+                            "逐段回退翻译失败，已写入失败占位文本: "
+                            "paragraph_index=%d error_type=%s",
+                            original_idx + 1,
+                            type(e2).__name__,
+                        )
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)

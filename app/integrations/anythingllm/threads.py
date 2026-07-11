@@ -61,11 +61,11 @@ class AnythingLLMThreadClient:
             raise AnythingLLMProtocolError("AnythingLLM 明确拒绝创建线程")
         thread = AnythingLLMThread.from_payload(response.get("thread") or response)
         logger.info(
-            "AnythingLLM 线程创建完成: workspace_slug=%s thread_slug=%s "
-            "thread_id=%s has_user_context=%s",
-            workspace_slug,
-            thread.slug,
-            thread.id,
+            "AnythingLLM 会话创建完成: thread_name_chars=%d has_thread_slug=%s "
+            "has_thread_id=%s has_user_context=%s",
+            len(normalized_name),
+            bool(thread.slug),
+            bool(thread.id),
             user_id is not None,
         )
         return thread
@@ -81,10 +81,10 @@ class AnythingLLMThreadClient:
         path = self._thread_path(workspace_slug, thread_slug)
         self._transport.delete_status(path, user_id=user_id)
         logger.info(
-            "AnythingLLM 线程删除完成: workspace_slug=%s thread_slug=%s "
+            "AnythingLLM 会话删除完成: has_workspace_slug=%s has_thread_slug=%s "
             "has_user_context=%s",
-            workspace_slug,
-            thread_slug,
+            bool(workspace_slug),
+            bool(thread_slug),
             user_id is not None,
         )
 
@@ -118,10 +118,8 @@ class AnythingLLMThreadClient:
         )
         path = f"{self._thread_path(workspace_slug, thread_slug)}/chat"
         logger.info(
-            "开始 AnythingLLM 线程问答: workspace_slug=%s thread_slug=%s "
-            "mode=%s prompt_chars=%d file_count=%d has_user_context=%s",
-            workspace_slug,
-            thread_slug,
+            "开始 AnythingLLM 会话问答: mode=%s prompt_chars=%d "
+            "file_count=%d has_user_context=%s",
             payload["mode"],
             len(normalized_prompt),
             len(payload.get("files", [])),
@@ -171,18 +169,14 @@ class AnythingLLMThreadClient:
         marked_source_count = sum(bool(source.source_marker) for source in sources)
         if unresolved_source_count:
             logger.warning(
-                "AnythingLLM 线程回答存在无法生成 legacy 展示引用的来源: workspace_slug=%s "
-                "thread_slug=%s source_count=%d unresolved_source_count=%d",
-                workspace_slug,
-                thread_slug,
+                "AnythingLLM 会话回答中存在无法生成旧版展示引用的来源: "
+                "source_count=%d unresolved_source_count=%d",
                 len(sources),
                 unresolved_source_count,
             )
         logger.info(
-            "AnythingLLM 线程问答完成: workspace_slug=%s thread_slug=%s "
-            "text_chars=%d raw_text_chars=%d source_count=%d marked_source_count=%d",
-            workspace_slug,
-            thread_slug,
+            "AnythingLLM 会话问答完成: text_chars=%d raw_text_chars=%d "
+            "source_count=%d marked_source_count=%d",
             len(cleaned_text),
             len(raw_text),
             len(sources),
@@ -225,10 +219,7 @@ class AnythingLLMThreadClient:
         emitted_chunk_count = 0
         final_event_received = False
         logger.debug(
-            "开始 AnythingLLM 流式线程问答: workspace_slug=%s thread_slug=%s "
-            "mode=%s message_chars=%d file_count=%d",
-            workspace_slug,
-            thread_slug,
+            "开始 AnythingLLM 流式会话问答: mode=%s message_chars=%d file_count=%d",
             payload["mode"],
             len(normalized_message),
             len(payload.get("files", [])),
@@ -257,10 +248,8 @@ class AnythingLLMThreadClient:
                             yield text_value
         finally:
             logger.debug(
-                "结束 AnythingLLM 流式线程问答: workspace_slug=%s thread_slug=%s "
-                "emitted_chunk_count=%d final_event_received=%s",
-                workspace_slug,
-                thread_slug,
+                "结束 AnythingLLM 流式会话问答: emitted_chunk_count=%d "
+                "final_event_received=%s",
                 emitted_chunk_count,
                 final_event_received,
             )
@@ -279,10 +268,7 @@ class AnythingLLMThreadClient:
         history_value = require_sequence(response.get("history", []), context="history 字段")
         history = [require_mapping(item, context="历史消息") for item in history_value]
         logger.debug(
-            "获取 AnythingLLM 线程历史完成: workspace_slug=%s thread_slug=%s "
-            "message_count=%d",
-            workspace_slug,
-            thread_slug,
+            "获取 AnythingLLM 会话历史完成: message_count=%d",
             len(history),
         )
         return history

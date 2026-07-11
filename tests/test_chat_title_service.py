@@ -248,7 +248,7 @@ class ChatTitleServiceTests(unittest.TestCase):
         )
 
     def test_delete_is_rejected_while_title_has_a_planned_temporary_lease(self) -> None:
-    """计划租约使标题创建与删除在 SQLite 临界区互斥。"""
+        """计划租约使标题创建与删除在 SQLite 临界区互斥。"""
         factory = FakeChatConversationFactory()
         self._create_session_with_known_context(chat_id="chat-title-race", factory=factory)
         lease_id = chat_temporary_thread_lease_id(

@@ -96,7 +96,7 @@ def _translate_if_needed(text: str) -> str:
         service = get_translation_service()
         return service.translate_text_only(text, target_lang="Chinese", fast_translate=True, as_html=False)
     except Exception as e:
-        logger.warning("翻译失败: %s", e)
+        logger.warning("字段内容翻译失败: error_type=%s", type(e).__name__)
         return ""
 
 
@@ -263,7 +263,12 @@ def _vector_search_with_top_n(
         )
     except Exception as exc:
         # 兼容测试 Fake 或尚未迁移实现抛出异常的场景，避免单字段检索中断整个任务。
-        logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, exc)
+        logger.error(
+            "武器装备字段的向量检索失败: query_chars=%d top_n=%d error_type=%s",
+            len(query or ""),
+            top_n,
+            type(exc).__name__,
+        )
         return []
 
 
@@ -281,7 +286,10 @@ def _list_workspace_documents(
         return client.list_workspace_documents(workspace_slug, user_id=user_id)
     except Exception as exc:
         # Facade 正常情况下会返回空列表；此处继续保护测试 Fake 与迁移期替代实现。
-        logger.error("获取工作区 %s 文档列表异常: %s", workspace_slug, exc)
+        logger.error(
+            "读取工作区文档列表失败: error_type=%s",
+            type(exc).__name__,
+        )
         return []
 
 
@@ -432,7 +440,7 @@ def _extract_thread_slug_from_client(client: AnythingLLMClient, thread_info: Dic
             if slug:
                 return str(slug)
         except Exception as e:
-            logger.warning("提取临时 Thread slug 失败: %s", e)
+            logger.warning("提取临时会话标识失败: error_type=%s", type(e).__name__)
     for key in ("slug", "threadSlug", "thread_slug", "id"):
         value = thread_info.get(key)
         if value:
@@ -466,7 +474,10 @@ def _send_prompt_to_isolated_thread(
                     active_thread_slug = child_thread_slug
                     delete_after = True
             except Exception as e:
-                logger.warning("创建字段临时 Thread 失败，回退到父 Thread: %s", e)
+                logger.warning(
+                    "创建字段临时会话失败，改用父会话: error_type=%s",
+                    type(e).__name__,
+                )
 
         try:
             result = client.send_prompt_to_thread(
@@ -480,17 +491,18 @@ def _send_prompt_to_isolated_thread(
             if delete_after and callable(delete_thread):
                 try:
                     if not delete_thread(workspace_slug, active_thread_slug, user_id=user_id):
-                        logger.warning("删除字段临时 Thread %s 失败（不影响结果）", active_thread_slug)
+                        logger.warning("删除字段临时会话失败，不影响已得到的字段结果")
                 except Exception as e:
-                    logger.warning("删除字段临时 Thread %s 异常（不影响结果）: %s", active_thread_slug, e)
+                    logger.warning(
+                        "删除字段临时会话发生异常，不影响已得到的字段结果: error_type=%s",
+                        type(e).__name__,
+                    )
 
         if result:
             return result
 
         logger.warning(
-            "字段提示词调用无有效响应，准备重试: workspace=%s thread=%s attempt=%d/%d",
-            workspace_slug,
-            active_thread_slug,
+            "字段提示词未得到有效响应，准备重试: attempt=%d/%d",
             attempt,
             PROMPT_SEND_MAX_ATTEMPTS,
         )
@@ -510,11 +522,11 @@ def _ensure_terms_workspace(
         return None
     workspace_info = client.ensure_workspace(TERMS_WORKSPACE_NAME, user_id=user_id)
     if not workspace_info:
-        logger.warning("无法创建或获取术语规则 workspace: %s", TERMS_WORKSPACE_NAME)
+        logger.warning("无法创建或获取术语规则工作区")
         return None
     workspace_slug = workspace_info.get("slug") or str(workspace_info.get("id") or "")
     if not workspace_slug:
-        logger.warning("术语规则 workspace 缺少 slug: %s", workspace_info)
+        logger.warning("术语规则工作区缺少有效标识")
         return None
 
     existing_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
@@ -526,18 +538,16 @@ def _ensure_terms_workspace(
     ]
     if not missing_doc_paths:
         logger.info(
-            "复用已有术语规则 workspace: %s term_docs=%d",
-            workspace_slug,
+            "复用已有术语规则工作区: term_document_count=%d",
             len(existing_paths_by_key),
         )
         return workspace_slug
 
     if not client.update_embeddings_batch(workspace_slug, adds=missing_doc_paths, user_id=user_id):
-        logger.warning("术语规则 workspace 加入术语文档失败: %s", workspace_slug)
+        logger.warning("向术语规则工作区加入术语文档失败")
         return None
     logger.info(
-        "术语规则 workspace 已补充缺失文档: %s adds=%d existing=%d",
-        workspace_slug,
+        "术语规则工作区已补充缺失文档: added_count=%d existing_count=%d",
         len(missing_doc_paths),
         len(existing_paths_by_key),
     )
@@ -566,7 +576,7 @@ def _upload_local_terms_if_needed(client: AnythingLLMClient, user_id: int = 1) -
             continue
         doc_info = client.upload_document(str(term_file), user_id=user_id)
         if not doc_info:
-            logger.warning("上传术语文件失败，跳过: %s", term_file)
+            logger.warning("上传术语文件失败，已跳过该文件: file_name=%s", term_file.name)
             continue
         doc_id = doc_info.get("id") or doc_info.get("docId")
         doc_path = doc_info.get("location") or doc_info.get("docpath") or f"custom-documents/{term_file.name}-{doc_id}.json"
@@ -643,9 +653,12 @@ def _prepare_retrieval_context(
         if target_term_paths:
             if client.update_embeddings_batch(workspace_slug, deletes=target_term_paths, user_id=user_id):
                 removed_term_paths = target_term_paths
-                logger.info("已从目标 workspace 临时移除术语文档: workspace=%s count=%d", workspace_slug, len(removed_term_paths))
+                logger.info(
+                    "已从目标工作区临时移除术语文档: removed_count=%d",
+                    len(removed_term_paths),
+                )
             else:
-                logger.warning("从目标 workspace 临时移除术语文档失败: workspace=%s", workspace_slug)
+                logger.warning("从目标工作区临时移除术语文档失败")
 
     return WeaponryRetrievalContext(
         target_file_names=target_file_names,
@@ -669,12 +682,11 @@ def _restore_target_workspace_terms(
         return
     if client.update_embeddings_batch(workspace_slug, adds=context.target_workspace_term_doc_paths, user_id=user_id):
         logger.info(
-            "已恢复目标 workspace 中的术语文档: workspace=%s count=%d",
-            workspace_slug,
+            "已恢复目标工作区中的术语文档: restored_count=%d",
             len(context.target_workspace_term_doc_paths),
         )
     else:
-        logger.warning("恢复目标 workspace 术语文档失败: workspace=%s", workspace_slug)
+        logger.warning("恢复目标工作区中的术语文档失败")
 
 
 def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: str = "") -> Dict[str, Any]:
@@ -850,7 +862,7 @@ def _query_input_field(
 
     filled = dict(field)
     if not vs_results:
-        logger.info("字段 [%s] 向量搜索无匹配，使用空来源", field_name)
+        logger.info("字段向量检索未命中，使用空来源: field_name=%s", field_name)
         filled["analyseData"] = ""
         analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
         filled["analyseDataSource"] = (
@@ -933,16 +945,20 @@ def _query_input_field(
                 first_valid_content = text_response
 
         if not data_sources:
-            logger.info("字段 [%s] (模式2) 提取成功: 所有相关文件均未能提取出有效信息", field_name)
+            logger.info(
+                "字段按文件提取完成，但未得到有效信息: field_name=%s",
+                field_name,
+            )
             filled["analyseData"] = ""
             filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
             return filled
 
-        preview_text = first_valid_content.replace('\n', ' ')
-        if len(preview_text) > 40:
-            preview_text = preview_text[:40] + "..."
-            
-        logger.info("字段 [%s] (模式2) 提取成功: %s (有效文件数: %d)", field_name, preview_text, len(data_sources))
+        logger.info(
+            "字段按文件提取完成: field_name=%s valid_file_count=%d result_chars=%d",
+            field_name,
+            len(data_sources),
+            len(first_valid_content),
+        )
         
         filled["analyseData"] = first_valid_content
         filled["analyseDataSource"] = data_sources
@@ -995,16 +1011,20 @@ def _query_input_field(
                 first_valid_content = text_response
 
         if not data_sources:
-            logger.info("字段 [%s] 提取成功: 所有相关 Chunk 均未能提取出有效信息", field_name)
+            logger.info(
+                "字段按片段提取完成，但未得到有效信息: field_name=%s",
+                field_name,
+            )
             filled["analyseData"] = ""
             filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
             return filled
 
-        preview_text = first_valid_content.replace('\n', ' ')
-        if len(preview_text) > 40:
-            preview_text = preview_text[:40] + "..."
-            
-        logger.info("字段 [%s] 提取成功: %s (有效 Chunk 数: %d)", field_name, preview_text, len(data_sources))
+        logger.info(
+            "字段按片段提取完成: field_name=%s valid_chunk_count=%d result_chars=%d",
+            field_name,
+            len(data_sources),
+            len(first_valid_content),
+        )
         
         filled["analyseData"] = first_valid_content
         filled["analyseDataSource"] = data_sources
@@ -1349,7 +1369,7 @@ def _query_table_field(
         return _finish(_preserve_original_table_rows())
 
     table_name = field.get("fieldName", "表格")
-    logger.info("  -> 开始处理表格 [%s]，列数: %d", table_name, len(column_defs))
+    logger.info("开始提取表格字段: table_name=%s column_count=%d", table_name, len(column_defs))
 
     retrieval_query = _build_table_retrieval_query(field, column_defs)
     vs_results = _vector_search_with_top_n(
@@ -1366,7 +1386,7 @@ def _query_table_field(
     ]
 
     if not vs_results:
-        logger.info("表格 [%s] 向量搜索无匹配，保留原始表格模板", table_name)
+        logger.info("表格字段向量检索未命中，保留原始模板: table_name=%s", table_name)
         return _finish(_preserve_original_table_rows())
 
     terms_rule_context = ""
@@ -1420,7 +1440,11 @@ def _query_table_field(
         rows = _parse_table_json_rows(text_response, column_defs)
         if not rows:
             if text_response and "未找到" not in text_response and text_response != "[]":
-                logger.warning("表格 [%s] 的模型响应无法解析为有效行: %s", table_name, text_response[:200])
+                logger.warning(
+                    "表格字段的模型响应无法解析为有效行: table_name=%s response_chars=%d",
+                    table_name,
+                    len(text_response),
+                )
             continue
 
         original_source_name = _resolve_original_source_name(file_name, retrieval_context)
@@ -1445,7 +1469,7 @@ def _query_table_field(
     else:
         filled["tableFieldList"] = template_rows
         extracted_row_count = 0
-    logger.info("表格 [%s] 提取完成: 解析行数=%d", table_name, extracted_row_count)
+    logger.info("表格字段提取完成: table_name=%s extracted_row_count=%d", table_name, extracted_row_count)
     return _finish(filled)
 
 
@@ -1489,7 +1513,7 @@ def run_weaponry_task(
 
         base_workspace_slug = kb_service.get_workspace_slug(architecture_id)
         if not base_workspace_slug:
-            logger.warning("architectureId=%s 无对应 Workspace，标记失败", architecture_id)
+            logger.warning("未找到分类对应的知识库工作区，任务将标记失败: architecture_id=%s", architecture_id)
             _fail_task(
                 task_service, progress_hub, architecture_id, architecture_id_str,
                 callback_url, callback_timeout,
@@ -1545,9 +1569,8 @@ def run_weaponry_task(
 
             workspace_slug = temporary_workspace_slug
             logger.info(
-                "武器装备解析已限定选中文件: architectureId=%s workspace=%s file_count=%d",
+                "武器装备解析已限制为选中文件: architecture_id=%s file_count=%d",
                 architecture_id,
-                workspace_slug,
                 len(selected_file_names),
             )
 
@@ -1606,7 +1629,7 @@ def run_weaponry_task(
             for field in field_list:
                 field_type = field.get("fieldType", "INPUT")
                 field_name = field.get("fieldName", "unknown")
-                logger.info("正在处理字段: %s (%s)", field_name, field_type)
+                logger.info("开始提取字段: field_name=%s field_type=%s", field_name, field_type)
 
                 if field_type == "TABLE":
                     filled = _query_table_field(
@@ -1643,9 +1666,9 @@ def run_weaponry_task(
 
         thread_deleted = client.delete_thread(workspace_slug, thread_slug, user_id=1)
         if not thread_deleted:
-            logger.warning("删除 Thread %s 失败（不影响结果）", thread_slug)
+            logger.warning("删除临时检索会话失败，不影响已得到的任务结果")
 
-        logger.info("武器装备提取任务完成: architectureId=%s", architecture_id)
+        logger.info("武器装备提取任务执行完成: architecture_id=%s", architecture_id)
 
         # ─── 阶段 5：组装回调并发送 ───
         callback_payload = _build_weaponry_callback_payload(
@@ -1665,16 +1688,20 @@ def run_weaponry_task(
                 callback_context={"businessType": "weaponry", "architectureId": architecture_id},
             ):
                 task_service.mark_callback_success("weaponry", architecture_id_str)
-                logger.info("回调结果提交成功: architectureId=%s", architecture_id)
+                logger.info("武器装备任务外部回调提交成功: architecture_id=%s", architecture_id)
             else:
                 task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
-                logger.warning("回调结果提交失败: architectureId=%s", architecture_id)
+                logger.warning("武器装备任务外部回调提交失败: architecture_id=%s", architecture_id)
         else:
             # 未配置回调时将终态记录为 skipped，防止后续巡检把它识别成待重放任务。
             task_service.mark_callback_skipped("weaponry", architecture_id_str)
 
     except Exception as e:
-        logger.exception("武器装备提取任务异常: architectureId=%s, error=%s", architecture_id, e)
+        logger.exception(
+            "武器装备提取任务发生异常: architecture_id=%s error_type=%s",
+            architecture_id,
+            type(e).__name__,
+        )
         _fail_task(
             task_service, progress_hub, architecture_id, architecture_id_str,
             callback_url, callback_timeout,
@@ -1685,27 +1712,31 @@ def run_weaponry_task(
             try:
                 _restore_target_workspace_terms(client, workspace_slug, retrieval_context, user_id=1)
             except Exception as cleanup_error:
-                logger.warning("恢复目标 workspace 术语文档异常（不影响任务结果）: %s", cleanup_error)
+                logger.warning(
+                    "恢复目标工作区术语文档时发生异常，不影响任务结果: error_type=%s",
+                    type(cleanup_error).__name__,
+                )
 
         if client and workspace_slug and thread_slug and not thread_deleted:
             try:
                 if not client.delete_thread(workspace_slug, thread_slug, user_id=1):
-                    logger.warning("最终清理 Thread %s 失败（不影响任务结果）", thread_slug)
+                    logger.warning("最终清理临时检索会话失败，不影响任务结果")
             except Exception as cleanup_error:
-                logger.warning("最终清理 Thread %s 异常（不影响任务结果）: %s", thread_slug, cleanup_error)
+                logger.warning(
+                    "最终清理临时检索会话时发生异常，不影响任务结果: error_type=%s",
+                    type(cleanup_error).__name__,
+                )
 
         if client and temporary_workspace_slug:
             try:
                 if not client.delete_workspace(temporary_workspace_slug, user_id=1):
                     logger.warning(
-                        "删除选中文件临时 workspace %s 失败（不影响任务结果）",
-                        temporary_workspace_slug,
+                        "删除选中文件临时工作区失败，不影响任务结果",
                     )
             except Exception as cleanup_error:
                 logger.warning(
-                    "删除选中文件临时 workspace %s 异常（不影响任务结果）: %s",
-                    temporary_workspace_slug,
-                    cleanup_error,
+                    "删除选中文件临时工作区时发生异常，不影响任务结果: error_type=%s",
+                    type(cleanup_error).__name__,
                 )
 
 
@@ -1719,6 +1750,11 @@ def _fail_task(
     msg: str = "解析失败",
 ) -> None:
     """统一的任务失败处理。"""
+    logger.warning(
+        "武器装备提取任务已标记失败: architecture_id=%s failure_message_chars=%d",
+        architecture_id,
+        len(msg or ""),
+    )
     callback_payload = _build_weaponry_callback_payload(
         architecture_id, [], status="3", msg=msg,
     )

@@ -165,7 +165,7 @@ class AnythingLLMTransport:
         if self._closed:
             return
         self._closed = True
-        logger.debug("关闭 AnythingLLM 任务级 HTTP 会话")
+        logger.debug("已关闭 AnythingLLM 任务级 HTTP 会话")
         self._session.close()
 
     def get_json(
@@ -460,7 +460,7 @@ class AnythingLLMTransport:
                     # 部分流式接口使用 NDJSON 而不是标准 SSE。显式开启兼容时，每个原始
                     # JSON 行都作为独立事件产出，避免被误解为 SSE 字段名后静默丢弃。
                     logger.debug(
-                        "按 NDJSON 兼容模式解析 AnythingLLM 流式响应: "
+                        "AnythingLLM 流式响应使用 NDJSON 兼容解析: "
                         "url=%s line_chars=%d",
                         self._safe_url(url),
                         len(line),
@@ -503,7 +503,7 @@ class AnythingLLMTransport:
         except requests.Timeout as exc:
             safe_url = self._safe_url(url)
             logger.warning(
-                "AnythingLLM 流式响应读取超时: method=POST url=%s",
+                "读取 AnythingLLM 流式响应超时: method=POST url=%s",
                 safe_url,
             )
             raise AnythingLLMTimeoutError(
@@ -514,7 +514,7 @@ class AnythingLLMTransport:
         except requests.RequestException as exc:
             safe_url = self._safe_url(url)
             logger.warning(
-                "AnythingLLM 流式响应读取中断: method=POST url=%s error_type=%s",
+                "读取 AnythingLLM 流式响应时连接中断: method=POST url=%s error_type=%s",
                 safe_url,
                 type(exc).__name__,
             )
@@ -655,7 +655,7 @@ class AnythingLLMTransport:
         if not 200 <= status_code < 300:
             summary = self._safe_response_summary(response)
             logger.warning(
-                "AnythingLLM HTTP 状态异常: method=%s url=%s status_code=%d "
+                "AnythingLLM 返回非成功 HTTP 状态: method=%s url=%s status_code=%d "
                 "response_summary_chars=%d",
                 method,
                 safe_url,
@@ -705,7 +705,7 @@ class AnythingLLMTransport:
             summary = self._safe_response_summary(response)
             safe_url = self._safe_url(url)
             logger.warning(
-                "AnythingLLM JSON 响应解析失败: method=%s url=%s status_code=%d "
+                "AnythingLLM 响应不是合法 JSON: method=%s url=%s status_code=%d "
                 "response_summary_chars=%d",
                 method,
                 safe_url,

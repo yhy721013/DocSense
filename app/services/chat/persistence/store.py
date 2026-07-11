@@ -173,7 +173,7 @@ class ChatStore:
         # 使未来代码不能在无可靠投递能力时静默降级为进程内列表。
         self.outbox: ChatOutboxStore = DisabledChatOutbox()
         logger.info(
-            "文件对话SQLite单实例持久化仓储已初始化: db_path=%s outbox_enabled=%s",
+            "文件对话 SQLite 单实例持久化仓储已初始化: db_path=%s outbox_enabled=%s",
             db_path,
             self.outbox.enabled,
         )

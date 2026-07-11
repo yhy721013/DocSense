@@ -27,7 +27,7 @@ def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
     for event in events:
         if not isinstance(event, ChatStreamEvent):
             raise TypeError("chat stream must yield ChatStreamEvent")
-        logger.debug("展示文件对话SSE事件: event_type=%s", event.event_type)
+        logger.debug("展示文件对话 SSE 事件: event_type=%s", event.event_type)
         yield format_sse_event(event.event_type, event.data)
 
 
@@ -75,7 +75,7 @@ def finalize_chat_run_stream(
             # Presenter 只负责协议转换和资源关闭，run 状态已经由 application
             # 层的 ChatRunEventRecorder 收敛，避免展示层与业务层双写状态。
             logger.debug(
-                "准备发送文件对话SSE事件: run_id=%s event_type=%s terminal=%s",
+                "准备发送文件对话 SSE 事件: run_id=%s event_type=%s terminal=%s",
                 run_id,
                 event.event_type,
                 is_terminal,
@@ -84,7 +84,7 @@ def finalize_chat_run_stream(
             if is_terminal:
                 terminal_event_seen = True
                 logger.info(
-                    "文件对话SSE流收到终态事件并准备关闭: run_id=%s event_type=%s",
+                    "文件对话 SSE 流收到终态事件并准备关闭: run_id=%s event_type=%s",
                     run_id,
                     event.event_type,
                 )

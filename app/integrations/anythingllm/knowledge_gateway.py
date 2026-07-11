@@ -190,9 +190,11 @@ class AnythingLLMKnowledgeGateway:
             )
             self._known_collections[collection.ref] = collection
             logger.info(
-                "永久知识集合已确保: collection_name=%s collection_ref=%s reused=%s",
-                collection.name,
-                collection.ref,
+                "永久知识集合已就绪: architecture_id=%s collection_name_chars=%d "
+                "has_collection_ref=%s reused=%s",
+                collection.architecture_id,
+                len(collection.name),
+                bool(collection.ref),
                 reused,
             )
             return collection
@@ -325,8 +327,9 @@ class AnythingLLMKnowledgeGateway:
             # 如果已存在且状态为 committed，直接复用，避免 document_ref/location 冲突
             if existing is not None and existing.status == STATUS_COMMITTED:
                 logger.info(
-                    "永久知识库文档已存在且已提交，直接复用: collection_ref=%s idempotency_key=%s",
-                    known_collection.ref,
+                    "永久知识库文档已提交，直接复用既有结果: architecture_id=%s "
+                    "idempotency_key=%s",
+                    known_collection.architecture_id,
                     normalized_key,
                 )
                 return self._indexed_result(existing, created=False)
@@ -453,13 +456,14 @@ class AnythingLLMKnowledgeGateway:
                     existing is None and deleted_rows == 0 and coordinated_rows == 0
                 )
                 logger.info(
-                    "永久知识文档已解除集合绑定: collection_ref=%s location=%s "
-                    "already_applied=%s business_type=%s business_key=%s",
-                    known_collection.ref,
-                    normalized_location,
+                    "永久知识文档已解除集合绑定: architecture_id=%s "
+                    "has_document_location=%s already_applied=%s business_type=%s "
+                    "business_key_chars=%d",
+                    known_collection.architecture_id,
+                    bool(normalized_location),
                     already_applied,
                     operation_context.business_type,
-                    operation_context.business_key,
+                    len(operation_context.business_key),
                 )
                 return OperationResult(
                     success=True,
@@ -468,13 +472,14 @@ class AnythingLLMKnowledgeGateway:
             except Exception as exc:
                 error_message = self._safe_error(exc, fallback="解除知识库文档绑定失败")
                 logger.error(
-                    "永久知识文档解除绑定失败: collection_ref=%s location=%s "
-                    "error_type=%s business_type=%s business_key=%s",
-                    known_collection.ref,
-                    normalized_location,
+                    "永久知识文档解除集合绑定失败: architecture_id=%s "
+                    "has_document_location=%s error_type=%s business_type=%s "
+                    "business_key_chars=%d",
+                    known_collection.architecture_id,
+                    bool(normalized_location),
                     type(exc).__name__,
                     operation_context.business_type,
-                    operation_context.business_key,
+                    len(operation_context.business_key),
                 )
                 return OperationResult(
                     success=False,
@@ -587,9 +592,8 @@ class AnythingLLMKnowledgeGateway:
             # 可恢复成果；协调记录保持 external_succeeded，重试只执行本地提交。
             self._record_error_best_effort(record, exc)
             logger.error(
-                "永久知识库本地提交失败，保留外部成功状态: collection_ref=%s "
+                "永久知识库本地提交失败，保留外部成功状态等待重试: "
                 "idempotency_key=%s error_type=%s",
-                record.collection_ref,
                 record.idempotency_key,
                 type(exc).__name__,
             )
@@ -603,11 +607,11 @@ class AnythingLLMKnowledgeGateway:
 
         record = self._finalize_commit(collection, record)
         logger.info(
-            "永久知识库操作已提交: collection_ref=%s idempotency_key=%s "
-            "document_ref=%s created=%s source_kind=%s",
-            record.collection_ref,
+            "永久知识库操作已提交: architecture_id=%s idempotency_key=%s "
+            "has_document_ref=%s created=%s source_kind=%s",
+            collection.architecture_id,
             record.idempotency_key,
-            record.document_ref,
+            bool(record.document_ref),
             created,
             record.source_kind,
         )
@@ -648,19 +652,17 @@ class AnythingLLMKnowledgeGateway:
             )
         if verified.document_ref != record.document_ref:
             logger.error(
-                "永久知识集合文档身份校验失败: collection_ref=%s "
-                "idempotency_key=%s expected_document_ref=%s "
-                "actual_document_ref=%s external_location=%s verified_location=%s "
-                "verified_document_id=%s verified_raw_document_id=%s "
-                "verified_identity_source=%s",
-                collection.ref,
+                "永久知识集合文档身份校验失败: architecture_id=%s "
+                "idempotency_key=%s expected_ref_present=%s actual_ref_present=%s "
+                "location_matched=%s has_document_id=%s has_raw_document_id=%s "
+                "identity_source=%s",
+                collection.architecture_id,
                 record.idempotency_key,
-                record.document_ref,
-                verified.document_ref,
-                record.external_location,
-                verified.location,
-                verified.id,
-                verified.raw_document_id,
+                bool(record.document_ref),
+                bool(verified.document_ref),
+                verified.location == record.external_location,
+                bool(verified.id),
+                bool(verified.raw_document_id),
                 verified.identity_source,
             )
             raise KnowledgeIndexError(
@@ -778,9 +780,7 @@ class AnythingLLMKnowledgeGateway:
                     )
                 except Exception:
                     logger.critical(
-                        "旧版本清理失败后无法提交恢复状态: collection_ref=%s "
-                        "idempotency_key=%s",
-                        record.collection_ref,
+                        "旧版本清理失败后，无法写入待恢复状态: idempotency_key=%s",
                         record.idempotency_key,
                         exc_info=True,
                     )
@@ -862,9 +862,8 @@ class AnythingLLMKnowledgeGateway:
             # 补偿状态落库失败不能覆盖最初的 AnythingLLM 异常。调用方根据 False 进入
             # “必须保留文档”路径，运维人员仍可通过日志和外部引用执行人工对账。
             logger.critical(
-                "补偿完成后无法提交知识库协调状态: collection_ref=%s "
+                "外部资源补偿完成后，无法写入知识库协调状态: "
                 "idempotency_key=%s target_status=%s",
-                record.collection_ref,
                 record.idempotency_key,
                 target_status,
                 exc_info=True,
@@ -872,9 +871,8 @@ class AnythingLLMKnowledgeGateway:
             return False
         logger.log(
             logging.ERROR if errors else logging.WARNING,
-            "永久知识库外部失败补偿完成: collection_ref=%s idempotency_key=%s "
+            "永久知识库外部资源失败补偿结束: idempotency_key=%s "
             "compensation_status=%s error_count=%d original_error_type=%s",
-            record.collection_ref,
             record.idempotency_key,
             target_status,
             len(errors),
@@ -899,9 +897,7 @@ class AnythingLLMKnowledgeGateway:
             )
         except Exception:
             logger.critical(
-                "上传失败后无法写入知识库协调状态: collection_ref=%s "
-                "idempotency_key=%s",
-                record.collection_ref,
+                "文档上传失败后，无法写入知识库协调状态: idempotency_key=%s",
                 record.idempotency_key,
                 exc_info=True,
             )
@@ -937,9 +933,8 @@ class AnythingLLMKnowledgeGateway:
             )
         except Exception:
             logger.critical(
-                "未登记上传补偿后无法更新协调状态: collection_ref=%s "
+                "未登记上传文档的补偿完成后，无法更新协调状态: "
                 "idempotency_key=%s cleanup_succeeded=%s",
-                record.collection_ref,
                 record.idempotency_key,
                 not bool(cleanup_error),
                 exc_info=True,
@@ -959,8 +954,7 @@ class AnythingLLMKnowledgeGateway:
             )
         except Exception:
             logger.critical(
-                "无法更新知识库协调错误信息: collection_ref=%s idempotency_key=%s",
-                record.collection_ref,
+                "无法更新知识库协调记录的错误信息: idempotency_key=%s",
                 record.idempotency_key,
                 exc_info=True,
             )

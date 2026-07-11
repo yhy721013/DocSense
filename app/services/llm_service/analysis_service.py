@@ -388,19 +388,14 @@ def _default_security_value(options: Iterable[Dict[str, Any]]) -> str:
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
     def _fallback(reason: str, detail: Any = None) -> int:
-        if detail is None:
-            logger.info(
-                "architectureId匹配失败: reason=%s fallback=%s",
-                reason,
-                ARCHITECTURE_FALLBACK_ID,
-            )
-        else:
-            logger.info(
-                "architectureId匹配失败: reason=%s detail=%s fallback=%s",
-                reason,
-                detail,
-                ARCHITECTURE_FALLBACK_ID,
-            )
+        logger.info(
+            "领域分类匹配失败，使用默认分类: reason=%s "
+            "fallback_architecture_id=%s has_detail=%s detail_type=%s",
+            reason,
+            ARCHITECTURE_FALLBACK_ID,
+            detail is not None,
+            type(detail).__name__ if detail is not None else "",
+        )
         return ARCHITECTURE_FALLBACK_ID
 
     candidate_items = [item for item in architecture_list if isinstance(item, dict)]
@@ -552,7 +547,11 @@ def _sanitize_keywords(raw_value: Any) -> str:
         seen.add(kw)
         # 单个关键词过长时截断
         if len(kw) > MAX_KEYWORD_LENGTH:
-            logger.warning("keyword 被截断: 原始长度=%d 超过上限 %d", len(kw), MAX_KEYWORD_LENGTH)
+            logger.warning(
+                "关键词长度超过上限，已截断: original_chars=%d limit=%d",
+                len(kw),
+                MAX_KEYWORD_LENGTH,
+            )
             kw = kw[:MAX_KEYWORD_LENGTH]
         cleaned.append(kw)
         if len(cleaned) >= MAX_KEYWORD_COUNT:
@@ -789,7 +788,11 @@ def map_analysis_result(
         ("format", raw_format, resolved_format),
     ):
         if raw_value not in (None, "", [], {}) and not resolved_value:
-            logger.info("字段候选匹配失败: field=%s raw=%s", field_name, _scalar_text(raw_value))
+            logger.info(
+                "字段候选值未匹配到预设范围: field=%s raw_value_chars=%d",
+                field_name,
+                len(_scalar_text(raw_value)),
+            )
 
     resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
     resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
@@ -888,13 +891,19 @@ def enrich_with_translations(
 
         if enable_full_translation:
             # 全文翻译模式：翻译整个文档
-            logger.info(f"[LLMAnalysis] 开始全文翻译：{file_path}")
+            logger.info(
+                "开始全文翻译文档: file_name=%s",
+                Path(file_path).name,
+            )
 
             # 【新增】定义进度回调函数，将翻译进度反馈到任务状态
             def translation_progress_callback(progress: float, message: str):
                 # 计算总体进度（翻译占 0.35~0.95 区间，共 0.6 权重）
                 overall_progress = 0.35 + (progress * 0.6)
-                logger.info(f"[LLMAnalysis] 翻译进度：{message} ({overall_progress:.0%})")
+                logger.debug(
+                    "全文翻译进度已更新: progress_percent=%d",
+                    round(overall_progress * 100),
+                )
 
             # 设置进度回调
             translation_service.set_progress_callback(translation_progress_callback)
@@ -912,7 +921,7 @@ def enrich_with_translations(
         else:
             # 快速模式：只翻译摘要
             if summary:
-                logger.info(f"[LLMAnalysis] 翻译摘要：{summary[:50]}...")
+                logger.info("开始翻译文档摘要: summary_chars=%d", len(summary))
                 translated_summary = translation_service.translate_text_only(summary)
                 mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
                 mapped_result["fileDataItem"]["documentTranslationTwo"] = summary+"\n"+translated_summary
@@ -920,7 +929,10 @@ def enrich_with_translations(
         return mapped_result
 
     except Exception as e:
-        logger.info(f"[LLMAnalysis] 翻译过程中出错：{e}，返回未翻译的结果")
+        logger.warning(
+            "文档翻译失败，返回未翻译结果: error_type=%s",
+            type(e).__name__,
+        )
         return mapped_result
 
 
@@ -1152,7 +1164,7 @@ def _submit_callback(
             task_service.mark_callback_skipped("file", file_name)
         except Exception:
             logger.critical(
-                "未配置回调但 skipped 状态无法提交: file_name=%s",
+                "未配置回调地址，但无法将任务标记为无需回调: file_name=%s",
                 file_name,
                 exc_info=True,
             )
@@ -1175,11 +1187,15 @@ def _submit_callback(
             task_service.mark_callback_failed("file", file_name, callback_error)
         except Exception:
             logger.critical(
-                "文件分析回调异常后无法提交 failed 状态: file_name=%s",
+                "文件分析回调发生异常后，无法将任务标记为回调失败: file_name=%s",
                 file_name,
                 exc_info=True,
             )
-        logger.exception("文件分析回调异常: file_name=%s", file_name)
+        logger.exception(
+            "文件分析回调发生异常: file_name=%s error_type=%s",
+            file_name,
+            type(exc).__name__,
+        )
         return
     try:
         if succeeded:
@@ -1265,7 +1281,7 @@ def _close_audited_session(
         cleanup = session.close(retain_document=retain_document)
     except Exception:
         logger.critical(
-            "RAG Session 关闭调用异常: interaction_id=%s execution_id=%s "
+            "RAG 会话关闭调用发生异常: interaction_id=%s execution_id=%s "
             "retain_document=%s",
             interaction_id,
             execution_id,
@@ -1289,7 +1305,7 @@ def _close_audited_session(
         )
     except Exception:
         logger.critical(
-            "RAG Session 已关闭但关闭审计追加失败: interaction_id=%s execution_id=%s",
+            "RAG 会话已关闭，但无法追加关闭审计: interaction_id=%s execution_id=%s",
             interaction_id,
             execution_id,
             exc_info=True,
@@ -1307,7 +1323,7 @@ def _close_audited_session(
             )
     except Exception:
         logger.critical(
-            "RAG Session 关闭后资源租约终结失败: interaction_id=%s execution_id=%s",
+            "RAG 会话关闭后，无法结束资源租约: interaction_id=%s execution_id=%s",
             interaction_id,
             execution_id,
             exc_info=True,
@@ -1326,13 +1342,14 @@ def _store_prepared_analysis_document(
 ) -> None:
     """把 RAG 已上传的同一文档转交永久知识库，不读取源文件也不二次上传。"""
     logger.info(
-        "[DEBUG] 开始转交文档到永久知识库: file_name=%s execution_id=%s",
+        "开始将已上传文档转交永久知识库: file_name=%s execution_id=%s",
         file_name,
         execution_id,
     )
     result_architecture_id = int(mapped_result["architectureId"])
     logger.info(
-        "[DEBUG] 解析结果 architecture_id=%s",
+        "文件分析结果已确定分类: execution_id=%s result_architecture_id=%s",
+        execution_id,
         result_architecture_id,
     )
     storage_architecture_id = resolve_storage_architecture_id(
@@ -1340,7 +1357,8 @@ def _store_prepared_analysis_document(
         architecture_list,
     )
     logger.info(
-        "[DEBUG] 存储架构 architecture_id=%s",
+        "永久知识库存储分类已确定: execution_id=%s storage_architecture_id=%s",
+        execution_id,
         storage_architecture_id,
     )
     if storage_architecture_id is None or storage_architecture_id < 1:
@@ -1365,9 +1383,9 @@ def _store_prepared_analysis_document(
         attributes=attributes,
     )
     logger.info(
-        "[DEBUG] 元数据构建完成: file_name=%s attributes=%s",
+        "永久知识库文档元数据已构建: file_name=%s attribute_key_count=%d",
         file_name,
-        list(attributes.keys()),
+        len(attributes),
     )
     operation_context = KnowledgeOperationContext(
         execution_id=execution_id,
@@ -1380,13 +1398,14 @@ def _store_prepared_analysis_document(
         content_sha256=prepared_document.content_sha256,
     )
     logger.info(
-        "[DEBUG] 幂等键生成完成: idempotency_key=%s",
-        idempotency_key[:50] + "...",
+        "永久知识库写入幂等键已生成: execution_id=%s key_length=%d",
+        execution_id,
+        len(idempotency_key),
     )
     try:
-        logger.info("[DEBUG] 进入 knowledge_index_factory 上下文")
+        logger.debug("开始创建永久知识库任务对象: execution_id=%s", execution_id)
         with knowledge_index_factory.create() as knowledge_index:
-            logger.info("[DEBUG] knowledge_index_factory 创建成功")
+            logger.debug("永久知识库任务对象创建完成: execution_id=%s", execution_id)
             collection = knowledge_index.ensure_collection(
                 CollectionSpec(
                     architecture_id=storage_architecture_id,
@@ -1394,10 +1413,11 @@ def _store_prepared_analysis_document(
                 )
             )
             logger.info(
-                "[DEBUG] 集合确保完成: collection_ref=%s",
-                collection.ref,
+                "永久知识集合已确认: execution_id=%s architecture_id=%s",
+                execution_id,
+                collection.architecture_id,
             )
-            logger.info("[DEBUG] 开始调用 store_prepared_document")
+            logger.debug("开始写入永久知识库文档: execution_id=%s", execution_id)
             knowledge_index.store_prepared_document(
                 collection,
                 prepared_document,
@@ -1405,14 +1425,14 @@ def _store_prepared_analysis_document(
                 operation_context=operation_context,
                 idempotency_key=idempotency_key,
             )
-            logger.info("[DEBUG] store_prepared_document 调用成功")
-        logger.info("[DEBUG] knowledge_index_factory 上下文退出成功")
+            logger.debug("永久知识库文档写入调用完成: execution_id=%s", execution_id)
+        logger.debug("永久知识库任务对象已正常关闭: execution_id=%s", execution_id)
     except Exception as exc:
         logger.exception(
-            "[DEBUG] knowledge_index_factory 上下文中发生异常: file_name=%s error_type=%s error=%s",
+            "写入永久知识库时发生异常: file_name=%s execution_id=%s error_type=%s",
             file_name,
+            execution_id,
             type(exc).__name__,
-            str(exc),
         )
         raise
     logger.info(
@@ -1592,7 +1612,7 @@ def _execute_file_analysis_task(
                 )
                 if architecture_id is not None:
                     logger.info(
-                        "architectureId 首次结果不合规，按 GJB 正文线索命中请求候选: "
+                        "模型首次返回的分类编号不在请求范围内，已按 GJB 正文线索匹配候选分类: "
                         "file_name=%s architecture_id=%s",
                         file_name,
                         architecture_id,
@@ -1853,7 +1873,7 @@ def _execute_file_analysis_task(
             # 只有该类型能证明 Gateway 已解绑永久集合并提交补偿成功状态，此时允许 RAG
             # Session 永久删除未转交的全局文档。
             logger.exception(
-                "[DEBUG] 捕获 KnowledgeIndexDocumentReleasedError: file_name=%s execution_id=%s",
+                "永久知识库写入失败且已完成文档释放补偿: file_name=%s execution_id=%s",
                 file_name,
                 execution_id,
             )
@@ -1871,7 +1891,7 @@ def _execute_file_analysis_task(
         except KnowledgeIndexRetentionRequiredError as knowledge_exc:
             retain_document = True
             logger.exception(
-                "[DEBUG] 捕获 KnowledgeIndexRetentionRequiredError: file_name=%s execution_id=%s",
+                "永久知识库写入状态需人工恢复，保留全局文档: file_name=%s execution_id=%s",
                 file_name,
                 execution_id,
             )
@@ -1891,7 +1911,8 @@ def _execute_file_analysis_task(
             # 协调记录对账；错误删除会破坏永久知识库中可能已经提交的引用。
             retain_document = True
             logger.exception(
-                "[DEBUG] 捕获未分类异常: file_name=%s execution_id=%s error_type=%s",
+                "永久知识库写入发生未分类异常，保留全局文档: "
+                "file_name=%s execution_id=%s error_type=%s",
                 file_name,
                 execution_id,
                 type(knowledge_exc).__name__,

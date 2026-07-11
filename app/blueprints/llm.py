@@ -443,9 +443,9 @@ def llm_weaponry():
         selected_file_names = _normalize_weaponry_file_path_list(params.get("filePathList"))
     except ValueError as exc:
         logger.warning(
-            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error=%s",
+            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error_type=%s",
             architecture_id,
-            exc,
+            type(exc).__name__,
         )
         return jsonify({"error": str(exc)}), 400
 
@@ -762,7 +762,11 @@ def llm_reassign():
                 metadata = {"file_name": file_name, "architecture_id": new_architecture_id}
                 client.update_embeddings(doc_path, new_workspace_slug, user_id=1, metadata=metadata)
     except Exception as e:
-        logger.error("在调整工作区关联时失败: file_name=%s, exception=%s", file_name, e)
+        logger.error(
+            "调整文档知识库关联失败: file_name=%s error_type=%s",
+            file_name,
+            type(e).__name__,
+        )
         return jsonify({
             "businessType": "reassign",
             "msg": "变更失败",
@@ -816,8 +820,8 @@ def llm_progress(ws):
                 command = _parse_progress_command(payload)
             except ValueError as exc:
                 logger.warning(
-                    "进度订阅消息被拒绝: %s payload_keys=%s",
-                    exc,
+                    "进度订阅消息被拒绝: error_type=%s payload_keys=%s",
+                    type(exc).__name__,
                     list(payload.keys()) if isinstance(payload, dict) else "n/a",
                 )
                 ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
@@ -996,7 +1000,7 @@ def llm_chat():
         raise
 
     logger.info(
-        "文件对话run已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
+        "文件对话运行已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
         chat_id,
         prepared_run.run_id,
         len(normalized_file_names),
@@ -1036,7 +1040,7 @@ def llm_chat():
                     )
                 except Exception:
                     logger.exception(
-                        "未启动文件对话run关闭时收敛失败: chatId=%s runId=%s",
+                        "未启动文件对话运行关闭时收敛失败: chatId=%s runId=%s",
                         chat_id,
                         prepared_run.run_id,
                     )
@@ -1049,7 +1053,7 @@ def llm_chat():
             _release_stream_slot()
 
         logger.info(
-            "文件对话SSE响应已创建: chatId=%s runId=%s",
+            "文件对话 SSE 响应已创建: chatId=%s runId=%s",
             chat_id,
             prepared_run.run_id,
         )

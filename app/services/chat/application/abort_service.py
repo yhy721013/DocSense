@@ -121,7 +121,7 @@ class ChatAbortService:
         )
         if expired_runs:
             logger.warning(
-                "文件对话中断前已释放过期run: chat_id=%s expired_run_ids=%s",
+                "文件对话中断前已释放过期运行: chat_id=%s expired_run_ids=%s",
                 normalized_chat_id,
                 ",".join(run.run_id for run in expired_runs),
             )

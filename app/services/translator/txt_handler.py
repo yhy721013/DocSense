@@ -49,7 +49,7 @@ class TXTHandler:
             base, _ = os.path.splitext(input_path)
             output_path = f"{base}_translated.txt"
 
-        logger.info("开始处理 TXT 文件: input_path=%s", input_path)
+        logger.info("开始处理 TXT 文件: input_file=%s", os.path.basename(input_path))
 
         with open(input_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -101,7 +101,7 @@ class TXTHandler:
             f.write("".join(results))
 
         tracker.mark_completed()
-        logger.info("TXT 翻译结果已保存: output_path=%s", output_path)
+        logger.info("TXT 翻译结果已保存: output_file=%s", os.path.basename(output_path))
         return output_path
 
     def _translate_paragraphs_one_by_one(
@@ -152,9 +152,10 @@ class TXTHandler:
                     fallback_text = f"[翻译失败：{str(e)}]"
                     translated_paragraphs.append(fallback_text)
                     logger.warning(
-                        "TXT 段落翻译失败: paragraph_index=%d error=%s",
+                        "TXT 段落翻译失败，已写入失败占位文本: "
+                        "paragraph_index=%d error_type=%s",
                         idx + 1,
-                        e,
+                        type(e).__name__,
                     )
                     tracker.update_paragraph(idx + 1)
 
@@ -218,8 +219,7 @@ class TXTHandler:
             current_progress = (chunk_idx + 1) / len(chunks) * 100
             progress_bar = self._create_progress_bar(current_progress, width=30)
             logger.debug(
-                "TXT 批量翻译进度: progress_bar=%s progress=%.1f%% batch=%d/%d",
-                progress_bar,
+                "TXT 批量翻译进度更新: progress_percent=%.1f batch=%d/%d",
                 current_progress,
                 chunk_idx + 1,
                 len(chunks),
@@ -258,16 +258,22 @@ class TXTHandler:
                         fallback_text = f"[部分翻译失败：期望{len(chunk['paragraph_indices'])}段，实际{len(translated_paras)}段]"
                         processed_paragraphs[original_idx] = fallback_text
                         logger.warning(
-                            "TXT 批量段落翻译结果缺失: paragraph_index=%d error=%s",
+                            "TXT 批量段落翻译结果缺失，已写入失败占位文本: "
+                            "paragraph_index=%d expected_count=%d actual_count=%d",
                             original_idx + 1,
-                            fallback_text,
+                            len(chunk["paragraph_indices"]),
+                            len(translated_paras),
                         )
 
                     translated_idx += 1
                     tracker.update_paragraph(translated_idx)
 
             except Exception as e:
-                logger.error("TXT 批量翻译批次失败: batch=%d error=%s", chunk_idx + 1, e)
+                logger.error(
+                    "TXT 批量翻译批次失败，改为逐段回退: batch=%d error_type=%s",
+                    chunk_idx + 1,
+                    type(e).__name__,
+                )
                 # 失败回退：逐段翻译
                 for para_local_idx, global_para_idx in enumerate(chunk["paragraph_indices"]):
                     original_idx, _ = translation_needed[global_para_idx]
@@ -288,9 +294,10 @@ class TXTHandler:
                         fallback_text = f"[翻译失败：{str(e2)}]"
                         processed_paragraphs[original_idx] = fallback_text
                         logger.warning(
-                            "TXT 批量段落回退翻译失败: paragraph_index=%d error=%s",
+                            "TXT 批量段落回退翻译失败，已写入失败占位文本: "
+                            "paragraph_index=%d error_type=%s",
                             original_idx + 1,
-                            e2,
+                            type(e2).__name__,
                         )
 
                     translated_idx += 1
@@ -322,7 +329,7 @@ class TXTHandler:
         """
         os.makedirs(output_dir, exist_ok=True)
 
-        logger.info("开始将 TXT 转换为翻译 HTML: input_path=%s", input_path)
+        logger.info("开始将 TXT 转换为翻译 HTML: input_file=%s", os.path.basename(input_path))
 
         with open(input_path, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -477,8 +484,7 @@ class TXTHandler:
             current_progress = (processed_count + 1) / total_paras * 100 if total_paras > 0 else 0
             progress_bar = self._create_progress_bar(current_progress, width=30)
             logger.debug(
-                "TXT HTML 渲染进度: progress_bar=%s progress=%.1f%% paragraph=%d/%d",
-                progress_bar,
+                "TXT HTML 渲染进度更新: progress_percent=%.1f paragraph=%d/%d",
                 current_progress,
                 processed_count + 1,
                 total_paras,
@@ -551,8 +557,8 @@ class TXTHandler:
             f.write("\n".join(monolingual_html_content))
 
         tracker.mark_completed()
-        logger.info("双语 HTML 已保存至：%s", bilingual_output_path)
-        logger.info("单语 HTML 已保存至：%s", monolingual_output_path)
+        logger.info("TXT 双语 HTML 已保存: output_file=%s", os.path.basename(bilingual_output_path))
+        logger.info("TXT 单语 HTML 已保存: output_file=%s", os.path.basename(monolingual_output_path))
         return bilingual_output_path, monolingual_output_path
 
     def _create_progress_bar(self, percentage: float, width: int = 30) -> str:

@@ -107,7 +107,7 @@ class HYMTTranslator:
         self.ollama_tags_url = f"{ollama_host}/api/tags"
 
         if check_ollama:
-            logger.info(f"Using Ollama model: {self.model_name} at {ollama_host}")
+            logger.info("开始检查 Ollama 服务连接: model_name=%s", self.model_name)
 
             # 测试连接
             try:
@@ -116,12 +116,17 @@ class HYMTTranslator:
                     timeout=5
                 )
                 if test_response.status_code == 200:
-                    logger.info("Ollama service connected successfully.")
+                    logger.info("Ollama 服务连接正常")
                 else:
-                    logger.warning(f"Warning: Ollama service returned status code {test_response.status_code}")
+                    logger.warning(
+                        "Ollama 服务返回非成功状态: status_code=%s",
+                        test_response.status_code,
+                    )
             except Exception as e:
-                logger.warning(f"Warning: Could not connect to Ollama service: {e}")
-                logger.info("Please ensure Ollama is running and the model is available.")
+                logger.warning(
+                    "无法连接 Ollama 服务，请确认服务已启动且模型可用: error_type=%s",
+                    type(e).__name__,
+                )
 
         self.progress_tracker = ProgressTracker()
 
@@ -204,7 +209,7 @@ class HYMTTranslator:
                 # 【关键修复】检测是否返回了 token IDs 而不是文本
                 if not translated and "context" in result:
                     # 尝试从 token IDs 重建文本（如果可能）
-                    logger.warning(f"  [警告] 检测到模型返回 token IDs 而非文本，尝试使用 'done_reason' 字段")
+                    logger.warning("模型返回了 token ID 而不是文本，将按失败处理并重试")
                     # qwen3.5 有时会返回原始 token 数据，此时应标记为失败并重试
                     raise RuntimeError("Ollama 返回 token IDs 而非解码文本，可能是模型加载问题")
 
@@ -212,7 +217,7 @@ class HYMTTranslator:
                 if not translated:
                     # 检查是否有其他字段包含有效响应
                     if "done_reason" in result:
-                        logger.warning(f"  [警告] 模型提前终止 (原因：{result['done_reason']})")
+                        logger.warning("模型提前结束生成: has_done_reason=%s", bool(result["done_reason"]))
                     raise RuntimeError(f"Ollama API 返回空响应，完整响应：{result}")
 
                 # 清理输出 (包含去重、去幻觉逻辑)
@@ -222,26 +227,30 @@ class HYMTTranslator:
                 if not translated or "[内容过滤" in translated or "[警告" in translated:
                     if attempt < max_retries:
                         attempt += 1
-                        logger.info(f"  [重试] 第 {attempt} 次重试...")
+                        logger.info("模型翻译结果无效，准备重试: retry_attempt=%d", attempt)
                         time.sleep(1)  # 短暂等待后重试
                         continue
                     else:
                         # 重试耗尽，返回原文或标记
-                        logger.info(f"  [失败] 多次重试后仍无法生成有效翻译")
+                        logger.warning("模型翻译多次重试后仍未得到有效结果，返回失败标记")
                         return f"[翻译失败：模型多次生成无效内容] {original_text}"
 
                 # 如果翻译成功，跳出循环
                 break
 
             except Exception as e:
-                logger.error(f"  [异常] 第 {attempt + 1} 次尝试失败：{e}")
+                logger.error(
+                    "模型翻译请求失败: attempt=%d error_type=%s",
+                    attempt + 1,
+                    type(e).__name__,
+                )
                 if attempt < max_retries:
                     attempt += 1
-                    logger.info(f"  [重试] 开始第 {attempt + 1} 次重试...")
+                    logger.info("准备再次请求模型翻译: next_attempt=%d", attempt + 1)
                     time.sleep(2)  # 错误后等待更久
                     continue
                 else:
-                    logger.info(f"  [失败] 所有重试均失败，返回原文")
+                    logger.warning("模型翻译的全部重试均失败，向调用方返回原文")
                     raise RuntimeError(f"Translation failed via Ollama after {max_retries} retries: {e}")
 
         if progress_callback:
@@ -271,7 +280,10 @@ class HYMTTranslator:
                     try:
                         return original_split_sentences(self, text)
                     except Exception as e:
-                        logger.warning(f"  [警告] StanzaSentencizer 失败，回退到基础断句: {e}")
+                        logger.warning(
+                            "Stanza 断句失败，改用基础断句: error_type=%s",
+                            type(e).__name__,
+                        )
                         import re
                         sentences = re.split(r'(?<=[.!?。！？\n])\s+', text)
                         return [s for s in sentences if s.strip()]
@@ -296,13 +308,13 @@ class HYMTTranslator:
             )
 
         except ImportError as ie:
-            logger.error(f"  [错误] argostranslate 未安装：{ie}")
+            logger.error("Argos Translate 未安装: error_type=%s", type(ie).__name__)
             raise RuntimeError(f"argostranslate 未安装：{ie}") from ie
         except AttributeError as ae:
-            logger.error(f"  [错误] ArgoTranslate API 调用失败：{ae}")
+            logger.error("Argos Translate API 调用失败: error_type=%s", type(ae).__name__)
             raise RuntimeError(f"ArgoTranslate API 调用失败：{ae}") from ae
         except Exception as e:
-            logger.error(f"  [错误] ArgoTranslate 翻译失败：{e}")
+            logger.error("Argos Translate 翻译失败: error_type=%s", type(e).__name__)
             raise RuntimeError(f"ArgoTranslate 翻译失败：{e}") from e
 
 
@@ -388,12 +400,11 @@ class HYMTTranslator:
                 )
         ):
             logger.info(
-                "  [提示] 未找到 %s -> %s 直达翻译包，使用 %s -> %s -> %s 中转翻译",
+                "未找到直达翻译包，改用中转翻译: source_language=%s "
+                "target_language=%s pivot_language=%s",
                 from_lang_code,
                 to_lang_code,
-                from_lang_code,
                 self._PIVOT_LANGUAGE_CODE,
-                to_lang_code,
             )
             pivot_text = self._run_argos_translation(
                 pivot_translation,
@@ -408,7 +419,11 @@ class HYMTTranslator:
 
         self._ensure_argos_language_available(installed_languages, from_lang_code, "源语言")
         self._ensure_argos_language_available(installed_languages, to_lang_code, "目标语言")
-        logger.warning(f"  [警告] 无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
+        logger.warning(
+            "无法创建 Argos Translate 翻译器: source_language=%s target_language=%s",
+            from_lang_code,
+            to_lang_code,
+        )
         raise RuntimeError(f"无法创建 {from_lang_code} -> {to_lang_code} 的翻译器")
 
     def _get_argos_translation(self, installed_languages, from_lang_code: str, to_lang_code: str):
@@ -424,14 +439,14 @@ class HYMTTranslator:
 
     def _ensure_argos_language_available(self, installed_languages, lang_code: str, role: str) -> None:
         if not self._find_argos_language(installed_languages, lang_code):
-            logger.warning(f"  [警告] 未找到{role} {lang_code} 的翻译包")
+            logger.warning("未找到所需翻译包: role=%s language_code=%s", role, lang_code)
             raise RuntimeError(f"未找到{role} {lang_code} 的翻译包")
 
     @staticmethod
     def _run_argos_translation(translation, text: str, path_desc: str) -> str:
         translated = translation.translate(text)
         if not translated:
-            logger.warning(f"  [警告] ArgoTranslate {path_desc} 返回空结果")
+            logger.warning("Argos Translate 返回空结果: translation_path=%s", path_desc)
             raise RuntimeError(f"ArgoTranslate {path_desc} 返回空结果")
         return translated
 
@@ -447,14 +462,14 @@ class HYMTTranslator:
             # 日志产生前重新应用统一级别，避免构造翻译器时泄漏 INFO 级详细信息。
             apply_third_party_log_levels()
 
-            logger.info("[ArgoTranslate] 检查并安装翻译包...")
+            logger.info("开始检查 Argos Translate 翻译包")
 
             # 【关键修复】先设置为离线模式
             argostranslate.settings.use_online = False
 
             # 【新增】检查已安装的语言，避免重复下载
             installed_languages = translate.get_installed_languages()
-            logger.info(f"[ArgoTranslate] 当前已安装的语言：{[str(lang) for lang in installed_languages]}")
+            logger.info("已读取当前安装的 Argos Translate 语言包: language_count=%d", len(installed_languages))
 
             for from_code, to_code, desc in self._ARGOS_LANGUAGE_PACKAGES:
                 # 检查是否已安装
@@ -465,12 +480,12 @@ class HYMTTranslator:
                     # 检查是否已有翻译路径
                     translation = from_lang_obj.get_translation(to_lang_obj)
                     if translation:
-                        logger.info(f"  ✓ {desc} 翻译包已存在，跳过下载")
+                        logger.info("翻译包已存在，跳过下载: package=%s", desc)
                         continue
                     else:
-                        logger.info(f"   {desc} 翻译包未完全安装")
+                        logger.info("翻译包未完全安装: package=%s", desc)
                 else:
-                    logger.info(f"   {desc} 翻译包未安装")
+                    logger.info("翻译包未安装: package=%s", desc)
 
                 # 只有在未安装时才尝试下载
                 try:
@@ -484,18 +499,24 @@ class HYMTTranslator:
                     if package_to_install:
                         package_path = package_to_install.download()
                         package.install_from_path(package_path)
-                        logger.info(f"  ✓ {desc} 翻译包安装完成")
+                        logger.info("翻译包安装完成: package=%s", desc)
                     else:
-                        logger.info(f"  ! {desc} 翻译包不可用")
+                        logger.warning("未找到可安装的翻译包: package=%s", desc)
                 except Exception as e:
-                    logger.info(f"  ✗ {desc} 翻译包安装失败：{e}")
+                    logger.warning(
+                        "翻译包安装失败: package=%s error_type=%s",
+                        desc,
+                        type(e).__name__,
+                    )
 
             # 验证已安装的语言
             installed_languages = translate.get_installed_languages()
-            logger.info(f"[ArgoTranslate] 已安装的语言：{[str(lang) for lang in installed_languages]}")
-            logger.info("[ArgoTranslate] 翻译包检查完成\n")
+            logger.info("Argos Translate 翻译包检查完成: language_count=%d", len(installed_languages))
 
         except ImportError:
-            logger.info("[ArgoTranslate] argostranslate 未安装，跳过自动安装")
+            logger.info("Argos Translate 未安装，跳过翻译包自动检查")
         except Exception as e:
-            logger.info(f"[ArgoTranslate] 自动安装翻译包失败：{e}，无法使用 ArgoTranslate 快速翻译")
+            logger.warning(
+                "Argos Translate 翻译包自动检查失败，无法使用快速翻译: error_type=%s",
+                type(e).__name__,
+            )

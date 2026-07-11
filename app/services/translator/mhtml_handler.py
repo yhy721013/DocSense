@@ -48,7 +48,7 @@ class MHTMLHandler:
             output_dir=output_dir,
         )
 
-        logger.info("MHTML Markdown saved: %s", md_path)
+        logger.info("MHTML 已转换为 Markdown: output_file=%s", os.path.basename(md_path))
         return md_path
 
     def process(

@@ -131,9 +131,10 @@ class ChatRunLockService:
         ensure_chat_schema(self.db_path)
         self._runs = ChatRunRepository(self.db_path, initialize=False)
         logger.info(
-            "文件对话SQLite单实例run协调器已初始化: db_path=%s owner=%s stale_after_seconds=%s",
+            "文件对话 SQLite 单实例运行协调器已初始化: db_path=%s "
+            "has_owner_instance=%s stale_after_seconds=%s",
             self.db_path,
-            self.owner_instance_id,
+            bool(self.owner_instance_id),
             self.stale_after_seconds,
         )
 
@@ -162,10 +163,10 @@ class ChatRunLockService:
             # 这里就是分布式互斥语义的边界。
             connection.execute("BEGIN IMMEDIATE")
             logger.info(
-                "尝试获取文件对话run锁: chat_id=%s run_id=%s owner=%s",
+                "尝试获取文件对话运行锁: chat_id=%s run_id=%s has_owner_instance=%s",
                 normalized_chat_id,
                 normalized_run_id,
-                self.owner_instance_id,
+                bool(self.owner_instance_id),
             )
             connection.execute(
                 """
@@ -204,7 +205,7 @@ class ChatRunLockService:
             ).fetchone()
             if active_row is not None:
                 logger.warning(
-                    "文件对话run锁获取失败，存在活跃run: chat_id=%s active_run_id=%s active_status=%s",
+                    "文件对话运行锁获取失败，存在活跃运行: chat_id=%s active_run_id=%s active_status=%s",
                     normalized_chat_id,
                     active_row["run_id"],
                     active_row["status"],
@@ -256,10 +257,10 @@ class ChatRunLockService:
                     created_at=now,
                 )
             logger.info(
-                "文件对话run锁获取成功: chat_id=%s run_id=%s owner=%s",
+                "文件对话运行锁获取成功: chat_id=%s run_id=%s has_owner_instance=%s",
                 normalized_chat_id,
                 normalized_run_id,
-                self.owner_instance_id,
+                bool(self.owner_instance_id),
             )
             return self._row(row)
 
@@ -520,10 +521,10 @@ class ChatRunLockService:
             run = self._get_run_with_connection(connection, normalized_run_id)
             if run.owner_instance_id != self.owner_instance_id:
                 logger.warning(
-                    "文件对话运行执行权领取失败：运行属于其他实例: run_id=%s expected_owner=%s actual_owner=%s",
+                    "文件对话运行执行权领取失败：运行属于其他实例: "
+                    "run_id=%s owner_matches=%s",
                     normalized_run_id,
-                    self.owner_instance_id,
-                    run.owner_instance_id,
+                    False,
                 )
                 raise ChatRunLeaseLostError(
                     run_id=normalized_run_id,
@@ -566,10 +567,11 @@ class ChatRunLockService:
                 )
             run = self._get_run_with_connection(connection, normalized_run_id)
         logger.info(
-            "文件对话运行执行权已在 SQLite 中领取: chat_id=%s run_id=%s owner=%s",
+            "文件对话运行执行权已在 SQLite 中领取: chat_id=%s run_id=%s "
+            "has_owner_instance=%s",
             run.chat_id,
             run.run_id,
-            run.owner_instance_id,
+            bool(run.owner_instance_id),
         )
         return ChatRunLease(
             run_id=run.run_id,
@@ -715,7 +717,7 @@ class ChatRunLockService:
                 raise ValueError("chat_run 不存在")
             if current["status"] not in RUN_ACTIVE_STATUSES:
                 logger.debug(
-                    "跳过非活跃run心跳: run_id=%s status=%s",
+                    "跳过非活跃文件对话运行的心跳刷新: run_id=%s status=%s",
                     normalized_run_id,
                     current["status"],
                 )
@@ -737,7 +739,7 @@ class ChatRunLockService:
             if row is None:
                 raise ValueError("chat_run 不存在")
             logger.debug(
-                "文件对话run心跳写入成功: run_id=%s status=%s",
+                "文件对话运行心跳写入成功: run_id=%s status=%s",
                 normalized_run_id,
                 row["status"],
             )
@@ -785,7 +787,8 @@ class ChatRunLockService:
                 continue
             stale_status = stale_row["status"]
             logger.warning(
-                "文件对话run心跳超时，标记失败释放锁: chat_id=%s run_id=%s stale_after_seconds=%s",
+                "文件对话运行心跳超时，已标记失败并释放锁: "
+                "chat_id=%s run_id=%s stale_after_seconds=%s",
                 chat_id,
                 stale_run_id,
                 self.stale_after_seconds,

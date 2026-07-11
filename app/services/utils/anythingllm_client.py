@@ -121,7 +121,10 @@ class AnythingLLMClient:
                 user_id=user_id
             )]
         except Exception as exc:
-            logger.error("获取工作区列表失败: %s", exc)
+            logger.error(
+                "获取 AnythingLLM 工作区列表失败: error_type=%s",
+                type(exc).__name__,
+            )
             return []
 
     def find_workspace_by_name(
@@ -176,7 +179,11 @@ class AnythingLLMClient:
             )
             return self._thread_dict(thread)
         except Exception as exc:
-            logger.error("创建线程 %s 时出现异常: %s", normalized_name, exc)
+            logger.error(
+                "创建 AnythingLLM 会话失败: thread_name_chars=%d error_type=%s",
+                len(normalized_name),
+                type(exc).__name__,
+            )
             return None
 
     @staticmethod
@@ -209,7 +216,11 @@ class AnythingLLMClient:
             )
             return self._answer_dict(answer)
         except Exception as exc:
-            logger.error("向线程 %s 发送提示词时出现异常: %s", thread_slug, exc)
+            logger.error(
+                "向 AnythingLLM 会话发送提问失败: prompt_chars=%d error_type=%s",
+                len(prompt or ""),
+                type(exc).__name__,
+            )
             return None
 
     def delete_thread(
@@ -223,7 +234,10 @@ class AnythingLLMClient:
             self.threads.delete_thread(workspace_slug, thread_slug, user_id=user_id)
             return True
         except Exception as exc:
-            logger.error("删除线程 %s 时出现异常: %s", thread_slug, exc)
+            logger.error(
+                "删除 AnythingLLM 会话失败: error_type=%s",
+                type(exc).__name__,
+            )
             return False
 
     def vector_search(
@@ -249,7 +263,12 @@ class AnythingLLMClient:
             )
             return [self._source_dict(source) for source in sources]
         except Exception as exc:
-            logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, exc)
+            logger.error(
+                "AnythingLLM 向量检索失败: query_chars=%d top_n=%s error_type=%s",
+                len(query or ""),
+                top_n,
+                type(exc).__name__,
+            )
             return []
 
     def list_workspace_documents(
@@ -271,9 +290,8 @@ class AnythingLLMClient:
             return [self._document_dict(document) for document in documents]
         except Exception as exc:
             logger.error(
-                "获取工作区文档列表时出现异常 workspace=%s: %s",
-                workspace_slug,
-                exc,
+                "获取 AnythingLLM 工作区文档列表失败: error_type=%s",
+                type(exc).__name__,
             )
             return []
 
@@ -287,7 +305,11 @@ class AnythingLLMClient:
             document = self.documents.upload_document(file_path, user_id=user_id)
             return self._document_dict(document)
         except Exception as exc:
-            logger.error("上传文档 %s 时出现异常: %s", file_path, exc)
+            logger.error(
+                "上传 AnythingLLM 文档失败: file_name=%s error_type=%s",
+                os.path.basename(file_path),
+                type(exc).__name__,
+            )
             return None
 
     def fetch_workspace_document(
@@ -305,7 +327,11 @@ class AnythingLLMClient:
             )
             return self._document_dict(document) if document is not None else None
         except Exception as exc:
-            logger.error("获取工作区文档 %s 时出现异常: %s", doc_path, exc)
+            logger.error(
+                "查找 AnythingLLM 工作区文档失败: has_document_path=%s error_type=%s",
+                bool(doc_path),
+                type(exc).__name__,
+            )
             return None
 
     def wait_for_processing(
@@ -326,7 +352,7 @@ class AnythingLLMClient:
 
         documents_root = os.path.normpath(os.path.join(storage_root, "documents"))
         if not os.path.isdir(documents_root):
-            logger.warning("AnythingLLM documents 目录不存在: %s，跳过处理等待", documents_root)
+            logger.warning("AnythingLLM 文档目录不可用，跳过解析等待")
             return True
 
         safe_relative_path = str(doc_relative_path or "").replace("\\", "/").strip("/")
@@ -339,14 +365,14 @@ class AnythingLLMClient:
             root_drive, _ = os.path.splitdrive(documents_root_abs)
             target_drive, _ = os.path.splitdrive(target_abs)
             if root_drive.casefold() != target_drive.casefold():
-                logger.warning("检测到不同盘符的 doc 路径，拒绝等待: %s", doc_relative_path)
+                logger.warning("文档路径跨盘符，拒绝等待解析结果")
                 return False
         try:
             if os.path.commonpath([documents_root_abs, target_abs]) != documents_root_abs:
-                logger.warning("检测到异常 doc 路径，拒绝等待: %s", doc_relative_path)
+                logger.warning("文档路径不在允许目录内，拒绝等待解析结果")
                 return False
         except ValueError:
-            logger.warning("检测到不可比较的 doc 路径，拒绝等待: %s", doc_relative_path)
+            logger.warning("文档路径无法安全比较，拒绝等待解析结果")
             return False
 
         for _ in range(max(0, retries)):
@@ -379,7 +405,10 @@ class AnythingLLMClient:
                 user_id=user_id,
             )
         except Exception as exc:
-            logger.error("更新文档 %s 的嵌入时出现异常: %s", cleaned_path, exc)
+            logger.error(
+                "将文档加入 AnythingLLM 工作区失败: error_type=%s",
+                type(exc).__name__,
+            )
             return False
 
         try:
@@ -389,16 +418,19 @@ class AnythingLLMClient:
                 user_id=user_id,
             )
         except Exception as exc:
-            logger.warning("固定文档 %s 失败: %s", cleaned_path, exc)
+            logger.warning(
+                "更新 AnythingLLM 文档固定状态失败，不影响已加入工作区的文档: "
+                "error_type=%s",
+                type(exc).__name__,
+            )
         if metadata:
             # 当前 AnythingLLM Developer API 不提供上传后更新文档元数据的稳定端点。旧流程
             # 继续接收该参数仅为保持调用签名兼容，但业务元数据必须由 DocSense 本地数据库
             # 持久化；这里禁止再调用已确认返回 404 的 /document/meta。
             logger.debug(
-                "跳过 AnythingLLM 上传后元数据更新，业务元数据由本地存储维护: "
-                "document=%s metadata_keys=%s",
-                cleaned_path,
-                sorted(str(key) for key in metadata.keys()),
+                "跳过 AnythingLLM 上传后元数据更新，本地数据库负责保存业务元数据: "
+                "metadata_key_count=%d",
+                len(metadata),
             )
         return True
 
@@ -419,7 +451,13 @@ class AnythingLLMClient:
             )
             return True
         except Exception as exc:
-            logger.error("批量更新工作区 %s 嵌入时出现异常: %s", workspace_slug, exc)
+            logger.error(
+                "批量更新 AnythingLLM 工作区文档失败: add_count=%d delete_count=%d "
+                "error_type=%s",
+                len(adds or ()),
+                len(deletes or ()),
+                type(exc).__name__,
+            )
             return False
 
     def stream_chat_to_thread(
@@ -444,7 +482,11 @@ class AnythingLLMClient:
         except RuntimeError:
             raise
         except Exception as exc:
-            logger.error("流式对话时出现异常: %s", exc)
+            logger.error(
+                "AnythingLLM 流式对话失败: message_chars=%d error_type=%s",
+                len(message or ""),
+                type(exc).__name__,
+            )
             raise RuntimeError(f"流式对话异常: {exc}") from exc
 
     def get_thread_chats(
@@ -464,7 +506,10 @@ class AnythingLLMClient:
                 )
             ]
         except Exception as exc:
-            logger.error("获取线程历史时出现异常: %s", exc)
+            logger.error(
+                "获取 AnythingLLM 会话历史失败: error_type=%s",
+                type(exc).__name__,
+            )
             return []
 
     def delete_workspace(
@@ -477,7 +522,10 @@ class AnythingLLMClient:
             self.workspaces.delete_workspace(workspace_slug, user_id=user_id)
             return True
         except Exception as exc:
-            logger.error("删除工作区 %s 时出现异常: %s", workspace_slug, exc)
+            logger.error(
+                "删除 AnythingLLM 工作区失败: error_type=%s",
+                type(exc).__name__,
+            )
             return False
 
     def _create_workspace(
@@ -496,7 +544,11 @@ class AnythingLLMClient:
             )
             return self._workspace_dict(workspace)
         except Exception as exc:
-            logger.error("创建工作区 %s 时出现异常: %s", name, exc)
+            logger.error(
+                "创建 AnythingLLM 工作区失败: workspace_name_chars=%d error_type=%s",
+                len(name or ""),
+                type(exc).__name__,
+            )
             return None
 
     def _resolve_storage_root(self) -> Optional[str]:
