@@ -15,6 +15,7 @@ from app.services.chat.application.document_resolver import (
     ChatDocumentResolver,
     ResolvedChatDocument,
 )
+from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.domain.resource_ids import (
     chat_document_binding_lease_id,
     chat_scoped_external_ref,
@@ -452,7 +453,10 @@ class SynchronousChatRunExecutor:
                 )
                 yield ChatStreamEvent(
                     "chatInfo",
-                    {"chatId": request.chat_id, "isNewChat": is_new_chat},
+                    {
+                        "chatId": chat_id_public_value(request.chat_id),
+                        "isNewChat": is_new_chat,
+                    },
                 )
                 output_chars = 0
                 logger.info(
@@ -478,7 +482,10 @@ class SynchronousChatRunExecutor:
                             "chat output exceeds the configured output limit"
                         )
                     yield ChatStreamEvent("textChunk", {"content": chunk.content})
-                yield ChatStreamEvent("done", {"chatId": request.chat_id})
+                yield ChatStreamEvent(
+                    "done",
+                    {"chatId": chat_id_public_value(request.chat_id)},
+                )
                 logger.info(
                     "文件对话模型流正常结束: chat_id=%s run_id=%s output_chars=%d",
                     request.chat_id,
@@ -1071,7 +1078,10 @@ class ChatRunEventRecorder:
     ) -> ChatStreamEvent:
         # 中断时保留已提交的用户消息，丢弃已输出但不完整的助手片段；这是本地历史的
         # 权威语义，不依赖供应商是否已经写入远端线程。
-        event = ChatStreamEvent("aborted", {"chatId": request.chat_id})
+        event = ChatStreamEvent(
+            "aborted",
+            {"chatId": chat_id_public_value(request.chat_id)},
+        )
         chat_commands.abort_chat_run_with_user(
             run_id=request.run_id,
             user_message_id=user_message_id,

@@ -20,12 +20,12 @@ class ChatDebugRouteTests(unittest.TestCase):
 
     def test_chat_bootstrap_api_returns_local_sessions_and_files(self):
         self.chat_store.sessions.create_or_get(
-            chat_id="conv-001",
+            chat_id="10001",
             workspace_ref="ws-1",
             thread_ref="th-1",
         )
         self.chat_store.document_bindings.add(
-            chat_id="conv-001",
+            chat_id="10001",
             file_name="alpha.pdf",
             original_name="alpha.pdf",
             document_ref="document:doc-alpha",
@@ -43,7 +43,7 @@ class ChatDebugRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(data["ok"])
-        self.assertEqual(data["data"]["sessions"][0]["chatId"], "conv-001")
+        self.assertEqual(data["data"]["sessions"][0]["chatId"], 10001)
         self.assertEqual(data["data"]["availableFiles"][0]["fileName"], "alpha.pdf")
 
     def test_chat_page_renders_shell(self):
@@ -57,6 +57,7 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn('id="refresh-button"', html)
         self.assertIn('id="chat-session-list"', html)
         self.assertIn('id="chat-id-input"', html)
+        self.assertIn('type="number"', html)
         self.assertIn('id="selected-files"', html)
         self.assertIn('id="toggle-file-picker-button"', html)
         self.assertIn('id="file-picker-panel"', html)
@@ -84,6 +85,7 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn('id="debug-details"', html)
         self.assertIn('id="debug-summary"', html)
         self.assertIn("function loadHistory()", html)
+        self.assertIn("function readChatId()", html)
         self.assertIn("function sendCurrentMessage()", html)
         self.assertIn("function consumeSseStream(response)", html)
         self.assertIn("function handleSseBlock(block)", html)

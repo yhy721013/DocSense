@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.locking.lock_service import ChatRunInactiveError
 from app.services.chat.persistence.store import ChatPersistenceStore
@@ -86,7 +87,7 @@ class ChatAbortResult:
 
     def to_response(self) -> dict[str, object]:
         return {
-            "chatId": self.chat_id,
+            "chatId": chat_id_public_value(self.chat_id),
             "aborted": self.aborted,
             "msg": self.msg,
         }
@@ -187,7 +188,7 @@ class ChatAbortService:
     def build_abort_signal(*, chat_id: str) -> ChatStreamEvent:
         return ChatStreamEvent(
             "aborted",
-            {"chatId": _required_text(chat_id, name="chat_id")},
+            {"chatId": chat_id_public_value(_required_text(chat_id, name="chat_id"))},
         )
 
 

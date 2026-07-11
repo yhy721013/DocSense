@@ -25,6 +25,11 @@ from app.services.chat import (
     ChatTitleGenerationError,
     ChatTitleUnavailableError,
 )
+from app.services.chat.domain.chat_id import (
+    chat_id_storage_key,
+    parse_query_chat_id,
+    require_public_chat_id,
+)
 from app.services.core.progress import normalize_progress
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
@@ -48,6 +53,54 @@ logger = logging.getLogger(__name__)
 def _services() -> ApplicationServices:
     """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
     return get_application_services()
+
+
+def _read_json_chat_id(
+    params: Dict[str, Any],
+    *,
+    operation: str,
+) -> tuple[int, str]:
+    """校验 JSON chatId，并返回公开整数与持久化层文本键。
+
+    HTTP 边界必须严格要求 JSON number 整数，不能因内部 SQLite 当前采用文本键
+    而接受字符串。内部服务仍使用规范文本键，以避免这次接口契约升级牵动表结构、
+    外键和资源租约标识；公开响应由应用服务统一转换回整数。
+    """
+
+    raw_chat_id = params.get("chatId")
+    try:
+        public_chat_id = require_public_chat_id(raw_chat_id)
+    except ValueError:
+        logger.warning(
+            "%s被拒绝: chatId必须为正整数 chat_id_type=%s",
+            operation,
+            type(raw_chat_id).__name__,
+        )
+        raise
+    return public_chat_id, chat_id_storage_key(public_chat_id)
+
+
+def _read_query_chat_id(
+    raw_chat_id: Any,
+    *,
+    operation: str,
+) -> tuple[int, str]:
+    """校验 Query chatId 的规范十进制表示，并返回两种边界值。
+
+    URL Query 在 Flask 中只能读取为字符串，因此这里要求其写成无前导零的十进制
+    正整数；服务端随后转换为与 JSON 路由一致的整数和内部文本键。
+    """
+
+    try:
+        public_chat_id = parse_query_chat_id(raw_chat_id)
+    except ValueError:
+        logger.warning(
+            "%s被拒绝: chatId必须为规范正整数 query_value_type=%s",
+            operation,
+            type(raw_chat_id).__name__,
+        )
+        raise
+    return public_chat_id, chat_id_storage_key(public_chat_id)
 
 
 def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
@@ -868,11 +921,10 @@ def llm_chat():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("文件对话请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
-    chat_id = chat_id.strip()
+    try:
+        _, chat_id = _read_json_chat_id(params, operation="文件对话请求")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     file_names = params.get("fileNames")
     if not isinstance(file_names, list):
@@ -1104,10 +1156,10 @@ def llm_chat_title():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("生成对话标题请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
+    try:
+        _, chat_id = _read_json_chat_id(params, operation="生成对话标题请求")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     try:
         result = services.chat_title.generate_title(chat_id=chat_id)
@@ -1130,10 +1182,13 @@ def llm_chat_title():
 @llm_bp.get("/llm/chat/history")
 def llm_chat_history():
     services = _services()
-    chat_id = request.args.get("chatId", "").strip()
-    if not chat_id:
-        logger.warning("对话历史请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
+    try:
+        _, chat_id = _read_query_chat_id(
+            request.args.get("chatId"),
+            operation="对话历史请求",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     history = services.chat_history.list_history(chat_id)
     logger.info("返回文件对话历史: chatId=%s message_count=%d", chat_id, len(history))
@@ -1161,10 +1216,10 @@ def llm_chat_abort():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("中断对话请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
+    try:
+        _, chat_id = _read_json_chat_id(params, operation="中断对话请求")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     result = services.chat_abort.abort_chat(chat_id=chat_id)
     logger.info(
@@ -1196,11 +1251,13 @@ def llm_chat_delete():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("删除对话请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
-    chat_id = chat_id.strip()
+    try:
+        public_chat_id, chat_id = _read_json_chat_id(
+            params,
+            operation="删除对话请求",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     try:
         result = services.chat_delete.delete_chat(chat_id=chat_id)
@@ -1211,7 +1268,7 @@ def llm_chat_delete():
     except ChatDeleteBusyError as exc:
         return jsonify(
             {
-                "chatId": exc.chat_id,
+                "chatId": public_chat_id,
                 "deleted": False,
                 "error": exc.reason,
             }
@@ -1224,7 +1281,7 @@ def llm_chat_delete():
         )
         return jsonify(
             {
-                "chatId": exc.chat_id,
+                "chatId": public_chat_id,
                 "deleted": False,
                 "error": "对话资源清理失败",
             }

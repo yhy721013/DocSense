@@ -130,9 +130,9 @@ class ChatTitleServiceTests(unittest.TestCase):
     def test_nonexistent_chat_returns_empty_title_without_model_call(self) -> None:
         service, factory = self._service()
 
-        result = service.generate_title(chat_id="missing-chat")
+        result = service.generate_title(chat_id="10001")
 
-        self.assertEqual({"chatId": "missing-chat", "title": ""}, result.to_response())
+        self.assertEqual({"chatId": 10001, "title": ""}, result.to_response())
         self.assertEqual(0, len(factory.ports))
 
     def test_existing_chat_with_empty_history_is_rejected(self) -> None:

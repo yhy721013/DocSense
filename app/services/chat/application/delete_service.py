@@ -20,6 +20,7 @@ from app.services.chat.application.cleanup_service import (
     ChatCleanupJobExecutor,
 )
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.domain.models import (
     CLEANUP_JOB_SUCCEEDED,
     CLEANUP_REASON_DELETE_CHAT,
@@ -57,7 +58,7 @@ class ChatDeleteResult:
 
     def to_response(self) -> dict[str, object]:
         return {
-            "chatId": self.chat_id,
+            "chatId": chat_id_public_value(self.chat_id),
             "deleted": self.deleted,
             "msg": self.msg,
         }

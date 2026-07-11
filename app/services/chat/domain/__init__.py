@@ -1,6 +1,12 @@
 """文件对话的领域模型与事件。"""
 
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.domain.chat_id import (
+    chat_id_public_value,
+    chat_id_storage_key,
+    parse_query_chat_id,
+    require_public_chat_id,
+)
 from app.services.chat.domain.models import (
     CLEANUP_JOB_FAILED,
     CLEANUP_JOB_PENDING,
@@ -61,6 +67,10 @@ __all__ = [
     "ChatRunEvent",
     "ChatSession",
     "ChatStreamEvent",
+    "chat_id_public_value",
+    "chat_id_storage_key",
+    "parse_query_chat_id",
+    "require_public_chat_id",
     "CLEANUP_JOB_FAILED",
     "CLEANUP_JOB_PENDING",
     "CLEANUP_JOB_REASONS",

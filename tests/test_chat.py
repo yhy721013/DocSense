@@ -135,7 +135,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             original_name=original_name,
         )
 
-    def _chat(self, *, chat_id: str, file_names: list[str], message: str):
+    def _chat(self, *, chat_id: int, file_names: list[str], message: str):
         return self.client.post(
             "/llm/chat",
             json={
@@ -151,25 +151,82 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
     def test_rejects_protocol_invalid_request_before_run_acceptance(self) -> None:
         response = self.client.post(
             "/llm/chat",
-            json={"businessType": "chat", "params": {"chatId": "c", "message": "hi"}},
+            json={"businessType": "chat", "params": {"chatId": 1000, "message": "hi"}},
         )
 
         self.assertEqual(400, response.status_code)
-        self.assertEqual((), self.services.chat_store.runs.list_active("c"))
+        self.assertEqual((), self.services.chat_store.runs.list_active("1000"))
+
+    def test_chat_routes_strictly_reject_invalid_chat_id_values(self) -> None:
+        """所有公开文件对话路由都必须在业务处理前拒绝非正整数。"""
+
+        invalid_values = ("1001", True, False, 0, -1, 1.5)
+        json_paths = (
+            "/llm/chat",
+            "/llm/chat/title",
+            "/llm/chat/abort",
+            "/llm/chat/delete",
+        )
+        for chat_id in invalid_values:
+            for path in json_paths:
+                with self.subTest(path=path, chat_id=chat_id):
+                    response = self.client.post(
+                        path,
+                        json={
+                            "businessType": "chat",
+                            "params": {"chatId": chat_id},
+                        },
+                    )
+                    self.assertEqual(400, response.status_code)
+                    self.assertEqual(
+                        {"error": "chatId必须为正整数"},
+                        response.get_json(),
+                    )
+
+        for raw_chat_id in ("", "0", "-1", "1.5", "001", "legacy-chat"):
+            with self.subTest(path="/llm/chat/history", chat_id=raw_chat_id):
+                response = self.client.get(
+                    "/llm/chat/history",
+                    query_string={"chatId": raw_chat_id},
+                )
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(
+                    {"error": "chatId必须为正整数"},
+                    response.get_json(),
+                )
+
+    def test_chat_related_routes_echo_numeric_chat_id(self) -> None:
+        title_response = self.client.post(
+            "/llm/chat/title",
+            json={"businessType": "chat", "params": {"chatId": 1011}},
+        )
+        abort_response = self.client.post(
+            "/llm/chat/abort",
+            json={"businessType": "chat", "params": {"chatId": 1011}},
+        )
+        history_response = self.client.get(
+            "/llm/chat/history",
+            query_string={"chatId": "1011"},
+        )
+
+        self.assertEqual({"chatId": 1011, "title": ""}, title_response.get_json())
+        self.assertEqual(1011, abort_response.get_json()["chatId"])
+        self.assertIsInstance(abort_response.get_json()["chatId"], int)
+        self.assertEqual([], history_response.get_json())
 
     def test_new_empty_file_chat_uses_new_executor_and_commits_history(self) -> None:
-        response = self._chat(chat_id="chat-empty", file_names=[], message=" 你好 ")
+        response = self._chat(chat_id=1001, file_names=[], message=" 你好 ")
 
         self.assertEqual(200, response.status_code)
         self.assertEqual("text/event-stream", response.mimetype)
         body = response.get_data(as_text=True)
-        self.assertIn('event: chatInfo\ndata: {"chatId": "chat-empty", "isNewChat": true}', body)
+        self.assertIn('event: chatInfo\ndata: {"chatId": 1001, "isNewChat": true}', body)
         self.assertIn('event: textChunk\ndata: {"content": "第一段"}', body)
-        self.assertIn('event: done\ndata: {"chatId": "chat-empty"}', body)
+        self.assertIn('event: done\ndata: {"chatId": 1001}', body)
 
-        session = self.services.chat_store.sessions.get("chat-empty")
-        messages = self.services.chat_store.messages.list_by_chat("chat-empty")
-        runs = self.services.chat_store.runs.list_active("chat-empty")
+        session = self.services.chat_store.sessions.get("1001")
+        messages = self.services.chat_store.messages.list_by_chat("1001")
+        runs = self.services.chat_store.runs.list_active("1001")
         self.assertIsNotNone(session)
         assert session is not None
         self.assertTrue(session.workspace_ref)
@@ -191,17 +248,17 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
     def test_chat_sse_contract_does_not_expose_internal_run_identity(self) -> None:
         response = self._chat(
-            chat_id="chat-contract",
+            chat_id=1002,
             file_names=[],
             message="验证既有 SSE 协议",
         )
 
         body = response.get_data(as_text=True)
         self.assertEqual(
-            'event: chatInfo\ndata: {"chatId": "chat-contract", "isNewChat": true}\n\n'
+            'event: chatInfo\ndata: {"chatId": 1002, "isNewChat": true}\n\n'
             'event: textChunk\ndata: {"content": "第一段"}\n\n'
             'event: textChunk\ndata: {"content": "第二段"}\n\n'
-            'event: done\ndata: {"chatId": "chat-contract"}\n\n',
+            'event: done\ndata: {"chatId": 1002}\n\n',
             body,
         )
         self.assertNotIn("runId", body)
@@ -214,7 +271,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self._save_document()
 
         response = self._chat(
-            chat_id="chat-doc",
+            chat_id=1003,
             file_names=["hash-alpha.pdf"],
             message="请总结",
         )
@@ -222,9 +279,9 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         response.get_data()
         documents = self.services.chat_store.document_bindings.list_current_by_chat(
-            "chat-doc"
+            "1003"
         )
-        messages = self.services.chat_store.messages.list_by_chat("chat-doc")
+        messages = self.services.chat_store.messages.list_by_chat("1003")
         run = next(
             message.run_id
             for message in messages
@@ -242,22 +299,22 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
     def test_unresolved_document_is_404_without_creating_session_or_run(self) -> None:
         response = self._chat(
-            chat_id="chat-missing-doc",
+            chat_id=1004,
             file_names=["missing.pdf"],
             message="请总结",
         )
 
         self.assertEqual(404, response.status_code)
-        self.assertIsNone(self.services.chat_store.sessions.get("chat-missing-doc"))
+        self.assertIsNone(self.services.chat_store.sessions.get("1004"))
 
     def test_active_chat_request_is_rejected_with_409(self) -> None:
         self.services.chat_commands.start_chat_run(
-            chat_id="chat-active",
+            chat_id="1005",
             user_message="first",
         )
 
         response = self._chat(
-            chat_id="chat-active",
+            chat_id=1005,
             file_names=[],
             message="second",
         )
@@ -271,7 +328,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             json={
                 "businessType": "chat",
                 "params": {
-                    "chatId": "chat-never-started",
+                    "chatId": 1006,
                     "fileNames": [],
                     "message": "执行已开始后保留",
                 },
@@ -282,7 +339,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         response.close()
 
         messages = self.services.chat_store.messages.list_by_chat(
-            "chat-never-started"
+            "1006"
         )
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
@@ -290,7 +347,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_FAILED, run.status)
-        self.assertEqual((), self.services.chat_store.runs.list_active("chat-never-started"))
+        self.assertEqual((), self.services.chat_store.runs.list_active("1006"))
 
     def test_global_stream_capacity_returns_429_before_run_acceptance(self) -> None:
         executor = self.services.chat_run_executor
@@ -298,7 +355,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual([True] * executor.max_concurrent_streams, acquired)
         try:
             response = self._chat(
-                chat_id="chat-capacity",
+                chat_id=1007,
                 file_names=[],
                 message="queued?",
             )
@@ -307,24 +364,24 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
                 executor.release_stream_slot()
 
         self.assertEqual(429, response.status_code)
-        self.assertIsNone(self.services.chat_store.sessions.get("chat-capacity"))
+        self.assertIsNone(self.services.chat_store.sessions.get("1007"))
 
     def test_continue_chat_reuses_session_and_reports_not_new(self) -> None:
-        first = self._chat(chat_id="chat-continue", file_names=[], message="first")
+        first = self._chat(chat_id=1008, file_names=[], message="first")
         first.get_data()
-        second = self._chat(chat_id="chat-continue", file_names=[], message="second")
+        second = self._chat(chat_id=1008, file_names=[], message="second")
 
         self.assertEqual(200, second.status_code)
         self.assertIn('"isNewChat": false', second.get_data(as_text=True))
         self.assertEqual(
             4,
-            len(self.services.chat_store.messages.list_by_chat("chat-continue")),
+            len(self.services.chat_store.messages.list_by_chat("1008")),
         )
 
     def test_replaced_business_file_creates_a_new_document_binding_revision(self) -> None:
         self._save_document(document_id="doc-v1")
         first = self._chat(
-            chat_id="chat-revision",
+            chat_id=1009,
             file_names=["hash-alpha.pdf"],
             message="first",
         )
@@ -332,22 +389,22 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self._save_document(document_id="doc-v2")
 
         second = self._chat(
-            chat_id="chat-revision",
+            chat_id=1009,
             file_names=["hash-alpha.pdf"],
             message="second",
         )
         second.get_data()
 
         documents = self.services.chat_store.document_bindings.list_by_chat(
-            "chat-revision"
+            "1009"
         )
         document = self.services.chat_store.document_bindings.list_current_by_chat(
-            "chat-revision"
+            "1009"
         )[0]
         binding_leases = [
             lease
             for lease in self.services.chat_store.resource_leases.list_by_chat(
-                "chat-revision"
+                "1009"
             )
             if lease.resource_type == "document_binding"
         ]
@@ -357,7 +414,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
     def test_delete_succeeds_for_leases_created_by_the_new_executor(self) -> None:
         response = self._chat(
-            chat_id="chat-delete-after-run",
+            chat_id=1010,
             file_names=[],
             message="delete after this",
         )
@@ -367,12 +424,14 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             "/llm/chat/delete",
             json={
                 "businessType": "chat",
-                "params": {"chatId": "chat-delete-after-run"},
+                "params": {"chatId": 1010},
             },
         )
 
         self.assertEqual(200, deleted.status_code)
         self.assertTrue(deleted.get_json()["deleted"])
+        self.assertEqual(1010, deleted.get_json()["chatId"])
+        self.assertIsInstance(deleted.get_json()["chatId"], int)
 
 
 if __name__ == "__main__":

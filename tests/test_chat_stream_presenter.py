@@ -25,19 +25,29 @@ class ChatStreamPresenterTests(unittest.TestCase):
         body = "".join(
             present_chat_stream(
                 [
-                    ChatStreamEvent("chatInfo", {"chatId": "c1", "isNewChat": True}),
+                    ChatStreamEvent("chatInfo", {"chatId": 10001, "isNewChat": True}),
                     ChatStreamEvent("textChunk", {"content": "第一段"}),
-                    ChatStreamEvent("done", {"chatId": "c1"}),
+                    ChatStreamEvent("done", {"chatId": 10001}),
                 ]
             )
         )
 
         self.assertEqual(
-            'event: chatInfo\ndata: {"chatId": "c1", "isNewChat": true}\n\n'
+            'event: chatInfo\ndata: {"chatId": 10001, "isNewChat": true}\n\n'
             'event: textChunk\ndata: {"content": "第一段"}\n\n'
-            'event: done\ndata: {"chatId": "c1"}\n\n',
+            'event: done\ndata: {"chatId": 10001}\n\n',
             body,
         )
+
+    def test_present_chat_stream_rejects_legacy_string_chat_id(self) -> None:
+        """展示层是 SSE 的最后边界，不能让旧字符串 ID 漏出公开协议。"""
+
+        with self.assertRaisesRegex(ValueError, "内部chatId不是规范正整数"):
+            list(
+                present_chat_stream(
+                    [ChatStreamEvent("done", {"chatId": "legacy-chat"})]
+                )
+            )
 
     def test_first_terminal_event_wins_and_closes_stream(self) -> None:
         closed = False
@@ -46,7 +56,7 @@ class ChatStreamPresenterTests(unittest.TestCase):
             nonlocal closed
             try:
                 yield ChatStreamEvent("error", {"error": "boom"})
-                yield ChatStreamEvent("done", {"chatId": "c1"})
+                yield ChatStreamEvent("done", {"chatId": 10001})
             finally:
                 closed = True
 
@@ -69,13 +79,13 @@ class ChatStreamPresenterTests(unittest.TestCase):
 
         body = "".join(
             finalize_chat_run_stream(
-                stream=iter([ChatStreamEvent("done", {"chatId": "c-close"})]),
+                stream=iter([ChatStreamEvent("done", {"chatId": 10002})]),
                 run_id="run-close",
                 on_close=close_client,
             )
         )
 
-        self.assertEqual('event: done\ndata: {"chatId": "c-close"}\n\n', body)
+        self.assertEqual('event: done\ndata: {"chatId": 10002}\n\n', body)
         self.assertTrue(closed)
 
 
