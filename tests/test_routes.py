@@ -153,11 +153,17 @@ class LLMRouteValidationTests(unittest.TestCase):
         self,
         mock_thread,
     ):
-        self.kb_service.get_document_record.return_value = {
-            "file_name": "abc123.pdf",
-            "architecture_id": 10502,
-            "doc_path": "custom-documents/abc123.json",
-        }
+        # 选中文件来自其他分类时也应允许提交；architectureId 只描述结果归属，不再
+        # 限制非空 filePathList 的来源类别。
+        self.kb_service.list_document_records.return_value = [
+            {
+                "file_name": "abc123.pdf",
+                "original_name": "跨分类来源.pdf",
+                "ingested_file_name": "abc123.pdf",
+                "architecture_id": 99999,
+                "doc_path": "custom-documents/abc123.json",
+            }
+        ]
         original_file_paths = [
             "https://host/download/abc%31%32%33.pdf?token=secret#page=2",
             "abc123.pdf",
@@ -178,11 +184,33 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        self.kb_service.get_document_record.assert_called_once_with("abc123.pdf")
+        self.kb_service.list_document_records.assert_called_once_with()
         worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
-        self.assertEqual(worker_kwargs["selected_file_names"], ["abc123.pdf"])
+        self.assertEqual(len(worker_kwargs["selected_documents"]), 1)
+        selected_document = worker_kwargs["selected_documents"][0]
+        self.assertEqual(selected_document.file_name, "abc123.pdf")
+        self.assertEqual(selected_document.source_architecture_id, 99999)
+        self.assertEqual(selected_document.doc_path, "custom-documents/abc123.json")
+        self.assertEqual(selected_document.ingested_file_name, "abc123.pdf")
         task = self.task_service.get_task("weaponry", "10502")
         self.assertEqual(task["request_payload"]["params"]["filePathList"], original_file_paths)
+        self.assertEqual(worker_kwargs["execution_id"], task["execution_id"])
+        self.assertEqual(
+            self.task_service.get_weaponry_task_document_snapshots(
+                architecture_id=10502,
+                execution_id=task["execution_id"],
+            ),
+            [
+                {
+                    "file_name": "abc123.pdf",
+                    "original_name": "跨分类来源.pdf",
+                    "ingested_file_name": "abc123.pdf",
+                    "source_architecture_id": 99999,
+                    "doc_path": "custom-documents/abc123.json",
+                    "anything_doc_id": "",
+                }
+            ],
+        )
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_weaponry_empty_file_path_list_keeps_full_category_scope(
@@ -204,8 +232,8 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 202)
-        self.kb_service.get_document_record.assert_not_called()
-        self.assertEqual(mock_thread.call_args.kwargs["kwargs"]["selected_file_names"], [])
+        self.kb_service.list_document_records.assert_not_called()
+        self.assertEqual(mock_thread.call_args.kwargs["kwargs"]["selected_documents"], ())
 
     def test_weaponry_rejects_invalid_file_path_list_type(self):
         response = self.client.post(
@@ -226,7 +254,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertIn("filePathList必须为数组", response.get_json()["error"])
 
     def test_weaponry_rejects_unknown_selected_file(self):
-        self.kb_service.get_document_record.return_value = None
+        self.kb_service.list_document_records.return_value = []
         response = self.client.post(
             "/llm/weaponry",
             json={
@@ -242,12 +270,22 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+        self.assertIn("尚未解析", response.get_json()["error"])
 
-    def test_weaponry_rejects_selected_file_from_another_category(self):
-        self.kb_service.get_document_record.return_value = {
-            "file_name": "abc123.pdf",
-            "architecture_id": 99999,
-        }
+    def test_weaponry_rejects_ambiguous_file_name_across_categories(self):
+        """同名记录无法由既有请求字段消歧，不能随机选择任一分类。"""
+        self.kb_service.list_document_records.return_value = [
+            {
+                "file_name": "abc123.pdf",
+                "architecture_id": 99999,
+                "doc_path": "custom-documents/abc123-v1.json",
+            },
+            {
+                "file_name": "abc123.pdf",
+                "architecture_id": 88888,
+                "doc_path": "custom-documents/abc123-v2.json",
+            },
+        ]
         response = self.client.post(
             "/llm/weaponry",
             json={
@@ -263,7 +301,8 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("不属于当前类别", response.get_json()["error"])
+        self.assertIn("无法唯一", response.get_json()["error"])
+        self.assertIsNone(self.task_service.get_task("weaponry", "10502"))
 
     def test_reassign_rejects_invalid_business_type(self):
         response = self.client.post("/llm/reassign", json={"businessType": "wrong", "params": {}})

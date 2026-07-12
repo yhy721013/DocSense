@@ -60,7 +60,7 @@ def configure_model(model_dir, model_type):
     }
 
     download_and_modify_json(json_url, config_file, json_mods)
-    logger.info(f'The configuration file has been successfully configured, the path is: {config_file}')
+    logger.info("MinerU 模型配置文件已更新: file_name=%s", os.path.basename(config_file))
 
 
 def download_pipeline_models():
@@ -76,16 +76,16 @@ def download_pipeline_models():
     ]
     download_finish_path = ""
     for model_path in model_paths:
-        logger.info(f"Downloading model: {model_path}")
+        logger.info("开始下载 Pipeline 模型: model=%s", model_path)
         download_finish_path = auto_download_and_get_model_root_path(model_path, repo_mode='pipeline')
-    logger.info(f"Pipeline models downloaded successfully to: {download_finish_path}")
+    logger.info("Pipeline 模型下载完成: has_model_directory=%s", bool(download_finish_path))
     configure_model(download_finish_path, "pipeline")
 
 
 def download_vlm_models():
     """下载VLM模型"""
     download_finish_path = auto_download_and_get_model_root_path("/", repo_mode='vlm')
-    logger.info(f"VLM models downloaded successfully to: {download_finish_path}")
+    logger.info("VLM 模型下载完成: has_model_directory=%s", bool(download_finish_path))
     configure_model(download_finish_path, "vlm")
 
 
@@ -94,9 +94,9 @@ def get_effective_download_model_source(requested_model_source):
     current_model_source = os.getenv(MODEL_SOURCE_ENV_VAR)
     if current_model_source == 'local':
         logger.warning(
-            f"{MODEL_SOURCE_ENV_VAR}=local means using pre-downloaded local models. "
-            f"`mineru-models-download` will temporarily use '{requested_model_source}' "
-            f"to perform a real download."
+            "当前 MinerU 配置为使用本地模型，本次下载将临时改用远程模型源: "
+            "requested_source=%s",
+            requested_model_source,
         )
         return requested_model_source
 
@@ -164,7 +164,11 @@ def download_models(model_source, model_type):
             default='all'
         )
 
-    logger.info(f"Downloading {model_type} model from {effective_model_source}...")
+    logger.info(
+        "开始下载 MinerU 模型: model_type=%s source=%s",
+        model_type,
+        effective_model_source,
+    )
 
     try:
         with temporary_model_source(effective_model_source):
@@ -180,7 +184,7 @@ def download_models(model_source, model_type):
                 sys.exit(1)
 
     except Exception as e:
-        logger.exception(f"An error occurred while downloading models: {str(e)}")
+        logger.exception("下载 MinerU 模型时发生异常: error_type=%s", type(e).__name__)
         sys.exit(1)
 
 if __name__ == '__main__':

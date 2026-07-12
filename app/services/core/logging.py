@@ -47,4 +47,4 @@ def setup_logging() -> None:
 
     apply_third_party_log_levels()
 
-    logging.info("日志系统初始化完成 (Level: %s)", log_level_str)
+    logging.info("日志系统初始化完成: log_level=%s", log_level_str)

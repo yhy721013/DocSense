@@ -1,7 +1,21 @@
-"""Domain models and events for file chat."""
+"""文件对话的领域模型与事件。"""
 
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.domain.chat_id import (
+    chat_id_public_value,
+    chat_id_storage_key,
+    parse_query_chat_id,
+    require_public_chat_id,
+)
 from app.services.chat.domain.models import (
+    CLEANUP_JOB_FAILED,
+    CLEANUP_JOB_PENDING,
+    CLEANUP_JOB_REASONS,
+    CLEANUP_JOB_RUNNING,
+    CLEANUP_JOB_STATUSES,
+    CLEANUP_JOB_SUCCEEDED,
+    CLEANUP_REASON_DELETE_CHAT,
+    CLEANUP_REASON_TEMPORARY_THREAD,
     LEASE_ACTIVE,
     LEASE_CLEANUP_FAILED,
     LEASE_CLEANUP_PENDING,
@@ -33,22 +47,38 @@ from app.services.chat.domain.models import (
     SESSION_DELETING,
     SESSION_ERROR,
     SESSION_STATUSES,
-    ChatDocument,
+    ChatCleanupJob,
+    ChatDocumentBinding,
     ChatMessage,
     ChatMessageFile,
     ChatResourceLease,
     ChatRun,
+    ChatRunEvent,
     ChatSession,
 )
 
 __all__ = [
-    "ChatDocument",
+    "ChatCleanupJob",
+    "ChatDocumentBinding",
     "ChatMessage",
     "ChatMessageFile",
     "ChatResourceLease",
     "ChatRun",
+    "ChatRunEvent",
     "ChatSession",
     "ChatStreamEvent",
+    "chat_id_public_value",
+    "chat_id_storage_key",
+    "parse_query_chat_id",
+    "require_public_chat_id",
+    "CLEANUP_JOB_FAILED",
+    "CLEANUP_JOB_PENDING",
+    "CLEANUP_JOB_REASONS",
+    "CLEANUP_JOB_RUNNING",
+    "CLEANUP_JOB_STATUSES",
+    "CLEANUP_JOB_SUCCEEDED",
+    "CLEANUP_REASON_DELETE_CHAT",
+    "CLEANUP_REASON_TEMPORARY_THREAD",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",
     "LEASE_CLEANUP_PENDING",

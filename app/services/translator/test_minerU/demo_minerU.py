@@ -143,7 +143,7 @@ async def run_demo(
                 prepare_local_api_temp_dir()
                 local_server = _api_client.LocalAPIServer()
                 base_url = local_server.start()
-                logger.info("Started local mineru-api: %s", base_url)
+                logger.info("本地 MinerU API 服务已启动")
                 server_health = await _api_client.wait_for_local_api_ready(
                     http_client,
                     local_server,
@@ -154,16 +154,16 @@ async def run_demo(
                     _api_client.normalize_base_url(api_url),
                 )
 
-            logger.info("Using API: %s", server_health.base_url)
-            logger.info("Submitting %d file(s)", len(upload_assets))
+            logger.info("MinerU API 健康检查通过")
+            logger.info("开始提交 MinerU 解析任务: file_count=%d", len(upload_assets))
             submit_response = await _api_client.submit_parse_task(
                 base_url=server_health.base_url,
                 upload_assets=upload_assets,
                 form_data=form_data,
             )
-            logger.info("task_id: %s", submit_response.task_id)
+            logger.info("MinerU 解析任务已提交: has_task_id=%s", bool(submit_response.task_id))
             if submit_response.queued_ahead is not None:
-                logger.info("status: pending (queued_ahead=%s)", submit_response.queued_ahead)
+                logger.info("MinerU 解析任务正在排队: queued_ahead=%s", submit_response.queued_ahead)
 
             last_status_message = None
 
@@ -173,7 +173,11 @@ async def run_demo(
                 if message == last_status_message:
                     return
                 last_status_message = message
-                logger.info("status: %s", message)
+                logger.info(
+                    "MinerU 解析任务状态更新: status=%s queued_ahead=%s",
+                    status_snapshot.status,
+                    status_snapshot.queued_ahead,
+                )
 
             await _api_client.wait_for_task_result(
                 client=http_client,
@@ -181,7 +185,7 @@ async def run_demo(
                 task_label=task_label,
                 status_snapshot_callback=on_status_update,
             )
-            logger.info("status: completed")
+            logger.info("MinerU 解析任务已完成")
             result_zip_path = await _api_client.download_result_zip(
                 client=http_client,
                 submit_response=submit_response,
@@ -196,7 +200,7 @@ async def run_demo(
         _api_client.safe_extract_zip(result_zip_path, output_path)
     finally:
         result_zip_path.unlink(missing_ok=True)
-    logger.info("Extracted result to: %s", output_path)
+    logger.info("MinerU 解析结果已解压: output_dir_name=%s", output_path.name)
 
 
 def main() -> None:

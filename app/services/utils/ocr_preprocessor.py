@@ -76,10 +76,18 @@ def prepare_analysis_file_for_upload(file_path: str, ocr_config: OCRConfig) -> s
     if ocr_config.analysis_scanned_pdf_engine == "mineru":
         try:
             markdown_path = mineru_pdf_to_markdown(path, ocr_config)
-            logger.info("扫描件 MinerU 解析完成，改为上传 Markdown: %s -> %s", path, markdown_path)
+            logger.info(
+                "扫描 PDF 已由 MinerU 解析为 Markdown: input_file=%s output_file=%s",
+                path.name,
+                markdown_path.name,
+            )
             return str(markdown_path)
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning("扫描件 MinerU 解析失败，降级使用内置 OCR: %s (%s)", path, exc)
+            logger.warning(
+                "扫描 PDF 的 MinerU 解析失败，改用内置 OCR: input_file=%s error_type=%s",
+                path.name,
+                type(exc).__name__,
+            )
 
     return _prepare_scanned_pdf_with_builtin_ocr(path, ocr_config)
 
@@ -87,10 +95,19 @@ def prepare_analysis_file_for_upload(file_path: str, ocr_config: OCRConfig) -> s
 def _prepare_scanned_pdf_with_builtin_ocr(path: Path, ocr_config: OCRConfig) -> str:
     try:
         markdown_path = ocr_pdf_to_markdown(path, ocr_config)
-        logger.info("扫描件 OCR 完成，改为上传 Markdown: %s -> %s", path, markdown_path)
+        logger.info(
+            "扫描 PDF 已由内置 OCR 解析为 Markdown: input_file=%s output_file=%s",
+            path.name,
+            markdown_path.name,
+        )
         return str(markdown_path)
     except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("扫描件 OCR 失败，降级直传原 PDF: %s (%s)", path, exc)
+        logger.warning(
+            "扫描 PDF 的内置 OCR 解析失败，改为直接上传原文件: "
+            "input_file=%s error_type=%s",
+            path.name,
+            type(exc).__name__,
+        )
         return str(path)
 
 

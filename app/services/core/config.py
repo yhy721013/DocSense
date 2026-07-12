@@ -47,6 +47,39 @@ class LLMIntegrationConfig:
     download_dir: str
 
 
+CHAT_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
+
+
+class ChatInfrastructureConfigurationError(RuntimeError):
+    """文件对话部署模式与已安装基础设施能力不匹配时抛出。"""
+
+
+@dataclass(frozen=True)
+class ChatInfrastructureConfig:
+    """文件对话的部署门禁配置。
+
+    当前代码只安装了 SQLite 单实例持久化、进程内同步执行器和轮询式取消检查。
+    因此 ``single_instance`` 是唯一可启动的值；集群、外部调度或共享持久化模式
+    必须等到对应适配器、迁移和运维验证完成后，才能在此处开放。
+    """
+
+    runtime_mode: str = CHAT_RUNTIME_MODE_SINGLE_INSTANCE
+
+    def __post_init__(self) -> None:
+        mode = str(self.runtime_mode or "").strip().lower()
+        if mode != CHAT_RUNTIME_MODE_SINGLE_INSTANCE:
+            raise ChatInfrastructureConfigurationError(
+                "当前仅安装 single_instance 文件对话基础设施；"
+                "集群或外部调度模式必须先完成持久化、调度和通知适配器部署"
+            )
+        object.__setattr__(self, "runtime_mode", mode)
+
+    @classmethod
+    def single_instance(cls) -> "ChatInfrastructureConfig":
+        """创建不依赖环境变量的单实例配置，供显式注入的离线测试使用。"""
+        return cls(runtime_mode=CHAT_RUNTIME_MODE_SINGLE_INSTANCE)
+
+
 def _parse_timeout(raw_value: Optional[str]) -> Optional[float]:
     # 支持空值 / None 字符串，返回 None 表示不设超时
     if raw_value is None:
@@ -129,3 +162,16 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
         download_timeout=float(os.getenv("FILE_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
         download_dir=str(LLM_DOWNLOAD_DIR),
     )
+
+
+def load_chat_infrastructure_config() -> ChatInfrastructureConfig:
+    """读取并严格校验文件对话部署模式，错误模式在应用装配前直接失败。
+
+    不使用宽松的默认回退：若操作人员误配 ``cluster``、``external_dispatcher``
+    或任意未知值，服务必须拒绝启动，而不是在 SQLite 文件上伪装多实例能力。
+    """
+    raw_mode = os.getenv(
+        "DOCSENSE_CHAT_RUNTIME_MODE",
+        CHAT_RUNTIME_MODE_SINGLE_INSTANCE,
+    )
+    return ChatInfrastructureConfig(runtime_mode=raw_mode)

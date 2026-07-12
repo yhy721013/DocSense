@@ -47,7 +47,7 @@ def clean_output(output_text: str, prompt: str) -> str:
 
     # 1. 检测 token IDs 特征
     if re.match(r'^[\d\s,\[\]]+$', output_text):
-        logger.warning(f"[警告] 检测到输出为 token IDs 数组，非正常文本")
+        logger.warning("检测到模型输出为 token ID 数组，不是正常文本")
         return ""
 
     # 2. 去除Prompt残留

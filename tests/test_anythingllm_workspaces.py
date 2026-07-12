@@ -220,10 +220,10 @@ class AnythingLLMWorkspaceClientTests(unittest.TestCase):
             "workspace/target",
             user_id=6,
         )
-        self.assertIn(
-            "workspace_slug=target",
-            "\n".join(captured_logs.output),
-        )
+        log_output = "\n".join(captured_logs.output)
+        self.assertIn("AnythingLLM 工作区删除完成", log_output)
+        self.assertIn("has_workspace_slug=True", log_output)
+        self.assertIn("has_user_context=True", log_output)
 
 
 if __name__ == "__main__":

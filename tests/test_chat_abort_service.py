@@ -1,4 +1,4 @@
-"""Tests for aborting active file-chat runs."""
+"""活跃文件对话运行中断功能的测试。"""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ class ChatAbortServiceTests(unittest.TestCase):
         self._tempdir.__exit__(None, None, None)
 
     def test_no_active_run_returns_false(self) -> None:
-        result = self.abort.abort_chat(chat_id="chat-empty")
+        result = self.abort.abort_chat(chat_id="10001")
 
         self.assertEqual(
             {
-                "chatId": "chat-empty",
+                "chatId": 10001,
                 "aborted": False,
                 "msg": "当前无进行中的流式响应",
             },
@@ -68,6 +68,7 @@ class ChatAbortServiceTests(unittest.TestCase):
 
     def test_completed_run_returns_false(self) -> None:
         run = self.commands.start_chat_run(chat_id="chat-done")
+        self.commands.issue_execution_lease(run_id=run.run_id)
         completed = self.commands.complete_chat_run(run_id=run.run_id)
 
         result = self.abort.abort_chat(chat_id="chat-done")
@@ -132,8 +133,8 @@ class ChatAbortServiceTests(unittest.TestCase):
 
     def test_build_abort_signal_returns_domain_event(self) -> None:
         self.assertEqual(
-            ChatStreamEvent("aborted", {"chatId": "chat-signal"}),
-            ChatAbortService.build_abort_signal(chat_id=" chat-signal "),
+            ChatStreamEvent("aborted", {"chatId": 10002}),
+            ChatAbortService.build_abort_signal(chat_id=" 10002 "),
         )
 
 

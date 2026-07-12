@@ -1,4 +1,4 @@
-"""Local authoritative history queries for file chat."""
+"""文件对话本地权威历史的查询服务。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChatHistoryService:
-    """Build API-facing chat history from local committed messages."""
+    """根据本地已提交消息构造面向接口的对话历史。"""
 
     def __init__(self, store: ChatPersistenceStore) -> None:
         self._store = store

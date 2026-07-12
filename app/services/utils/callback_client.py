@@ -137,13 +137,17 @@ def post_callback_payload(
 ) -> bool:
     try:
         dump_path = save_callback_history_payload(payload, callback_context=callback_context)
-        logger.debug("回调历史数据已保存至 %s", dump_path)
+        logger.debug("回调历史数据已保存: file_name=%s", dump_path.name)
     except Exception as e:
-        logger.warning("保存回调历史数据失败: %s", e)
+        logger.warning("保存回调历史数据失败: error_type=%s", type(e).__name__)
 
     try:
         response = requests.post(callback_url, json=payload, timeout=timeout)
         return bool(response.ok)
     except requests.exceptions.RequestException as exc:
-        logger.warning("回调请求失败 url=%s: %s", callback_url, exc)
+        logger.warning(
+            "向外部回调地址发送请求失败: timeout_seconds=%s error_type=%s",
+            timeout,
+            type(exc).__name__,
+        )
         return False

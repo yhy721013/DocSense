@@ -367,7 +367,7 @@
         <section id="chat-context" class="chat-context">
           <label class="form-row chat-id-row">
             <span>chatId</span>
-            <input id="chat-id-input" type="text" placeholder="请输入 chatId">
+            <input id="chat-id-input" type="number" min="1" step="1" inputmode="numeric" placeholder="请输入正整数 chatId">
           </label>
           <section class="context-row">
             <div class="context-header">
@@ -427,7 +427,7 @@
     const state = {
       sessions: [],
       availableFiles: [],
-      activeChatId: "",
+      activeChatId: null,
       historyMessages: [],
       streamEvents: [],
       streamingReply: "",
@@ -439,6 +439,23 @@
 
     function setMessage(text) {
       pageMessage.textContent = text;
+    }
+
+    function readChatId() {
+      const rawChatId = chatIdInput.value.trim();
+      // 浏览器 number 输入仍可能出现指数形式或小数，因此按接口契约再次严格校验。
+      if (!/^[1-9]\d*$/.test(rawChatId)) {
+        setMessage("chatId 必须为正整数");
+        return null;
+      }
+
+      const chatId = Number(rawChatId);
+      // JavaScript Number 无法精确表达超出安全整数范围的值，调试页不应悄然发送被截断的 ID。
+      if (!Number.isSafeInteger(chatId) || chatId < 1) {
+        setMessage("chatId 超出调试页可安全表示的整数范围");
+        return null;
+      }
+      return chatId;
     }
 
     function escapeHtml(value) {
@@ -555,9 +572,8 @@
     }
 
     async function loadHistory() {
-      const chatId = chatIdInput.value.trim();
-      if (!chatId) {
-        setMessage("请先输入或选择 chatId");
+      const chatId = readChatId();
+      if (chatId === null) {
         return;
       }
 
@@ -581,10 +597,9 @@
         return;
       }
 
-      const chatId = chatIdInput.value.trim();
+      const chatId = readChatId();
       const message = messageInput.value.trim();
-      if (!chatId) {
-        setMessage("chatId 不能为空");
+      if (chatId === null) {
         return;
       }
       if (!state.selectedFileNames.length) {
@@ -684,10 +699,16 @@
       state.streamEvents.push({ eventName, data });
       renderDebugEventList();
 
-      if (eventName === "chatInfo" && data.chatId) {
-        state.activeChatId = data.chatId;
-        chatIdInput.value = data.chatId;
-        setMessage(`已连接会话 ${data.chatId}`);
+      if (eventName === "chatInfo") {
+        const chatId = data.chatId;
+        if (!Number.isSafeInteger(chatId) || chatId < 1) {
+          setStreamingState(false);
+          setMessage("服务端返回的 chatId 不是调试页可用的正整数");
+          return;
+        }
+        state.activeChatId = chatId;
+        chatIdInput.value = String(chatId);
+        setMessage(`已连接会话 ${chatId}`);
         return;
       }
 
@@ -735,7 +756,7 @@
             return;
           }
           state.activeChatId = item.chatId;
-          chatIdInput.value = item.chatId;
+          chatIdInput.value = String(item.chatId);
           state.selectedFileNames = [...item.fileNames];
           state.sentFileNames = [...item.fileNames];
           state.streamingReply = "";
@@ -770,9 +791,8 @@
         return;
       }
 
-      const chatId = chatIdInput.value.trim();
-      if (!chatId) {
-        setMessage("请先输入或选择 chatId");
+      const chatId = readChatId();
+      if (chatId === null) {
         return;
       }
 
@@ -790,7 +810,7 @@
         return;
       }
 
-      state.activeChatId = "";
+      state.activeChatId = null;
       state.historyMessages = [];
       state.streamEvents = [];
       state.streamingReply = "";

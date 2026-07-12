@@ -1,4 +1,4 @@
-"""Task-scoped factory for AnythingLLM file-chat conversations."""
+"""AnythingLLM 文件对话的任务级工厂。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class AnythingLLMChatFactory(ChatConversationFactory):
-    """Create isolated AnythingLLM chat gateways for one request or task."""
+    """为单个请求或后台任务创建相互隔离的 AnythingLLM 对话网关。"""
 
     def __init__(
         self,
@@ -32,7 +32,7 @@ class AnythingLLMChatFactory(ChatConversationFactory):
         standalone_mode: str = "chat",
         transport_factory: Callable[..., AnythingLLMTransport] = AnythingLLMTransport,
     ) -> None:
-        """Validate immutable factory configuration without opening sessions."""
+        """校验不可变工厂配置，但不在构造阶段创建网络会话。"""
         if not isinstance(config, AnythingLLMConfig):
             raise TypeError("config must be AnythingLLMConfig")
         if user_id is not None and (
@@ -60,7 +60,7 @@ class AnythingLLMChatFactory(ChatConversationFactory):
         self._transport_factory = transport_factory
 
     def create(self) -> AbstractContextManager[ChatConversationPort]:
-        """Return a lazy lease; concrete network objects are built on enter."""
+        """返回惰性租约；进入上下文时才创建具体网络对象。"""
         return self._create_lease()
 
     @contextmanager
@@ -84,9 +84,10 @@ class AnythingLLMChatFactory(ChatConversationFactory):
                 standalone_mode=self._standalone_mode,
             )
             logger.debug(
-                "Created task-scoped AnythingLLM chat gateway: "
-                "has_user_context=%s",
+                "已创建任务级 AnythingLLM 文件对话网关: has_user_context=%s stream_mode=%s standalone_mode=%s",
                 self._user_id is not None,
+                self._stream_mode,
+                self._standalone_mode,
             )
             yield gateway
         except BaseException:
@@ -96,12 +97,11 @@ class AnythingLLMChatFactory(ChatConversationFactory):
             if transport is not None:
                 try:
                     transport.close()
-                    logger.debug("Closed task-scoped AnythingLLM chat transport")
+                    logger.debug("已关闭任务级 AnythingLLM 文件对话传输对象")
                 except Exception:
                     if task_failed:
                         logger.exception(
-                            "Failed to close AnythingLLM chat transport; "
-                            "preserving active task exception"
+                            "关闭任务级 AnythingLLM 文件对话传输对象失败，保留当前业务异常"
                         )
                     else:
                         raise

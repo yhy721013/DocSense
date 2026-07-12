@@ -67,6 +67,7 @@ class CallbackDebugRouteTests(unittest.TestCase):
             "data": {
                 "fileName": "demo.txt",
                 "status": "2",
+                "security": "公开",
                 "fileDataItem": {
                     "originalText": "原文第一行\n原文第二行",
                     "documentTranslationOne": "<p>单语翻译</p>",
@@ -86,6 +87,7 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertEqual(data["message"], "读取成功")
         self.assertEqual(data["payload"]["businessType"], "file")
         self.assertEqual(data["payload"]["data"]["fileName"], "demo.txt")
+        self.assertEqual(data["payload"]["data"]["security"], "公开")
         self.assertEqual(
             data["payload"]["data"]["fileDataItem"]["originalText"],
             "原文第一行\n原文第二行",
@@ -264,6 +266,8 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.assertIn('renderHtmlPreview("单语翻译预览"', html)
         self.assertIn('renderHtmlPreview("双语翻译预览"', html)
         self.assertIn('renderFieldGrid("数据标准信息"', html)
+        self.assertIn("data.security", html)
+        self.assertNotIn("data.secrets", html)
         self.assertIn('"militaryName"', html)
         self.assertIn('"approvalDept"', html)
         self.assertIn('renderHtmlPreview("报告预览"', html)

@@ -52,7 +52,7 @@ class DocumentTranslator:
 
         # DOCX、PDF、PPTX、XLSX 统一使用 MinerU 模式
         if ext in ['.pdf', '.docx', '.pptx', '.xlsx']:
-            logger.info("使用 MinerU 模式处理：%s", file_path)
+            logger.info("使用 MinerU 解析文档: file_name=%s", os.path.basename(file_path))
 
             # 【修复】确定输出目录（与输出文件同目录）
             output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -136,7 +136,7 @@ class DocumentTranslator:
 
         # DOCX、PDF、PPTX、XLSX 统一使用 MinerU 模式
         if ext in ['.pdf', '.docx', '.pptx', '.xlsx']:
-            logger.info("使用 MinerU 模式处理 HTML 转换：%s", file_path)
+            logger.info("使用 MinerU 解析 HTML 转换源文件: file_name=%s", os.path.basename(file_path))
 
             # 1. 先将文档转换为 Markdown
             markdown_path = self.markdown_handler.convert_to_markdown(

@@ -282,6 +282,9 @@ class FakeKnowledgeIndexPort:
             {
                 "file_name": metadata.file_name,
                 "original_name": metadata.original_name,
+                # 与生产协调记录一致保存实际上传文件名，避免 MHTML/OCR 预处理后的
+                # 来源映射在离线测试中被错误简化为业务哈希名。
+                "ingested_file_name": metadata.ingested_file_name,
                 "attributes": metadata.attributes_dict(),
             },
             ensure_ascii=False,

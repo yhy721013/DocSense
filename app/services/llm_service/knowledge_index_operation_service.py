@@ -437,10 +437,9 @@ class KnowledgeIndexOperationService:
                     )
                 if not immutable_matches:
                     logger.error(
-                        "[DEBUG] 知识库幂等键冲突: collection_ref=%s idempotency_key=%s "
+                        "知识库幂等键与既有操作冲突: idempotency_key=%s "
                         "business_type_match=%s business_key_match=%s source_kind_match=%s "
                         "source_digest_match=%s metadata_match=%s",
-                        normalized_collection,
                         normalized_key,
                         existing["business_type"] == operation_context.business_type,
                         existing["business_key"] == operation_context.business_key,
@@ -450,17 +449,16 @@ class KnowledgeIndexOperationService:
                     )
                     if normalized_source_kind == "prepared":
                         logger.error(
-                            "[DEBUG] prepared 文档引用冲突: document_ref_match=%s location_match=%s",
+                            "预备文档引用与既有操作不一致: "
+                            "document_ref_match=%s location_match=%s",
                             existing["document_ref"] == normalized_document_ref,
                             existing["external_location"] == normalized_location,
                         )
                     logger.error(
-                        "[DEBUG] 现有元数据: %s",
-                        existing["metadata_json"][:200] if existing["metadata_json"] else "None",
-                    )
-                    logger.error(
-                        "[DEBUG] 新元数据: %s",
-                        metadata_json[:200] if metadata_json else "None",
+                        "知识库幂等键冲突的元数据摘要: "
+                        "existing_metadata_chars=%d requested_metadata_chars=%d",
+                        len(existing["metadata_json"] or ""),
+                        len(metadata_json or ""),
                     )
                     raise KnowledgeIndexConflictError(
                         "相同知识库幂等键对应的业务身份、来源或 metadata 发生冲突"
@@ -542,15 +540,14 @@ class KnowledgeIndexOperationService:
             raise KnowledgeIndexError("知识库协调记录提交后无法读取")
         record = self._row_to_record(row)
         logger.info(
-            "知识库协调记录已准备: collection_ref=%s idempotency_key=%s "
-            "status=%s source_kind=%s business_type=%s business_key=%s "
+            "知识库协调记录已准备: idempotency_key=%s status=%s "
+            "source_kind=%s business_type=%s business_key_chars=%d "
             "execution_id=%s",
-            record.collection_ref,
             record.idempotency_key,
             record.status,
             record.source_kind,
             record.business_type,
-            record.business_key,
+            len(record.business_key),
             operation_context.execution_id,
         )
         return record
@@ -636,9 +633,8 @@ class KnowledgeIndexOperationService:
                     ).fetchone()
                 record = self._row_to_record(row)
                 logger.debug(
-                    "知识库协调状态幂等复用: collection_ref=%s idempotency_key=%s "
+                    "知识库协调状态已幂等复用: idempotency_key=%s "
                     "status=%s",
-                    normalized_collection,
                     normalized_key,
                     target_status,
                 )
@@ -695,10 +691,9 @@ class KnowledgeIndexOperationService:
             raise KnowledgeIndexError("状态转换后无法读取知识库协调记录")
         record = self._row_to_record(updated)
         logger.info(
-            "知识库协调状态已转换: collection_ref=%s idempotency_key=%s "
+            "知识库协调状态已转换: idempotency_key=%s "
             "previous_status=%s target_status=%s has_document_ref=%s "
             "has_external_location=%s",
-            normalized_collection,
             normalized_key,
             row["status"],
             target_status,
@@ -824,11 +819,10 @@ class KnowledgeIndexOperationService:
             )
             updated_count = int(cursor.rowcount)
         logger.info(
-            "知识库协调记录已标记解绑: collection_ref=%s location=%s "
-            "updated_count=%d",
-            normalized_collection,
-            normalized_location,
+            "知识库协调记录已标记为解绑完成: updated_count=%d "
+            "has_document_location=%s",
             updated_count,
+            bool(normalized_location),
         )
         return updated_count
 

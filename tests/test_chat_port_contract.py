@@ -67,7 +67,7 @@ class ChatDtoContractTests(unittest.TestCase):
         self.assertEqual((document,), snapshot.linked_documents)
 
     def test_invalid_roles_timestamps_and_empty_chunks_are_rejected(self) -> None:
-        """DTO 在端口边界拒绝模糊状态，而不是把脏数据留给适配器解释。"""
+        """数据传输对象在端口边界拒绝模糊状态，而不是把脏数据留给适配器解释。"""
         with self.assertRaises(ValueError):
             ChatMessageSnapshot(role="system", content="隐藏消息")
         with self.assertRaises(ValueError):
@@ -116,7 +116,7 @@ class ChatPortContractTests(unittest.TestCase):
     """验证文件对话 Port 的 Fake 可替换性、流式边界和资源语义。"""
 
     def test_fake_implements_runtime_checkable_protocols(self) -> None:
-        """Fake 必须能直接注入只依赖 Protocol 的业务服务。"""
+        """替身对象必须能直接注入只依赖协议的业务服务。"""
         port = FakeChatConversationPort()
         factory = FakeChatConversationFactory()
 
@@ -210,22 +210,30 @@ class ChatPortContractTests(unittest.TestCase):
                 )
             )
 
-    def test_standalone_reply_does_not_mutate_conversation_history(self) -> None:
-        """标题生成等一次性回复不得污染主对话消息快照。"""
+    def test_temporary_reply_does_not_mutate_main_conversation_history(self) -> None:
+        """标题临时会话不得污染主对话，且调用方显式负责删除。"""
         port = FakeChatConversationPort(standalone_reply="标题")
         session = port.open_conversation(
             context_name="chat-c3",
             conversation_name="thread-c3",
         )
 
-        reply = port.generate_standalone_reply(
+        temporary_session = port.open_temporary_conversation(
             context_ref=session.context_ref,
+            conversation_name="title-c3",
+        )
+        reply = port.generate_temporary_reply(
+            session=temporary_session,
             prompt="生成标题",
         )
 
         self.assertEqual("标题", reply)
         self.assertEqual((), port.fetch_messages(session))
         self.assertEqual([(session.context_ref, "生成标题")], port.standalone_prompts)
+        self.assertEqual(
+            ChatOperationResult(success=True),
+            port.delete_conversation(temporary_session),
+        )
 
     def test_delete_operations_are_idempotent(self) -> None:
         """删除对话和上下文都应能重复调用，并明确 already_applied 状态。"""

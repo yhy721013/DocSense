@@ -54,13 +54,6 @@ DEFAULT_COUNTRY_OPTIONS = [
     {"key": "06", "value": "法国"},
 ]
 
-DEFAULT_CHANNEL_OPTIONS = [
-    {"key": "02", "value": "装发"},
-    {"key": "03", "value": "军情"},
-    {"key": "04", "value": "科技"},
-    {"key": "05", "value": "训练"},
-]
-
 DEFAULT_FORMAT_OPTIONS = [
     {"key": "01", "value": "音频类"},
     {"key": "03", "value": "文档类"},
@@ -73,7 +66,7 @@ DEFAULT_MATURITY_OPTIONS = [
     {"key": "03", "value": "定型成果"},
 ]
 
-DEFAULT_SECRET_OPTIONS = [
+DEFAULT_SECURITY_OPTIONS = [
     {"key": "02", "value": "公开"},
 ]
 
@@ -120,10 +113,11 @@ def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dic
 def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str, list[dict[str, Any]]]:
     return {
         "country": _normalize_range_list(request_params.get("country"), DEFAULT_COUNTRY_OPTIONS),
-        "channel": _normalize_range_list(request_params.get("channel"), DEFAULT_CHANNEL_OPTIONS),
+        # channel 必须完全由调用方提供，缺失或空范围不能回填服务端默认值。
+        "channel": _normalize_range_list(request_params.get("channel"), []),
         "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
         "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
-        "secrets": _normalize_range_list(request_params.get("secrets"), DEFAULT_SECRET_OPTIONS),
+        "security": _normalize_range_list(request_params.get("security"), DEFAULT_SECURITY_OPTIONS),
         "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
         "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
     }
@@ -135,6 +129,19 @@ def _as_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value)
+
+
+def _as_business_original_file_name(value: Any) -> str:
+    """读取业务原始文件名，并保留请求字符串的原始值。
+
+    ``originalFileName`` 是面向甲方回调展示的业务字段，不是文件系统路径或内部键。
+    因此只能用去首尾空白后的结果判断它是否为空，不能把 strip 后的文本回写为值；
+    否则会违反“回调 source 严格返回请求 originalFileName 原值”的约定。
+    """
+    if value is None:
+        return ""
+    original_name = value if isinstance(value, str) else str(value)
+    return original_name if original_name.strip() else ""
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -167,23 +174,117 @@ def _contains_gjb_standard_reference(*values: Any) -> bool:
     )
 
 
+def _is_data_standard_candidate(item: Dict[str, Any]) -> bool:
+    """判断候选节点是否属于数据标准分支。
+
+    现有接口以节点 ``name`` / ``pathName`` 中是否包含“数据标准”标识该分支。这里延续
+    既有口径，并在下游结合 ``parentId`` 扩展到名称中未重复写入“数据标准”的子孙节点。
+    """
+    names = (_as_text(item.get("name")), _as_text(item.get("pathName")))
+    return any("数据标准" in name for name in names)
+
+
+def _architecture_candidate_topology(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> tuple[list[tuple[int, Dict[str, Any]]], set[int]]:
+    """构建请求候选的有限树拓扑，并保留前端传入顺序。
+
+    GJB 兜底的业务规则要求“按候选顺序”选择数据标准叶子，因此不能把节点先放入无序集合。
+    叶子关系仅根据本次请求中明确给出的 ``parentId`` 识别：若调用方没有提供某个子节点，
+    服务端不会猜测完整树结构，也不会因此提前拒绝该请求。
+    """
+    nodes: list[tuple[int, Dict[str, Any]]] = []
+    candidate_ids: set[int] = set()
+    for item in architecture_list:
+        if not isinstance(item, dict):
+            continue
+        item_id = _coerce_int(item.get("id"))
+        if item_id is None or item_id < 1:
+            continue
+        nodes.append((item_id, item))
+        candidate_ids.add(item_id)
+
+    parent_ids = {
+        parent_id
+        for _item_id, item in nodes
+        if (parent_id := _coerce_int(item.get("parentId"))) in candidate_ids
+    }
+    return nodes, parent_ids
+
+
+def _data_standard_candidate_ids(
+        nodes: Iterable[tuple[int, Dict[str, Any]]],
+) -> set[int]:
+    """返回数据标准节点及其在本次候选树中可追溯到的子孙节点 ID。"""
+    ordered_nodes = list(nodes)
+    standard_ids = {
+        item_id
+        for item_id, item in ordered_nodes
+        if _is_data_standard_candidate(item)
+    }
+
+    # 子节点可能只填写自身名称、未重复填写“数据标准”。通过 parentId 向下扩展可避免把
+    # 这类合法叶子遗漏；循环仅在集合新增节点时继续，能安全处理异常环状数据。
+    has_new_node = True
+    while has_new_node:
+        has_new_node = False
+        for item_id, item in ordered_nodes:
+            parent_id = _coerce_int(item.get("parentId"))
+            if item_id not in standard_ids and parent_id in standard_ids:
+                standard_ids.add(item_id)
+                has_new_node = True
+    return standard_ids
+
+
+def _ordered_data_standard_leaf_ids(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> list[int]:
+    """按请求顺序返回数据标准分支中的叶子节点 ID。
+
+    普通领域仍允许返回父节点；此函数只服务于数据标准的特殊规则。若多个数据标准叶子
+    均可选或无法区分，调用方按列表顺序取第一个，而不在服务端引入证据唯一性判断。
+    """
+    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
+    standard_ids = _data_standard_candidate_ids(nodes)
+    leaf_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for item_id, _item in nodes:
+        if (
+                item_id in standard_ids
+                and item_id not in parent_ids
+                and item_id not in seen_ids
+        ):
+            leaf_ids.append(item_id)
+            seen_ids.add(item_id)
+    return leaf_ids
+
+
+def _first_data_standard_leaf_id(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int | None:
+    """返回按请求顺序可命中的第一个数据标准叶子节点。"""
+    leaf_ids = _ordered_data_standard_leaf_ids(architecture_list)
+    return leaf_ids[0] if leaf_ids else None
+
+
+def _is_data_standard_parent_id(
+        architecture_id: int,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> bool:
+    """判断指定候选是否为本次请求中数据标准分支的父节点。"""
+    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
+    standard_ids = _data_standard_candidate_ids(nodes)
+    return architecture_id in standard_ids and architecture_id in parent_ids
+
+
 def _match_data_standard_architecture_id(
         architecture_list: Iterable[Dict[str, Any]],
         *context_values: Any,
 ) -> int | None:
+    """命中 GJB 线索后，按候选顺序选择数据标准分支的第一个叶子节点。"""
     if not _contains_gjb_standard_reference(*context_values):
         return None
-
-    for item in architecture_list:
-        if not isinstance(item, dict):
-            continue
-        names = [_as_text(item.get("name")), _as_text(item.get("pathName"))]
-        if any("数据标准" in name for name in names):
-            try:
-                return int(item.get("id"))
-            except (TypeError, ValueError):
-                return None
-    return None
+    return _first_data_standard_leaf_id(architecture_list)
 
 
 def _architecture_id_set(items: Iterable[Dict[str, Any]]) -> set[int]:
@@ -379,7 +480,7 @@ def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
     return ""
 
 
-def _default_secret_value(options: Iterable[Dict[str, Any]]) -> str:
+def _default_security_value(options: Iterable[Dict[str, Any]]) -> str:
     matched = _match_option_value("公开", options)
     if matched:
         return matched
@@ -394,19 +495,14 @@ def _default_secret_value(options: Iterable[Dict[str, Any]]) -> str:
 
 def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
     def _fallback(reason: str, detail: Any = None) -> int:
-        if detail is None:
-            logger.info(
-                "architectureId匹配失败: reason=%s fallback=%s",
-                reason,
-                ARCHITECTURE_FALLBACK_ID,
-            )
-        else:
-            logger.info(
-                "architectureId匹配失败: reason=%s detail=%s fallback=%s",
-                reason,
-                detail,
-                ARCHITECTURE_FALLBACK_ID,
-            )
+        logger.info(
+            "领域分类匹配失败，使用默认分类: reason=%s "
+            "fallback_architecture_id=%s has_detail=%s detail_type=%s",
+            reason,
+            ARCHITECTURE_FALLBACK_ID,
+            detail is not None,
+            type(detail).__name__ if detail is not None else "",
+        )
         return ARCHITECTURE_FALLBACK_ID
 
     candidate_items = [item for item in architecture_list if isinstance(item, dict)]
@@ -558,7 +654,11 @@ def _sanitize_keywords(raw_value: Any) -> str:
         seen.add(kw)
         # 单个关键词过长时截断
         if len(kw) > MAX_KEYWORD_LENGTH:
-            logger.warning("keyword 被截断: 原始长度=%d 超过上限 %d", len(kw), MAX_KEYWORD_LENGTH)
+            logger.warning(
+                "关键词长度超过上限，已截断: original_chars=%d limit=%d",
+                len(kw),
+                MAX_KEYWORD_LENGTH,
+            )
             kw = kw[:MAX_KEYWORD_LENGTH]
         cleaned.append(kw)
         if len(cleaned) >= MAX_KEYWORD_COUNT:
@@ -668,14 +768,14 @@ def _opening_text(original_text: str, *, max_chars: int = 2000, max_lines: int =
     return original_text[:max_chars]
 
 
-def _extract_secret_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
+def _extract_security_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
     opening = _opening_text(original_text)
     if not opening:
         return ""
     lines = [line.strip() for line in opening.splitlines() if line.strip()]
-    secret_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
+    security_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
     for line in lines:
-        if not secret_label_pattern.search(line):
+        if not security_label_pattern.search(line):
             continue
         matched = _match_option_value_from_text(options, line)
         if matched:
@@ -774,9 +874,9 @@ def map_analysis_result(
     raw_country = _first_non_empty_value(parsed_result, "country", "国家")
     raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
     raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
-    raw_secrets = _first_non_empty_value(parsed_result, "secrets", "secret", "密级", "密级程度")
-    if raw_secrets in (None, "", [], {}):
-        raw_secrets = _first_non_empty_value(file_item, "secrets", "secret", "密级", "密级程度")
+    raw_security = _first_non_empty_value(parsed_result, "security", "密级", "密级程度")
+    if raw_security in (None, "", [], {}):
+        raw_security = _first_non_empty_value(file_item, "security", "密级", "密级程度")
     raw_format = _first_non_empty_value(parsed_result, "format", "格式")
     if raw_format in (None, "", [], {}):
         raw_format = _first_non_empty_value(file_item, "dataFormat", "资料格式")
@@ -784,18 +884,22 @@ def map_analysis_result(
     resolved_country = _match_option_value(raw_country, ranges["country"])
     resolved_channel = _match_option_value(raw_channel, ranges["channel"])
     resolved_maturity = _match_option_value(raw_maturity, ranges["maturity"])
-    resolved_secrets = _match_option_value(raw_secrets, ranges["secrets"])
+    resolved_security = _match_option_value(raw_security, ranges["security"])
     resolved_format = _match_option_value(raw_format, ranges["format"])
 
     for field_name, raw_value, resolved_value in (
         ("country", raw_country, resolved_country),
         ("channel", raw_channel, resolved_channel),
         ("maturity", raw_maturity, resolved_maturity),
-        ("secrets", raw_secrets, resolved_secrets),
+        ("security", raw_security, resolved_security),
         ("format", raw_format, resolved_format),
     ):
         if raw_value not in (None, "", [], {}) and not resolved_value:
-            logger.info("字段候选匹配失败: field=%s raw=%s", field_name, _scalar_text(raw_value))
+            logger.info(
+                "字段候选值未匹配到预设范围: field=%s raw_value_chars=%d",
+                field_name,
+                len(_scalar_text(raw_value)),
+            )
 
     resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
     resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
@@ -857,10 +961,10 @@ def map_analysis_result(
         "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
         "channel": resolved_channel,
         "maturity": resolved_maturity,
-        "secrets": (
-            resolved_secrets
-            or _extract_secret_from_opening_text(normalized_original_text, ranges["secrets"])
-            or _default_secret_value(ranges["secrets"])
+        "security": (
+            resolved_security
+            or _extract_security_from_opening_text(normalized_original_text, ranges["security"])
+            or _default_security_value(ranges["security"])
         ),
         "format": resolved_format,
         "architectureId": architecture_id,
@@ -894,13 +998,19 @@ def enrich_with_translations(
 
         if enable_full_translation:
             # 全文翻译模式：翻译整个文档
-            logger.info(f"[LLMAnalysis] 开始全文翻译：{file_path}")
+            logger.info(
+                "开始全文翻译文档: file_name=%s",
+                Path(file_path).name,
+            )
 
             # 【新增】定义进度回调函数，将翻译进度反馈到任务状态
             def translation_progress_callback(progress: float, message: str):
                 # 计算总体进度（翻译占 0.35~0.95 区间，共 0.6 权重）
                 overall_progress = 0.35 + (progress * 0.6)
-                logger.info(f"[LLMAnalysis] 翻译进度：{message} ({overall_progress:.0%})")
+                logger.debug(
+                    "全文翻译进度已更新: progress_percent=%d",
+                    round(overall_progress * 100),
+                )
 
             # 设置进度回调
             translation_service.set_progress_callback(translation_progress_callback)
@@ -918,7 +1028,7 @@ def enrich_with_translations(
         else:
             # 快速模式：只翻译摘要
             if summary:
-                logger.info(f"[LLMAnalysis] 翻译摘要：{summary[:50]}...")
+                logger.info("开始翻译文档摘要: summary_chars=%d", len(summary))
                 translated_summary = translation_service.translate_text_only(summary)
                 mapped_result["fileDataItem"]["documentTranslationOne"] = translated_summary
                 mapped_result["fileDataItem"]["documentTranslationTwo"] = summary+"\n"+translated_summary
@@ -926,7 +1036,10 @@ def enrich_with_translations(
         return mapped_result
 
     except Exception as e:
-        logger.info(f"[LLMAnalysis] 翻译过程中出错：{e}，返回未翻译的结果")
+        logger.warning(
+            "文档翻译失败，返回未翻译结果: error_type=%s",
+            type(e).__name__,
+        )
         return mapped_result
 
 
@@ -984,7 +1097,11 @@ class AnalysisContractError(ValueError):
 
 
 class ArchitectureContractError(AnalysisContractError):
-    """architectureId 缺失、类型错误、非叶子或超出候选范围。"""
+    """architectureId 缺失、类型错误或超出请求候选范围。"""
+
+
+class DataStandardParentContractError(ArchitectureContractError):
+    """数据标准分支的父节点不能作为最终成功分类。"""
 
 
 def _reject_nonstandard_json_constant(value: str) -> None:
@@ -998,7 +1115,7 @@ def _parse_strict_json_object(raw_result: Any) -> Dict[str, Any] | None:
     旧实现会从任意文本中截取最外层花括号并反复补 ``}``。这种做法可能把截断回答误判
     为有效业务数据。阶段 9 改为显式发起一次 ``JSON_REPAIR`` 模型调用，因此本地解析器
     必须保持确定性：语法不合法就返回 ``None``，由编排层决定是否修复；合法的空对象
-    仍交给业务契约校验并按 ``business_contract`` 失败，不能伪装成语法问题。
+    则继续进入宽松字段映射和独立的 architectureId 契约处理，不能伪装成语法问题。
     """
     if isinstance(raw_result, dict):
         try:
@@ -1027,87 +1144,13 @@ def _parse_strict_json_object(raw_result: Any) -> Dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _option_values(options: Iterable[Dict[str, Any]]) -> set[str]:
-    """提取非空候选 value；key 仅是请求编码，不属于模型输出契约。"""
-    return {
-        value
-        for item in options
-        if isinstance(item, dict) and (value := _as_text(item.get("value")))
-    }
-
-
-def _validate_analysis_model_contract(
-        parsed_result: Dict[str, Any],
-        request_params: Dict[str, Any],
-) -> Dict[str, Any]:
-    """校验并规范化 architecture 之外的文件分析模型契约。
-
-    五个枚举字段在缺少文档证据时允许为空；一旦模型返回非空值，则必须与请求候选的
-    ``value`` 精确相等。这里不接受候选 key、对象或相似字符串，也不通过正文猜测替换
-    模型返回值，防止“合法化”语义错误。architecture 单独校验，以便只对该字段执行一次
-    受控修复。
-    """
-    if not isinstance(parsed_result, dict) or not parsed_result:
-        raise AnalysisContractError("模型结果必须是非空 JSON 对象")
-    required_keys = {
-        "country",
-        "channel",
-        "maturity",
-        "secrets",
-        "format",
-        "fileDataItem",
-    }
-    missing_keys = sorted(required_keys.difference(parsed_result))
-    if missing_keys:
-        raise AnalysisContractError(
-            f"模型结果缺少必需顶层字段: {', '.join(missing_keys)}"
-        )
-    allowed_keys = required_keys | {"architectureId"}
-    unknown_keys = sorted(set(parsed_result).difference(allowed_keys))
-    if unknown_keys:
-        raise AnalysisContractError(
-            f"模型结果包含未知顶层字段: {', '.join(unknown_keys)}"
-        )
-    file_item = parsed_result.get("fileDataItem")
-    if not isinstance(file_item, dict):
-        raise AnalysisContractError("fileDataItem 必须是 JSON 对象")
-
-    normalized = dict(parsed_result)
-    normalized_file_item = dict(file_item)
-    ranges = build_effective_analysis_ranges(request_params)
-    for field_name in ("country", "channel", "maturity", "secrets", "format"):
-        raw_value = parsed_result.get(field_name)
-        if raw_value in (None, ""):
-            normalized[field_name] = ""
-            continue
-        if not isinstance(raw_value, str):
-            raise AnalysisContractError(f"{field_name} 必须是候选 value 字符串或空字符串")
-        value = raw_value.strip()
-        if value not in _option_values(ranges[field_name]):
-            raise AnalysisContractError(f"{field_name} 不属于请求候选 value")
-        normalized[field_name] = value
-
-    raw_data_format = normalized_file_item.get("dataFormat")
-    if raw_data_format in (None, ""):
-        normalized_file_item["dataFormat"] = normalized["format"]
-    elif not isinstance(raw_data_format, str):
-        raise AnalysisContractError("fileDataItem.dataFormat 必须是字符串")
-    elif raw_data_format.strip() != normalized["format"]:
-        raise AnalysisContractError("fileDataItem.dataFormat 必须与顶层 format 完全一致")
-    else:
-        normalized_file_item["dataFormat"] = raw_data_format.strip()
-    normalized["fileDataItem"] = normalized_file_item
-    return normalized
-
-
 def _architecture_candidates(
         request_params: Dict[str, Any],
 ) -> tuple[list[Dict[str, Any]], set[int]]:
-    """返回有效候选及当前候选图中的叶子 ID 集合。
+    """返回请求中的有效候选及其全部 ID。
 
     当请求只携带一个节点时，无论它在完整体系中是否还有子节点，都按阶段 9 契约直接
-    使用该唯一 ID。多候选时，只排除当前候选列表中明确拥有子节点的节点，避免根据缺失
-    的完整树结构猜测叶子关系。
+    使用该唯一 ID。多候选时允许模型选择请求中任意候选节点，不再由服务端强制要求叶子。
     """
     items: list[Dict[str, Any]] = []
     ids: set[int] = set()
@@ -1123,17 +1166,22 @@ def _architecture_candidates(
         items.append(item)
     if not items:
         raise AnalysisContractError("architectureList 不包含有效候选")
-    if len(ids) == 1:
-        return items, set(ids)
-    parent_ids = {
-        parent_id
-        for item in items
-        if (parent_id := _coerce_int(item.get("parentId"))) in ids
-    }
-    leaf_ids = ids.difference(parent_ids)
-    if not leaf_ids:
-        raise AnalysisContractError("architectureList 无法形成有效叶子候选")
-    return items, leaf_ids
+    return items, ids
+
+
+def _validate_data_standard_leaf_requirement(
+        architecture_id: int,
+        candidates: Iterable[Dict[str, Any]],
+) -> None:
+    """阻止数据标准父节点进入成功回调与永久知识库。
+
+    普通分类父节点仍是合法业务结果，不能复用旧版“所有候选必须叶子”的全局校验。只有
+    数据标准分支中、且在本次候选树内明确拥有子节点的父节点会触发此特殊规则。
+    """
+    if _is_data_standard_parent_id(architecture_id, candidates):
+        raise DataStandardParentContractError(
+            "architectureId 是数据标准父节点，必须兜底到其下叶子节点"
+        )
 
 
 def _resolve_analysis_architecture_id(
@@ -1141,17 +1189,41 @@ def _resolve_analysis_architecture_id(
         request_params: Dict[str, Any],
 ) -> int:
     """按单候选直返、多候选显式 ID 的规则解析 architectureId。"""
-    _items, allowed_ids = _architecture_candidates(request_params)
+    candidates, allowed_ids = _architecture_candidates(request_params)
     if len(allowed_ids) == 1:
-        return next(iter(allowed_ids))
-    if "architectureId" not in parsed_result or parsed_result.get("architectureId") in (None, ""):
-        raise ArchitectureContractError("architectureId 缺失")
-    raw_id = parsed_result.get("architectureId")
-    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
-        raise ArchitectureContractError("architectureId 必须是数字 ID")
-    if raw_id not in allowed_ids:
-        raise ArchitectureContractError("architectureId 不是允许的叶子候选 ID")
-    return raw_id
+        architecture_id = next(iter(allowed_ids))
+    else:
+        if "architectureId" not in parsed_result or parsed_result.get("architectureId") in (None, ""):
+            raise ArchitectureContractError("architectureId 缺失")
+        raw_id = parsed_result.get("architectureId")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+            raise ArchitectureContractError("architectureId 必须是数字 ID")
+        if raw_id not in allowed_ids:
+            raise ArchitectureContractError("architectureId 不属于请求 architectureList 候选")
+        architecture_id = raw_id
+
+    _validate_data_standard_leaf_requirement(architecture_id, candidates)
+    return architecture_id
+
+
+def _match_gjb_architecture_candidate(
+        parsed_result: Dict[str, Any],
+        request_params: Dict[str, Any],
+        original_text: str,
+        candidates: Iterable[Dict[str, Any]],
+) -> int | None:
+    """首次分类不合规时，按 GJB 线索匹配请求中的数据标准叶子节点。"""
+    file_item = parsed_result.get("fileDataItem")
+    if not isinstance(file_item, dict):
+        file_item = {}
+    return _match_data_standard_architecture_id(
+        candidates,
+        original_text,
+        request_params.get("originalFileName"),
+        _resolve_field(parsed_result, file_item, "summary", "摘要"),
+        _first_non_empty_value(file_item, "keyword", "keywords", "关键词"),
+        _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
+    )
 
 
 def _validate_architecture_repair_result(
@@ -1222,7 +1294,7 @@ def _submit_callback(
             task_service.mark_callback_skipped("file", file_name)
         except Exception:
             logger.critical(
-                "未配置回调但 skipped 状态无法提交: file_name=%s",
+                "未配置回调地址，但无法将任务标记为无需回调: file_name=%s",
                 file_name,
                 exc_info=True,
             )
@@ -1245,11 +1317,15 @@ def _submit_callback(
             task_service.mark_callback_failed("file", file_name, callback_error)
         except Exception:
             logger.critical(
-                "文件分析回调异常后无法提交 failed 状态: file_name=%s",
+                "文件分析回调发生异常后，无法将任务标记为回调失败: file_name=%s",
                 file_name,
                 exc_info=True,
             )
-        logger.exception("文件分析回调异常: file_name=%s", file_name)
+        logger.exception(
+            "文件分析回调发生异常: file_name=%s error_type=%s",
+            file_name,
+            type(exc).__name__,
+        )
         return
     try:
         if succeeded:
@@ -1335,7 +1411,7 @@ def _close_audited_session(
         cleanup = session.close(retain_document=retain_document)
     except Exception:
         logger.critical(
-            "RAG Session 关闭调用异常: interaction_id=%s execution_id=%s "
+            "RAG 会话关闭调用发生异常: interaction_id=%s execution_id=%s "
             "retain_document=%s",
             interaction_id,
             execution_id,
@@ -1359,7 +1435,7 @@ def _close_audited_session(
         )
     except Exception:
         logger.critical(
-            "RAG Session 已关闭但关闭审计追加失败: interaction_id=%s execution_id=%s",
+            "RAG 会话已关闭，但无法追加关闭审计: interaction_id=%s execution_id=%s",
             interaction_id,
             execution_id,
             exc_info=True,
@@ -1377,7 +1453,7 @@ def _close_audited_session(
             )
     except Exception:
         logger.critical(
-            "RAG Session 关闭后资源租约终结失败: interaction_id=%s execution_id=%s",
+            "RAG 会话关闭后，无法结束资源租约: interaction_id=%s execution_id=%s",
             interaction_id,
             execution_id,
             exc_info=True,
@@ -1396,13 +1472,14 @@ def _store_prepared_analysis_document(
 ) -> None:
     """把 RAG 已上传的同一文档转交永久知识库，不读取源文件也不二次上传。"""
     logger.info(
-        "[DEBUG] 开始转交文档到永久知识库: file_name=%s execution_id=%s",
+        "开始将已上传文档转交永久知识库: file_name=%s execution_id=%s",
         file_name,
         execution_id,
     )
     result_architecture_id = int(mapped_result["architectureId"])
     logger.info(
-        "[DEBUG] 解析结果 architecture_id=%s",
+        "文件分析结果已确定分类: execution_id=%s result_architecture_id=%s",
+        execution_id,
         result_architecture_id,
     )
     storage_architecture_id = resolve_storage_architecture_id(
@@ -1410,7 +1487,8 @@ def _store_prepared_analysis_document(
         architecture_list,
     )
     logger.info(
-        "[DEBUG] 存储架构 architecture_id=%s",
+        "永久知识库存储分类已确定: execution_id=%s storage_architecture_id=%s",
+        execution_id,
         storage_architecture_id,
     )
     if storage_architecture_id is None or storage_architecture_id < 1:
@@ -1427,17 +1505,23 @@ def _store_prepared_analysis_document(
         )
     attributes = {
         key: mapped_result.get(key, "")
-        for key in ("country", "channel", "maturity", "secrets", "format")
+        for key in ("country", "channel", "maturity", "security", "format")
     }
     metadata = KnowledgeDocumentMetadata(
         file_name=file_name,
         original_name=original_name,
+        # 此名称来自 RAG Gateway 实际提交给 AnythingLLM 的不可变上传副本，而不是
+        # 下载文件或业务哈希名。MHTML/PDF、OCR/Markdown 等预处理后的来源映射必须以
+        # 它为准，才能在 weaponry 回调中稳定回填业务原始名。
+        ingested_file_name=prepared_document.ingested_file_name,
         attributes=attributes,
     )
     logger.info(
-        "[DEBUG] 元数据构建完成: file_name=%s attributes=%s",
+        "永久知识库文档元数据已构建: file_name=%s has_ingested_file_name=%s "
+        "attribute_key_count=%d",
         file_name,
-        list(attributes.keys()),
+        bool(metadata.ingested_file_name),
+        len(attributes),
     )
     operation_context = KnowledgeOperationContext(
         execution_id=execution_id,
@@ -1450,13 +1534,14 @@ def _store_prepared_analysis_document(
         content_sha256=prepared_document.content_sha256,
     )
     logger.info(
-        "[DEBUG] 幂等键生成完成: idempotency_key=%s",
-        idempotency_key[:50] + "...",
+        "永久知识库写入幂等键已生成: execution_id=%s key_length=%d",
+        execution_id,
+        len(idempotency_key),
     )
     try:
-        logger.info("[DEBUG] 进入 knowledge_index_factory 上下文")
+        logger.debug("开始创建永久知识库任务对象: execution_id=%s", execution_id)
         with knowledge_index_factory.create() as knowledge_index:
-            logger.info("[DEBUG] knowledge_index_factory 创建成功")
+            logger.debug("永久知识库任务对象创建完成: execution_id=%s", execution_id)
             collection = knowledge_index.ensure_collection(
                 CollectionSpec(
                     architecture_id=storage_architecture_id,
@@ -1464,10 +1549,11 @@ def _store_prepared_analysis_document(
                 )
             )
             logger.info(
-                "[DEBUG] 集合确保完成: collection_ref=%s",
-                collection.ref,
+                "永久知识集合已确认: execution_id=%s architecture_id=%s",
+                execution_id,
+                collection.architecture_id,
             )
-            logger.info("[DEBUG] 开始调用 store_prepared_document")
+            logger.debug("开始写入永久知识库文档: execution_id=%s", execution_id)
             knowledge_index.store_prepared_document(
                 collection,
                 prepared_document,
@@ -1475,14 +1561,14 @@ def _store_prepared_analysis_document(
                 operation_context=operation_context,
                 idempotency_key=idempotency_key,
             )
-            logger.info("[DEBUG] store_prepared_document 调用成功")
-        logger.info("[DEBUG] knowledge_index_factory 上下文退出成功")
+            logger.debug("永久知识库文档写入调用完成: execution_id=%s", execution_id)
+        logger.debug("永久知识库任务对象已正常关闭: execution_id=%s", execution_id)
     except Exception as exc:
         logger.exception(
-            "[DEBUG] knowledge_index_factory 上下文中发生异常: file_name=%s error_type=%s error=%s",
+            "写入永久知识库时发生异常: file_name=%s execution_id=%s error_type=%s",
             file_name,
+            execution_id,
             type(exc).__name__,
-            str(exc),
         )
         raise
     logger.info(
@@ -1518,7 +1604,17 @@ def _execute_file_analysis_task(
         raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
-    original_name = _as_text(params.get("originalFileName")) or file_name
+    requested_original_name = _as_business_original_file_name(
+        params.get("originalFileName"),
+    )
+    original_name = requested_original_name or file_name
+    if not requested_original_name:
+        # 不改变既有接口的可选参数约束，但明确记录此类请求无法提供业务原始名；后续
+        # weaponry 只能稳定回填哈希名，绝不能把预处理生成的文件名伪装成业务原始名。
+        logger.warning(
+            "文件分析请求缺少originalFileName，来源展示将回退为业务哈希名: file_name=%s",
+            file_name,
+        )
     file_path = _as_text(params.get("filePath"))
     task = task_service.get_task("file", file_name)
     if task is None:
@@ -1646,54 +1742,65 @@ def _execute_file_analysis_task(
                 if parsed_result is None:
                     raise AnalysisContractError("JSON 修复后仍不是严格 JSON 对象")
 
-            normalized_result = _validate_analysis_model_contract(
-                parsed_result,
-                params,
-            )
+            original_text = _read_original_text(llm_file_path)
             try:
                 architecture_id = _resolve_analysis_architecture_id(
-                    normalized_result,
+                    parsed_result,
                     params,
                 )
             except ArchitectureContractError as contract_error:
                 candidates, allowed_ids = _architecture_candidates(params)
-                final_prompt = normalize_rag_prompt(
-                    build_architecture_repair_prompt(
-                        normalized_result,
-                        [
-                            item
-                            for item in candidates
-                            if _coerce_int(item.get("id")) in allowed_ids
-                        ],
-                        str(contract_error),
+                if isinstance(contract_error, DataStandardParentContractError):
+                    # 模型已返回合法候选 ID，但该 ID 是数据标准父节点。该场景不依赖
+                    # GJB 关键词，按前端原始候选顺序直接兜底到数据标准叶子节点。
+                    architecture_id = _first_data_standard_leaf_id(candidates)
+                    fallback_reason = "data_standard_parent"
+                else:
+                    # 保留既有 GJB 兜底：首次结果缺失、类型错误或超出候选范围时，若正文
+                    # 存在 GJB 线索，则按候选顺序选择数据标准分支中的第一个叶子节点。
+                    architecture_id = _match_gjb_architecture_candidate(
+                        parsed_result,
+                        params,
+                        original_text,
+                        candidates,
                     )
-                )
-                repaired_result = session.ask(
-                    final_prompt,
-                    prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
-                    require_sources=True,
-                    max_attempts=1,
-                )
-                architecture_id = _validate_architecture_repair_result(
-                    repaired_result.text,
-                    params,
-                )
-            normalized_result["architectureId"] = architecture_id
-            original_text = _read_original_text(llm_file_path)
+                    fallback_reason = "gjb_reference"
+                if architecture_id is not None:
+                    logger.info(
+                        "文件分析分类已按候选顺序兜底到数据标准叶子: "
+                        "file_name=%s fallback_reason=%s architecture_id=%s",
+                        file_name,
+                        fallback_reason,
+                        architecture_id,
+                    )
+                else:
+                    final_prompt = normalize_rag_prompt(
+                        build_architecture_repair_prompt(
+                            parsed_result,
+                            [
+                                item
+                                for item in candidates
+                                if _coerce_int(item.get("id")) in allowed_ids
+                            ],
+                            str(contract_error),
+                        )
+                    )
+                    repaired_result = session.ask(
+                        final_prompt,
+                        prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                        require_sources=True,
+                        max_attempts=1,
+                    )
+                    architecture_id = _validate_architecture_repair_result(
+                        repaired_result.text,
+                        params,
+                    )
             mapped_result = map_analysis_result(
-                normalized_result,
+                parsed_result,
                 params,
                 original_text=original_text,
                 resolved_architecture_id=architecture_id,
             )
-            # legacy 映射器默认仍保留 GJB 文本启发式。正式阶段 9 链路显式传入已经完成
-            # 候选契约校验的 ID 和枚举值，禁止映射器通过正文关键词或兼容别名静默补值。
-            mapped_result["architectureId"] = architecture_id
-            for enum_field in ("country", "channel", "maturity", "format"):
-                mapped_result[enum_field] = normalized_result[enum_field]
-            if normalized_result.get("secrets"):
-                mapped_result["secrets"] = normalized_result["secrets"]
-            mapped_result["fileDataItem"]["dataFormat"] = normalized_result["format"]
         except Exception as exc:
             trace = exc.trace if isinstance(exc, RagOperationError) else (
                 session.trace if session is not None else None
@@ -1922,7 +2029,7 @@ def _execute_file_analysis_task(
             # 只有该类型能证明 Gateway 已解绑永久集合并提交补偿成功状态，此时允许 RAG
             # Session 永久删除未转交的全局文档。
             logger.exception(
-                "[DEBUG] 捕获 KnowledgeIndexDocumentReleasedError: file_name=%s execution_id=%s",
+                "永久知识库写入失败且已完成文档释放补偿: file_name=%s execution_id=%s",
                 file_name,
                 execution_id,
             )
@@ -1940,7 +2047,7 @@ def _execute_file_analysis_task(
         except KnowledgeIndexRetentionRequiredError as knowledge_exc:
             retain_document = True
             logger.exception(
-                "[DEBUG] 捕获 KnowledgeIndexRetentionRequiredError: file_name=%s execution_id=%s",
+                "永久知识库写入状态需人工恢复，保留全局文档: file_name=%s execution_id=%s",
                 file_name,
                 execution_id,
             )
@@ -1960,7 +2067,8 @@ def _execute_file_analysis_task(
             # 协调记录对账；错误删除会破坏永久知识库中可能已经提交的引用。
             retain_document = True
             logger.exception(
-                "[DEBUG] 捕获未分类异常: file_name=%s execution_id=%s error_type=%s",
+                "永久知识库写入发生未分类异常，保留全局文档: "
+                "file_name=%s execution_id=%s error_type=%s",
                 file_name,
                 execution_id,
                 type(knowledge_exc).__name__,
@@ -2087,7 +2195,10 @@ def run_file_analysis_task(
         params_list = request_payload.get("params", [])
         params = params_list[0] if params_list and isinstance(params_list[0], dict) else {}
         file_name = _as_text(params.get("fileName"))
-        original_name = _as_text(params.get("originalFileName")) or file_name
+        original_name = (
+            _as_business_original_file_name(params.get("originalFileName"))
+            or file_name
+        )
         error_message = _safe_task_error(exc, fallback="文件分析编排失败")
         logger.exception(
             "文件分析后台线程未处理异常: file_name=%s error_type=%s",

@@ -61,9 +61,9 @@ class AnythingLLMWorkspaceClient:
         payload = self._get_workspace_payload(workspace_slug, user_id=user_id)
         workspace = AnythingLLMWorkspace.from_payload(payload)
         logger.debug(
-            "获取 AnythingLLM 工作区完成: workspace_slug=%s workspace_id=%s",
-            workspace.slug,
-            workspace.id,
+            "获取 AnythingLLM 工作区完成: has_workspace_slug=%s has_workspace_id=%s",
+            bool(workspace.slug),
+            bool(workspace.id),
         )
         return workspace
 
@@ -94,11 +94,11 @@ class AnythingLLMWorkspaceClient:
             raise AnythingLLMProtocolError("AnythingLLM 明确拒绝创建工作区")
         workspace = AnythingLLMWorkspace.from_payload(payload.get("workspace") or payload)
         logger.info(
-            "AnythingLLM 工作区创建完成: workspace_name=%s workspace_slug=%s "
-            "workspace_id=%s has_user_context=%s",
-            workspace.name,
-            workspace.slug,
-            workspace.id,
+            "AnythingLLM 工作区创建完成: workspace_name_chars=%d has_workspace_slug=%s "
+            "has_workspace_id=%s has_user_context=%s",
+            len(workspace.name),
+            bool(workspace.slug),
+            bool(workspace.id),
             user_id is not None,
         )
         return workspace
@@ -118,9 +118,9 @@ class AnythingLLMWorkspaceClient:
             raise AnythingLLMProtocolError("AnythingLLM 明确拒绝更新工作区")
         workspace = AnythingLLMWorkspace.from_payload(payload.get("workspace") or payload)
         logger.info(
-            "AnythingLLM 工作区配置更新完成: workspace_slug=%s setting_keys=%s",
-            workspace.slug,
-            sorted(str(key) for key in settings.keys()),
+            "AnythingLLM 工作区配置更新完成: setting_key_count=%d has_workspace_slug=%s",
+            len(settings),
+            bool(workspace.slug),
         )
         return workspace
 
@@ -139,8 +139,8 @@ class AnythingLLMWorkspaceClient:
         path = f"workspace/{self._path_segment(workspace_slug)}"
         self._transport.delete_status(path, user_id=user_id)
         logger.info(
-            "AnythingLLM 工作区删除完成: workspace_slug=%s has_user_context=%s",
-            workspace_slug,
+            "AnythingLLM 工作区删除完成: has_workspace_slug=%s has_user_context=%s",
+            bool(workspace_slug),
             user_id is not None,
         )
 
@@ -158,9 +158,9 @@ class AnythingLLMWorkspaceClient:
         )
         normalized_documents = [AnythingLLMDocument.from_payload(item) for item in documents]
         logger.debug(
-            "获取 AnythingLLM 工作区文档完成: workspace_slug=%s document_count=%d",
-            workspace_slug,
+            "获取 AnythingLLM 工作区文档完成: document_count=%d has_user_context=%s",
             len(normalized_documents),
+            user_id is not None,
         )
         return normalized_documents
 
@@ -185,21 +185,17 @@ class AnythingLLMWorkspaceClient:
             stored_location_key = normalize_document_location_key(document.location)
             if stored_location_key == target_location_key:
                 logger.debug(
-                    "AnythingLLM 工作区文档精确匹配: workspace_slug=%s "
-                    "location=%s document_id=%s document_ref=%s "
-                    "raw_document_id=%s identity_source=%s",
-                    workspace_slug,
-                    document.location,
-                    document.id,
-                    document.document_ref,
-                    document.raw_document_id,
+                    "AnythingLLM 工作区文档精确匹配: has_document_id=%s "
+                    "has_document_ref=%s has_raw_document_id=%s identity_source=%s",
+                    bool(document.id),
+                    bool(document.document_ref),
+                    bool(document.raw_document_id),
                     document.identity_source,
                 )
                 return document
         logger.debug(
-            "AnythingLLM 工作区文档未匹配: workspace_slug=%s target_location=%s",
-            workspace_slug,
-            target_location_key,
+            "AnythingLLM 工作区中未找到目标文档: has_target_location=%s",
+            bool(target_location_key),
         )
         return None
 
@@ -226,8 +222,8 @@ class AnythingLLMWorkspaceClient:
             request_payload["deletes"] = normalized_deletes
         if not request_payload:
             logger.debug(
-                "跳过空的 AnythingLLM 嵌入变更: workspace_slug=%s",
-                workspace_slug,
+                "工作区文档变更为空，跳过 AnythingLLM 请求: has_workspace_slug=%s",
+                bool(workspace_slug),
             )
             return None
 
@@ -248,9 +244,9 @@ class AnythingLLMWorkspaceClient:
                 "AnythingLLM 更新嵌入响应的 workspace slug 与目标不一致"
             )
         logger.info(
-            "AnythingLLM 工作区文档变更已接受: workspace_slug=%s add_count=%d "
+            "AnythingLLM 工作区文档变更已接受: has_workspace_slug=%s add_count=%d "
             "delete_count=%d has_user_context=%s",
-            workspace.slug,
+            bool(workspace.slug),
             len(normalized_adds),
             len(normalized_deletes),
             user_id is not None,
@@ -290,10 +286,10 @@ class AnythingLLMWorkspaceClient:
                 "AnythingLLM 更新 Pin 响应缺少可识别的成功消息"
             )
         logger.info(
-            "AnythingLLM 文档 Pin 状态更新完成: workspace_slug=%s location=%s "
+            "AnythingLLM 文档固定状态更新完成: has_workspace_slug=%s has_document_location=%s "
             "pinned=%s has_user_context=%s",
-            workspace_slug,
-            normalized_location,
+            bool(workspace_slug),
+            bool(normalized_location),
             pinned,
             user_id is not None,
         )
@@ -321,9 +317,8 @@ class AnythingLLMWorkspaceClient:
         results = require_sequence(payload.get("results", []), context="results 字段")
         sources = [AnythingLLMSource.from_payload(item) for item in results]
         logger.debug(
-            "AnythingLLM 向量检索完成: workspace_slug=%s query_chars=%d "
+            "AnythingLLM 向量检索完成: query_chars=%d "
             "top_n=%s result_count=%d",
-            workspace_slug,
             len(normalized_query),
             top_n,
             len(sources),

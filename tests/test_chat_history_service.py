@@ -1,4 +1,4 @@
-"""Tests for local authoritative file-chat history."""
+"""文件对话本地权威历史的测试。"""
 
 from __future__ import annotations
 

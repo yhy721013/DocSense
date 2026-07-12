@@ -1,25 +1,50 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from app.services.core.database import ChatDatabaseService, DatabaseService
+from app.services.chat.domain.chat_id import chat_id_public_value
+from app.services.chat.persistence.store import ChatPersistenceStore
+from app.services.core.database import DatabaseService
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_chat_debug_bootstrap(
     *,
-    chat_db: ChatDatabaseService,
+    chat_store: ChatPersistenceStore,
     kb_service: DatabaseService,
 ) -> dict[str, Any]:
+    logger.info("开始读取文件对话调试初始化数据")
     try:
-        sessions = [
-            {
-                "chatId": item["chat_id"],
-                "fileNames": item["file_original_names"],
-                "createdAt": item["created_at"],
-                "updatedAt": item["updated_at"],
-            }
-            for item in chat_db.list_chats()
-        ]
+        sessions = []
+        for item in chat_store.sessions.list_all():
+            if item.status == "deleted":
+                continue
+            try:
+                public_chat_id = chat_id_public_value(item.chat_id)
+            except ValueError:
+                # 调试页同样属于前端调用方，不能把旧格式字符串 chatId 回显给页面。
+                # 不兼容历史会话的前提下，跳过该条存量数据而不是让整页初始化失败。
+                logger.warning(
+                    "调试页跳过非规范 chatId 的存量会话: internal_chat_id=%s",
+                    item.chat_id,
+                )
+                continue
+            sessions.append(
+                {
+                    "chatId": public_chat_id,
+                    "fileNames": [
+                        document.file_name
+                        for document in chat_store.document_bindings.list_current_by_chat(
+                            item.chat_id
+                        )
+                    ],
+                    "createdAt": item.created_at,
+                    "updatedAt": item.updated_at,
+                }
+            )
         available_files = [
             {
                 "fileName": item["file_name"],
@@ -28,12 +53,18 @@ def load_chat_debug_bootstrap(
             for item in kb_service.list_document_records()
         ]
     except Exception as exc:
+        logger.exception("读取文件对话调试初始化数据失败")
         return {
             "ok": False,
             "message": f"读取失败: {exc}",
             "data": {"sessions": [], "availableFiles": []},
         }
 
+    logger.info(
+        "文件对话调试初始化数据读取完成: session_count=%d available_file_count=%d",
+        len(sessions),
+        len(available_files),
+    )
     return {
         "ok": True,
         "message": "读取成功",

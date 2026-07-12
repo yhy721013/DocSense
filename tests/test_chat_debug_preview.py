@@ -1,164 +1,108 @@
-import json
+"""本地权威文件对话调试初始化数据的离线测试。"""
+
+from __future__ import annotations
+
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.services.core.database import ChatDatabaseService, DatabaseService
-
-
-class ChatDebugDatabaseQueryTests(unittest.TestCase):
-    def setUp(self):
-        self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.tmp = self._tempdir.__enter__()
-        self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
-        self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
-
-    def tearDown(self):
-        self._tempdir.__exit__(None, None, None)
-
-    def test_list_document_records_returns_rows_sorted_by_file_name(self):
-        self.kb_service.save_document_record(
-            "zulu.pdf",
-            9,
-            "doc-zulu",
-            "custom-documents/doc-zulu.json",
-        )
-        self.kb_service.save_document_record(
-            "alpha.pdf",
-            3,
-            "doc-alpha",
-            "custom-documents/doc-alpha.json",
-        )
-
-        rows = self.kb_service.list_document_records()
-
-        self.assertEqual(
-            [row["file_name"] for row in rows],
-            ["alpha.pdf", "zulu.pdf"],
-        )
-        self.assertEqual(rows[0]["architecture_id"], 3)
-        self.assertEqual(rows[0]["anything_doc_id"], "doc-alpha")
-
-    def test_list_chats_returns_latest_updated_first_with_decoded_file_names(self):
-        self.chat_db.create_chat("chat-older", ["测试A.pdf"], "ws-a", "th-a")
-        self.chat_db.create_chat("chat-newer", ["测试B.pdf"], "ws-b", "th-b")
-        self.chat_db.append_file_original_names("chat-older", ["测试C.pdf"])
-
-        rows = self.chat_db.list_chats()
-
-        self.assertEqual(rows[0]["chat_id"], "chat-older")
-        self.assertEqual(rows[0]["file_original_names"], [["测试A.pdf"], ["测试C.pdf"]])
-        self.assertEqual(rows[1]["chat_id"], "chat-newer")
-
-    def test_create_and_append_chat_persist_turn_timestamps(self):
-        self.chat_db.create_chat("chat-ts", ["测试A.pdf"], "ws-a", "th-a")
-        created = self.chat_db.get_chat("chat-ts")
-        self.assertEqual(len(created["turn_timestamps"]), 1)
-        self.assertIsInstance(created["turn_timestamps"][0], int)
-
-        self.chat_db.append_file_original_names("chat-ts", ["测试B.pdf"])
-        updated = self.chat_db.get_chat("chat-ts")
-        self.assertEqual(len(updated["turn_timestamps"]), 2)
-        self.assertGreaterEqual(updated["turn_timestamps"][1], updated["turn_timestamps"][0])
+from app.services.chat import ChatStore
+from app.services.core.database import DatabaseService
+from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
 
 
 class ChatDebugPreviewTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
         self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
-        self.chat_db = ChatDatabaseService(db_path=f"{self.tmp}/chat.sqlite3")
+        self.chat_store = ChatStore(db_path=f"{self.tmp}/chat.sqlite3")
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
-    def test_load_chat_debug_bootstrap_returns_sessions_and_available_files(self):
-        from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
-
-        self.chat_db.create_chat("conv-001", ["测试文件.pdf"], "ws-1", "th-1")
+    def test_bootstrap_reads_new_sessions_and_business_file_names(self) -> None:
+        self.chat_store.sessions.create_or_get(
+            chat_id="10001",
+            workspace_ref="ws-1",
+            thread_ref="thread-1",
+        )
+        self.chat_store.document_bindings.add(
+            chat_id="10001",
+            file_name="hash-alpha.pdf",
+            original_name="测试文件.pdf",
+            document_ref="document:alpha",
+            external_location="custom-documents/alpha.json",
+        )
         self.kb_service.save_document_record(
-            "alpha.pdf",
+            "hash-alpha.pdf",
             12,
-            "doc-alpha",
-            "custom-documents/doc-alpha.json",
+            "alpha",
+            "custom-documents/alpha.json",
+            original_name="测试文件.pdf",
+            ingested_file_name="hash-alpha.pdf",
         )
 
-        result = load_chat_debug_bootstrap(chat_db=self.chat_db, kb_service=self.kb_service)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["message"], "读取成功")
-        self.assertEqual(result["data"]["sessions"][0]["chatId"], "conv-001")
-        self.assertEqual(result["data"]["sessions"][0]["fileNames"], [["测试文件.pdf"]])
-        self.assertEqual(result["data"]["availableFiles"][0]["fileName"], "alpha.pdf")
-        self.assertEqual(result["data"]["availableFiles"][0]["architectureId"], 12)
-
-    def test_load_chat_debug_bootstrap_returns_empty_lists_for_empty_databases(self):
-        from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
-
-        result = load_chat_debug_bootstrap(chat_db=self.chat_db, kb_service=self.kb_service)
-
-        self.assertEqual(
-            result,
-            {
-                "ok": True,
-                "message": "读取成功",
-                "data": {"sessions": [], "availableFiles": []},
-            },
-        )
-
-    def test_load_chat_debug_bootstrap_returns_error_state_when_query_fails(self):
-        from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
-
-        with patch.object(self.chat_db, "list_chats", side_effect=sqlite3.Error("boom")):
-            result = load_chat_debug_bootstrap(chat_db=self.chat_db, kb_service=self.kb_service)
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["data"], {"sessions": [], "availableFiles": []})
-        self.assertIn("读取失败", result["message"])
-
-    def test_load_chat_debug_bootstrap_migrates_legacy_chats_schema(self):
-        """Stage 3 migrates old chats tables that lack turn_timestamps."""
-        from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
-
-        legacy_path = f"{self.tmp}/legacy-chat.sqlite3"
-        with sqlite3.connect(legacy_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE chats (
-                    chat_id TEXT PRIMARY KEY,
-                    file_original_names TEXT NOT NULL,
-                    workspace_slug TEXT NOT NULL,
-                    thread_slug TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                INSERT INTO chats (
-                    chat_id, file_original_names, workspace_slug,
-                    thread_slug, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "legacy-chat",
-                    json.dumps([["旧文件.pdf"]], ensure_ascii=False),
-                    "legacy-ws",
-                    "legacy-thread",
-                    "2026-07-08T00:00:00+00:00",
-                    "2026-07-08T00:00:00+00:00",
-                ),
-            )
-
-        legacy_chat_db = ChatDatabaseService(db_path=legacy_path)
         result = load_chat_debug_bootstrap(
-            chat_db=legacy_chat_db,
+            chat_store=self.chat_store,
             kb_service=self.kb_service,
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["data"]["sessions"][0]["chatId"], "legacy-chat")
-        self.assertEqual(1, len(result["data"]["sessions"][0]["fileNames"]))
+        self.assertEqual(10001, result["data"]["sessions"][0]["chatId"])
+        self.assertEqual(
+            ["hash-alpha.pdf"],
+            result["data"]["sessions"][0]["fileNames"],
+        )
+        self.assertEqual(
+            "hash-alpha.pdf",
+            result["data"]["availableFiles"][0]["fileName"],
+        )
+
+    def test_deleted_session_is_hidden_from_debug_list(self) -> None:
+        self.chat_store.sessions.create_or_get(chat_id="10002")
+        self.chat_store.sessions.set_status(chat_id="10002", status="deleting")
+        self.chat_store.sessions.set_status(chat_id="10002", status="deleted")
+
+        result = load_chat_debug_bootstrap(
+            chat_store=self.chat_store,
+            kb_service=self.kb_service,
+        )
+
+        self.assertEqual([], result["data"]["sessions"])
+
+    def test_legacy_string_chat_id_is_not_returned_to_debug_page(self) -> None:
+        """不兼容历史字符串会话，调试接口也不得泄露旧类型。"""
+
+        self.chat_store.sessions.create_or_get(chat_id="legacy-chat")
+
+        result = load_chat_debug_bootstrap(
+            chat_store=self.chat_store,
+            kb_service=self.kb_service,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([], result["data"]["sessions"])
+
+    def test_query_failure_returns_stable_empty_error_payload(self) -> None:
+        with patch.object(
+            self.chat_store.sessions,
+            "list_all",
+            side_effect=sqlite3.Error("boom"),
+        ):
+            result = load_chat_debug_bootstrap(
+                chat_store=self.chat_store,
+                kb_service=self.kb_service,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            {"sessions": [], "availableFiles": []},
+            result["data"],
+        )
+        self.assertIn("读取失败", result["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()
