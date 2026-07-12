@@ -161,23 +161,117 @@ def _contains_gjb_standard_reference(*values: Any) -> bool:
     )
 
 
+def _is_data_standard_candidate(item: Dict[str, Any]) -> bool:
+    """判断候选节点是否属于数据标准分支。
+
+    现有接口以节点 ``name`` / ``pathName`` 中是否包含“数据标准”标识该分支。这里延续
+    既有口径，并在下游结合 ``parentId`` 扩展到名称中未重复写入“数据标准”的子孙节点。
+    """
+    names = (_as_text(item.get("name")), _as_text(item.get("pathName")))
+    return any("数据标准" in name for name in names)
+
+
+def _architecture_candidate_topology(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> tuple[list[tuple[int, Dict[str, Any]]], set[int]]:
+    """构建请求候选的有限树拓扑，并保留前端传入顺序。
+
+    GJB 兜底的业务规则要求“按候选顺序”选择数据标准叶子，因此不能把节点先放入无序集合。
+    叶子关系仅根据本次请求中明确给出的 ``parentId`` 识别：若调用方没有提供某个子节点，
+    服务端不会猜测完整树结构，也不会因此提前拒绝该请求。
+    """
+    nodes: list[tuple[int, Dict[str, Any]]] = []
+    candidate_ids: set[int] = set()
+    for item in architecture_list:
+        if not isinstance(item, dict):
+            continue
+        item_id = _coerce_int(item.get("id"))
+        if item_id is None or item_id < 1:
+            continue
+        nodes.append((item_id, item))
+        candidate_ids.add(item_id)
+
+    parent_ids = {
+        parent_id
+        for _item_id, item in nodes
+        if (parent_id := _coerce_int(item.get("parentId"))) in candidate_ids
+    }
+    return nodes, parent_ids
+
+
+def _data_standard_candidate_ids(
+        nodes: Iterable[tuple[int, Dict[str, Any]]],
+) -> set[int]:
+    """返回数据标准节点及其在本次候选树中可追溯到的子孙节点 ID。"""
+    ordered_nodes = list(nodes)
+    standard_ids = {
+        item_id
+        for item_id, item in ordered_nodes
+        if _is_data_standard_candidate(item)
+    }
+
+    # 子节点可能只填写自身名称、未重复填写“数据标准”。通过 parentId 向下扩展可避免把
+    # 这类合法叶子遗漏；循环仅在集合新增节点时继续，能安全处理异常环状数据。
+    has_new_node = True
+    while has_new_node:
+        has_new_node = False
+        for item_id, item in ordered_nodes:
+            parent_id = _coerce_int(item.get("parentId"))
+            if item_id not in standard_ids and parent_id in standard_ids:
+                standard_ids.add(item_id)
+                has_new_node = True
+    return standard_ids
+
+
+def _ordered_data_standard_leaf_ids(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> list[int]:
+    """按请求顺序返回数据标准分支中的叶子节点 ID。
+
+    普通领域仍允许返回父节点；此函数只服务于数据标准的特殊规则。若多个数据标准叶子
+    均可选或无法区分，调用方按列表顺序取第一个，而不在服务端引入证据唯一性判断。
+    """
+    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
+    standard_ids = _data_standard_candidate_ids(nodes)
+    leaf_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for item_id, _item in nodes:
+        if (
+                item_id in standard_ids
+                and item_id not in parent_ids
+                and item_id not in seen_ids
+        ):
+            leaf_ids.append(item_id)
+            seen_ids.add(item_id)
+    return leaf_ids
+
+
+def _first_data_standard_leaf_id(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int | None:
+    """返回按请求顺序可命中的第一个数据标准叶子节点。"""
+    leaf_ids = _ordered_data_standard_leaf_ids(architecture_list)
+    return leaf_ids[0] if leaf_ids else None
+
+
+def _is_data_standard_parent_id(
+        architecture_id: int,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> bool:
+    """判断指定候选是否为本次请求中数据标准分支的父节点。"""
+    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
+    standard_ids = _data_standard_candidate_ids(nodes)
+    return architecture_id in standard_ids and architecture_id in parent_ids
+
+
 def _match_data_standard_architecture_id(
         architecture_list: Iterable[Dict[str, Any]],
         *context_values: Any,
 ) -> int | None:
+    """命中 GJB 线索后，按候选顺序选择数据标准分支的第一个叶子节点。"""
     if not _contains_gjb_standard_reference(*context_values):
         return None
-
-    for item in architecture_list:
-        if not isinstance(item, dict):
-            continue
-        names = [_as_text(item.get("name")), _as_text(item.get("pathName"))]
-        if any("数据标准" in name for name in names):
-            try:
-                return int(item.get("id"))
-            except (TypeError, ValueError):
-                return None
-    return None
+    return _first_data_standard_leaf_id(architecture_list)
 
 
 def _architecture_id_set(items: Iterable[Dict[str, Any]]) -> set[int]:
@@ -993,6 +1087,10 @@ class ArchitectureContractError(AnalysisContractError):
     """architectureId 缺失、类型错误或超出请求候选范围。"""
 
 
+class DataStandardParentContractError(ArchitectureContractError):
+    """数据标准分支的父节点不能作为最终成功分类。"""
+
+
 def _reject_nonstandard_json_constant(value: str) -> None:
     """拒绝 Python JSON 解码器默认接受的 NaN 与 Infinity 扩展值。"""
     raise ValueError(f"非法 JSON 常量: {value}")
@@ -1058,22 +1156,41 @@ def _architecture_candidates(
     return items, ids
 
 
+def _validate_data_standard_leaf_requirement(
+        architecture_id: int,
+        candidates: Iterable[Dict[str, Any]],
+) -> None:
+    """阻止数据标准父节点进入成功回调与永久知识库。
+
+    普通分类父节点仍是合法业务结果，不能复用旧版“所有候选必须叶子”的全局校验。只有
+    数据标准分支中、且在本次候选树内明确拥有子节点的父节点会触发此特殊规则。
+    """
+    if _is_data_standard_parent_id(architecture_id, candidates):
+        raise DataStandardParentContractError(
+            "architectureId 是数据标准父节点，必须兜底到其下叶子节点"
+        )
+
+
 def _resolve_analysis_architecture_id(
         parsed_result: Dict[str, Any],
         request_params: Dict[str, Any],
 ) -> int:
     """按单候选直返、多候选显式 ID 的规则解析 architectureId。"""
-    _items, allowed_ids = _architecture_candidates(request_params)
+    candidates, allowed_ids = _architecture_candidates(request_params)
     if len(allowed_ids) == 1:
-        return next(iter(allowed_ids))
-    if "architectureId" not in parsed_result or parsed_result.get("architectureId") in (None, ""):
-        raise ArchitectureContractError("architectureId 缺失")
-    raw_id = parsed_result.get("architectureId")
-    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
-        raise ArchitectureContractError("architectureId 必须是数字 ID")
-    if raw_id not in allowed_ids:
-        raise ArchitectureContractError("architectureId 不属于请求 architectureList 候选")
-    return raw_id
+        architecture_id = next(iter(allowed_ids))
+    else:
+        if "architectureId" not in parsed_result or parsed_result.get("architectureId") in (None, ""):
+            raise ArchitectureContractError("architectureId 缺失")
+        raw_id = parsed_result.get("architectureId")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+            raise ArchitectureContractError("architectureId 必须是数字 ID")
+        if raw_id not in allowed_ids:
+            raise ArchitectureContractError("architectureId 不属于请求 architectureList 候选")
+        architecture_id = raw_id
+
+    _validate_data_standard_leaf_requirement(architecture_id, candidates)
+    return architecture_id
 
 
 def _match_gjb_architecture_candidate(
@@ -1082,7 +1199,7 @@ def _match_gjb_architecture_candidate(
         original_text: str,
         candidates: Iterable[Dict[str, Any]],
 ) -> int | None:
-    """首次分类不合规时，按正文和摘要线索匹配请求中的数据标准候选。"""
+    """首次分类不合规时，按 GJB 线索匹配请求中的数据标准叶子节点。"""
     file_item = parsed_result.get("fileDataItem")
     if not isinstance(file_item, dict):
         file_item = {}
@@ -1604,17 +1721,27 @@ def _execute_file_analysis_task(
                 )
             except ArchitectureContractError as contract_error:
                 candidates, allowed_ids = _architecture_candidates(params)
-                architecture_id = _match_gjb_architecture_candidate(
-                    parsed_result,
-                    params,
-                    original_text,
-                    candidates,
-                )
+                if isinstance(contract_error, DataStandardParentContractError):
+                    # 模型已返回合法候选 ID，但该 ID 是数据标准父节点。该场景不依赖
+                    # GJB 关键词，按前端原始候选顺序直接兜底到数据标准叶子节点。
+                    architecture_id = _first_data_standard_leaf_id(candidates)
+                    fallback_reason = "data_standard_parent"
+                else:
+                    # 保留既有 GJB 兜底：首次结果缺失、类型错误或超出候选范围时，若正文
+                    # 存在 GJB 线索，则按候选顺序选择数据标准分支中的第一个叶子节点。
+                    architecture_id = _match_gjb_architecture_candidate(
+                        parsed_result,
+                        params,
+                        original_text,
+                        candidates,
+                    )
+                    fallback_reason = "gjb_reference"
                 if architecture_id is not None:
                     logger.info(
-                        "模型首次返回的分类编号不在请求范围内，已按 GJB 正文线索匹配候选分类: "
-                        "file_name=%s architecture_id=%s",
+                        "文件分析分类已按候选顺序兜底到数据标准叶子: "
+                        "file_name=%s fallback_reason=%s architecture_id=%s",
                         file_name,
+                        fallback_reason,
                         architecture_id,
                     )
                 else:
