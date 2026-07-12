@@ -119,6 +119,83 @@ class LLMTaskServiceTests(unittest.TestCase):
 
             self.assertNotEqual(first["execution_id"], second["execution_id"])
 
+    def test_weaponry_task_persists_explicit_document_snapshot(self):
+        """显式选文快照必须与对外原始请求分离，并按执行身份读取。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            payload = {
+                "businessType": "weaponry",
+                "params": {
+                    "architectureId": 1001,
+                    "filePathList": ["https://host/download/cross-category.pdf"],
+                },
+            }
+            task = service.create_weaponry_task(
+                1001,
+                payload,
+                selected_documents=(
+                    {
+                        "file_name": "cross-category.pdf",
+                        "original_name": "跨分类来源.pdf",
+                        "source_architecture_id": 2002,
+                        "doc_path": "custom-documents/cross-category.json",
+                        "anything_doc_id": "doc-2002",
+                    },
+                ),
+            )
+
+            snapshots = service.get_weaponry_task_document_snapshots(
+                architecture_id=1001,
+                execution_id=task["execution_id"],
+            )
+
+        self.assertEqual(payload["params"]["filePathList"], ["https://host/download/cross-category.pdf"])
+        self.assertEqual(snapshots[0]["file_name"], "cross-category.pdf")
+        self.assertEqual(snapshots[0]["source_architecture_id"], 2002)
+        self.assertEqual(snapshots[0]["doc_path"], "custom-documents/cross-category.json")
+
+    def test_weaponry_task_reissue_replaces_old_execution_document_snapshot(self):
+        """同一类别重跑不能让旧 execution_id 读取到新任务的选文范围。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = service.create_weaponry_task(
+                1001,
+                {"businessType": "weaponry"},
+                selected_documents=(
+                    {
+                        "file_name": "first.pdf",
+                        "original_name": "first.pdf",
+                        "source_architecture_id": 1001,
+                        "doc_path": "custom-documents/first.json",
+                    },
+                ),
+            )
+            second = service.create_weaponry_task(
+                1001,
+                {"businessType": "weaponry"},
+                selected_documents=(
+                    {
+                        "file_name": "second.pdf",
+                        "original_name": "second.pdf",
+                        "source_architecture_id": 2002,
+                        "doc_path": "custom-documents/second.json",
+                    },
+                ),
+            )
+
+            old_snapshots = service.get_weaponry_task_document_snapshots(
+                architecture_id=1001,
+                execution_id=first["execution_id"],
+            )
+            current_snapshots = service.get_weaponry_task_document_snapshots(
+                architecture_id=1001,
+                execution_id=second["execution_id"],
+            )
+
+        self.assertNotEqual(first["execution_id"], second["execution_id"])
+        self.assertEqual(old_snapshots, [])
+        self.assertEqual([item["file_name"] for item in current_snapshots], ["second.pdf"])
+
     def test_legacy_task_database_is_migrated_with_audit_version_marker(self):
         """旧任务库升级后应为历史任务和交互补充可区分的执行与审计版本。"""
         with workspace_tempdir() as tmp:

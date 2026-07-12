@@ -40,7 +40,13 @@ from app.services.llm_service.analysis_service import (
     run_file_analysis_task,
 )
 from app.services.llm_service.report_service import run_report_task
-from app.services.llm_service.weaponry_service import run_weaponry_task
+from app.services.llm_service.weaponry_service import (
+    WeaponrySelectedDocumentAmbiguityError,
+    WeaponrySelectedDocumentError,
+    WeaponrySelectedDocumentNotFoundError,
+    resolve_weaponry_selected_documents,
+    run_weaponry_task,
+)
 from app.services.utils.anythingllm_client import AnythingLLMClient
 
 
@@ -502,26 +508,35 @@ def llm_weaponry():
         )
         return jsonify({"error": str(exc)}), 400
 
-    for file_name in selected_file_names:
-        document_record = kb_service.get_document_record(
-            file_name,
-            architecture_id=int(architecture_id),
-        )
-        if not document_record:
-            logger.warning(
-                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s fileName=%s",
-                architecture_id,
-                file_name,
+    # 非空 filePathList 可引用任意已入库分类的文档。路由受理时一次性解析为不可变
+    # 快照，后续后台线程和未来可靠任务队列都不再按当前 architectureId 重新查找，
+    # 避免同名文件或文档重分类导致任务检索范围漂移。
+    selected_documents = ()
+    if selected_file_names:
+        try:
+            selected_documents = resolve_weaponry_selected_documents(
+                kb_service,
+                selected_file_names,
             )
-            return jsonify({"error": f"文件 {file_name} 尚未解析"}), 404
-        if str(document_record.get("architecture_id")) != str(architecture_id):
+        except WeaponrySelectedDocumentNotFoundError as exc:
             logger.warning(
-                "武器装备提取请求被拒绝: 选中文件不属于当前类别 architectureId=%s fileName=%s actualArchitectureId=%s",
+                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s error=%s",
                 architecture_id,
-                file_name,
-                document_record.get("architecture_id"),
+                str(exc),
             )
-            return jsonify({"error": f"文件 {file_name} 不属于当前类别"}), 400
+            return jsonify({"error": str(exc)}), 404
+        except (
+            WeaponrySelectedDocumentAmbiguityError,
+            WeaponrySelectedDocumentError,
+        ) as exc:
+            logger.warning(
+                "武器装备提取请求被拒绝: 选中文件无法唯一解析 "
+                "architectureId=%s error_type=%s error=%s",
+                architecture_id,
+                type(exc).__name__,
+                str(exc),
+            )
+            return jsonify({"error": str(exc)}), 400
 
     field_list = params.get("weaponryTemplateFieldList")
     if not isinstance(field_list, list) or not field_list:
@@ -572,6 +587,10 @@ def llm_weaponry():
     task = task_service.create_weaponry_task(
         architecture_id=architecture_id,
         request_payload=payload,
+        selected_documents=tuple(
+            document.to_task_snapshot()
+            for document in selected_documents
+        ),
     )
     progress_hub.publish(
         "weaponry",
@@ -586,7 +605,10 @@ def llm_weaponry():
             "kb_service": kb_service,
             "progress_hub": progress_hub,
             "request_payload": payload,
-            "selected_file_names": selected_file_names,
+            # 仅作为进程内工作线程的不可变输入；可靠队列恢复时会按 execution_id 从
+            # 任务库读取同一份内部快照。该参数不会进入对外 HTTP 契约。
+            "selected_documents": selected_documents,
+            "execution_id": task["execution_id"],
             "callback_url": llm_config.callback_url or "",
             "callback_timeout": llm_config.callback_timeout,
         },

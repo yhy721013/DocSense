@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 
 from app.services.llm_service import weaponry_service as weaponry_service_module
 from app.services.llm_service.weaponry_service import (
+    WeaponrySelectedDocument,
+    WeaponrySelectedDocumentAmbiguityError,
+    WeaponrySelectedDocumentNotFoundError,
     WeaponryRetrievalContext,
     _count_query_fields,
     _strip_document_metadata,
@@ -27,6 +30,7 @@ from app.services.llm_service.weaponry_service import (
     _resolve_original_source_name,
     _target_document_records,
     _vector_search_with_top_n,
+    resolve_weaponry_selected_documents,
     run_weaponry_task,
 )
 
@@ -218,7 +222,7 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         self.assertTrue(_is_target_source("JFS_3526-JFS_-16-Aug-2023.pdf", context))
         self.assertTrue(_is_target_source("", context))
 
-    def test_target_document_records_preserve_selected_file_order(self):
+    def test_target_document_records_returns_all_documents_in_current_category(self):
         class FakeKB:
             def list_document_records(self):
                 return [
@@ -227,11 +231,87 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
                     {"file_name": "other.pdf", "architecture_id": 456},
                 ]
 
-        records = _target_document_records(FakeKB(), 123, ["b.pdf", "a.pdf"])
+        records = _target_document_records(FakeKB(), 123)
 
-        self.assertEqual([record["file_name"] for record in records], ["b.pdf", "a.pdf"])
-        with self.assertRaisesRegex(ValueError, "不存在或不属于当前类别"):
-            _target_document_records(FakeKB(), 123, ["other.pdf"])
+        self.assertEqual([record["file_name"] for record in records], ["a.pdf", "b.pdf"])
+
+    def test_resolve_selected_documents_accepts_cross_category_and_preserves_order(self):
+        class FakeKB:
+            def list_document_records(self):
+                return [
+                    {
+                        "file_name": "current.pdf",
+                        "original_name": "当前类别资料.pdf",
+                        "architecture_id": 123,
+                        "doc_path": "custom-documents/current.json",
+                    },
+                    {
+                        "file_name": "other.pdf",
+                        "original_name": "其他类别资料.pdf",
+                        "architecture_id": 456,
+                        "doc_path": "custom-documents/other.json",
+                    },
+                ]
+
+        documents = resolve_weaponry_selected_documents(
+            FakeKB(),
+            ["other.pdf", "current.pdf"],
+        )
+
+        self.assertEqual(
+            [document.file_name for document in documents],
+            ["other.pdf", "current.pdf"],
+        )
+        self.assertEqual(
+            [document.source_architecture_id for document in documents],
+            [456, 123],
+        )
+
+    def test_resolve_selected_documents_rejects_ambiguous_same_file_name(self):
+        class FakeKB:
+            def list_document_records(self):
+                return [
+                    {
+                        "file_name": "same.pdf",
+                        "architecture_id": 123,
+                        "doc_path": "custom-documents/same-123.json",
+                    },
+                    {
+                        "file_name": "same.pdf",
+                        "architecture_id": 456,
+                        "doc_path": "custom-documents/same-456.json",
+                    },
+                ]
+
+        with self.assertRaisesRegex(WeaponrySelectedDocumentAmbiguityError, "无法唯一"):
+            resolve_weaponry_selected_documents(FakeKB(), ["same.pdf"])
+
+    def test_resolve_selected_documents_rejects_same_external_document_path(self):
+        class FakeKB:
+            def list_document_records(self):
+                return [
+                    {
+                        "file_name": "first.pdf",
+                        "architecture_id": 123,
+                        "doc_path": "custom-documents/shared.json",
+                    },
+                    {
+                        "file_name": "second.pdf",
+                        "architecture_id": 456,
+                        "doc_path": "custom-documents/shared.json",
+                    },
+                ]
+
+        with self.assertRaisesRegex(WeaponrySelectedDocumentAmbiguityError, "同一知识库文档位置"):
+            resolve_weaponry_selected_documents(FakeKB(), ["first.pdf", "second.pdf"])
+
+    def test_resolve_selected_documents_rejects_unknown_file(self):
+        class FakeKB:
+            def list_document_records(self):
+                return []
+
+        with self.assertRaisesRegex(WeaponrySelectedDocumentNotFoundError, "尚未解析"):
+            resolve_weaponry_selected_documents(FakeKB(), ["missing.pdf"])
 
     def test_target_document_records_reject_invalid_database_contract(self):
         """数据库实现若错误返回 None，应产生可诊断的契约异常而非迭代器异常。"""
@@ -240,7 +320,7 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
                 return None
 
         with self.assertRaisesRegex(TypeError, "文档记录查询返回契约错误"):
-            _target_document_records(InvalidKB(), 123, ["a.pdf"])
+            _target_document_records(InvalidKB(), 123)
 
     def test_resolve_original_source_name_for_mode2_callback(self):
         context = WeaponryRetrievalContext(
@@ -818,23 +898,13 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
         }
 
         kb_service = MagicMock()
-        kb_service.get_workspace_slug.return_value = "architecture-ws"
-        kb_service.list_document_records.return_value = [
-            {
-                "file_name": "selected.pdf",
-                "original_name": "选中文件.pdf",
-                "architecture_id": 10502,
-                "anything_doc_id": "selected-doc-id",
-                "doc_path": "custom-documents/selected.json",
-            },
-            {
-                "file_name": "unselected.pdf",
-                "original_name": "未选文件.pdf",
-                "architecture_id": 10502,
-                "anything_doc_id": "unselected-doc-id",
-                "doc_path": "custom-documents/unselected.json",
-            },
-        ]
+        selected_document = WeaponrySelectedDocument(
+            file_name="selected.pdf",
+            original_name="跨分类选中文件.pdf",
+            source_architecture_id=99999,
+            doc_path="custom-documents/selected.json",
+            anything_doc_id="selected-doc-id",
+        )
 
         run_weaponry_task(
             task_service=MagicMock(),
@@ -844,6 +914,7 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
                 "businessType": "weaponry",
                 "params": {
                     "architectureId": 10502,
+                    "filePathList": ["selected.pdf"],
                     "weaponryTemplateFieldList": [
                         {"fieldName": "舰级名称", "fieldType": "INPUT"}
                     ],
@@ -851,7 +922,8 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
             },
             callback_url="",
             callback_timeout=5.0,
-            selected_file_names=["selected.pdf"],
+            selected_documents=(selected_document,),
+            execution_id="execution-selected",
         )
 
         client.create_rag_workspace.assert_called_once()
@@ -866,30 +938,32 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
             10502,
             "selected-ws",
             user_id=1,
-            selected_file_names=["selected.pdf"],
+            selected_documents=(selected_document,),
         )
+        kb_service.get_workspace_slug.assert_not_called()
+        kb_service.list_document_records.assert_not_called()
         self.assertEqual(mock_query_input.call_args.args[1], "selected-ws")
         client.delete_workspace.assert_called_once_with("selected-ws", user_id=1)
 
     @patch("app.services.llm_service.weaponry_service.AnythingLLMClient")
     def test_selected_workspace_is_deleted_when_document_binding_fails(self, MockClient):
+        """队列恢复指定范围任务时，必须按 execution_id 读取受理时的快照。"""
         client = MockClient.return_value
         client.create_rag_workspace.return_value = {"slug": "selected-ws"}
         client.update_embeddings_batch.return_value = False
         client.delete_workspace.return_value = True
 
         kb_service = MagicMock()
-        kb_service.get_workspace_slug.return_value = "architecture-ws"
-        kb_service.list_document_records.return_value = [
+        task_service = MagicMock()
+        task_service.get_weaponry_task_document_snapshots.return_value = [
             {
                 "file_name": "selected.pdf",
-                "original_name": "选中文件.pdf",
-                "architecture_id": 10502,
-                "anything_doc_id": "selected-doc-id",
+                "original_name": "跨分类选中文件.pdf",
+                "source_architecture_id": 99999,
                 "doc_path": "custom-documents/selected.json",
+                "anything_doc_id": "selected-doc-id",
             }
         ]
-        task_service = MagicMock()
 
         run_weaponry_task(
             task_service=task_service,
@@ -899,6 +973,7 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
                 "businessType": "weaponry",
                 "params": {
                     "architectureId": 10502,
+                    "filePathList": ["selected.pdf"],
                     "weaponryTemplateFieldList": [
                         {"fieldName": "舰级名称", "fieldType": "INPUT"}
                     ],
@@ -906,9 +981,14 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
             },
             callback_url="",
             callback_timeout=5.0,
-            selected_file_names=["selected.pdf"],
+            execution_id="execution-selected",
         )
 
+        task_service.get_weaponry_task_document_snapshots.assert_called_once_with(
+            architecture_id=10502,
+            execution_id="execution-selected",
+        )
+        task_service.get_task.assert_not_called()
         task_service.mark_business_result.assert_called_once()
         self.assertEqual(task_service.mark_business_result.call_args.kwargs["status"], "3")
         client.create_thread.assert_not_called()

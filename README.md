@@ -191,9 +191,9 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
-   - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时只解析列表选中的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并严格校验文件已解析且属于当前 `architectureId`。
-   - 指定文件范围时会创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束时会在 `finally` 中尝试删除，失败只记录 warning，可能残留临时 workspace；原类别 workspace 不做选中文档增删。
-   - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
+   - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时可选择任意已进入知识库类别的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并要求每个文件名唯一对应一条本地文档记录。未解析文件返回 `404`；同名跨类别或多个选中文件对应同一外部文档位置时返回 `400`，不会随机选择文档。
+   - 指定文件范围时会在受理阶段冻结内部文档快照，并创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束时会在 `finally` 中尝试删除，失败只记录 warning，可能残留临时 workspace；任何来源类别 workspace 均不做选中文档增删。此模式不依赖目标 `architectureId` 的永久 workspace。
+   - `filePathList` 缺省或为空时，仍通过 `architectureId` 从知识库映射中定位永久 workspace，并解析该类别全部文件。
    - 字段抽取默认采用“目标证据 + 术语规则”分池检索：普通 `INPUT` 字段的目标证据默认 `topN=8`，`TABLE` 字段默认 `topN=16`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取。只有成功解析出有效行时，回调才扩展为多行二维 `tableFieldList`；否则保留原始列模板。
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束时会尝试恢复，失败只记录 warning，不能视为强恢复保证。
