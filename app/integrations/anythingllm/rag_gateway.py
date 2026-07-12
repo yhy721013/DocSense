@@ -404,6 +404,10 @@ class _AnythingLLMRagSession:
         self._lifecycle_events = list(lifecycle_events)
         self._document_ref: Optional[str] = None
         self._content_sha256: Optional[str] = None
+        # 该名称是实际上传文件的基名。它与业务哈希名、业务原始名分别保存，不能由
+        # AnythingLLM 的 location/title 反向猜测，否则 MHTML、OCR 等预处理链路会
+        # 让回调来源退化为中间文件名。
+        self._ingested_file_name: Optional[str] = None
         self._uploaded_document: Optional[AnythingLLMDocument] = None
         self._bound_locations: set[str] = set()
         self._pinned_location: Optional[str] = None
@@ -441,9 +445,12 @@ class _AnythingLLMRagSession:
 
         document: Optional[AnythingLLMDocument] = None
         try:
-            document, content_sha256 = self._upload_document(normalized_file_path)
+            document, content_sha256, ingested_file_name = self._upload_document(
+                normalized_file_path,
+            )
             self._uploaded_document = document
             self._content_sha256 = content_sha256
+            self._ingested_file_name = ingested_file_name
             self._bind_document(document.location)
             self._pin_document(document.location)
             self._document_ref = document.document_ref
@@ -594,7 +601,10 @@ class _AnythingLLMRagSession:
         )
         return result
 
-    def _upload_document(self, file_path: str) -> tuple[AnythingLLMDocument, str]:
+    def _upload_document(
+        self,
+        file_path: str,
+    ) -> tuple[AnythingLLMDocument, str, str]:
         """上传不可变文件快照，并返回文档及该快照的 SHA-256。
 
         ``docSource`` 是 AnythingLLM 上传接口允许的结构化元数据。将随机标记放在该字段，
@@ -605,6 +615,7 @@ class _AnythingLLMRagSession:
             source_path = Path(file_path)
             if not source_path.is_file():
                 raise FileNotFoundError(f"待分析文件不存在或不是普通文件: {source_path}")
+            ingested_file_name = source_path.name
             # 摘要和 multipart 请求必须使用同一个任务私有副本。调用方即使在分析期间替换
             # 原路径，也不会让后续永久知识库幂等键与 AnythingLLM 实际内容发生分叉。
             with tempfile.TemporaryDirectory(prefix="docsense-rag-") as temporary_dir:
@@ -681,7 +692,7 @@ class _AnythingLLMRagSession:
             bool(document_ref),
             Path(file_path).name,
         )
-        return document, content_sha256
+        return document, content_sha256, ingested_file_name
 
     def _bind_document(self, location: str) -> None:
         """把真实上传位置加入工作区，并仅对标准暂态网关错误有限重试。"""
@@ -987,9 +998,9 @@ class _AnythingLLMRagSession:
                     )
                 )
                 if failure_stage is None:
-                    if not self._content_sha256:
+                    if not self._content_sha256 or not self._ingested_file_name:
                         raise self._operation_error(
-                            "成功查询缺少不可变上传内容摘要",
+                            "成功查询缺少不可变上传文档身份",
                             failure_stage="document_identity",
                         )
                     self._failure_stage = None
@@ -1001,6 +1012,7 @@ class _AnythingLLMRagSession:
                             document_ref=target_ref,
                             external_location=external_location,
                             content_sha256=self._content_sha256,
+                            ingested_file_name=self._ingested_file_name,
                         ),
                         trace=self._trace(),
                     )

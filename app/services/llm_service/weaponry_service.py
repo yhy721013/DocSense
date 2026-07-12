@@ -108,6 +108,7 @@ class WeaponrySelectedDocument:
     original_name: str
     source_architecture_id: int
     doc_path: str
+    ingested_file_name: str
     anything_doc_id: str = ""
 
     def __post_init__(self) -> None:
@@ -115,7 +116,14 @@ class WeaponrySelectedDocument:
         file_name = str(self.file_name or "").strip()
         if not file_name:
             raise ValueError("file_name不能为空")
-        original_name = str(self.original_name or "").strip() or file_name
+        # 业务原始名必须在请求受理后原样流转。仅借助 strip 判断空值，不能修改实际
+        # 保存值；否则 analyseDataSource.source 无法严格回显 originalFileName 原值。
+        requested_original_name = str(self.original_name or "")
+        original_name = (
+            requested_original_name
+            if requested_original_name.strip()
+            else file_name
+        )
         if (
             isinstance(self.source_architecture_id, bool)
             or not isinstance(self.source_architecture_id, int)
@@ -125,6 +133,14 @@ class WeaponrySelectedDocument:
         doc_path = str(self.doc_path or "").strip()
         if not doc_path:
             raise ValueError("doc_path不能为空")
+        ingested_file_name = (
+            str(self.ingested_file_name or "")
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+            .strip()
+        )
+        if not ingested_file_name or ingested_file_name in {".", ".."}:
+            raise ValueError("ingested_file_name必须是有效文件名")
 
         object.__setattr__(self, "file_name", file_name)
         object.__setattr__(self, "original_name", original_name)
@@ -134,6 +150,7 @@ class WeaponrySelectedDocument:
             "anything_doc_id",
             str(self.anything_doc_id or "").strip(),
         )
+        object.__setattr__(self, "ingested_file_name", ingested_file_name)
 
     def to_task_snapshot(self) -> Dict[str, Any]:
         """转换为可严格 JSON 持久化的任务快照，不包含供应商响应原文。"""
@@ -143,6 +160,7 @@ class WeaponrySelectedDocument:
             "source_architecture_id": self.source_architecture_id,
             "doc_path": self.doc_path,
             "anything_doc_id": self.anything_doc_id,
+            "ingested_file_name": self.ingested_file_name,
         }
 
     @classmethod
@@ -166,6 +184,7 @@ class WeaponrySelectedDocument:
             source_architecture_id=source_architecture_id,
             doc_path=str(value.get("doc_path") or ""),
             anything_doc_id=str(value.get("anything_doc_id") or ""),
+            ingested_file_name=str(value.get("ingested_file_name") or ""),
         )
 
     def to_document_record(self) -> Dict[str, Any]:
@@ -176,6 +195,7 @@ class WeaponrySelectedDocument:
             "architecture_id": self.source_architecture_id,
             "doc_path": self.doc_path,
             "anything_doc_id": self.anything_doc_id,
+            "ingested_file_name": self.ingested_file_name,
         }
 
 
@@ -539,6 +559,7 @@ def resolve_weaponry_selected_documents(
                 source_architecture_id=source_architecture_id,
                 doc_path=doc_path,
                 anything_doc_id=str(record.get("anything_doc_id") or ""),
+                ingested_file_name=str(record.get("ingested_file_name") or ""),
             )
         )
 
@@ -822,6 +843,7 @@ def _prepare_retrieval_context(
     for record in records:
         file_name = str(record.get("file_name") or "")
         original_name = str(record.get("original_name") or "") or file_name
+        ingested_file_name = str(record.get("ingested_file_name") or "").strip()
         doc_path = str(record.get("doc_path") or "")
         anything_doc_id = str(record.get("anything_doc_id") or "")
 
@@ -830,10 +852,23 @@ def _prepare_retrieval_context(
         if file_name:
             file_names.add(file_name)
 
-        for value in (file_name, original_name):
+        for value in (file_name, original_name, ingested_file_name):
             value = _normalize_source_name(value)
             if value:
                 target_file_names.add(value)
+
+        if not ingested_file_name:
+            # 开发阶段不兼容旧数据，也不从 doc_path、AnythingLLM title 等位置猜测上传名。
+            # 否则 MHTML 转换后的中间文件名会重新进入 callback，破坏业务原始名契约。
+            logger.error(
+                "知识谱系来源映射缺少实际上传文件名，拒绝执行并要求重新解析: "
+                "architecture_id=%s file_name=%s",
+                record.get("architecture_id"),
+                file_name,
+            )
+            raise WeaponrySelectedDocumentError(
+                "知识库文档缺少实际上传文件名，请重新执行文件解析后再进行知识谱系解析"
+            )
 
         if doc_path:
             target_doc_paths.add(doc_path.replace("\\", "/"))
@@ -841,6 +876,7 @@ def _prepare_retrieval_context(
         aliases = [
             file_name,
             original_name,
+            ingested_file_name,
             doc_path,
             Path(doc_path.replace("\\", "/")).name if doc_path else "",
             anything_doc_id,

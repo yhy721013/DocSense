@@ -169,7 +169,7 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - 同请求可提交多个文件，服务端按数组顺序串行执行。
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
    - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
-   - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
+   - `params[].originalFileName` 表示业务原始文件名；服务端保留其请求原值，除作为文件解析提示词上下文外，还用于知识谱系回调中的来源展示。
    - `params[].channel` 表示资料来源机构候选范围（字典编码），服务端只使用请求中提供的候选，不再注入“装发、军情、科技、训练”等默认值；未传、传空数组或没有有效候选对象时，Prompt 要求模型输出空字符串，回调 `data.channel` 也返回空字符串。
    - `params[].security` 表示密级候选范围（字典编码），回调 `data.security` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时，候选包含“公开”则返回“公开”，否则返回密级候选中的第一个 `value`。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
@@ -199,7 +199,7 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束时会尝试恢复，失败只记录 warning，不能视为强恢复保证。
    - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时跳过字段阶段的术语向量检索和 Prompt 注入，但准备阶段仍可能上传或复用术语 workspace，并处理目标 workspace 中混入的术语文档。
    - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
-   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 优先返回 `documents.original_name` 文件原名，`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表；文件映射缺失时文件名字段回退为 AnythingLLM 返回的内部来源名。
+   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 严格返回文件解析请求中 `originalFileName` 的原值（持久化为 `documents.original_name`），`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表。MHTML/OCR 等预处理产生的实际上传文件名仅用于内部映射，绝不写入回调；缺少该内部谱系的开发数据必须重新解析，不做名称猜测或回退。
    - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
 
 4. `/llm/check-task`

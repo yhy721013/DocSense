@@ -131,6 +131,19 @@ def _as_text(value: Any) -> str:
     return str(value)
 
 
+def _as_business_original_file_name(value: Any) -> str:
+    """读取业务原始文件名，并保留请求字符串的原始值。
+
+    ``originalFileName`` 是面向甲方回调展示的业务字段，不是文件系统路径或内部键。
+    因此只能用去首尾空白后的结果判断它是否为空，不能把 strip 后的文本回写为值；
+    否则会违反“回调 source 严格返回请求 originalFileName 原值”的约定。
+    """
+    if value is None:
+        return ""
+    original_name = value if isinstance(value, str) else str(value)
+    return original_name if original_name.strip() else ""
+
+
 def _coerce_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -1497,11 +1510,17 @@ def _store_prepared_analysis_document(
     metadata = KnowledgeDocumentMetadata(
         file_name=file_name,
         original_name=original_name,
+        # 此名称来自 RAG Gateway 实际提交给 AnythingLLM 的不可变上传副本，而不是
+        # 下载文件或业务哈希名。MHTML/PDF、OCR/Markdown 等预处理后的来源映射必须以
+        # 它为准，才能在 weaponry 回调中稳定回填业务原始名。
+        ingested_file_name=prepared_document.ingested_file_name,
         attributes=attributes,
     )
     logger.info(
-        "永久知识库文档元数据已构建: file_name=%s attribute_key_count=%d",
+        "永久知识库文档元数据已构建: file_name=%s has_ingested_file_name=%s "
+        "attribute_key_count=%d",
         file_name,
+        bool(metadata.ingested_file_name),
         len(attributes),
     )
     operation_context = KnowledgeOperationContext(
@@ -1585,7 +1604,17 @@ def _execute_file_analysis_task(
         raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
-    original_name = _as_text(params.get("originalFileName")) or file_name
+    requested_original_name = _as_business_original_file_name(
+        params.get("originalFileName"),
+    )
+    original_name = requested_original_name or file_name
+    if not requested_original_name:
+        # 不改变既有接口的可选参数约束，但明确记录此类请求无法提供业务原始名；后续
+        # weaponry 只能稳定回填哈希名，绝不能把预处理生成的文件名伪装成业务原始名。
+        logger.warning(
+            "文件分析请求缺少originalFileName，来源展示将回退为业务哈希名: file_name=%s",
+            file_name,
+        )
     file_path = _as_text(params.get("filePath"))
     task = task_service.get_task("file", file_name)
     if task is None:
@@ -2166,7 +2195,10 @@ def run_file_analysis_task(
         params_list = request_payload.get("params", [])
         params = params_list[0] if params_list and isinstance(params_list[0], dict) else {}
         file_name = _as_text(params.get("fileName"))
-        original_name = _as_text(params.get("originalFileName")) or file_name
+        original_name = (
+            _as_business_original_file_name(params.get("originalFileName"))
+            or file_name
+        )
         error_message = _safe_task_error(exc, fallback="文件分析编排失败")
         logger.exception(
             "文件分析后台线程未处理异常: file_name=%s error_type=%s",

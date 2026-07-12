@@ -41,6 +41,7 @@ class ChatDebugPreviewTests(unittest.TestCase):
             "alpha",
             "custom-documents/alpha.json",
             original_name="测试文件.pdf",
+            ingested_file_name="hash-alpha.pdf",
         )
 
         result = load_chat_debug_bootstrap(

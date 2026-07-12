@@ -137,6 +137,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                     {
                         "file_name": "cross-category.pdf",
                         "original_name": "跨分类来源.pdf",
+                        "ingested_file_name": "cross-category.mhtml.normalized.pdf",
                         "source_architecture_id": 2002,
                         "doc_path": "custom-documents/cross-category.json",
                         "anything_doc_id": "doc-2002",
@@ -151,6 +152,10 @@ class LLMTaskServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["params"]["filePathList"], ["https://host/download/cross-category.pdf"])
         self.assertEqual(snapshots[0]["file_name"], "cross-category.pdf")
+        self.assertEqual(
+            snapshots[0]["ingested_file_name"],
+            "cross-category.mhtml.normalized.pdf",
+        )
         self.assertEqual(snapshots[0]["source_architecture_id"], 2002)
         self.assertEqual(snapshots[0]["doc_path"], "custom-documents/cross-category.json")
 
@@ -165,6 +170,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                     {
                         "file_name": "first.pdf",
                         "original_name": "first.pdf",
+                        "ingested_file_name": "first.pdf",
                         "source_architecture_id": 1001,
                         "doc_path": "custom-documents/first.json",
                     },
@@ -177,6 +183,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                     {
                         "file_name": "second.pdf",
                         "original_name": "second.pdf",
+                        "ingested_file_name": "second.pdf",
                         "source_architecture_id": 2002,
                         "doc_path": "custom-documents/second.json",
                     },
@@ -195,6 +202,10 @@ class LLMTaskServiceTests(unittest.TestCase):
         self.assertNotEqual(first["execution_id"], second["execution_id"])
         self.assertEqual(old_snapshots, [])
         self.assertEqual([item["file_name"] for item in current_snapshots], ["second.pdf"])
+        self.assertEqual(
+            [item["ingested_file_name"] for item in current_snapshots],
+            ["second.pdf"],
+        )
 
     def test_legacy_task_database_is_migrated_with_audit_version_marker(self):
         """旧任务库升级后应为历史任务和交互补充可区分的执行与审计版本。"""

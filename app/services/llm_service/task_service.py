@@ -307,6 +307,7 @@ class LLMTaskService:
                     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
                     file_name TEXT NOT NULL,
                     original_name TEXT NOT NULL,
+                    ingested_file_name TEXT NOT NULL DEFAULT '',
                     source_architecture_id INTEGER NOT NULL
                         CHECK (source_architecture_id >= 1),
                     doc_path TEXT NOT NULL,
@@ -316,6 +317,12 @@ class LLMTaskService:
                     UNIQUE (business_key, doc_path)
                 )
                 """
+            )
+            self._ensure_column(
+                conn,
+                table="weaponry_task_document_snapshots",
+                column="ingested_file_name",
+                definition="TEXT NOT NULL DEFAULT ''",
             )
             conn.execute(
                 """
@@ -362,8 +369,8 @@ class LLMTaskService:
         """校验并冻结 weaponry 显式选文的内部持久化快照。
 
         该快照与外部请求参数隔离：它仅保存受理时已经唯一解析出的本地文件身份、来源
-        分类和 AnythingLLM 文档位置。任务重跑会在同一事务中替换旧快照，避免新旧执行
-        共享一份可变选文范围。
+        分类、AnythingLLM 文档位置和实际上传文件名。任务重跑会在同一事务中替换旧
+        快照，避免新旧执行共享一份可变选文范围。
         """
         if selected_documents is None:
             return ()
@@ -382,7 +389,22 @@ class LLMTaskService:
             file_name = str(item.get("file_name") or "").strip()
             if not file_name:
                 raise ValueError("weaponry任务文档快照缺少file_name")
-            original_name = str(item.get("original_name") or "").strip() or file_name
+            # 任务快照必须保留请求 originalFileName 的原值。只以 strip 判空，避免任务
+            # 异步执行时把业务展示名改写为标准化名称。
+            requested_original_name = str(item.get("original_name") or "")
+            original_name = (
+                requested_original_name
+                if requested_original_name.strip()
+                else file_name
+            )
+            ingested_file_name = (
+                str(item.get("ingested_file_name") or "")
+                .replace("\\", "/")
+                .rsplit("/", 1)[-1]
+                .strip()
+            )
+            if not ingested_file_name or ingested_file_name in {".", ".."}:
+                raise ValueError("weaponry任务文档快照的ingested_file_name无效")
             raw_architecture_id = item.get("source_architecture_id")
             if isinstance(raw_architecture_id, bool):
                 raise ValueError("weaponry任务文档快照的source_architecture_id无效")
@@ -407,6 +429,7 @@ class LLMTaskService:
                 {
                     "file_name": file_name,
                     "original_name": original_name,
+                    "ingested_file_name": ingested_file_name,
                     "source_architecture_id": source_architecture_id,
                     "doc_path": doc_path,
                     "anything_doc_id": str(item.get("anything_doc_id") or "").strip(),
@@ -432,9 +455,9 @@ class LLMTaskService:
                 """
                 INSERT INTO weaponry_task_document_snapshots (
                     business_key, execution_id, sequence_no, file_name, original_name,
-                    source_architecture_id, doc_path, anything_doc_id
+                    ingested_file_name, source_architecture_id, doc_path, anything_doc_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     business_key,
@@ -442,6 +465,7 @@ class LLMTaskService:
                     sequence_no,
                     document["file_name"],
                     document["original_name"],
+                    document["ingested_file_name"],
                     document["source_architecture_id"],
                     document["doc_path"],
                     document["anything_doc_id"],
@@ -616,8 +640,8 @@ class LLMTaskService:
         with self._connection() as conn:
             rows = conn.execute(
                 """
-                SELECT sequence_no, file_name, original_name, source_architecture_id,
-                       doc_path, anything_doc_id
+                SELECT sequence_no, file_name, original_name, ingested_file_name,
+                       source_architecture_id, doc_path, anything_doc_id
                 FROM weaponry_task_document_snapshots
                 WHERE business_key = ? AND execution_id = ?
                 ORDER BY sequence_no ASC
@@ -628,6 +652,7 @@ class LLMTaskService:
             {
                 "file_name": row["file_name"],
                 "original_name": row["original_name"],
+                "ingested_file_name": row["ingested_file_name"],
                 "source_architecture_id": row["source_architecture_id"],
                 "doc_path": row["doc_path"],
                 "anything_doc_id": row["anything_doc_id"],

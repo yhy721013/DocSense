@@ -678,7 +678,10 @@ class AnythingLLMKnowledgeGateway:
         """把业务控制字段和本地权威 metadata 原子写入知识库数据库。"""
         metadata = dict(record.metadata)
         file_name = str(metadata.pop("file_name")).strip()
-        original_name = str(metadata.pop("original_name", file_name)).strip()
+        # original_name 是请求 originalFileName 的业务原值。只在下游数据库提交时判空，
+        # 此处不能 strip，否则会破坏“回调 source 严格返回原值”的链路。
+        original_name = str(metadata.pop("original_name", file_name))
+        ingested_file_name = str(metadata.pop("ingested_file_name")).strip()
         attributes = metadata.pop("attributes")
         if metadata:
             raise KnowledgeIndexError("协调记录包含未知文档控制字段")
@@ -691,6 +694,7 @@ class AnythingLLMKnowledgeGateway:
             workspace_slug=collection.ref,
             file_name=file_name,
             original_name=original_name,
+            ingested_file_name=ingested_file_name,
             anything_doc_id=record.external_document_id,
             doc_path=record.external_location,
             metadata=attributes,
@@ -978,6 +982,7 @@ class AnythingLLMKnowledgeGateway:
         return {
             "file_name": metadata.file_name,
             "original_name": metadata.original_name,
+            "ingested_file_name": metadata.ingested_file_name,
             "attributes": metadata.attributes_dict(),
         }
 

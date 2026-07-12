@@ -36,6 +36,7 @@ class ChatDebugRouteTests(unittest.TestCase):
             12,
             "doc-alpha",
             "custom-documents/doc-alpha.json",
+            ingested_file_name="alpha.pdf",
         )
 
         response = self.client.get("/debug/api/chat/bootstrap")

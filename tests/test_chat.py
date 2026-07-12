@@ -133,6 +133,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             document_id,
             f"custom-documents/{document_id}.json",
             original_name=original_name,
+            ingested_file_name=file_name,
         )
 
     def _chat(self, *, chat_id: int, file_names: list[str], message: str):

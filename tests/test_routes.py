@@ -159,6 +159,7 @@ class LLMRouteValidationTests(unittest.TestCase):
             {
                 "file_name": "abc123.pdf",
                 "original_name": "跨分类来源.pdf",
+                "ingested_file_name": "abc123.pdf",
                 "architecture_id": 99999,
                 "doc_path": "custom-documents/abc123.json",
             }
@@ -190,6 +191,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(selected_document.file_name, "abc123.pdf")
         self.assertEqual(selected_document.source_architecture_id, 99999)
         self.assertEqual(selected_document.doc_path, "custom-documents/abc123.json")
+        self.assertEqual(selected_document.ingested_file_name, "abc123.pdf")
         task = self.task_service.get_task("weaponry", "10502")
         self.assertEqual(task["request_payload"]["params"]["filePathList"], original_file_paths)
         self.assertEqual(worker_kwargs["execution_id"], task["execution_id"])
@@ -202,6 +204,7 @@ class LLMRouteValidationTests(unittest.TestCase):
                 {
                     "file_name": "abc123.pdf",
                     "original_name": "跨分类来源.pdf",
+                    "ingested_file_name": "abc123.pdf",
                     "source_architecture_id": 99999,
                     "doc_path": "custom-documents/abc123.json",
                     "anything_doc_id": "",

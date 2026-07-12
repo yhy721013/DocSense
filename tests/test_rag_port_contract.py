@@ -376,6 +376,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         return KnowledgeDocumentMetadata(
             file_name="sample.pdf",
             original_name="sample.pdf",
+            ingested_file_name="sample.pdf",
             attributes=attributes,
         )
 
@@ -389,6 +390,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         metadata = KnowledgeDocumentMetadata(
             file_name="sample.pdf",
             original_name="sample.pdf",
+            ingested_file_name="sample.pdf",
             attributes=source,
         )
         source["nested"]["values"].append(3)
@@ -397,6 +399,19 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         self.assertEqual({"nested": {"values": [1, 2]}}, snapshot)
         with self.assertRaises(TypeError):
             metadata.attributes["nested"]["new"] = True
+
+    def test_document_metadata_preserves_business_original_name_raw_value(self) -> None:
+        """业务原始名只能用于空值判断，不能被内部规范化逻辑改写。"""
+        original_file_name = "  甲方原始资料.mhtml  "
+
+        metadata = KnowledgeDocumentMetadata(
+            file_name="e9a7f5.mhtml",
+            original_name=original_file_name,
+            ingested_file_name="e9a7f5.mhtml.normalized.pdf",
+            attributes={},
+        )
+
+        self.assertEqual(metadata.original_name, original_file_name)
 
     def test_default_idempotency_key_changes_with_collection_or_content(self) -> None:
         """同名文件的新内容或不同存储 architecture 必须得到不同默认键。"""
@@ -496,6 +511,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
             document_ref="document:prepared",
             external_location="external:prepared",
             content_sha256="a" * 64,
+            ingested_file_name="sample.pdf",
         )
 
         stored = port.store_prepared_document(
@@ -605,7 +621,12 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         operation_context = self._operation_context()
         port.store_prepared_document(
             collection,
-            PreparedDocumentRef("document:first", "external:first", "a" * 64),
+            PreparedDocumentRef(
+                "document:first",
+                "external:first",
+                "a" * 64,
+                "first-upload.pdf",
+            ),
             self._metadata(),
             operation_context=operation_context,
             idempotency_key="prepared-key",
@@ -614,7 +635,12 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不同的预备文档"):
             port.store_prepared_document(
                 collection,
-                PreparedDocumentRef("document:second", "external:second", "b" * 64),
+                PreparedDocumentRef(
+                    "document:second",
+                    "external:second",
+                    "b" * 64,
+                    "second-upload.pdf",
+                ),
                 self._metadata(),
                 operation_context=operation_context,
                 idempotency_key="prepared-key",

@@ -85,6 +85,7 @@ class _KnowledgeGatewayHarness:
         return KnowledgeDocumentMetadata(
             file_name="hash.pdf",
             original_name="装备手册.pdf",
+            ingested_file_name="hash.pdf",
             attributes=attributes,
         )
 
@@ -115,6 +116,7 @@ class _KnowledgeGatewayHarness:
             document_ref=document.document_ref,
             external_location=document.location,
             content_sha256=content_sha256,
+            ingested_file_name="hash.pdf",
         )
 
     def _upload(self, _file_path: str, **_kwargs) -> AnythingLLMDocument:
@@ -244,6 +246,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 architecture_id=100,
             )
             self.assertEqual(record["doc_path"], prepared.external_location)
+            self.assertEqual(record["ingested_file_name"], "hash.pdf")
             self.assertEqual(
                 record["metadata"],
                 {"country": "中国", "channel": "陆基"},
@@ -253,6 +256,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 "file:100:sha256",
             )
             self.assertEqual(operation.status, STATUS_COMMITTED)
+            self.assertEqual(operation.metadata["ingested_file_name"], "hash.pdf")
 
     def test_exact_replay_reuses_committed_operation(self):
         """相同幂等键的第二次提交必须复用，不重复绑定或 Pin。"""
