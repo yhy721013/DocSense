@@ -15,6 +15,7 @@ from app.services.chat.application.document_resolver import (
     ChatDocumentResolver,
     ResolvedChatDocument,
 )
+from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.domain.resource_ids import (
     chat_document_binding_lease_id,
     chat_scoped_external_ref,
@@ -323,7 +324,7 @@ class SynchronousChatRunExecutor:
             # 重复执行器可能在另一执行器已领取后仍观察到同一持久化运行。不能仅因为
             # 这次过期投递未领取到执行权，就丢弃合法所有者的待处理用户轮次。
             logger.warning(
-                "文件对话run已被其他执行路径领取，跳过未启动收敛: "
+                "文件对话运行已被其他执行路径领取，跳过未启动收敛: "
                 "chat_id=%s run_id=%s reason=%s",
                 run.chat_id,
                 normalized_run_id,
@@ -333,7 +334,7 @@ class SynchronousChatRunExecutor:
             return
         except Exception as exc:
             logger.exception(
-                "文件对话run领取执行权失败: chat_id=%s run_id=%s",
+                "文件对话运行领取执行权失败: chat_id=%s run_id=%s",
                 run.chat_id,
                 normalized_run_id,
             )
@@ -346,7 +347,7 @@ class SynchronousChatRunExecutor:
                 # 运行状态在领取失败与尝试收敛之间已发生变化。它现已归另一条执行路径
                 # 所有，因此其待处理用户轮次必须保持不变。
                 logger.warning(
-                    "文件对话run已被其他执行路径领取，跳过未启动收敛: "
+                    "文件对话运行已被其他执行路径领取，跳过未启动收敛: "
                     "chat_id=%s run_id=%s",
                     run.chat_id,
                     normalized_run_id,
@@ -355,7 +356,7 @@ class SynchronousChatRunExecutor:
                 # 即便持久化暂时不可用，也要保持 SSE 响应确定。既有的过期运行回收器
                 # 仍负责收敛本次请求中无法完成的已受理运行。
                 logger.exception(
-                    "文件对话run领取失败后的未启动收敛异常: chat_id=%s run_id=%s",
+                    "文件对话运行领取失败后的未启动收敛异常: chat_id=%s run_id=%s",
                     run.chat_id,
                     normalized_run_id,
                 )
@@ -452,7 +453,10 @@ class SynchronousChatRunExecutor:
                 )
                 yield ChatStreamEvent(
                     "chatInfo",
-                    {"chatId": request.chat_id, "isNewChat": is_new_chat},
+                    {
+                        "chatId": chat_id_public_value(request.chat_id),
+                        "isNewChat": is_new_chat,
+                    },
                 )
                 output_chars = 0
                 logger.info(
@@ -478,7 +482,10 @@ class SynchronousChatRunExecutor:
                             "chat output exceeds the configured output limit"
                         )
                     yield ChatStreamEvent("textChunk", {"content": chunk.content})
-                yield ChatStreamEvent("done", {"chatId": request.chat_id})
+                yield ChatStreamEvent(
+                    "done",
+                    {"chatId": chat_id_public_value(request.chat_id)},
+                )
                 logger.info(
                     "文件对话模型流正常结束: chat_id=%s run_id=%s output_chars=%d",
                     request.chat_id,
@@ -798,7 +805,7 @@ class ChatRunEventRecorder:
                 # 校验；未来协调器会在这里校验实际 token/fencing 信息。
                 chat_commands.validate_execution_lease(lease=execution_lease)
             logger.info(
-                "开始记录文件对话run事件: chat_id=%s run_id=%s file_count=%d",
+                "开始记录文件对话运行事件: chat_id=%s run_id=%s file_count=%d",
                 request.chat_id,
                 request.run_id,
                 len(request.file_names),
@@ -835,7 +842,7 @@ class ChatRunEventRecorder:
                     event = next(event_iterator)
                 except StopIteration:
                     logger.warning(
-                        "文件对话run上游事件流无终态结束: chat_id=%s run_id=%s",
+                        "文件对话运行上游事件流未产生终态便结束: chat_id=%s run_id=%s",
                         request.chat_id,
                         request.run_id,
                     )
@@ -863,7 +870,7 @@ class ChatRunEventRecorder:
                         assistant_parts.append(content)
                 if event.event_type in _TERMINAL_EVENT_TYPES:
                     logger.info(
-                        "文件对话run收到终态事件: chat_id=%s run_id=%s event=%s chunks=%d",
+                        "文件对话运行收到终态事件: chat_id=%s run_id=%s event=%s chunks=%d",
                         request.chat_id,
                         request.run_id,
                         event.event_type,
@@ -929,7 +936,7 @@ class ChatRunEventRecorder:
                     )
                 else:
                     logger.warning(
-                        "文件对话run因缺失终态标记失败: chat_id=%s run_id=%s",
+                        "文件对话运行因缺失终态标记而失败: chat_id=%s run_id=%s",
                         request.chat_id,
                         request.run_id,
                     )
@@ -992,7 +999,7 @@ class ChatRunEventRecorder:
                 return
             if not terminal_event:
                 logger.exception(
-                    "文件对话run事件记录异常，按失败收敛: chat_id=%s run_id=%s",
+                    "文件对话运行事件记录发生异常，按失败状态收敛: chat_id=%s run_id=%s",
                     request.chat_id,
                     request.run_id,
                 )
@@ -1071,7 +1078,10 @@ class ChatRunEventRecorder:
     ) -> ChatStreamEvent:
         # 中断时保留已提交的用户消息，丢弃已输出但不完整的助手片段；这是本地历史的
         # 权威语义，不依赖供应商是否已经写入远端线程。
-        event = ChatStreamEvent("aborted", {"chatId": request.chat_id})
+        event = ChatStreamEvent(
+            "aborted",
+            {"chatId": chat_id_public_value(request.chat_id)},
+        )
         chat_commands.abort_chat_run_with_user(
             run_id=request.run_id,
             user_message_id=user_message_id,
@@ -1079,7 +1089,7 @@ class ChatRunEventRecorder:
             **self._execution_lease_kwargs(execution_lease),
         )
         logger.info(
-            "文件对话run按中断完成收敛: chat_id=%s run_id=%s",
+            "文件对话运行已按中断完成收敛: chat_id=%s run_id=%s",
             request.chat_id,
             request.run_id,
         )
@@ -1121,7 +1131,7 @@ class ChatRunEventRecorder:
             )
         except Exception:
             logger.exception(
-                "终态事件写入失败，降级收敛文件对话run: chat_id=%s run_id=%s",
+                "终态事件写入失败，使用降级路径收敛文件对话运行: chat_id=%s run_id=%s",
                 request.chat_id,
                 run_id,
             )

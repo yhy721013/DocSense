@@ -24,12 +24,12 @@ class ChatDebugPreviewTests(unittest.TestCase):
 
     def test_bootstrap_reads_new_sessions_and_business_file_names(self) -> None:
         self.chat_store.sessions.create_or_get(
-            chat_id="conv-001",
+            chat_id="10001",
             workspace_ref="ws-1",
             thread_ref="thread-1",
         )
         self.chat_store.document_bindings.add(
-            chat_id="conv-001",
+            chat_id="10001",
             file_name="hash-alpha.pdf",
             original_name="测试文件.pdf",
             document_ref="document:alpha",
@@ -41,6 +41,7 @@ class ChatDebugPreviewTests(unittest.TestCase):
             "alpha",
             "custom-documents/alpha.json",
             original_name="测试文件.pdf",
+            ingested_file_name="hash-alpha.pdf",
         )
 
         result = load_chat_debug_bootstrap(
@@ -49,7 +50,7 @@ class ChatDebugPreviewTests(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual("conv-001", result["data"]["sessions"][0]["chatId"])
+        self.assertEqual(10001, result["data"]["sessions"][0]["chatId"])
         self.assertEqual(
             ["hash-alpha.pdf"],
             result["data"]["sessions"][0]["fileNames"],
@@ -60,15 +61,28 @@ class ChatDebugPreviewTests(unittest.TestCase):
         )
 
     def test_deleted_session_is_hidden_from_debug_list(self) -> None:
-        self.chat_store.sessions.create_or_get(chat_id="conv-deleted")
-        self.chat_store.sessions.set_status(chat_id="conv-deleted", status="deleting")
-        self.chat_store.sessions.set_status(chat_id="conv-deleted", status="deleted")
+        self.chat_store.sessions.create_or_get(chat_id="10002")
+        self.chat_store.sessions.set_status(chat_id="10002", status="deleting")
+        self.chat_store.sessions.set_status(chat_id="10002", status="deleted")
 
         result = load_chat_debug_bootstrap(
             chat_store=self.chat_store,
             kb_service=self.kb_service,
         )
 
+        self.assertEqual([], result["data"]["sessions"])
+
+    def test_legacy_string_chat_id_is_not_returned_to_debug_page(self) -> None:
+        """不兼容历史字符串会话，调试接口也不得泄露旧类型。"""
+
+        self.chat_store.sessions.create_or_get(chat_id="legacy-chat")
+
+        result = load_chat_debug_bootstrap(
+            chat_store=self.chat_store,
+            kb_service=self.kb_service,
+        )
+
+        self.assertTrue(result["ok"])
         self.assertEqual([], result["data"]["sessions"])
 
     def test_query_failure_returns_stable_empty_error_payload(self) -> None:

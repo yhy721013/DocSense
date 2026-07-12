@@ -176,7 +176,7 @@ def ensure_chat_schema(db_path: str) -> None:
                 (version, _utc_now_iso()),
             )
             logger.info(
-                "已应用文件对话SQLite schema migration: version=%s db_path=%s",
+                "已应用文件对话 SQLite 架构迁移: version=%s db_path=%s",
                 version,
                 normalized_path,
             )
@@ -629,10 +629,11 @@ class ChatSessionRepository(_Repository):
                     or merged_metadata != existing_metadata
                 ):
                     logger.info(
-                        "更新文件对话会话引用: chat_id=%s workspace_ref=%s thread_ref=%s",
+                        "文件对话会话远端引用已更新: chat_id=%s has_workspace_ref=%s "
+                        "has_thread_ref=%s",
                         normalized_chat_id,
-                        resolved_workspace,
-                        resolved_thread,
+                        bool(resolved_workspace),
+                        bool(resolved_thread),
                     )
                     connection.execute(
                         """
@@ -681,11 +682,12 @@ class ChatSessionRepository(_Repository):
                 (normalized_chat_id,),
             ).fetchone()
             logger.info(
-                "创建文件对话会话: chat_id=%s status=%s workspace_ref=%s thread_ref=%s",
+                "文件对话会话已创建: chat_id=%s status=%s has_workspace_ref=%s "
+                "has_thread_ref=%s",
                 normalized_chat_id,
                 normalized_status,
-                normalized_workspace,
-                normalized_thread,
+                bool(normalized_workspace),
+                bool(normalized_thread),
             )
             return self._row(row)
 
@@ -746,14 +748,19 @@ class ChatSessionRepository(_Repository):
                 ),
             )
             logger.info(
-                "更新文件对话会话远端引用: chat_id=%s workspace_ref=%s thread_ref=%s",
+                "文件对话会话远端引用已更新: chat_id=%s has_workspace_ref=%s "
+                "has_thread_ref=%s",
                 normalized_chat_id,
-                _optional_text(workspace_ref)
-                if workspace_ref is not None
-                else row["workspace_ref"],
-                _optional_text(thread_ref)
-                if thread_ref is not None
-                else row["thread_ref"],
+                bool(
+                    _optional_text(workspace_ref)
+                    if workspace_ref is not None
+                    else row["workspace_ref"]
+                ),
+                bool(
+                    _optional_text(thread_ref)
+                    if thread_ref is not None
+                    else row["thread_ref"]
+                ),
             )
             return self._row(
                 connection.execute(
@@ -939,10 +946,11 @@ class ChatDocumentBindingRepository(_Repository):
                 ),
             )
             logger.info(
-                "绑定文件revision到本地对话: chat_id=%s file_name=%s document_ref=%s binding_id=%s",
+                "文件版本已绑定到本地对话: chat_id=%s file_name=%s "
+                "has_document_ref=%s binding_id=%s",
                 normalized_chat_id,
                 normalized_file_name,
-                normalized_document_ref,
+                bool(normalized_document_ref),
                 binding.binding_id,
             )
             return binding
@@ -1058,7 +1066,7 @@ class ChatRunRepository(_Repository):
                     owner_instance_id=_optional_text(owner_instance_id),
                 )
                 logger.debug(
-                    "复用已存在文件对话run: chat_id=%s run_id=%s status=%s",
+                    "复用已存在文件对话运行记录: chat_id=%s run_id=%s status=%s",
                     normalized_chat_id,
                     normalized_run_id,
                     existing["status"],
@@ -1081,10 +1089,11 @@ class ChatRunRepository(_Repository):
                 ),
             )
             logger.info(
-                "创建文件对话run记录: chat_id=%s run_id=%s owner=%s status=%s",
+                "文件对话运行记录已创建: chat_id=%s run_id=%s "
+                "has_owner_instance=%s status=%s",
                 normalized_chat_id,
                 normalized_run_id,
-                _optional_text(owner_instance_id),
+                bool(_optional_text(owner_instance_id)),
                 normalized_status,
             )
             return self._get_with_connection(connection, normalized_run_id)
@@ -1122,7 +1131,7 @@ class ChatRunRepository(_Repository):
             )
             if current.status == normalized_status:
                 logger.debug(
-                    "文件对话run状态无需变更: chat_id=%s run_id=%s status=%s",
+                    "文件对话运行状态无需变更: chat_id=%s run_id=%s status=%s",
                     current.chat_id,
                     normalized_run_id,
                     normalized_status,
@@ -1160,13 +1169,14 @@ class ChatRunRepository(_Repository):
             if cursor.rowcount != 1:
                 raise ValueError("chat_run status was changed concurrently")
             logger.info(
-                "文件对话run状态迁移: chat_id=%s run_id=%s %s->%s terminal=%s error=%s",
+                "文件对话运行状态已迁移: chat_id=%s run_id=%s previous_status=%s "
+                "target_status=%s terminal=%s error_chars=%d",
                 current.chat_id,
                 normalized_run_id,
                 current.status,
                 normalized_status,
                 terminal,
-                _optional_text(error_message),
+                len(_optional_text(error_message)),
             )
             return self._get_with_connection(connection, normalized_run_id)
 
@@ -1197,7 +1207,8 @@ class ChatRunRepository(_Repository):
             current = self._get_with_connection(connection, normalized_run_id)
             if current.status not in RUN_ACTIVE_STATUSES:
                 logger.info(
-                    "拒绝为非活跃run设置中断标记: chat_id=%s run_id=%s status=%s",
+                    "拒绝为非活跃文件对话运行设置中断标记: "
+                    "chat_id=%s run_id=%s status=%s",
                     current.chat_id,
                     normalized_run_id,
                     current.status,
@@ -1218,7 +1229,7 @@ class ChatRunRepository(_Repository):
             if cursor.rowcount != 1:
                 raise ValueError("chat_run status was changed concurrently")
             logger.info(
-                "文件对话run中断标记已持久化: chat_id=%s run_id=%s previous_status=%s",
+                "文件对话运行中断标记已持久化: chat_id=%s run_id=%s previous_status=%s",
                 current.chat_id,
                 normalized_run_id,
                 current.status,

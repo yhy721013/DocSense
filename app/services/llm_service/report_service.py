@@ -134,17 +134,21 @@ def run_report_task(
                 callback_context={"businessType": "report", "reportId": report_id},
             ):
                 task_service.mark_callback_success("report", str(report_id))
-                logger.info("回调结果提交成功: report_id=%s", report_id)
+                logger.info("报告任务外部回调提交成功: report_id=%s", report_id)
             else:
                 task_service.mark_callback_failed("report", str(report_id), "callback failed")
-                logger.warning("回调结果提交失败: report_id=%s", report_id)
+                logger.warning("报告任务外部回调提交失败: report_id=%s", report_id)
         else:
             # 没有回调地址时显式关闭状态机，避免完成任务被错误展示为等待回调。
             task_service.mark_callback_skipped("report", str(report_id))
         
-        logger.info("报告生成任务完成: report_id=%s", report_id)
+        logger.info("报告生成任务执行完成: report_id=%s", report_id)
     except Exception as e:
-        logger.exception("报告生成任务执行异常: report_id=%s, error=%s", report_id, e)
+        logger.exception(
+            "报告生成任务执行异常: report_id=%s error_type=%s",
+            report_id,
+            type(e).__name__,
+        )
         callback_payload = build_report_callback_payload(report_id, "", status="2")
         task_service.mark_business_result("report", str(report_id), callback_payload, status="2", message="报告生成失败")
         _publish_progress(progress_hub, report_id, 1.0)
@@ -156,10 +160,10 @@ def run_report_task(
                 callback_context={"businessType": "report", "reportId": report_id},
             ):
                 task_service.mark_callback_success("report", str(report_id))
-                logger.info("失败回调提交成功: report_id=%s", report_id)
+                logger.info("报告任务失败结果的外部回调提交成功: report_id=%s", report_id)
             else:
                 task_service.mark_callback_failed("report", str(report_id), "callback failed")
-                logger.warning("失败回调提交失败: report_id=%s", report_id)
+                logger.warning("报告任务失败结果的外部回调提交失败: report_id=%s", report_id)
         else:
             # 业务失败与回调失败是两个独立维度；此处只表示未配置外部回调。
             task_service.mark_callback_skipped("report", str(report_id))

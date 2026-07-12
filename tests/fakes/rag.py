@@ -301,6 +301,7 @@ class FakeDocumentRagSession:
                         ),
                         external_location=f"external:{self._context_ref}",
                         content_sha256=self._content_sha256,
+                        ingested_file_name="fake-upload.pdf",
                     ),
                     trace=self._trace(),
                 )

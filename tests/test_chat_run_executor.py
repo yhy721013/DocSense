@@ -101,12 +101,12 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.db_path = f"{self.tmp}/chat.sqlite3"
         self.store = ChatStore(self.db_path)
         self.commands = ChatCommandService(ChatRunLockService(self.db_path))
-        self.store.sessions.create_or_get(chat_id="chat-1")
-        self.store.runs.create(run_id="run-1", chat_id="chat-1")
+        self.store.sessions.create_or_get(chat_id="10001")
+        self.store.runs.create(run_id="run-1", chat_id="10001")
         self.store.runs.mark_running("run-1")
         self.request = ChatRunStreamRequest(
             run_id="run-1",
-            chat_id="chat-1",
+            chat_id="10001",
             message="请总结",
             file_names=("hash-a.pdf",),
             file_original_names=("原名.pdf",),
@@ -117,10 +117,10 @@ class ChatRunEventRecorderTests(unittest.TestCase):
 
     def test_done_commits_user_and_complete_assistant_message(self) -> None:
         events = [
-            ChatStreamEvent("chatInfo", {"chatId": "chat-1"}),
+            ChatStreamEvent("chatInfo", {"chatId": 10001}),
             ChatStreamEvent("textChunk", {"content": "你好"}),
             ChatStreamEvent("textChunk", {"content": "世界"}),
-            ChatStreamEvent("done", {"chatId": "chat-1"}),
+            ChatStreamEvent("done", {"chatId": 10001}),
         ]
 
         result = list(
@@ -132,7 +132,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertEqual(events, result)
         self.assertIsNotNone(run)
@@ -154,7 +154,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
 
     def test_error_commits_user_without_partial_assistant(self) -> None:
         events = [
-            ChatStreamEvent("chatInfo", {"chatId": "chat-1"}),
+            ChatStreamEvent("chatInfo", {"chatId": 10001}),
             ChatStreamEvent("textChunk", {"content": "半截"}),
             ChatStreamEvent("error", {"error": "boom"}),
         ]
@@ -171,7 +171,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             ),
         )
 
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertIsNotNone(run)
         assert run is not None
@@ -183,7 +183,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_aborted_commits_user_without_partial_assistant(self) -> None:
         events = [
             ChatStreamEvent("textChunk", {"content": "半截"}),
-            ChatStreamEvent("aborted", {"chatId": "chat-1"}),
+            ChatStreamEvent("aborted", {"chatId": 10001}),
         ]
 
         list(
@@ -195,7 +195,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertIsNotNone(run)
         assert run is not None
@@ -210,7 +210,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             events=[
                 ChatStreamEvent("textChunk", {"content": "第一段"}),
                 ChatStreamEvent("textChunk", {"content": "第二段"}),
-                ChatStreamEvent("done", {"chatId": "chat-1"}),
+                ChatStreamEvent("done", {"chatId": 10001}),
             ],
             store=self.store,
             chat_commands=self.commands,
@@ -221,17 +221,17 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         second = next(stream)
 
         self.assertEqual(ChatStreamEvent("textChunk", {"content": "第一段"}), first)
-        self.assertEqual(ChatStreamEvent("aborted", {"chatId": "chat-1"}), second)
+        self.assertEqual(ChatStreamEvent("aborted", {"chatId": 10001}), second)
         with self.assertRaises(StopIteration):
             next(stream)
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_ABORTED, run.status)
-        next_run = self.commands.start_chat_run(chat_id="chat-1")
+        next_run = self.commands.start_chat_run(chat_id="10001")
         self.assertNotEqual("run-1", next_run.run_id)
         self.assertEqual(RUN_ACCEPTED, next_run.status)
 
@@ -252,7 +252,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                 if self.index == 1:
                     self.index += 1
                     commands.request_abort(run_id="run-1")
-                    return ChatStreamEvent("done", {"chatId": "chat-1"})
+                    return ChatStreamEvent("done", {"chatId": 10001})
                 raise StopIteration
 
         result = list(
@@ -267,11 +267,11 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.assertEqual(
             [
                 ChatStreamEvent("textChunk", {"content": "第一段"}),
-                ChatStreamEvent("aborted", {"chatId": "chat-1"}),
+                ChatStreamEvent("aborted", {"chatId": 10001}),
             ],
             result,
         )
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -291,8 +291,8 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([ChatStreamEvent("aborted", {"chatId": "chat-1"})], result)
-        messages = self.store.messages.list_by_chat("chat-1")
+        self.assertEqual([ChatStreamEvent("aborted", {"chatId": 10001})], result)
+        messages = self.store.messages.list_by_chat("10001")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
 
@@ -316,8 +316,8 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([ChatStreamEvent("aborted", {"chatId": "chat-1"})], result)
-        messages = self.store.messages.list_by_chat("chat-1")
+        self.assertEqual([ChatStreamEvent("aborted", {"chatId": 10001})], result)
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -345,8 +345,8 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([ChatStreamEvent("aborted", {"chatId": "chat-1"})], result)
-        messages = self.store.messages.list_by_chat("chat-1")
+        self.assertEqual([ChatStreamEvent("aborted", {"chatId": 10001})], result)
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -359,7 +359,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             request=self.request,
             events=[
                 ChatStreamEvent("textChunk", {"content": "第一段"}),
-                ChatStreamEvent("done", {"chatId": "chat-1"}),
+                ChatStreamEvent("done", {"chatId": 10001}),
             ],
             store=self.store,
             chat_commands=self.commands,
@@ -372,7 +372,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.commands.request_abort(run_id="run-1")
         stream.close()
 
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -384,7 +384,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         list(
             record_chat_run_events(
                 request=self.request,
-                events=[ChatStreamEvent("chatInfo", {"chatId": "chat-1"})],
+                events=[ChatStreamEvent("chatInfo", {"chatId": 10001})],
                 store=self.store,
                 chat_commands=self.commands,
             )
@@ -405,7 +405,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             request=self.request,
             events=[
                 ChatStreamEvent("textChunk", {"content": "第一段"}),
-                ChatStreamEvent("done", {"chatId": "chat-1"}),
+                ChatStreamEvent("done", {"chatId": 10001}),
             ],
             store=self.store,
             chat_commands=self.commands,
@@ -423,7 +423,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_terminal_event_failure_rolls_back_message_and_run_terminal_state(self) -> None:
         self.store.messages.append(
             message_id="run-1:user",
-            chat_id="chat-1",
+            chat_id="10001",
             run_id="run-1",
             role=MESSAGE_ROLE_USER,
             content="请总结",
@@ -441,10 +441,10 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                     user_message_id="run-1:user",
                     assistant_message_id="run-1:assistant",
                     assistant_content="必须回滚",
-                    terminal_event=ChatStreamEvent("done", {"chatId": "chat-1"}),
+                    terminal_event=ChatStreamEvent("done", {"chatId": 10001}),
                 )
 
-        user = self.store.messages.list_by_chat("chat-1")[0]
+        user = self.store.messages.list_by_chat("10001")[0]
         run = self.store.runs.get("run-1")
         self.assertEqual(MESSAGE_PENDING, user.status)
         self.assertIsNotNone(run)
@@ -469,7 +469,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                 )
 
         run = self.store.runs.get("run-1")
-        messages = self.store.messages.list_by_chat("chat-1")
+        messages = self.store.messages.list_by_chat("10001")
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_FAILED, run.status)
@@ -482,7 +482,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_user_pending_append_is_idempotent_after_commit(self) -> None:
         events = [
             ChatStreamEvent("textChunk", {"content": "回答"}),
-            ChatStreamEvent("done", {"chatId": "chat-1"}),
+            ChatStreamEvent("done", {"chatId": 10001}),
         ]
         list(
             record_chat_run_events(
@@ -495,7 +495,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
 
         same = self.store.messages.append(
             message_id="run-1:user",
-            chat_id="chat-1",
+            chat_id="10001",
             run_id="run-1",
             role=MESSAGE_ROLE_USER,
             content="请总结",
@@ -508,7 +508,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_success_terminal_transaction_rolls_back_user_on_assistant_write_error(self) -> None:
         self.store.messages.append(
             message_id="run-1:user",
-            chat_id="chat-1",
+            chat_id="10001",
             run_id="run-1",
             role=MESSAGE_ROLE_USER,
             content="请总结",
@@ -523,7 +523,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                 assistant_content="必须导致事务回滚",
             )
 
-        user = self.store.messages.list_by_chat("chat-1")[0]
+        user = self.store.messages.list_by_chat("10001")[0]
         run = self.store.runs.get("run-1")
         self.assertEqual(MESSAGE_PENDING, user.status)
         self.assertIsNotNone(run)
@@ -533,7 +533,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_high_frequency_chunks_do_not_write_a_heartbeat_per_chunk(self) -> None:
         events = [
             *(ChatStreamEvent("textChunk", {"content": "x"}) for _ in range(50)),
-            ChatStreamEvent("done", {"chatId": "chat-1"}),
+            ChatStreamEvent("done", {"chatId": 10001}),
         ]
 
         with patch.object(self.commands, "heartbeat_chat_run") as heartbeat:
@@ -572,7 +572,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="chat-executor",
+            chat_id="10002",
             message="question",
             file_names=("hash-a.pdf",),
         )
@@ -585,11 +585,11 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
 
         events = list(executor.execute_chat_run(prepared.run_id))
 
-        session = self.store.sessions.get("chat-executor")
+        session = self.store.sessions.get("10002")
         documents = self.store.document_bindings.list_current_by_chat(
-            "chat-executor"
+            "10002"
         )
-        leases = self.store.resource_leases.list_by_chat("chat-executor")
+        leases = self.store.resource_leases.list_by_chat("10002")
         self.assertEqual(["chatInfo", "textChunk", "done"], [event.event_type for event in events])
         self.assertIsNotNone(session)
         assert session is not None
@@ -693,14 +693,14 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             max_output_chars=3,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="chat-output-limit",
+            chat_id="10003",
             message="question",
             file_names=(),
         )
 
         events = list(executor.execute_chat_run(prepared.run_id))
 
-        messages = self.store.messages.list_by_chat("chat-output-limit")
+        messages = self.store.messages.list_by_chat("10003")
         run = self.store.runs.get(prepared.run_id)
         self.assertEqual(["chatInfo", "error"], [event.event_type for event in events])
         self.assertEqual([MESSAGE_ROLE_USER], [message.role for message in messages])

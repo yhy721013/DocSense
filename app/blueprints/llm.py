@@ -25,6 +25,11 @@ from app.services.chat import (
     ChatTitleGenerationError,
     ChatTitleUnavailableError,
 )
+from app.services.chat.domain.chat_id import (
+    chat_id_storage_key,
+    parse_query_chat_id,
+    require_public_chat_id,
+)
 from app.services.core.progress import normalize_progress
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
@@ -35,7 +40,13 @@ from app.services.llm_service.analysis_service import (
     run_file_analysis_task,
 )
 from app.services.llm_service.report_service import run_report_task
-from app.services.llm_service.weaponry_service import run_weaponry_task
+from app.services.llm_service.weaponry_service import (
+    WeaponrySelectedDocumentAmbiguityError,
+    WeaponrySelectedDocumentError,
+    WeaponrySelectedDocumentNotFoundError,
+    resolve_weaponry_selected_documents,
+    run_weaponry_task,
+)
 from app.services.utils.anythingllm_client import AnythingLLMClient
 
 
@@ -48,6 +59,54 @@ logger = logging.getLogger(__name__)
 def _services() -> ApplicationServices:
     """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
     return get_application_services()
+
+
+def _read_json_chat_id(
+    params: Dict[str, Any],
+    *,
+    operation: str,
+) -> tuple[int, str]:
+    """校验 JSON chatId，并返回公开整数与持久化层文本键。
+
+    HTTP 边界必须严格要求 JSON number 整数，不能因内部 SQLite 当前采用文本键
+    而接受字符串。内部服务仍使用规范文本键，以避免这次接口契约升级牵动表结构、
+    外键和资源租约标识；公开响应由应用服务统一转换回整数。
+    """
+
+    raw_chat_id = params.get("chatId")
+    try:
+        public_chat_id = require_public_chat_id(raw_chat_id)
+    except ValueError:
+        logger.warning(
+            "%s被拒绝: chatId必须为正整数 chat_id_type=%s",
+            operation,
+            type(raw_chat_id).__name__,
+        )
+        raise
+    return public_chat_id, chat_id_storage_key(public_chat_id)
+
+
+def _read_query_chat_id(
+    raw_chat_id: Any,
+    *,
+    operation: str,
+) -> tuple[int, str]:
+    """校验 Query chatId 的规范十进制表示，并返回两种边界值。
+
+    URL Query 在 Flask 中只能读取为字符串，因此这里要求其写成无前导零的十进制
+    正整数；服务端随后转换为与 JSON 路由一致的整数和内部文本键。
+    """
+
+    try:
+        public_chat_id = parse_query_chat_id(raw_chat_id)
+    except ValueError:
+        logger.warning(
+            "%s被拒绝: chatId必须为规范正整数 query_value_type=%s",
+            operation,
+            type(raw_chat_id).__name__,
+        )
+        raise
+    return public_chat_id, chat_id_storage_key(public_chat_id)
 
 
 def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
@@ -443,32 +502,41 @@ def llm_weaponry():
         selected_file_names = _normalize_weaponry_file_path_list(params.get("filePathList"))
     except ValueError as exc:
         logger.warning(
-            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error=%s",
+            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error_type=%s",
             architecture_id,
-            exc,
+            type(exc).__name__,
         )
         return jsonify({"error": str(exc)}), 400
 
-    for file_name in selected_file_names:
-        document_record = kb_service.get_document_record(
-            file_name,
-            architecture_id=int(architecture_id),
-        )
-        if not document_record:
-            logger.warning(
-                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s fileName=%s",
-                architecture_id,
-                file_name,
+    # 非空 filePathList 可引用任意已入库分类的文档。路由受理时一次性解析为不可变
+    # 快照，后续后台线程和未来可靠任务队列都不再按当前 architectureId 重新查找，
+    # 避免同名文件或文档重分类导致任务检索范围漂移。
+    selected_documents = ()
+    if selected_file_names:
+        try:
+            selected_documents = resolve_weaponry_selected_documents(
+                kb_service,
+                selected_file_names,
             )
-            return jsonify({"error": f"文件 {file_name} 尚未解析"}), 404
-        if str(document_record.get("architecture_id")) != str(architecture_id):
+        except WeaponrySelectedDocumentNotFoundError as exc:
             logger.warning(
-                "武器装备提取请求被拒绝: 选中文件不属于当前类别 architectureId=%s fileName=%s actualArchitectureId=%s",
+                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s error=%s",
                 architecture_id,
-                file_name,
-                document_record.get("architecture_id"),
+                str(exc),
             )
-            return jsonify({"error": f"文件 {file_name} 不属于当前类别"}), 400
+            return jsonify({"error": str(exc)}), 404
+        except (
+            WeaponrySelectedDocumentAmbiguityError,
+            WeaponrySelectedDocumentError,
+        ) as exc:
+            logger.warning(
+                "武器装备提取请求被拒绝: 选中文件无法唯一解析 "
+                "architectureId=%s error_type=%s error=%s",
+                architecture_id,
+                type(exc).__name__,
+                str(exc),
+            )
+            return jsonify({"error": str(exc)}), 400
 
     field_list = params.get("weaponryTemplateFieldList")
     if not isinstance(field_list, list) or not field_list:
@@ -519,6 +587,10 @@ def llm_weaponry():
     task = task_service.create_weaponry_task(
         architecture_id=architecture_id,
         request_payload=payload,
+        selected_documents=tuple(
+            document.to_task_snapshot()
+            for document in selected_documents
+        ),
     )
     progress_hub.publish(
         "weaponry",
@@ -533,7 +605,10 @@ def llm_weaponry():
             "kb_service": kb_service,
             "progress_hub": progress_hub,
             "request_payload": payload,
-            "selected_file_names": selected_file_names,
+            # 仅作为进程内工作线程的不可变输入；可靠队列恢复时会按 execution_id 从
+            # 任务库读取同一份内部快照。该参数不会进入对外 HTTP 契约。
+            "selected_documents": selected_documents,
+            "execution_id": task["execution_id"],
             "callback_url": llm_config.callback_url or "",
             "callback_timeout": llm_config.callback_timeout,
         },
@@ -762,7 +837,11 @@ def llm_reassign():
                 metadata = {"file_name": file_name, "architecture_id": new_architecture_id}
                 client.update_embeddings(doc_path, new_workspace_slug, user_id=1, metadata=metadata)
     except Exception as e:
-        logger.error("在调整工作区关联时失败: file_name=%s, exception=%s", file_name, e)
+        logger.error(
+            "调整文档知识库关联失败: file_name=%s error_type=%s",
+            file_name,
+            type(e).__name__,
+        )
         return jsonify({
             "businessType": "reassign",
             "msg": "变更失败",
@@ -816,8 +895,8 @@ def llm_progress(ws):
                 command = _parse_progress_command(payload)
             except ValueError as exc:
                 logger.warning(
-                    "进度订阅消息被拒绝: %s payload_keys=%s",
-                    exc,
+                    "进度订阅消息被拒绝: error_type=%s payload_keys=%s",
+                    type(exc).__name__,
                     list(payload.keys()) if isinstance(payload, dict) else "n/a",
                 )
                 ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
@@ -864,11 +943,10 @@ def llm_chat():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("文件对话请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
-    chat_id = chat_id.strip()
+    try:
+        _, chat_id = _read_json_chat_id(params, operation="文件对话请求")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     file_names = params.get("fileNames")
     if not isinstance(file_names, list):
@@ -996,7 +1074,7 @@ def llm_chat():
         raise
 
     logger.info(
-        "文件对话run已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
+        "文件对话运行已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
         chat_id,
         prepared_run.run_id,
         len(normalized_file_names),
@@ -1036,7 +1114,7 @@ def llm_chat():
                     )
                 except Exception:
                     logger.exception(
-                        "未启动文件对话run关闭时收敛失败: chatId=%s runId=%s",
+                        "未启动文件对话运行关闭时收敛失败: chatId=%s runId=%s",
                         chat_id,
                         prepared_run.run_id,
                     )
@@ -1049,7 +1127,7 @@ def llm_chat():
             _release_stream_slot()
 
         logger.info(
-            "文件对话SSE响应已创建: chatId=%s runId=%s",
+            "文件对话 SSE 响应已创建: chatId=%s runId=%s",
             chat_id,
             prepared_run.run_id,
         )
@@ -1100,10 +1178,10 @@ def llm_chat_title():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("生成对话标题请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
+    try:
+        _, chat_id = _read_json_chat_id(params, operation="生成对话标题请求")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     try:
         result = services.chat_title.generate_title(chat_id=chat_id)
@@ -1126,10 +1204,13 @@ def llm_chat_title():
 @llm_bp.get("/llm/chat/history")
 def llm_chat_history():
     services = _services()
-    chat_id = request.args.get("chatId", "").strip()
-    if not chat_id:
-        logger.warning("对话历史请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
+    try:
+        _, chat_id = _read_query_chat_id(
+            request.args.get("chatId"),
+            operation="对话历史请求",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     history = services.chat_history.list_history(chat_id)
     logger.info("返回文件对话历史: chatId=%s message_count=%d", chat_id, len(history))
@@ -1157,10 +1238,10 @@ def llm_chat_abort():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("中断对话请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
+    try:
+        _, chat_id = _read_json_chat_id(params, operation="中断对话请求")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     result = services.chat_abort.abort_chat(chat_id=chat_id)
     logger.info(
@@ -1192,11 +1273,13 @@ def llm_chat_delete():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    chat_id = params.get("chatId")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        logger.warning("删除对话请求被拒绝: chatId为空")
-        return jsonify({"error": "chatId不能为空"}), 400
-    chat_id = chat_id.strip()
+    try:
+        public_chat_id, chat_id = _read_json_chat_id(
+            params,
+            operation="删除对话请求",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     try:
         result = services.chat_delete.delete_chat(chat_id=chat_id)
@@ -1207,7 +1290,7 @@ def llm_chat_delete():
     except ChatDeleteBusyError as exc:
         return jsonify(
             {
-                "chatId": exc.chat_id,
+                "chatId": public_chat_id,
                 "deleted": False,
                 "error": exc.reason,
             }
@@ -1220,7 +1303,7 @@ def llm_chat_delete():
         )
         return jsonify(
             {
-                "chatId": exc.chat_id,
+                "chatId": public_chat_id,
                 "deleted": False,
                 "error": "对话资源清理失败",
             }

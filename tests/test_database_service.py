@@ -25,6 +25,7 @@ class DatabaseServiceTests(unittest.TestCase):
                 100,
                 "document-1",
                 doc_path="custom-documents/demo-document-1.json",
+                ingested_file_name="demo.pdf",
                 metadata={"country": "中国"},
             )
             records = service.list_document_records()
@@ -43,12 +44,14 @@ class DatabaseServiceTests(unittest.TestCase):
                 100,
                 "document-1",
                 doc_path="external-1",
+                ingested_file_name="demo.pdf",
             )
             service.save_document_record(
                 "demo.pdf",
                 100,
                 "document-2",
                 doc_path="external-2",
+                ingested_file_name="demo.pdf",
             )
 
             record = service.get_document_record("demo.pdf", architecture_id=100)
@@ -64,6 +67,7 @@ class DatabaseServiceTests(unittest.TestCase):
                 100,
                 "document-1",
                 doc_path="external-1",
+                ingested_file_name="demo.pdf",
                 metadata={"country": "美国"},
             )
             service.save_document_record(
@@ -71,6 +75,7 @@ class DatabaseServiceTests(unittest.TestCase):
                 101,
                 "document-2",
                 doc_path="external-2",
+                ingested_file_name="demo.pdf",
                 metadata={"country": "中国"},
             )
 
@@ -87,7 +92,12 @@ class DatabaseServiceTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             db_path = f"{tmp}/knowledge.sqlite3"
             service = DatabaseService(db_path=db_path)
-            service.save_document_record("demo.pdf", 100, "document-1")
+            service.save_document_record(
+                "demo.pdf",
+                100,
+                "document-1",
+                ingested_file_name="demo.pdf",
+            )
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     "UPDATE documents SET metadata_json = '[]' WHERE file_name = ?",
@@ -106,6 +116,7 @@ class DatabaseServiceTests(unittest.TestCase):
                     "list.pdf",
                     100,
                     "document-list",
+                    ingested_file_name="list.pdf",
                     metadata=[],  # type: ignore[arg-type]
                 )
             with self.assertRaises(ValueError):
@@ -113,7 +124,21 @@ class DatabaseServiceTests(unittest.TestCase):
                     "nan.pdf",
                     100,
                     "document-nan",
+                    ingested_file_name="nan.pdf",
                     metadata={"score": float("nan")},
+                )
+
+    def test_direct_save_rejects_missing_ingested_file_name(self):
+        """内部快捷写入不得再把业务哈希名猜测为实际上传文件名。"""
+        with workspace_tempdir() as tmp:
+            service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
+
+            with self.assertRaisesRegex(ValueError, "ingested_file_name"):
+                service.save_document_record(
+                    "e9a7f5.mhtml",
+                    100,
+                    "document-mhtml",
+                    doc_path="custom-documents/e9a7f5.json",
                 )
 
     def test_workspace_mapping_is_idempotent_but_rejects_conflict(self):
@@ -132,12 +157,14 @@ class DatabaseServiceTests(unittest.TestCase):
         """永久索引提交应在一个事务中保存映射、文档身份和业务 metadata。"""
         with workspace_tempdir() as tmp:
             service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
+            original_file_name = "  装备手册.pdf  "
 
             service.commit_indexed_document(
                 architecture_id=100,
                 workspace_slug="architecture-100",
                 file_name="hash.pdf",
-                original_name="装备手册.pdf",
+                original_name=original_file_name,
+                ingested_file_name="hash.mhtml.normalized.pdf",
                 anything_doc_id="document-1",
                 doc_path="custom-documents/hash-document-1.json",
                 metadata={"country": "中国"},
@@ -148,7 +175,11 @@ class DatabaseServiceTests(unittest.TestCase):
                 "architecture-100",
             )
             record = service.get_document_record("hash.pdf")
-            self.assertEqual(record["original_name"], "装备手册.pdf")
+            self.assertEqual(record["original_name"], original_file_name)
+            self.assertEqual(
+                record["ingested_file_name"],
+                "hash.mhtml.normalized.pdf",
+            )
             self.assertEqual(record["metadata"], {"country": "中国"})
 
     def test_workspace_conflict_rolls_back_document_in_same_commit(self):
@@ -163,6 +194,7 @@ class DatabaseServiceTests(unittest.TestCase):
                     workspace_slug="architecture-conflict",
                     file_name="hash.pdf",
                     original_name="装备手册.pdf",
+                    ingested_file_name="hash.pdf",
                     anything_doc_id="document-1",
                     doc_path="custom-documents/hash-document-1.json",
                     metadata={},
@@ -179,6 +211,7 @@ class DatabaseServiceTests(unittest.TestCase):
                 workspace_slug="architecture-100",
                 file_name="hash.pdf",
                 original_name="hash.pdf",
+                ingested_file_name="hash.pdf",
                 anything_doc_id="document-1",
                 doc_path="custom-documents/hash-document-1.json",
                 metadata={},
@@ -238,6 +271,7 @@ class DatabaseServiceTests(unittest.TestCase):
                 2,
                 "doc-2",
                 doc_path="external-2",
+                ingested_file_name="legacy.pdf",
             )
             self.assertEqual(len(service.list_document_records()), 2)
 

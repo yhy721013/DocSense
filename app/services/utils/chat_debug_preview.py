@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.persistence.store import ChatPersistenceStore
 from app.services.core.database import DatabaseService
 
@@ -21,9 +22,19 @@ def load_chat_debug_bootstrap(
         for item in chat_store.sessions.list_all():
             if item.status == "deleted":
                 continue
+            try:
+                public_chat_id = chat_id_public_value(item.chat_id)
+            except ValueError:
+                # 调试页同样属于前端调用方，不能把旧格式字符串 chatId 回显给页面。
+                # 不兼容历史会话的前提下，跳过该条存量数据而不是让整页初始化失败。
+                logger.warning(
+                    "调试页跳过非规范 chatId 的存量会话: internal_chat_id=%s",
+                    item.chat_id,
+                )
+                continue
             sessions.append(
                 {
-                    "chatId": item.chat_id,
+                    "chatId": public_chat_id,
                     "fileNames": [
                         document.file_name
                         for document in chat_store.document_bindings.list_current_by_chat(

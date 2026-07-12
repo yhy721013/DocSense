@@ -169,15 +169,15 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - 同请求可提交多个文件，服务端按数组顺序串行执行。
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
    - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
-   - `params[].originalFileName` 表示原文件名，当前作为请求上下文进入文件解析提示词，后续可继续用于业务链路。
+   - `params[].originalFileName` 表示业务原始文件名；服务端保留其请求原值，除作为文件解析提示词上下文外，还用于知识谱系回调中的来源展示。
    - `params[].channel` 表示资料来源机构候选范围（字典编码），服务端只使用请求中提供的候选，不再注入“装发、军情、科技、训练”等默认值；未传、传空数组或没有有效候选对象时，Prompt 要求模型输出空字符串，回调 `data.channel` 也返回空字符串。
    - `params[].security` 表示密级候选范围（字典编码），回调 `data.security` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时，候选包含“公开”则返回“公开”，否则返回密级候选中的第一个 `value`。
    - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
    - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
    - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
    - 主 Prompt 的多节点分类合同是：`architectureId` 必须返回有唯一文档证据支持的候选叶子节点 ID；叶子证据不足、无法区分或无法匹配时保持为空，不得返回父节点、公共父节点或任意默认值。
-   - 当前服务端尚未验证候选是否为叶子：单候选会直接返回该节点 ID；多候选成功路径要求非空 `architectureId`，并只校验它是请求 `architectureList` 中的整数候选。因而主 Prompt 输出的空值会先被视为合同不合规，非叶子候选却可能通过校验；这两点都是当前实现限制，不代表主 Prompt 的目标口径。首次结果不合规时，服务端会先尝试下述 GJB 确定性兜底，未命中再发起一次 architecture repair，repair 仍不合规才将任务置为失败。
-   - GJB、国军标、国家军用标准资料应归类到候选中“数据标准”下有证据支持的叶子节点，禁止返回“数据标准”父节点。当前服务端的 GJB 兜底会按候选顺序选择名称或路径包含“数据标准”的首个节点，尚未区分父节点与叶子节点；调用方应保证数据标准叶子结构完整，并避免泛化父节点排在可命中的叶子节点之前，但最终仍应以主 Prompt 合同作为验收口径。
+   - 当前服务端尚未验证普通候选是否为叶子：单候选会直接返回该节点 ID；多候选成功路径要求非空 `architectureId`，并只校验它是请求 `architectureList` 中的整数候选。因而主 Prompt 输出的空值会先被视为合同不合规，普通领域的非叶子候选却可能通过校验；这两点都是当前实现限制，不代表主 Prompt 的目标口径。首次结果不合规时，服务端会先尝试下述 GJB 确定性兜底，未命中再发起一次 architecture repair，repair 仍不合规才将任务置为失败。
+   - GJB、国军标、国家军用标准资料的兜底分类只会返回候选中“数据标准”分支下的叶子节点，禁止返回“数据标准”父节点。服务端保留前端 `architectureList` 原始顺序：多个数据标准叶子均可选或无法区分时，返回其中第一个叶子；模型直接返回数据标准父节点时，也会触发相同的叶子兜底，父节点不会进入成功回调或永久知识库。
    - 当最终分类名称严格符合 `<武器装备名称>-基础数据`、`<武器装备名称>-战技指标`、`<武器装备名称>-运用数据` 或 `<武器装备名称>-效能数据` 时，回调 `data.architectureId` 返回具体子分类 ID；本地知识库关系和 AnythingLLM workspace 按解析出的装备级父节点 ID 归并。业务 metadata 以 DocSense 本地数据库为准，AnythingLLM 上传 metadata 当前仅写入用于来源追踪的 `docSource`，不写入分类 ID。
    - 主 Prompt 要求 `fileDataItem.score` 必填且只能是 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料；服务端映射会将缺失、无法转为数值、数值不是整数值或候选外的评分归一化为 `55`，可转换为整值的 `95.0`、`"95"` 等输入会保留为对应整数档位。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。
@@ -191,15 +191,15 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
-   - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时只解析列表选中的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并严格校验文件已解析且属于当前 `architectureId`。
-   - 指定文件范围时会创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束时会在 `finally` 中尝试删除，失败只记录 warning，可能残留临时 workspace；原类别 workspace 不做选中文档增删。
-   - 通过 `architectureId` 从知识库映射中定位 workspace 后执行字段提取。
+   - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时可选择任意已进入知识库类别的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并要求每个文件名唯一对应一条本地文档记录。未解析文件返回 `404`；同名跨类别或多个选中文件对应同一外部文档位置时返回 `400`，不会随机选择文档。
+   - 指定文件范围时会在受理阶段冻结内部文档快照，并创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束时会在 `finally` 中尝试删除，失败只记录 warning，可能残留临时 workspace；任何来源类别 workspace 均不做选中文档增删。此模式不依赖目标 `architectureId` 的永久 workspace。
+   - `filePathList` 缺省或为空时，仍通过 `architectureId` 从知识库映射中定位永久 workspace，并解析该类别全部文件。
    - 字段抽取默认采用“目标证据 + 术语规则”分池检索：普通 `INPUT` 字段的目标证据默认 `topN=8`，`TABLE` 字段默认 `topN=16`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取。只有成功解析出有效行时，回调才扩展为多行二维 `tableFieldList`；否则保留原始列模板。
    - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束时会尝试恢复，失败只记录 warning，不能视为强恢复保证。
    - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时跳过字段阶段的术语向量检索和 Prompt 注入，但准备阶段仍可能上传或复用术语 workspace，并处理目标 workspace 中混入的术语文档。
    - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
-   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 优先返回 `documents.original_name` 文件原名，`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表；文件映射缺失时文件名字段回退为 AnythingLLM 返回的内部来源名。
+   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 严格返回文件解析请求中 `originalFileName` 的原值（持久化为 `documents.original_name`），`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表。MHTML/OCR 等预处理产生的实际上传文件名仅用于内部映射，绝不写入回调；缺少该内部谱系的开发数据必须重新解析，不做名称猜测或回退。
    - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
 
 4. `/llm/check-task`

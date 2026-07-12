@@ -168,11 +168,11 @@ class AnythingLLMGatewayFactory:
             if transport is not None:
                 try:
                     transport.close()
-                    logger.debug("关闭 AnythingLLM 任务级 RAG 对象图")
+                    logger.debug("已关闭 AnythingLLM 任务级 RAG 对象图")
                 except Exception:
                     if task_failed:
                         logger.exception(
-                            "关闭 AnythingLLM 任务级 Transport 失败，保留原始任务异常"
+                            "关闭 AnythingLLM 任务级 HTTP 传输连接失败，保留原始任务异常"
                         )
                     else:
                         raise
@@ -272,11 +272,11 @@ class AnythingLLMKnowledgeIndexFactory:
             if transport is not None:
                 try:
                     transport.close()
-                    logger.debug("关闭 AnythingLLM 任务级永久知识库对象图")
+                    logger.debug("已关闭 AnythingLLM 任务级永久知识库对象图")
                 except Exception:
                     if task_failed:
                         logger.exception(
-                            "关闭永久知识库 Transport 失败，保留原始任务异常"
+                            "关闭永久知识库任务级 HTTP 传输连接失败，保留原始任务异常"
                         )
                     else:
                         raise

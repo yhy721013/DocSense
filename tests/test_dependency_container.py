@@ -124,7 +124,7 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
         transport.close.assert_called_once_with()
 
     def test_transport_construction_failure_is_not_suppressed(self) -> None:
-    """传输对象尚未创建时，工厂必须原样传播构造异常。"""
+        """传输对象尚未创建时，工厂必须原样传播构造异常。"""
         factory = AnythingLLMGatewayFactory(
             self._config(),
             transport_factory=Mock(side_effect=ValueError("配置无效")),
@@ -330,7 +330,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertNotIn("requests.Session(", container_source)
 
     def test_blueprint_source_has_no_module_level_service_construction(self) -> None:
-    """蓝图只能解析应用容器，不能重新引入模块级数据库或信号量单例。"""
+        """蓝图只能解析应用容器，不能重新引入模块级数据库或信号量单例。"""
         blueprint_source = (
             Path(__file__).resolve().parents[1]
             / "app"

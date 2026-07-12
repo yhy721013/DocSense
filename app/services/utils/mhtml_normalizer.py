@@ -140,13 +140,17 @@ def is_mhtml_file(file_path: str) -> bool:
         # 2. 包含 multipart MIME boundary
         # 3. 可能包含 "Content-Type: multipart/related"
         if 'from:' in header_str and ('saved by blink' in header_str or 'multipart/' in header_str):
-            logger.warning("检测到文件实际是MHTML格式（尽管扩展名是 %s）: %s", 
-                          path.suffix, file_path)
+            logger.warning(
+                "检测到文件内容实际为 MHTML，扩展名与内容不一致: "
+                "suffix=%s file_name=%s",
+                path.suffix,
+                path.name,
+            )
             return True
         
         # 额外的MIME边界检测
         if 'content-type: multipart/' in header_str and 'boundary=' in header_str:
-            logger.warning("检测到MIME multipart格式，可能是MHTML文件: %s", file_path)
+            logger.warning("检测到 MIME multipart 内容，按 MHTML 文件处理: file_name=%s", path.name)
             return True
             
     except Exception:
@@ -226,18 +230,21 @@ def normalize_mhtml_file(file_path: str, use_pdf_conversion: bool = True) -> str
             # 调用 MHTML → PDF 转换器
             convert_mhtml_to_pdf(str(source), pdf_output_path)
             
-            logger.info("MHTML 标准化 PDF 已生成: %s", pdf_output_path)
+            logger.info(
+                "MHTML 标准化 PDF 已生成: output_file=%s",
+                Path(pdf_output_path).name,
+            )
             return pdf_output_path
             
         except Exception as e:
-            logger.warning("MHTML → PDF 转换失败: %s", e)
+            logger.warning("MHTML 转 PDF 失败，准备切换降级流程: error_type=%s", type(e).__name__)
             logger.info("MHTML 标准化切换到纯文本提取模式")
     
     # 【降级方案】使用纯文本提取
     logger.info("MHTML 标准化使用降级流程：MHTML → 纯文本 MD")
     normalized_path = source.with_name(f"{source.name}.normalized.md")
     normalized_path.write_text(extract_text_from_mhtml(file_path) + "\n", encoding="utf-8")
-    logger.info("MHTML 标准化 Markdown 已生成: %s", normalized_path)
+    logger.info("MHTML 标准化 Markdown 已生成: output_file=%s", normalized_path.name)
     return str(normalized_path)
 
 

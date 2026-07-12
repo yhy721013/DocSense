@@ -347,12 +347,15 @@ class PreparedDocumentRef:
     ``document_ref`` 用于来源精确匹配，``external_location`` 用于后续索引登记和补偿，
     ``content_sha256`` 则来自实际上传的不可变副本，供永久知识库构造可信幂等身份。两个
     外部引用只能作为不可拆解的值传递、比较和持久化；业务层不得根据其文本格式推导
-    供应商目录、HTTP 路径或资源类型。
+    供应商目录、HTTP 路径或资源类型。``ingested_file_name`` 是实际提交给文档处理服务
+    的文件基名，用于把外部系统返回的展示来源稳定映射回业务原始文件名；它不是外部资源
+    标识，也不会加入任何 HTTP 接口字段。
     """
 
     document_ref: str
     external_location: str
     content_sha256: str
+    ingested_file_name: str
 
     def __post_init__(self) -> None:
         """拒绝无法被可靠审计或转交长期知识库的空引用。"""
@@ -366,7 +369,23 @@ class PreparedDocumentRef:
             or any(character not in "0123456789abcdef" for character in normalized_digest)
         ):
             raise ValueError("PreparedDocumentRef.content_sha256 必须是 SHA-256 摘要")
+        normalized_ingested_file_name = (
+            str(self.ingested_file_name or "")
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+            .strip()
+        )
+        if (
+            not normalized_ingested_file_name
+            or normalized_ingested_file_name in {".", ".."}
+        ):
+            raise ValueError("PreparedDocumentRef.ingested_file_name 必须是有效文件名")
         object.__setattr__(self, "content_sha256", normalized_digest)
+        object.__setattr__(
+            self,
+            "ingested_file_name",
+            normalized_ingested_file_name,
+        )
 
 
 @dataclass(frozen=True)

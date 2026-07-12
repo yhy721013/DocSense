@@ -56,18 +56,19 @@ class ChatCommandService:
             input_documents=input_documents,
         )
         logger.info(
-            "文件对话运行已受理: chat_id=%s run_id=%s status=%s owner=%s",
+            "文件对话运行已受理: chat_id=%s run_id=%s status=%s "
+            "has_owner_instance=%s",
             run.chat_id,
             run.run_id,
             run.status,
-            run.owner_instance_id,
+            bool(run.owner_instance_id),
         )
         return run
 
     def complete_chat_run(self, *, run_id: str) -> ChatRun:
         run = self._run_coordinator.complete_run(run_id)
         logger.info(
-            "文件对话run已成功完成: chat_id=%s run_id=%s status=%s",
+            "文件对话运行已成功完成: chat_id=%s run_id=%s status=%s",
             run.chat_id,
             run.run_id,
             run.status,
@@ -99,7 +100,7 @@ class ChatCommandService:
             error_message=error_message,
         )
         logger.info(
-            "文件对话未启动run已收敛: chat_id=%s run_id=%s status=%s",
+            "未启动的文件对话运行已收敛: chat_id=%s run_id=%s status=%s",
             run.chat_id,
             run.run_id,
             run.status,
@@ -109,7 +110,7 @@ class ChatCommandService:
     def abort_chat_run(self, *, run_id: str) -> ChatRun:
         run = self._run_coordinator.abort_run(run_id)
         logger.info(
-            "文件对话run已标记中断: chat_id=%s run_id=%s abort_requested=%s",
+            "文件对话运行已标记中断: chat_id=%s run_id=%s abort_requested=%s",
             run.chat_id,
             run.run_id,
             run.abort_requested,
@@ -132,7 +133,7 @@ class ChatCommandService:
                 lease=execution_lease,
             )
         logger.debug(
-            "文件对话run心跳已刷新: chat_id=%s run_id=%s status=%s",
+            "文件对话运行心跳已刷新: chat_id=%s run_id=%s status=%s",
             run.chat_id,
             run.run_id,
             run.status,
@@ -142,7 +143,7 @@ class ChatCommandService:
     def request_abort(self, *, run_id: str) -> ChatRun:
         run = self._run_coordinator.request_abort(run_id)
         logger.info(
-            "文件对话run收到中断请求: chat_id=%s run_id=%s abort_requested=%s",
+            "文件对话运行收到中断请求: chat_id=%s run_id=%s abort_requested=%s",
             run.chat_id,
             run.run_id,
             run.abort_requested,
@@ -160,10 +161,10 @@ class ChatCommandService:
         logger.debug("开始领取文件对话运行执行权: run_id=%s", run_id)
         lease = self._run_coordinator.issue_execution_lease(run_id=run_id)
         logger.info(
-            "文件对话运行执行权已领取: chat_id=%s run_id=%s owner=%s",
+            "文件对话运行执行权已领取: chat_id=%s run_id=%s has_owner_instance=%s",
             lease.chat_id,
             lease.run_id,
-            lease.owner_instance_id,
+            bool(lease.owner_instance_id),
         )
         return lease
 
@@ -282,7 +283,7 @@ class ChatCommandService:
         )
         if expired_runs:
             logger.warning(
-                "文件对话过期run已在命令层收敛: chat_id=%s run_ids=%s",
+                "文件对话过期运行已在命令层收敛: chat_id=%s run_ids=%s",
                 chat_id,
                 ",".join(run.run_id for run in expired_runs),
             )

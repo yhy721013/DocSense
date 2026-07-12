@@ -11,7 +11,10 @@ from app.ports import (
 )
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.analysis_service import (
+    DataStandardParentContractError,
     DEFAULT_ARCHITECTURE_OPTIONS,
+    _first_data_standard_leaf_id,
+    _resolve_analysis_architecture_id,
     build_file_callback_payload,
     map_analysis_result,
     resolve_storage_architecture_id,
@@ -229,7 +232,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["architectureId"], 1)
 
-    def test_map_analysis_result_routes_gjb_content_to_data_standard_node(self):
+    def test_map_analysis_result_routes_gjb_content_to_ordered_data_standard_leaf(self):
         request_params = {
             "fileName": "sample.txt",
             "originalFileName": "GJB 9001C-2017.pdf",
@@ -250,6 +253,22 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     "pathName": "数据标准",
                     "remark": "国家军用标准、GJB、技术标准和数据规范。",
                 },
+                {
+                    "id": 203,
+                    "name": "军用软件标准",
+                    "parentId": 202,
+                    "path": "202/203",
+                    "pathName": "数据标准/军用软件标准",
+                    "remark": "军用软件相关标准。",
+                },
+                {
+                    "id": 204,
+                    "name": "建模与仿真标准",
+                    "parentId": 202,
+                    "path": "202/204",
+                    "pathName": "数据标准/建模与仿真标准",
+                    "remark": "建模与仿真相关标准。",
+                },
             ],
         }
 
@@ -259,7 +278,27 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             original_text="本文档为 GJB 9001C-2017 质量管理体系要求，属于国家军用标准。",
         )
 
-        self.assertEqual(result["architectureId"], 202)
+        # GJB 兜底必须跳过“数据标准”父节点，并保留前端候选原始顺序。
+        self.assertEqual(result["architectureId"], 203)
+
+    def test_resolve_architecture_keeps_normal_parent_but_rejects_data_standard_parent(self):
+        """普通父节点可用，数据标准父节点必须转入叶子兜底路径。"""
+        request_params = {
+            "architectureList": [
+                {"id": 211, "name": "普通父节点", "parentId": None},
+                {"id": 212, "name": "普通子节点", "parentId": 211},
+                {"id": 213, "name": "数据标准", "parentId": None},
+                {"id": 214, "name": "军用软件标准", "parentId": 213},
+            ]
+        }
+
+        self.assertEqual(
+            _resolve_analysis_architecture_id({"architectureId": 211}, request_params),
+            211,
+        )
+        self.assertEqual(_first_data_standard_leaf_id(request_params["architectureList"]), 214)
+        with self.assertRaises(DataStandardParentContractError):
+            _resolve_analysis_architecture_id({"architectureId": 213}, request_params)
 
     def test_map_analysis_result_returns_standard_fields_when_architecture_matches_standard_range(self):
         request_params = {
@@ -1046,6 +1085,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 [
                     {"id": 9071, "name": "普通候选", "parentId": None},
                     {"id": 9072, "name": "数据标准", "parentId": None},
+                    {
+                        "id": 9073,
+                        "name": "军用软件标准",
+                        "parentId": 9072,
+                        "pathName": "数据标准/军用软件标准",
+                    },
                 ],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
@@ -1075,8 +1120,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(task["result_payload"]["data"]["architectureId"], 9071)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
-    def test_stage9_invalid_model_architecture_uses_gjb_candidate_before_repair(self):
-        """数字字符串不合法时应先按 GJB 正文命中数据标准候选。"""
+    def test_stage9_invalid_model_architecture_uses_ordered_gjb_leaf_before_repair(self):
+        """数字字符串不合法时，应先按 GJB 正文命中首个数据标准叶子。"""
         with workspace_tempdir() as tmp:
             file_name = "gjb-fallback.txt"
             Path(tmp, file_name).write_text("本文件为 GJB 9001C-2017 国家军用标准。", encoding="utf-8")
@@ -1085,6 +1130,18 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 [
                     {"id": 9081, "name": "普通候选", "parentId": None},
                     {"id": 9082, "name": "数据标准", "parentId": None},
+                    {
+                        "id": 9083,
+                        "name": "军用软件标准",
+                        "parentId": 9082,
+                        "pathName": "数据标准/军用软件标准",
+                    },
+                    {
+                        "id": 9084,
+                        "name": "建模与仿真标准",
+                        "parentId": 9082,
+                        "pathName": "数据标准/建模与仿真标准",
+                    },
                 ],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
@@ -1111,8 +1168,114 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             attempts = task_service.get_llm_interaction_attempts(interaction["id"])
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9082)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9083)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+
+    def test_stage9_data_standard_parent_falls_back_to_ordered_leaf_without_gjb_text(self):
+        """数据标准父节点即使没有 GJB 关键词，也必须按顺序兜底到叶子。"""
+        with workspace_tempdir() as tmp:
+            file_name = "data-standard-parent.txt"
+            Path(tmp, file_name).write_text("数据标准父节点分类测试", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9091, "name": "普通候选", "parentId": None},
+                    {"id": 9092, "name": "数据标准", "parentId": None},
+                    {
+                        "id": 9093,
+                        "name": "军用软件标准",
+                        "parentId": 9092,
+                        "pathName": "数据标准/军用软件标准",
+                    },
+                    {
+                        "id": 9094,
+                        "name": "建模与仿真标准",
+                        "parentId": 9092,
+                        "pathName": "数据标准/建模与仿真标准",
+                    },
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:data-standard-parent", text="分类来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, 9092),
+                        sources=(source,),
+                    )
+                ]
+            )
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=FakeKnowledgeIndexFactory(),
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9093)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+
+    def test_stage9_repair_cannot_store_data_standard_parent(self):
+        """分类修复再次返回数据标准父节点时，任务不得成功入库。"""
+        with workspace_tempdir() as tmp:
+            file_name = "repair-data-standard-parent.txt"
+            Path(tmp, file_name).write_text("普通分类文本", encoding="utf-8")
+            request_payload = self._stage9_request(
+                file_name,
+                [
+                    {"id": 9095, "name": "普通候选", "parentId": None},
+                    {"id": 9096, "name": "数据标准", "parentId": None},
+                    {
+                        "id": 9097,
+                        "name": "军用软件标准",
+                        "parentId": 9096,
+                        "pathName": "数据标准/军用软件标准",
+                    },
+                ],
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request_payload)
+            source = RagSource(document_ref="document:repair-data-standard-parent", text="分类来源")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(file_name, ""),
+                        sources=(source,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":9096}',
+                        sources=(source,),
+                    )
+                ],
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            self._run_stage9_task(
+                task_service=task_service,
+                request_payload=request_payload,
+                download_root=tmp,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=knowledge_factory,
+            )
+            task = task_service.get_task("file", file_name)
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(len(knowledge_factory.ports), 0)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [RagPromptKind.ANALYSIS.value, RagPromptKind.ARCHITECTURE_REPAIR.value],
+        )
 
     def test_stage9_architecture_repair_has_separate_audit_attempt(self):
         """多候选缺少 architectureId 时可修复为请求中的父节点。"""

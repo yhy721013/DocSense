@@ -96,7 +96,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertTrue(aborted.abort_requested)
 
     def test_discard_unstarted_run_hides_the_accepted_user_message(self) -> None:
-    """已受理状态从未领取执行权时，断开连接不应产生历史轮次。"""
+        """已受理状态从未领取执行权时，断开连接不应产生历史轮次。"""
         run = self.locks.try_acquire_chat_run(
             chat_id="chat-discard",
             run_id="run-discard",

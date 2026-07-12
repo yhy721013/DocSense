@@ -231,11 +231,11 @@ class RagResourceLeaseService:
         logger.log(
             logging.INFO if succeeded else logging.ERROR,
             "RAG 资源租约审计状态已更新: execution_id=%s status=%s "
-            "interaction_id=%s error=%s",
+            "interaction_id=%s error_chars=%d",
             normalized_execution,
             "audited" if succeeded else "audit_failed",
             interaction_id if succeeded else None,
-            "" if succeeded else normalized_error,
+            len("" if succeeded else normalized_error),
         )
 
     def mark_closed(
@@ -297,9 +297,10 @@ class RagResourceLeaseService:
             if cursor.rowcount != 1:
                 raise ValueError("只有审计成功且尚未关闭的租约可以记录清理失败")
         logger.warning(
-            "RAG 资源租约记录清理失败: execution_id=%s status=audited error=%s",
+            "RAG 资源租约已记录清理失败，等待后续恢复: "
+            "execution_id=%s status=audited error_chars=%d",
             normalized_execution,
-            normalized_error,
+            len(normalized_error),
         )
 
     def list_open(self) -> list[RagResourceLease]:

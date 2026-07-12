@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 import os
 from collections import defaultdict
 
@@ -82,6 +82,123 @@ class WeaponryRetrievalContext:
             self.target_workspace_term_doc_paths = []
 
 
+class WeaponrySelectedDocumentError(ValueError):
+    """指定范围的知识库文档无法形成确定检索快照时抛出。"""
+
+
+class WeaponrySelectedDocumentNotFoundError(WeaponrySelectedDocumentError):
+    """请求文件尚未进入本地知识库映射时抛出。"""
+
+
+class WeaponrySelectedDocumentAmbiguityError(WeaponrySelectedDocumentError):
+    """同一请求无法唯一定位一份外部知识库文档时抛出。"""
+
+
+@dataclass(frozen=True)
+class WeaponrySelectedDocument:
+    """一次 weaponry 任务中被显式选中的不可变文档快照。
+
+    ``filePathList`` 只携带哈希文件名，不能携带来源分类或 AnythingLLM 外部位置。
+    因此必须在路由受理阶段将其解析为此快照，再持久化并交给后台线程使用，避免文件
+    重分类、重新解析或删除后，异步任务重新查询到另一份同名文档。该对象只描述内部
+    任务输入，绝不加入 HTTP 请求或回调字段。
+    """
+
+    file_name: str
+    original_name: str
+    source_architecture_id: int
+    doc_path: str
+    ingested_file_name: str
+    anything_doc_id: str = ""
+
+    def __post_init__(self) -> None:
+        """校验可用于临时 workspace 绑定和来源映射的最小身份集。"""
+        file_name = str(self.file_name or "").strip()
+        if not file_name:
+            raise ValueError("file_name不能为空")
+        # 业务原始名必须在请求受理后原样流转。仅借助 strip 判断空值，不能修改实际
+        # 保存值；否则 analyseDataSource.source 无法严格回显 originalFileName 原值。
+        requested_original_name = str(self.original_name or "")
+        original_name = (
+            requested_original_name
+            if requested_original_name.strip()
+            else file_name
+        )
+        if (
+            isinstance(self.source_architecture_id, bool)
+            or not isinstance(self.source_architecture_id, int)
+            or self.source_architecture_id < 1
+        ):
+            raise ValueError("source_architecture_id必须是正整数")
+        doc_path = str(self.doc_path or "").strip()
+        if not doc_path:
+            raise ValueError("doc_path不能为空")
+        ingested_file_name = (
+            str(self.ingested_file_name or "")
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+            .strip()
+        )
+        if not ingested_file_name or ingested_file_name in {".", ".."}:
+            raise ValueError("ingested_file_name必须是有效文件名")
+
+        object.__setattr__(self, "file_name", file_name)
+        object.__setattr__(self, "original_name", original_name)
+        object.__setattr__(self, "doc_path", doc_path)
+        object.__setattr__(
+            self,
+            "anything_doc_id",
+            str(self.anything_doc_id or "").strip(),
+        )
+        object.__setattr__(self, "ingested_file_name", ingested_file_name)
+
+    def to_task_snapshot(self) -> Dict[str, Any]:
+        """转换为可严格 JSON 持久化的任务快照，不包含供应商响应原文。"""
+        return {
+            "file_name": self.file_name,
+            "original_name": self.original_name,
+            "source_architecture_id": self.source_architecture_id,
+            "doc_path": self.doc_path,
+            "anything_doc_id": self.anything_doc_id,
+            "ingested_file_name": self.ingested_file_name,
+        }
+
+    @classmethod
+    def from_task_snapshot(
+        cls,
+        value: Mapping[str, Any],
+    ) -> "WeaponrySelectedDocument":
+        """从任务库读取内部快照，并重新执行边界校验。"""
+        if not isinstance(value, Mapping):
+            raise TypeError("weaponry任务文档快照必须是Mapping")
+        raw_architecture_id = value.get("source_architecture_id")
+        if isinstance(raw_architecture_id, bool):
+            raise ValueError("source_architecture_id必须是正整数")
+        try:
+            source_architecture_id = int(raw_architecture_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("source_architecture_id必须是正整数") from exc
+        return cls(
+            file_name=str(value.get("file_name") or ""),
+            original_name=str(value.get("original_name") or ""),
+            source_architecture_id=source_architecture_id,
+            doc_path=str(value.get("doc_path") or ""),
+            anything_doc_id=str(value.get("anything_doc_id") or ""),
+            ingested_file_name=str(value.get("ingested_file_name") or ""),
+        )
+
+    def to_document_record(self) -> Dict[str, Any]:
+        """适配既有检索与溯源辅助函数所需的最小本地文档结构。"""
+        return {
+            "file_name": self.file_name,
+            "original_name": self.original_name,
+            "architecture_id": self.source_architecture_id,
+            "doc_path": self.doc_path,
+            "anything_doc_id": self.anything_doc_id,
+            "ingested_file_name": self.ingested_file_name,
+        }
+
+
 # ---------------------------------------------------------------------------
 # 语言检测 & 翻译
 # ---------------------------------------------------------------------------
@@ -96,7 +213,7 @@ def _translate_if_needed(text: str) -> str:
         service = get_translation_service()
         return service.translate_text_only(text, target_lang="Chinese", fast_translate=True, as_html=False)
     except Exception as e:
-        logger.warning("翻译失败: %s", e)
+        logger.warning("字段内容翻译失败: error_type=%s", type(e).__name__)
         return ""
 
 
@@ -263,7 +380,12 @@ def _vector_search_with_top_n(
         )
     except Exception as exc:
         # 兼容测试 Fake 或尚未迁移实现抛出异常的场景，避免单字段检索中断整个任务。
-        logger.error("向量搜索时出现异常 workspace=%s: %s", workspace_slug, exc)
+        logger.error(
+            "武器装备字段的向量检索失败: query_chars=%d top_n=%d error_type=%s",
+            len(query or ""),
+            top_n,
+            type(exc).__name__,
+        )
         return []
 
 
@@ -281,7 +403,10 @@ def _list_workspace_documents(
         return client.list_workspace_documents(workspace_slug, user_id=user_id)
     except Exception as exc:
         # Facade 正常情况下会返回空列表；此处继续保护测试 Fake 与迁移期替代实现。
-        logger.error("获取工作区 %s 文档列表异常: %s", workspace_slug, exc)
+        logger.error(
+            "读取工作区文档列表失败: error_type=%s",
+            type(exc).__name__,
+        )
         return []
 
 
@@ -325,11 +450,10 @@ def _unique_term_doc_paths(doc_paths: List[str]) -> List[str]:
     return unique_paths
 
 
-def _target_document_records(
+def _all_knowledge_document_records(
     kb_service: DatabaseService,
-    architecture_id: int,
-    selected_file_names: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    """读取全部本地知识库文档，并统一校验数据库服务返回契约。"""
     all_records = kb_service.list_document_records()
     # 数据库服务公开契约要求始终返回列表。此处保留边界校验，可以把未来实现回归或测试
     # 替身错误转换为带有明确上下文的异常，避免再次暴露难以定位的“NoneType 不可迭代”。
@@ -339,26 +463,22 @@ def _target_document_records(
             "文档记录查询返回契约错误: "
             f"期望 list，实际为 {type(all_records).__name__}"
         )
+    if any(not isinstance(record, dict) for record in all_records):
+        raise TypeError("文档记录查询返回契约错误: 列表元素必须是dict")
+    return all_records
+
+
+def _target_document_records(
+    kb_service: DatabaseService,
+    architecture_id: int,
+) -> List[Dict[str, Any]]:
+    """返回空 ``filePathList`` 语义下当前类别的全部文档。"""
     records = [
         record
-        for record in all_records
+        for record in _all_knowledge_document_records(kb_service)
         if str(record.get("architecture_id")) == str(architecture_id)
     ]
-    if not selected_file_names:
-        return records
-
-    records_by_file_name = {
-        str(record.get("file_name") or ""): record
-        for record in records
-        if record.get("file_name")
-    }
-    selected_records: List[Dict[str, Any]] = []
-    for file_name in selected_file_names:
-        record = records_by_file_name.get(file_name)
-        if not record:
-            raise ValueError(f"文件 {file_name} 不存在或不属于当前类别")
-        selected_records.append(record)
-    return selected_records
+    return records
 
 
 def _document_record_path(record: Dict[str, Any]) -> str:
@@ -367,6 +487,124 @@ def _document_record_path(record: Dict[str, Any]) -> str:
         return doc_path
     anything_doc_id = str(record.get("anything_doc_id") or "").strip()
     return f"custom-documents/{anything_doc_id}.json" if anything_doc_id else ""
+
+
+def resolve_weaponry_selected_documents(
+    kb_service: DatabaseService,
+    selected_file_names: Sequence[str],
+) -> tuple[WeaponrySelectedDocument, ...]:
+    """将非空 ``filePathList`` 解析为跨分类的不可变知识库文档快照。
+
+    甲方请求中只提供文件名，数据库却允许同名文件存在于多个分类。因此这里绝不能
+    按数据库默认顺序任选一条记录：找不到返回“未解析”，存在多条记录或多个业务文件
+    指向同一外部位置时返回“无法唯一溯源”。两类歧义都必须在后台线程启动前拒绝。
+    """
+    if isinstance(selected_file_names, (str, bytes)) or not isinstance(
+        selected_file_names,
+        Sequence,
+    ):
+        raise TypeError("selected_file_names必须是字符串序列")
+
+    records_by_file_name: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in _all_knowledge_document_records(kb_service):
+        file_name = str(record.get("file_name") or "").strip()
+        if file_name:
+            records_by_file_name[file_name].append(record)
+
+    selected_documents: List[WeaponrySelectedDocument] = []
+    selected_doc_paths: Dict[str, str] = {}
+    for raw_file_name in selected_file_names:
+        file_name = str(raw_file_name or "").strip()
+        if not file_name:
+            raise WeaponrySelectedDocumentError("filePathList中包含无效文件名")
+
+        candidates = records_by_file_name.get(file_name, [])
+        if not candidates:
+            raise WeaponrySelectedDocumentNotFoundError(
+                f"文件 {file_name} 尚未解析，无法用于知识谱系解析"
+            )
+        if len(candidates) != 1:
+            raise WeaponrySelectedDocumentAmbiguityError(
+                f"文件 {file_name} 在多个知识库分类中存在记录，无法唯一确定引用版本"
+            )
+
+        record = candidates[0]
+        raw_architecture_id = record.get("architecture_id")
+        if isinstance(raw_architecture_id, bool):
+            raise WeaponrySelectedDocumentError(
+                f"文件 {file_name} 的知识库分类记录无效"
+            )
+        try:
+            source_architecture_id = int(raw_architecture_id)
+        except (TypeError, ValueError) as exc:
+            raise WeaponrySelectedDocumentError(
+                f"文件 {file_name} 的知识库分类记录无效"
+            ) from exc
+
+        doc_path = _document_record_path(record)
+        if not doc_path:
+            raise WeaponrySelectedDocumentError(
+                f"文件 {file_name} 缺少知识库文档位置"
+            )
+        existing_file_name = selected_doc_paths.get(doc_path)
+        if existing_file_name and existing_file_name != file_name:
+            raise WeaponrySelectedDocumentAmbiguityError(
+                "选中文件指向同一知识库文档位置，无法唯一溯源"
+            )
+        selected_doc_paths[doc_path] = file_name
+        selected_documents.append(
+            WeaponrySelectedDocument(
+                file_name=file_name,
+                original_name=str(record.get("original_name") or file_name),
+                source_architecture_id=source_architecture_id,
+                doc_path=doc_path,
+                anything_doc_id=str(record.get("anything_doc_id") or ""),
+                ingested_file_name=str(record.get("ingested_file_name") or ""),
+            )
+        )
+
+    logger.info(
+        "已解析知识谱系跨分类选中文档快照: file_count=%d source_architecture_count=%d",
+        len(selected_documents),
+        len({item.source_architecture_id for item in selected_documents}),
+    )
+    return tuple(selected_documents)
+
+
+def _load_persisted_weaponry_selected_documents(
+    task_service: LLMTaskService,
+    architecture_id: int,
+    execution_id: str,
+) -> tuple[WeaponrySelectedDocument, ...]:
+    """按当前任务执行身份恢复已受理的跨分类文档快照。
+
+    当前路由会把快照直接传给本进程后台线程；该恢复入口用于未来可靠调度器或进程重启后
+    按持久化任务执行。读取时必须同时校验 ``execution_id``，避免同一类别新任务覆盖旧
+    任务后，旧执行意外拿到新一轮的文档范围。
+    """
+    normalized_execution_id = str(execution_id or "").strip()
+    if not normalized_execution_id:
+        # 不能以当前 architectureId 查询结果兜底：同一类别的新任务可能已覆盖旧任务，
+        # 此时兜底会让旧执行拿到新一轮选文范围，破坏任务隔离。
+        raise ValueError("指定文件范围任务缺少execution_id")
+    snapshots = task_service.get_weaponry_task_document_snapshots(
+        architecture_id=architecture_id,
+        execution_id=normalized_execution_id,
+    )
+    if not snapshots:
+        raise ValueError("指定文件范围任务缺少已受理文档快照")
+    selected_documents = tuple(
+        WeaponrySelectedDocument.from_task_snapshot(snapshot)
+        for snapshot in snapshots
+    )
+    logger.info(
+        "已从任务库恢复知识谱系选中文档快照: architecture_id=%s execution_id=%s "
+        "file_count=%d",
+        architecture_id,
+        normalized_execution_id,
+        len(selected_documents),
+    )
+    return selected_documents
 
 
 def _build_terms_rule_query(field_name: str, field_desc: str) -> str:
@@ -432,7 +670,7 @@ def _extract_thread_slug_from_client(client: AnythingLLMClient, thread_info: Dic
             if slug:
                 return str(slug)
         except Exception as e:
-            logger.warning("提取临时 Thread slug 失败: %s", e)
+            logger.warning("提取临时会话标识失败: error_type=%s", type(e).__name__)
     for key in ("slug", "threadSlug", "thread_slug", "id"):
         value = thread_info.get(key)
         if value:
@@ -466,7 +704,10 @@ def _send_prompt_to_isolated_thread(
                     active_thread_slug = child_thread_slug
                     delete_after = True
             except Exception as e:
-                logger.warning("创建字段临时 Thread 失败，回退到父 Thread: %s", e)
+                logger.warning(
+                    "创建字段临时会话失败，改用父会话: error_type=%s",
+                    type(e).__name__,
+                )
 
         try:
             result = client.send_prompt_to_thread(
@@ -480,17 +721,18 @@ def _send_prompt_to_isolated_thread(
             if delete_after and callable(delete_thread):
                 try:
                     if not delete_thread(workspace_slug, active_thread_slug, user_id=user_id):
-                        logger.warning("删除字段临时 Thread %s 失败（不影响结果）", active_thread_slug)
+                        logger.warning("删除字段临时会话失败，不影响已得到的字段结果")
                 except Exception as e:
-                    logger.warning("删除字段临时 Thread %s 异常（不影响结果）: %s", active_thread_slug, e)
+                    logger.warning(
+                        "删除字段临时会话发生异常，不影响已得到的字段结果: error_type=%s",
+                        type(e).__name__,
+                    )
 
         if result:
             return result
 
         logger.warning(
-            "字段提示词调用无有效响应，准备重试: workspace=%s thread=%s attempt=%d/%d",
-            workspace_slug,
-            active_thread_slug,
+            "字段提示词未得到有效响应，准备重试: attempt=%d/%d",
             attempt,
             PROMPT_SEND_MAX_ATTEMPTS,
         )
@@ -510,11 +752,11 @@ def _ensure_terms_workspace(
         return None
     workspace_info = client.ensure_workspace(TERMS_WORKSPACE_NAME, user_id=user_id)
     if not workspace_info:
-        logger.warning("无法创建或获取术语规则 workspace: %s", TERMS_WORKSPACE_NAME)
+        logger.warning("无法创建或获取术语规则工作区")
         return None
     workspace_slug = workspace_info.get("slug") or str(workspace_info.get("id") or "")
     if not workspace_slug:
-        logger.warning("术语规则 workspace 缺少 slug: %s", workspace_info)
+        logger.warning("术语规则工作区缺少有效标识")
         return None
 
     existing_docs = _list_workspace_documents(client, workspace_slug, user_id=user_id)
@@ -526,18 +768,16 @@ def _ensure_terms_workspace(
     ]
     if not missing_doc_paths:
         logger.info(
-            "复用已有术语规则 workspace: %s term_docs=%d",
-            workspace_slug,
+            "复用已有术语规则工作区: term_document_count=%d",
             len(existing_paths_by_key),
         )
         return workspace_slug
 
     if not client.update_embeddings_batch(workspace_slug, adds=missing_doc_paths, user_id=user_id):
-        logger.warning("术语规则 workspace 加入术语文档失败: %s", workspace_slug)
+        logger.warning("向术语规则工作区加入术语文档失败")
         return None
     logger.info(
-        "术语规则 workspace 已补充缺失文档: %s adds=%d existing=%d",
-        workspace_slug,
+        "术语规则工作区已补充缺失文档: added_count=%d existing_count=%d",
         len(missing_doc_paths),
         len(existing_paths_by_key),
     )
@@ -566,7 +806,7 @@ def _upload_local_terms_if_needed(client: AnythingLLMClient, user_id: int = 1) -
             continue
         doc_info = client.upload_document(str(term_file), user_id=user_id)
         if not doc_info:
-            logger.warning("上传术语文件失败，跳过: %s", term_file)
+            logger.warning("上传术语文件失败，已跳过该文件: file_name=%s", term_file.name)
             continue
         doc_id = doc_info.get("id") or doc_info.get("docId")
         doc_path = doc_info.get("location") or doc_info.get("docpath") or f"custom-documents/{term_file.name}-{doc_id}.json"
@@ -581,9 +821,19 @@ def _prepare_retrieval_context(
     architecture_id: int,
     workspace_slug: str,
     user_id: int = 1,
-    selected_file_names: Optional[List[str]] = None,
+    selected_documents: Optional[Sequence[WeaponrySelectedDocument]] = None,
 ) -> WeaponryRetrievalContext:
-    records = _target_document_records(kb_service, architecture_id, selected_file_names)
+    # 指定范围时必须使用受理阶段冻结的文档快照，不能重新按 ``architecture_id`` 查库。
+    # 否则同名文件重分类后会让临时 workspace 的真实文档与回调溯源记录产生分叉。
+    if selected_documents:
+        if any(
+            not isinstance(item, WeaponrySelectedDocument)
+            for item in selected_documents
+        ):
+            raise TypeError("selected_documents只能包含WeaponrySelectedDocument")
+        records = [item.to_document_record() for item in selected_documents]
+    else:
+        records = _target_document_records(kb_service, architecture_id)
     target_file_names: Set[str] = set()
     target_doc_paths: Set[str] = set()
     source_original_names: Dict[str, str] = {}
@@ -593,6 +843,7 @@ def _prepare_retrieval_context(
     for record in records:
         file_name = str(record.get("file_name") or "")
         original_name = str(record.get("original_name") or "") or file_name
+        ingested_file_name = str(record.get("ingested_file_name") or "").strip()
         doc_path = str(record.get("doc_path") or "")
         anything_doc_id = str(record.get("anything_doc_id") or "")
 
@@ -601,10 +852,23 @@ def _prepare_retrieval_context(
         if file_name:
             file_names.add(file_name)
 
-        for value in (file_name, original_name):
+        for value in (file_name, original_name, ingested_file_name):
             value = _normalize_source_name(value)
             if value:
                 target_file_names.add(value)
+
+        if not ingested_file_name:
+            # 开发阶段不兼容旧数据，也不从 doc_path、AnythingLLM title 等位置猜测上传名。
+            # 否则 MHTML 转换后的中间文件名会重新进入 callback，破坏业务原始名契约。
+            logger.error(
+                "知识谱系来源映射缺少实际上传文件名，拒绝执行并要求重新解析: "
+                "architecture_id=%s file_name=%s",
+                record.get("architecture_id"),
+                file_name,
+            )
+            raise WeaponrySelectedDocumentError(
+                "知识库文档缺少实际上传文件名，请重新执行文件解析后再进行知识谱系解析"
+            )
 
         if doc_path:
             target_doc_paths.add(doc_path.replace("\\", "/"))
@@ -612,6 +876,7 @@ def _prepare_retrieval_context(
         aliases = [
             file_name,
             original_name,
+            ingested_file_name,
             doc_path,
             Path(doc_path.replace("\\", "/")).name if doc_path else "",
             anything_doc_id,
@@ -643,9 +908,12 @@ def _prepare_retrieval_context(
         if target_term_paths:
             if client.update_embeddings_batch(workspace_slug, deletes=target_term_paths, user_id=user_id):
                 removed_term_paths = target_term_paths
-                logger.info("已从目标 workspace 临时移除术语文档: workspace=%s count=%d", workspace_slug, len(removed_term_paths))
+                logger.info(
+                    "已从目标工作区临时移除术语文档: removed_count=%d",
+                    len(removed_term_paths),
+                )
             else:
-                logger.warning("从目标 workspace 临时移除术语文档失败: workspace=%s", workspace_slug)
+                logger.warning("从目标工作区临时移除术语文档失败")
 
     return WeaponryRetrievalContext(
         target_file_names=target_file_names,
@@ -669,12 +937,11 @@ def _restore_target_workspace_terms(
         return
     if client.update_embeddings_batch(workspace_slug, adds=context.target_workspace_term_doc_paths, user_id=user_id):
         logger.info(
-            "已恢复目标 workspace 中的术语文档: workspace=%s count=%d",
-            workspace_slug,
+            "已恢复目标工作区中的术语文档: restored_count=%d",
             len(context.target_workspace_term_doc_paths),
         )
     else:
-        logger.warning("恢复目标 workspace 术语文档失败: workspace=%s", workspace_slug)
+        logger.warning("恢复目标工作区中的术语文档失败")
 
 
 def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: str = "") -> Dict[str, Any]:
@@ -850,7 +1117,7 @@ def _query_input_field(
 
     filled = dict(field)
     if not vs_results:
-        logger.info("字段 [%s] 向量搜索无匹配，使用空来源", field_name)
+        logger.info("字段向量检索未命中，使用空来源: field_name=%s", field_name)
         filled["analyseData"] = ""
         analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
         filled["analyseDataSource"] = (
@@ -933,16 +1200,20 @@ def _query_input_field(
                 first_valid_content = text_response
 
         if not data_sources:
-            logger.info("字段 [%s] (模式2) 提取成功: 所有相关文件均未能提取出有效信息", field_name)
+            logger.info(
+                "字段按文件提取完成，但未得到有效信息: field_name=%s",
+                field_name,
+            )
             filled["analyseData"] = ""
             filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
             return filled
 
-        preview_text = first_valid_content.replace('\n', ' ')
-        if len(preview_text) > 40:
-            preview_text = preview_text[:40] + "..."
-            
-        logger.info("字段 [%s] (模式2) 提取成功: %s (有效文件数: %d)", field_name, preview_text, len(data_sources))
+        logger.info(
+            "字段按文件提取完成: field_name=%s valid_file_count=%d result_chars=%d",
+            field_name,
+            len(data_sources),
+            len(first_valid_content),
+        )
         
         filled["analyseData"] = first_valid_content
         filled["analyseDataSource"] = data_sources
@@ -995,16 +1266,20 @@ def _query_input_field(
                 first_valid_content = text_response
 
         if not data_sources:
-            logger.info("字段 [%s] 提取成功: 所有相关 Chunk 均未能提取出有效信息", field_name)
+            logger.info(
+                "字段按片段提取完成，但未得到有效信息: field_name=%s",
+                field_name,
+            )
             filled["analyseData"] = ""
             filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
             return filled
 
-        preview_text = first_valid_content.replace('\n', ' ')
-        if len(preview_text) > 40:
-            preview_text = preview_text[:40] + "..."
-            
-        logger.info("字段 [%s] 提取成功: %s (有效 Chunk 数: %d)", field_name, preview_text, len(data_sources))
+        logger.info(
+            "字段按片段提取完成: field_name=%s valid_chunk_count=%d result_chars=%d",
+            field_name,
+            len(data_sources),
+            len(first_valid_content),
+        )
         
         filled["analyseData"] = first_valid_content
         filled["analyseDataSource"] = data_sources
@@ -1349,7 +1624,7 @@ def _query_table_field(
         return _finish(_preserve_original_table_rows())
 
     table_name = field.get("fieldName", "表格")
-    logger.info("  -> 开始处理表格 [%s]，列数: %d", table_name, len(column_defs))
+    logger.info("开始提取表格字段: table_name=%s column_count=%d", table_name, len(column_defs))
 
     retrieval_query = _build_table_retrieval_query(field, column_defs)
     vs_results = _vector_search_with_top_n(
@@ -1366,7 +1641,7 @@ def _query_table_field(
     ]
 
     if not vs_results:
-        logger.info("表格 [%s] 向量搜索无匹配，保留原始表格模板", table_name)
+        logger.info("表格字段向量检索未命中，保留原始模板: table_name=%s", table_name)
         return _finish(_preserve_original_table_rows())
 
     terms_rule_context = ""
@@ -1420,7 +1695,11 @@ def _query_table_field(
         rows = _parse_table_json_rows(text_response, column_defs)
         if not rows:
             if text_response and "未找到" not in text_response and text_response != "[]":
-                logger.warning("表格 [%s] 的模型响应无法解析为有效行: %s", table_name, text_response[:200])
+                logger.warning(
+                    "表格字段的模型响应无法解析为有效行: table_name=%s response_chars=%d",
+                    table_name,
+                    len(text_response),
+                )
             continue
 
         original_source_name = _resolve_original_source_name(file_name, retrieval_context)
@@ -1445,7 +1724,7 @@ def _query_table_field(
     else:
         filled["tableFieldList"] = template_rows
         extracted_row_count = 0
-    logger.info("表格 [%s] 提取完成: 解析行数=%d", table_name, extracted_row_count)
+    logger.info("表格字段提取完成: table_name=%s extracted_row_count=%d", table_name, extracted_row_count)
     return _finish(filled)
 
 
@@ -1461,16 +1740,23 @@ def run_weaponry_task(
     request_payload: Dict[str, Any],
     callback_url: str,
     callback_timeout: float,
-    selected_file_names: Optional[List[str]] = None,
+    selected_documents: Optional[Sequence[WeaponrySelectedDocument]] = None,
+    execution_id: Optional[str] = None,
 ) -> None:
-    """后台线程入口：执行 weaponry 解析任务。"""
+    """后台线程入口：执行 weaponry 解析任务。
+
+    ``execution_id`` 为内部任务身份，不属于 HTTP 请求或回调字段。队列恢复指定文件
+    范围任务时必须携带它，才能读取受理时对应的文档快照。
+    """
 
     params = request_payload.get("params", {})
     architecture_id = params.get("architectureId")
     architecture_id_str = str(architecture_id)
     field_list: List[Dict[str, Any]] = params.get("weaponryTemplateFieldList", [])
-    selected_file_names = list(selected_file_names or [])
-
+    raw_file_path_list = params.get("filePathList")
+    has_explicit_file_scope = (
+        isinstance(raw_file_path_list, list) and bool(raw_file_path_list)
+    )
     client: Optional[AnythingLLMClient] = None
     workspace_slug = ""
     temporary_workspace_slug = ""
@@ -1480,35 +1766,38 @@ def run_weaponry_task(
     terms_restored = False
 
     try:
-        # ─── 阶段 1：查找 Workspace ───
+        if selected_documents is None and has_explicit_file_scope:
+            # 生产路由会直接传入同一份快照；此分支服务于未来携带 execution_id 的
+            # 可靠调度器，确保异步重试不会重新按当前分类查询文档。
+            resolved_selected_documents = _load_persisted_weaponry_selected_documents(
+                task_service,
+                architecture_id,
+                execution_id,
+            )
+        else:
+            resolved_selected_documents = tuple(selected_documents or ())
+        if any(
+            not isinstance(item, WeaponrySelectedDocument)
+            for item in resolved_selected_documents
+        ):
+            raise TypeError("selected_documents只能包含WeaponrySelectedDocument")
+        if has_explicit_file_scope and not resolved_selected_documents:
+            raise ValueError("指定文件范围任务缺少已受理文档快照")
+
+        # ─── 阶段 1：准备检索 Workspace ───
         task_service.update_task_progress(
             "weaponry", architecture_id_str,
             progress=0.05, message="正在查找知识库", status="1",
         )
         _publish_progress(progress_hub, architecture_id_str, 0.05)
 
-        base_workspace_slug = kb_service.get_workspace_slug(architecture_id)
-        if not base_workspace_slug:
-            logger.warning("architectureId=%s 无对应 Workspace，标记失败", architecture_id)
-            _fail_task(
-                task_service, progress_hub, architecture_id, architecture_id_str,
-                callback_url, callback_timeout,
-                msg=f"architectureId={architecture_id} 对应的知识库不存在",
-            )
-            return
-
         client = AnythingLLMClient(load_anythingllm_config())
-        workspace_slug = base_workspace_slug
-
-        if selected_file_names:
-            selected_records = _target_document_records(
-                kb_service,
-                architecture_id,
-                selected_file_names,
-            )
-            selected_doc_paths = [_document_record_path(record) for record in selected_records]
-            if any(not doc_path for doc_path in selected_doc_paths):
-                raise ValueError("部分选中文件缺少 AnythingLLM 文档路径")
+        if resolved_selected_documents:
+            # 指定范围不再依赖目标 ``architectureId`` 的永久 workspace。所有来源文档
+            # 都只加入本任务新建的临时 workspace，绝不能向任一来源类别增删 embedding。
+            selected_doc_paths = [
+                item.doc_path for item in resolved_selected_documents
+            ]
 
             temporary_workspace_name = f"weaponry-selection-{architecture_id}-{int(time.time() * 1000)}"
             workspace_info = client.create_rag_workspace(temporary_workspace_name, user_id=1)
@@ -1545,11 +1834,33 @@ def run_weaponry_task(
 
             workspace_slug = temporary_workspace_slug
             logger.info(
-                "武器装备解析已限定选中文件: architectureId=%s workspace=%s file_count=%d",
+                "武器装备解析已限制为跨分类选中文件: architecture_id=%s "
+                "file_count=%d source_architecture_count=%d",
                 architecture_id,
-                workspace_slug,
-                len(selected_file_names),
+                len(resolved_selected_documents),
+                len(
+                    {
+                        item.source_architecture_id
+                        for item in resolved_selected_documents
+                    }
+                ),
             )
+        else:
+            # 未指定 filePathList 时必须保留旧语义：检索目标类别下全部永久文档，
+            # 因而仍要求该类别已存在永久 workspace 映射。
+            base_workspace_slug = kb_service.get_workspace_slug(architecture_id)
+            if not base_workspace_slug:
+                logger.warning(
+                    "未找到分类对应的知识库工作区，任务将标记失败: architecture_id=%s",
+                    architecture_id,
+                )
+                _fail_task(
+                    task_service, progress_hub, architecture_id, architecture_id_str,
+                    callback_url, callback_timeout,
+                    msg=f"architectureId={architecture_id} 对应的知识库不存在",
+                )
+                return
+            workspace_slug = base_workspace_slug
 
         # ─── 阶段 2：创建临时 Thread ───
         task_service.update_task_progress(
@@ -1582,7 +1893,7 @@ def run_weaponry_task(
             architecture_id,
             workspace_slug,
             user_id=1,
-            selected_file_names=selected_file_names,
+            selected_documents=resolved_selected_documents or None,
         )
 
         # ─── 阶段 3：逐字段查询 ───
@@ -1606,7 +1917,7 @@ def run_weaponry_task(
             for field in field_list:
                 field_type = field.get("fieldType", "INPUT")
                 field_name = field.get("fieldName", "unknown")
-                logger.info("正在处理字段: %s (%s)", field_name, field_type)
+                logger.info("开始提取字段: field_name=%s field_type=%s", field_name, field_type)
 
                 if field_type == "TABLE":
                     filled = _query_table_field(
@@ -1643,9 +1954,9 @@ def run_weaponry_task(
 
         thread_deleted = client.delete_thread(workspace_slug, thread_slug, user_id=1)
         if not thread_deleted:
-            logger.warning("删除 Thread %s 失败（不影响结果）", thread_slug)
+            logger.warning("删除临时检索会话失败，不影响已得到的任务结果")
 
-        logger.info("武器装备提取任务完成: architectureId=%s", architecture_id)
+        logger.info("武器装备提取任务执行完成: architecture_id=%s", architecture_id)
 
         # ─── 阶段 5：组装回调并发送 ───
         callback_payload = _build_weaponry_callback_payload(
@@ -1665,16 +1976,20 @@ def run_weaponry_task(
                 callback_context={"businessType": "weaponry", "architectureId": architecture_id},
             ):
                 task_service.mark_callback_success("weaponry", architecture_id_str)
-                logger.info("回调结果提交成功: architectureId=%s", architecture_id)
+                logger.info("武器装备任务外部回调提交成功: architecture_id=%s", architecture_id)
             else:
                 task_service.mark_callback_failed("weaponry", architecture_id_str, "callback failed")
-                logger.warning("回调结果提交失败: architectureId=%s", architecture_id)
+                logger.warning("武器装备任务外部回调提交失败: architecture_id=%s", architecture_id)
         else:
             # 未配置回调时将终态记录为 skipped，防止后续巡检把它识别成待重放任务。
             task_service.mark_callback_skipped("weaponry", architecture_id_str)
 
     except Exception as e:
-        logger.exception("武器装备提取任务异常: architectureId=%s, error=%s", architecture_id, e)
+        logger.exception(
+            "武器装备提取任务发生异常: architecture_id=%s error_type=%s",
+            architecture_id,
+            type(e).__name__,
+        )
         _fail_task(
             task_service, progress_hub, architecture_id, architecture_id_str,
             callback_url, callback_timeout,
@@ -1685,27 +2000,31 @@ def run_weaponry_task(
             try:
                 _restore_target_workspace_terms(client, workspace_slug, retrieval_context, user_id=1)
             except Exception as cleanup_error:
-                logger.warning("恢复目标 workspace 术语文档异常（不影响任务结果）: %s", cleanup_error)
+                logger.warning(
+                    "恢复目标工作区术语文档时发生异常，不影响任务结果: error_type=%s",
+                    type(cleanup_error).__name__,
+                )
 
         if client and workspace_slug and thread_slug and not thread_deleted:
             try:
                 if not client.delete_thread(workspace_slug, thread_slug, user_id=1):
-                    logger.warning("最终清理 Thread %s 失败（不影响任务结果）", thread_slug)
+                    logger.warning("最终清理临时检索会话失败，不影响任务结果")
             except Exception as cleanup_error:
-                logger.warning("最终清理 Thread %s 异常（不影响任务结果）: %s", thread_slug, cleanup_error)
+                logger.warning(
+                    "最终清理临时检索会话时发生异常，不影响任务结果: error_type=%s",
+                    type(cleanup_error).__name__,
+                )
 
         if client and temporary_workspace_slug:
             try:
                 if not client.delete_workspace(temporary_workspace_slug, user_id=1):
                     logger.warning(
-                        "删除选中文件临时 workspace %s 失败（不影响任务结果）",
-                        temporary_workspace_slug,
+                        "删除选中文件临时工作区失败，不影响任务结果",
                     )
             except Exception as cleanup_error:
                 logger.warning(
-                    "删除选中文件临时 workspace %s 异常（不影响任务结果）: %s",
-                    temporary_workspace_slug,
-                    cleanup_error,
+                    "删除选中文件临时工作区时发生异常，不影响任务结果: error_type=%s",
+                    type(cleanup_error).__name__,
                 )
 
 
@@ -1719,6 +2038,11 @@ def _fail_task(
     msg: str = "解析失败",
 ) -> None:
     """统一的任务失败处理。"""
+    logger.warning(
+        "武器装备提取任务已标记失败: architecture_id=%s failure_message_chars=%d",
+        architecture_id,
+        len(msg or ""),
+    )
     callback_payload = _build_weaponry_callback_payload(
         architecture_id, [], status="3", msg=msg,
     )

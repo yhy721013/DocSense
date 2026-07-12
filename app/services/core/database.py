@@ -33,6 +33,7 @@ class DatabaseService:
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         file_name TEXT NOT NULL,
                         original_name TEXT NOT NULL DEFAULT '',
+                        ingested_file_name TEXT NOT NULL DEFAULT '',
                         architecture_id INTEGER NOT NULL,
                         anything_doc_id TEXT NOT NULL,
                         doc_path TEXT,
@@ -42,7 +43,7 @@ class DatabaseService:
                 """)
                 self._ensure_documents_schema(conn)
                 conn.commit()
-            logger.info("数据库初始化完成: %s", self.db_path)
+            logger.info("本地数据库初始化完成: db_path=%s", self.db_path)
 
     def _ensure_documents_schema(self, conn: sqlite3.Connection) -> None:
         """把历史 ``documents`` 表向前迁移到当前结构。
@@ -57,18 +58,27 @@ class DatabaseService:
 
         if "original_name" not in columns:
             conn.execute("ALTER TABLE documents ADD COLUMN original_name TEXT NOT NULL DEFAULT ''")
-            logger.info("已为 documents 表补充 original_name 列: %s", self.db_path)
+            logger.info("已补齐文档表原始文件名字段: db_path=%s", self.db_path)
+
+        if "ingested_file_name" not in columns:
+            # 该列保存实际上传 AnythingLLM 的文件名，必须独立于业务哈希名和业务原始名。
+            # 历史开发数据不做字符串反推；空值会在读取链路中保持“缺少谱系”的可观察状态。
+            conn.execute(
+                "ALTER TABLE documents "
+                "ADD COLUMN ingested_file_name TEXT NOT NULL DEFAULT ''"
+            )
+            logger.info("已补齐文档表实际上传文件名字段: db_path=%s", self.db_path)
 
         if "doc_path" not in columns:
             conn.execute("ALTER TABLE documents ADD COLUMN doc_path TEXT")
-            logger.info("已为 documents 表补充 doc_path 列: %s", self.db_path)
+            logger.info("已补齐文档表外部文档路径字段: db_path=%s", self.db_path)
 
         if "metadata_json" not in columns:
             conn.execute(
                 "ALTER TABLE documents "
                 "ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
             )
-            logger.info("已为 documents 表补充 metadata_json 列: %s", self.db_path)
+            logger.info("已补齐文档表元数据字段: db_path=%s", self.db_path)
 
         conn.execute(
             """
@@ -123,6 +133,7 @@ class DatabaseService:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_name TEXT NOT NULL,
                 original_name TEXT NOT NULL DEFAULT '',
+                ingested_file_name TEXT NOT NULL DEFAULT '',
                 architecture_id INTEGER NOT NULL,
                 anything_doc_id TEXT NOT NULL,
                 doc_path TEXT,
@@ -134,17 +145,17 @@ class DatabaseService:
         conn.execute(
             f"""
             INSERT INTO documents (
-                file_name, original_name, architecture_id,
+                file_name, original_name, ingested_file_name, architecture_id,
                 anything_doc_id, doc_path, metadata_json
             )
-            SELECT file_name, original_name, architecture_id,
+            SELECT file_name, original_name, ingested_file_name, architecture_id,
                    anything_doc_id, doc_path, metadata_json
             FROM {legacy_table}
             """
         )
         conn.execute(f"DROP TABLE {legacy_table}")
         logger.info(
-            "documents 表身份约束迁移完成: uniqueness=(architecture_id,file_name) db_path=%s",
+            "文档表唯一约束迁移完成: constraint=(architecture_id,file_name) db_path=%s",
             self.db_path,
         )
 
@@ -237,18 +248,20 @@ class DatabaseService:
         anything_doc_id: str,
         doc_path: str,
         original_name: str,
+        ingested_file_name: str,
         metadata_json: str,
     ) -> None:
         """在调用方事务中 UPSERT 文档行，不隐式提交或获取线程锁。"""
         conn.execute(
             """
             INSERT INTO documents (
-                file_name, original_name, architecture_id,
+                file_name, original_name, ingested_file_name, architecture_id,
                 anything_doc_id, doc_path, metadata_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(architecture_id, file_name) DO UPDATE SET
                 original_name = excluded.original_name,
+                ingested_file_name = excluded.ingested_file_name,
                 architecture_id = excluded.architecture_id,
                 anything_doc_id = excluded.anything_doc_id,
                 doc_path = excluded.doc_path,
@@ -256,7 +269,8 @@ class DatabaseService:
             """,
             (
                 file_name,
-                original_name or file_name,
+                original_name if str(original_name or "").strip() else file_name,
+                ingested_file_name,
                 architecture_id,
                 anything_doc_id,
                 doc_path,
@@ -271,6 +285,7 @@ class DatabaseService:
         anything_doc_id: str,
         doc_path: str = "",
         original_name: str = "",
+        ingested_file_name: str = "",
         metadata: Mapping[str, Any] | None = None,
     ):
         """使用显式 UPSERT 保存文档及本地权威业务元数据。
@@ -280,6 +295,19 @@ class DatabaseService:
         只保证本地行更新具有原子性。
         """
         metadata_json = self._serialize_document_metadata(metadata)
+        # 该方法仍供少量内部调试/测试场景直接写入文档记录。为避免绕过正式索引链路时
+        # 把业务哈希名误写成实际上传名，这里同样要求调用方明确提供已上传文件的基名。
+        normalized_ingested_file_name = (
+            str(ingested_file_name or "")
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+            .strip()
+        )
+        if (
+            not normalized_ingested_file_name
+            or normalized_ingested_file_name in {".", ".."}
+        ):
+            raise ValueError("ingested_file_name必须是有效文件名")
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 self._upsert_document_record(
@@ -289,6 +317,7 @@ class DatabaseService:
                     anything_doc_id=anything_doc_id,
                     doc_path=doc_path,
                     original_name=original_name,
+                    ingested_file_name=normalized_ingested_file_name,
                     metadata_json=metadata_json,
                 )
 
@@ -299,6 +328,7 @@ class DatabaseService:
         workspace_slug: str,
         file_name: str,
         original_name: str,
+        ingested_file_name: str,
         anything_doc_id: str,
         doc_path: str,
         metadata: Mapping[str, Any] | None = None,
@@ -316,6 +346,7 @@ class DatabaseService:
         required_values = {
             "workspace_slug": workspace_slug,
             "file_name": file_name,
+            "ingested_file_name": ingested_file_name,
             "anything_doc_id": anything_doc_id,
             "doc_path": doc_path,
         }
@@ -327,6 +358,11 @@ class DatabaseService:
             if not value:
                 raise ValueError(f"{name} 不能为空")
         metadata_json = self._serialize_document_metadata(metadata)
+        # original_name 属于甲方业务展示字段。仅做空值校验，不能使用 strip 后的文本
+        # 覆盖原值，避免后续 weaponry callback 丢失 originalFileName 原貌。
+        persisted_original_name = str(original_name or "")
+        if not persisted_original_name.strip():
+            persisted_original_name = normalized["file_name"]
 
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
@@ -342,17 +378,17 @@ class DatabaseService:
                     architecture_id=architecture_id,
                     anything_doc_id=normalized["anything_doc_id"],
                     doc_path=normalized["doc_path"],
-                    original_name=str(original_name or "").strip(),
+                    original_name=persisted_original_name,
+                    ingested_file_name=normalized["ingested_file_name"],
                     metadata_json=metadata_json,
                 )
         logger.info(
-            "永久知识库本地记录已原子提交: architecture_id=%s workspace_slug=%s "
-            "file_name=%s document_id=%s metadata_keys=%s",
+            "永久知识库本地记录已提交: architecture_id=%s file_name=%s "
+            "has_ingested_file_name=%s metadata_key_count=%d",
             architecture_id,
-            normalized["workspace_slug"],
             normalized["file_name"],
-            normalized["anything_doc_id"],
-            tuple(sorted(str(key) for key in (metadata or {}).keys())),
+            bool(normalized["ingested_file_name"]),
+            len(metadata or {}),
         )
 
     def delete_document_by_location(
@@ -381,11 +417,11 @@ class DatabaseService:
                 )
                 deleted_count = int(cursor.rowcount)
         logger.info(
-            "永久知识库本地文档解绑完成: workspace_slug=%s doc_path=%s "
-            "deleted_count=%d",
-            normalized_workspace,
-            normalized_path,
+            "永久知识库本地文档解绑完成: deleted_count=%d "
+            "has_workspace_ref=%s has_document_path=%s",
             deleted_count,
+            bool(normalized_workspace),
+            bool(normalized_path),
         )
         return deleted_count
 
@@ -438,7 +474,7 @@ class DatabaseService:
             conn.row_factory = sqlite3.Row
             cursor = conn.execute(
                 """
-                SELECT file_name, original_name, architecture_id,
+                SELECT file_name, original_name, ingested_file_name, architecture_id,
                        anything_doc_id, doc_path, metadata_json
                 FROM documents
                 ORDER BY file_name ASC, architecture_id ASC
@@ -492,7 +528,7 @@ class DatabaseService:
                             """,
                             (file_name, architecture_id),
                         )
-                logger.info("已删除文档记录: %s", file_name)
+                logger.info("本地文档记录已删除: file_name=%s", file_name)
             except Exception:
                 logger.exception("删除文档记录失败: file_name=%s", file_name)
                 raise
@@ -527,7 +563,11 @@ class DatabaseService:
                     f"UPDATE documents SET architecture_id = ? WHERE {where_clause}",
                     parameters,
                 )
-            logger.info("已更新文档类别: file_name=%s, new_architecture_id=%s", file_name, new_architecture_id)
+            logger.info(
+                "本地文档分类已更新: file_name=%s target_architecture_id=%s",
+                file_name,
+                new_architecture_id,
+            )
 
     def get_original_name(self, file_name: str) -> str:
         """根据哈希文件名查询原始文件名，若无记录则回退返回 file_name 本身"""

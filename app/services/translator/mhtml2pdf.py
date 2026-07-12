@@ -22,7 +22,7 @@ class MHTMLToPDFConverter:
                 "请确保系统已安装 Google Chrome 或 Microsoft Edge。\n"
                 "Windows 通常自带 Edge，Chrome 可从 https://www.google.com/chrome/ 下载。"
             )
-        logger.info("MHTML→PDF 使用浏览器: %s", self.chrome_path)
+        logger.info("MHTML 转 PDF 将使用浏览器: browser_name=%s", Path(self.chrome_path).name)
 
     def _find_chrome(self) -> Optional[str]:
         """查找系统中可用的 Chrome/Edge 浏览器"""
@@ -99,7 +99,11 @@ class MHTMLToPDFConverter:
             output_dir = Path(mhtml_path).parent
             output_path = str(output_dir / f"{base_name}.pdf")
 
-        logger.info("MHTML 转 PDF: 输入=%s 输出=%s", mhtml_path, output_path)
+        logger.info(
+            "开始将 MHTML 转换为 PDF: input_file=%s output_file=%s",
+            Path(mhtml_path).name,
+            Path(output_path).name,
+        )
 
         return self._convert_mhtml_to_pdf(mhtml_path, output_path)
 
@@ -136,13 +140,15 @@ class MHTMLToPDFConverter:
                 )
 
                 if result.returncode != 0 and result.stderr:
-                    stderr_lines = [l for l in result.stderr.strip().split('\n') if l.strip()]
-                    error_summary = '\n'.join(stderr_lines[:5])
-                    logger.warning("浏览器输出:\n%s", error_summary)
+                    logger.warning(
+                        "浏览器转换 MHTML 时返回错误输出: return_code=%d stderr_chars=%d",
+                        result.returncode,
+                        len(result.stderr),
+                    )
 
                 if os.path.exists(tmp_pdf_path) and os.path.getsize(tmp_pdf_path) > 0:
                     self._safe_copy(tmp_pdf_path, output_path)
-                    logger.info("PDF 已保存至: %s", output_path)
+                    logger.info("MHTML 转换后的 PDF 已保存: output_file=%s", Path(output_path).name)
                     return output_path
 
                 raise RuntimeError(

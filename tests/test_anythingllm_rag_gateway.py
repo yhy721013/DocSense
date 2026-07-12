@@ -170,6 +170,10 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             result.prepared_document.content_sha256,
         )
         self.assertEqual(
+            result.prepared_document.ingested_file_name,
+            _SAMPLE_FILE_PATH.name,
+        )
+        self.assertEqual(
             [
                 "create_context",
                 "create_conversation",
@@ -190,11 +194,28 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         )
         log_text = "\n".join(captured.output)
         self.assertIn("AnythingLLM 文档上传完成", log_text)
-        self.assertIn("AnythingLLM 文档嵌入变更已接受", log_text)
-        self.assertIn("AnythingLLM 文档 Pin 完成", log_text)
+        self.assertIn("AnythingLLM 文档已加入隔离工作区", log_text)
+        self.assertIn("AnythingLLM 文档固定完成", log_text)
         self.assertIn("AnythingLLM 来源归属校验完成", log_text)
         self.assertIn("AnythingLLM 查询完成", log_text)
         self.assertNotIn(harness.SOURCE_MARKER, log_text)
+
+    def test_prepared_document_records_actual_mhtml_normalized_upload_name(self) -> None:
+        """RAG 端口必须携带 MHTML 转换后真正提交给 AnythingLLM 的文件名。"""
+        harness = _GatewayHarness()
+        transformed_path = (
+            Path(_TEST_DIRECTORY.name) / "e9a7f5.mhtml.normalized.pdf"
+        )
+        transformed_path.write_bytes(b"normalized mhtml pdf")
+
+        result = harness.open_session().analyse(str(transformed_path), "分析文档")
+
+        self.assertEqual(
+            result.prepared_document.ingested_file_name,
+            "e9a7f5.mhtml.normalized.pdf",
+        )
+        uploaded_path = Path(harness.document_client.upload_document.call_args.args[0])
+        self.assertEqual(uploaded_path.name, "e9a7f5.mhtml.normalized.pdf")
 
     def test_source_optional_fields_can_be_absent(self) -> None:
         """来源只有随机标记和文本时仍可转换，不得要求展示型可选字段。"""

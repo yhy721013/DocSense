@@ -14,6 +14,7 @@ from app.ports import (
     ChatPortError,
 )
 from app.services.chat.application.history_service import ChatHistoryService
+from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.application.cleanup_dispatcher import (
     ChatCleanupDispatcher,
     InlineChatCleanupDispatcher,
@@ -97,9 +98,9 @@ class ChatTitleResult:
         )
         object.__setattr__(self, "title", str(self.title or "").strip())
 
-    def to_response(self) -> dict[str, str]:
+    def to_response(self) -> dict[str, object]:
         """返回严格符合公开接口的 JSON 载荷形状。"""
-        return {"chatId": self.chat_id, "title": self.title}
+        return {"chatId": chat_id_public_value(self.chat_id), "title": self.title}
 
 
 class ChatTitleService:

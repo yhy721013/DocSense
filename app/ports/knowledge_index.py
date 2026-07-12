@@ -139,6 +139,7 @@ class KnowledgeDocumentMetadata:
 
     file_name: str
     original_name: str
+    ingested_file_name: str
     attributes: Mapping[str, Any]
 
     def __post_init__(self) -> None:
@@ -146,9 +147,22 @@ class KnowledgeDocumentMetadata:
         normalized_file_name = str(self.file_name or "").strip()
         if not normalized_file_name:
             raise ValueError("KnowledgeDocumentMetadata.file_name 不能为空")
-        normalized_original_name = str(self.original_name or "").strip()
-        if not normalized_original_name:
-            normalized_original_name = normalized_file_name
+        # ``original_name`` 是甲方请求中的业务原始名。这里仅使用 strip 判断是否为空，
+        # 不能把处理后的结果写回字段，否则 callback 中的 source 就不再是请求原值。
+        original_name = str(self.original_name or "")
+        if not original_name.strip():
+            original_name = normalized_file_name
+        normalized_ingested_file_name = (
+            str(self.ingested_file_name or "")
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+            .strip()
+        )
+        if (
+            not normalized_ingested_file_name
+            or normalized_ingested_file_name in {".", ".."}
+        ):
+            raise ValueError("KnowledgeDocumentMetadata.ingested_file_name 必须是有效文件名")
         if not isinstance(self.attributes, Mapping):
             raise TypeError("KnowledgeDocumentMetadata.attributes 必须是 Mapping")
         try:
@@ -165,7 +179,12 @@ class KnowledgeDocumentMetadata:
         if not isinstance(snapshot, dict):
             raise TypeError("KnowledgeDocumentMetadata.attributes 必须序列化为 JSON 对象")
         object.__setattr__(self, "file_name", normalized_file_name)
-        object.__setattr__(self, "original_name", normalized_original_name)
+        object.__setattr__(self, "original_name", original_name)
+        object.__setattr__(
+            self,
+            "ingested_file_name",
+            normalized_ingested_file_name,
+        )
         object.__setattr__(self, "attributes", _freeze_json(snapshot))
 
     def attributes_dict(self) -> dict[str, Any]:
