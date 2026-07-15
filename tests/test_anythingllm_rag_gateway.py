@@ -286,6 +286,68 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             harness.thread_client.ask.call_count,
         )
 
+    def test_analyse_records_explicit_two_stage_prompt_kinds(self) -> None:
+        """首次真实查询必须把分类或字段抽取用途原样写入审计轨迹。"""
+        for prompt_kind in (
+            RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+            RagPromptKind.ANALYSIS_EXTRACTION,
+        ):
+            with self.subTest(prompt_kind=prompt_kind):
+                harness = _GatewayHarness()
+                session = harness.open_session()
+
+                session.analyse(
+                    str(_SAMPLE_FILE_PATH),
+                    "执行阶段查询",
+                    prompt_kind=prompt_kind,
+                )
+
+                self.assertEqual(
+                    prompt_kind.value,
+                    session.trace.attempts[0].prompt_kind,
+                )
+
+    def test_invalid_analyse_prompt_kind_fails_before_upload(self) -> None:
+        """非法首次用途不得上传文档，且修正参数后同一 Session 仍可执行。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+
+        with self.assertRaises(TypeError):
+            session.analyse(
+                str(_SAMPLE_FILE_PATH),
+                "执行分类",
+                prompt_kind="architecture_classification",  # type: ignore[arg-type]
+            )
+
+        harness.document_client.upload_document.assert_not_called()
+        result = session.analyse(
+            str(_SAMPLE_FILE_PATH),
+            "执行分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        self.assertEqual("分析结果", result.text)
+
+    def test_gateway_records_classification_then_extraction_sequence(self) -> None:
+        """生产 Session 应在同一线程中区分分类首次查询和字段抽取追问。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+
+        session.analyse(
+            str(_SAMPLE_FILE_PATH),
+            "领域分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+
+        self.assertEqual(
+            ["architecture_classification", "analysis_extraction"],
+            [attempt.prompt_kind for attempt in session.trace.attempts],
+        )
+        self.assertEqual(2, harness.thread_client.ask.call_count)
+
     def test_explicit_non_source_query_can_succeed_without_sources(self) -> None:
         """调用方关闭来源要求时，有效文本可以在无来源条件下成功返回。"""
         harness = _GatewayHarness()

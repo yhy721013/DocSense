@@ -197,6 +197,73 @@ class DocumentRagPortContractTests(unittest.TestCase):
         )
         self.assertEqual("修复完成", result.text)
 
+    def test_analyse_records_explicit_two_stage_prompt_kinds(self) -> None:
+        """首次查询必须能区分领域分类和字段抽取，并把用途写入轨迹。"""
+        for prompt_kind in (
+            RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+            RagPromptKind.ANALYSIS_EXTRACTION,
+        ):
+            with self.subTest(prompt_kind=prompt_kind):
+                session = FakeDocumentRagPort().open_isolated_session(
+                    context_name=f"file-task-{prompt_kind.value}",
+                    conversation_name="analysis",
+                )
+
+                session.analyse(
+                    "sample.pdf",
+                    "执行阶段查询",
+                    prompt_kind=prompt_kind,
+                )
+
+                self.assertEqual(
+                    prompt_kind.value,
+                    session.trace.attempts[0].prompt_kind,
+                )
+
+    def test_invalid_analyse_prompt_kind_does_not_start_fake_session(self) -> None:
+        """非法首次用途不得消费结果或把 Session 错误标记为已经开始。"""
+        session = FakeDocumentRagPort().open_isolated_session(
+            context_name="file-task-invalid-analyse-kind",
+            conversation_name="analysis",
+        )
+
+        with self.assertRaises(TypeError):
+            session.analyse(
+                "sample.pdf",
+                "执行分类",
+                prompt_kind="architecture_classification",  # type: ignore[arg-type]
+            )
+
+        result = session.analyse(
+            "sample.pdf",
+            "执行分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        self.assertEqual("模拟结果", result.text)
+        self.assertEqual(1, len(session.trace.attempts))
+
+    def test_fake_records_classification_then_extraction_sequence(self) -> None:
+        """两阶段流程在同一 Session 中应形成可区分、顺序稳定的轨迹。"""
+        session = FakeDocumentRagPort().open_isolated_session(
+            context_name="file-task-two-stage",
+            conversation_name="analysis",
+        )
+
+        session.analyse(
+            "sample.pdf",
+            "领域分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+
+        self.assertEqual(
+            ["architecture_classification", "analysis_extraction"],
+            [attempt.prompt_kind for attempt in session.trace.attempts],
+        )
+
     def test_attempt_rejects_source_status_that_conflicts_with_counts(self) -> None:
         """来源总数为零时不能伪造 matched 状态绕过审计判定。"""
         with self.assertRaisesRegex(ValueError, "来源验证统计不一致"):

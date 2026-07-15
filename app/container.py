@@ -19,7 +19,10 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMKnowledgeIndexFactory,
 )
 from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
-from app.integrations.anythingllm.policies import document_rag_workspace_settings
+from app.integrations.anythingllm.policies import (
+    analysis_rag_workspace_settings,
+    knowledge_index_workspace_settings,
+)
 from app.ports import (
     ChatConversationFactory,
     DocumentRagFactory,
@@ -283,13 +286,13 @@ def create_application_services() -> ApplicationServices:
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
-            workspace_settings=document_rag_workspace_settings(),
+            workspace_settings=analysis_rag_workspace_settings(),
         ),
         knowledge_index_factory=AnythingLLMKnowledgeIndexFactory(
             anythingllm_config,
             task_service.knowledge_index_operations,
             kb_service,
-            workspace_settings=document_rag_workspace_settings(),
+            workspace_settings=knowledge_index_workspace_settings(),
         ),
         chat_conversation_factory=chat_conversation_factory,
         task_service=task_service,

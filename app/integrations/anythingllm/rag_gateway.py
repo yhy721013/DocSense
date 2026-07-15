@@ -424,6 +424,7 @@ class _AnythingLLMRagSession:
         file_path: str,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
     ) -> RagResult:
@@ -440,6 +441,7 @@ class _AnythingLLMRagSession:
             )
         normalized_file_path = self._required_text(file_path, name="file_path")
         normalized_prompt = normalize_rag_prompt(prompt)
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
         self._analyse_started = True
 
@@ -457,7 +459,7 @@ class _AnythingLLMRagSession:
             result = self._query(
                 prompt=normalized_prompt,
                 operation="analyse",
-                prompt_kind=RagPromptKind.ANALYSIS,
+                prompt_kind=validated_prompt_kind,
                 require_sources=require_sources,
                 max_attempts=max_attempts,
             )

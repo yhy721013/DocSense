@@ -27,17 +27,12 @@ DOCUMENT_RAG_WORKSPACE_POLICY_VERSION = 1
 """文档 RAG Workspace 策略版本；配置语义变化时必须递增。"""
 
 
-def document_rag_workspace_settings() -> dict[str, object]:
-    """返回文档抽取与永久知识库共同遵守的 Workspace 策略。
-
-    返回新字典而不是公开可变模块常量，确保不同任务和 AnythingLLM Client 不能通过原地
-    修改影响其他请求。新旧链路在迁移期都调用该函数，避免阶段 9 切换后悄悄回退到
-    AnythingLLM 默认阈值、默认 Prompt 或默认检索数量。
-    """
+def _document_workspace_settings(*, open_ai_history: int) -> dict[str, object]:
+    """构造文档查询共用策略，并由调用场景显式决定历史窗口。"""
     return {
         "similarityThreshold": 0.25,
         "openAiTemp": 0.1,
-        "openAiHistory": 1,
+        "openAiHistory": open_ai_history,
         "openAiPrompt": (
             "你是一个文档信息抽取与判断系统。\n"
             "【重要规则】\n"
@@ -55,6 +50,35 @@ def document_rag_workspace_settings() -> dict[str, object]:
         "chatMode": "query",
         "topN": 6,
     }
+
+
+def analysis_rag_workspace_settings() -> dict[str, object]:
+    """返回临时文件分析 Workspace 策略。
+
+    分类和字段抽取会在同一隔离线程中顺序执行，但字段抽取不得读取上一轮分类 Prompt 中
+    的完整候选集，因此把 AnythingLLM 历史窗口显式关闭。每次返回独立字典，避免任务间
+    共享可变配置。
+    """
+    return _document_workspace_settings(open_ai_history=0)
+
+
+def knowledge_index_workspace_settings() -> dict[str, object]:
+    """返回永久知识库 Workspace 策略。
+
+    永久知识库仍保留原有一轮历史设置；该策略与临时 analysis 分离，避免为了两阶段分类
+    隔离而改变后续知识检索的既有行为。
+    """
+    return _document_workspace_settings(open_ai_history=1)
+
+
+def document_rag_workspace_settings() -> dict[str, object]:
+    """返回迁移期兼容的旧文档 Workspace 策略。
+
+    旧 Facade 的调用用途混合，暂时维持历史行为（``openAiHistory=1``）。新对象图必须
+    分别调用 ``analysis_rag_workspace_settings`` 或
+    ``knowledge_index_workspace_settings``，不得继续依赖此兼容入口做场景判断。
+    """
+    return knowledge_index_workspace_settings()
 
 
 def chat_workspace_settings() -> dict[str, object]:

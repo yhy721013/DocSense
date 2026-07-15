@@ -109,6 +109,7 @@ class FakeDocumentRagSession:
         file_path: str,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
     ) -> RagResult:
@@ -120,16 +121,17 @@ class FakeDocumentRagSession:
                 failure_stage="analyse_repeated",
             )
         normalized_file_path = self._required_text(file_path, name="file_path")
+        normalized_prompt = normalize_rag_prompt(prompt)
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
+        self._validate_max_attempts(max_attempts)
         self._content_sha256 = hashlib.sha256(
             normalized_file_path.encode("utf-8")
         ).hexdigest()
-        normalized_prompt = normalize_rag_prompt(prompt)
-        self._validate_max_attempts(max_attempts)
         self._analyse_started = True
         result = self._execute(
             prompt=normalized_prompt,
             operation="analyse",
-            prompt_kind=RagPromptKind.ANALYSIS,
+            prompt_kind=validated_prompt_kind,
             outcomes=self._analyse_outcomes,
             require_sources=require_sources,
             max_attempts=max_attempts,

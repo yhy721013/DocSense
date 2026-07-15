@@ -81,6 +81,7 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
 
         with factory.create() as first_gateway:
             self.assertIsInstance(first_gateway, DocumentRagPort)
+            self.assertEqual(0, first_gateway._workspace_settings["openAiHistory"])
             first_transport.close.assert_not_called()
         with factory.create() as second_gateway:
             self.assertIsInstance(second_gateway, DocumentRagPort)
@@ -165,6 +166,7 @@ class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
 
             with lease as gateway:
                 self.assertIsInstance(gateway, KnowledgeIndexPort)
+                self.assertEqual(1, gateway._workspace_settings["openAiHistory"])
                 transport.close.assert_not_called()
 
             transport.close.assert_called_once_with()

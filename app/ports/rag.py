@@ -40,12 +40,14 @@ def normalize_rag_prompt(value: str) -> str:
 class RagPromptKind(str, Enum):
     """文档 RAG 模型调用的稳定用途分类。
 
-    使用受控枚举而不是自由文本，可以让审计系统可靠区分首次分析、JSON 修复和领域分类
-    修复。``FOLLOW_UP`` 仅用于尚未迁移的通用追问；阶段 9 的文件分析修复必须使用更具体
-    的枚举值，不能继续把所有调用归类为 follow_up。
+    使用受控枚举而不是自由文本，可以让审计系统可靠区分兼容分析、领域分类、字段抽取
+    和各类修复。``FOLLOW_UP`` 仅用于尚未迁移的通用追问；文件分析阶段调用必须使用更
+    具体的枚举值，不能继续把所有调用归类为 follow_up。
     """
 
     ANALYSIS = "analysis"
+    ARCHITECTURE_CLASSIFICATION = "architecture_classification"
+    ANALYSIS_EXTRACTION = "analysis_extraction"
     JSON_REPAIR = "json_repair"
     ARCHITECTURE_REPAIR = "architecture_repair"
     FOLLOW_UP = "follow_up"
@@ -457,10 +459,11 @@ class DocumentRagSession(Protocol):
         file_path: str,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
     ) -> RagResult:
-        """准备目标文档并完成首次查询；Prompt 按公共契约规范化且只允许调用一次。"""
+        """准备目标文档并按显式用途完成首次查询；整个会话只允许调用一次。"""
         ...
 
     def ask(
