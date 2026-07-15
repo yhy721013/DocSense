@@ -61,6 +61,94 @@ def _format_architecture_options(items: Iterable[Any], title: str = "领域体�
     return _format_options(title, formatted_items)
 
 
+MODEL_ARCHITECTURE_CANDIDATE_FIELDS = ("id", "pathName", "nodeType", "remark")
+"""两阶段分类允许暴露给模型的最小候选字段集合。"""
+
+MAX_ARCHITECTURE_REMARK_CHARS = 512
+"""单个模型候选允许携带的 remark 最大字符数。"""
+
+
+_CANDIDATE_FIELD_ALIASES = {
+    "pathName": ("path_name", "semantic_path"),
+    "nodeType": ("node_type",),
+}
+
+
+def _candidate_field(item: Any, field: str) -> Any:
+    """兼容协议字典和使用 snake_case/语义路径命名的不可变 DTO。"""
+    names = (field, *_CANDIDATE_FIELD_ALIASES.get(field, ()))
+    if isinstance(item, Mapping):
+        for name in names:
+            value = item.get(name)
+            if value is not None:
+                return value
+        return None
+    for name in names:
+        value = getattr(item, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _project_architecture_candidates(items: Iterable[Any]) -> list[dict[str, Any]]:
+    """将内部候选收敛为分类模型可见的稳定投影。
+
+    旧调用方可能仍传入只有 ``name/pathName`` 的完整树节点。为保证 legacy repair
+    可继续运行，缺失的 ``pathName`` 会回退到 ``name``，缺失 ``nodeType`` 则显式
+    标为 ``unknown``；不会把完整树的 parentId/path/name 等字段泄漏给两阶段 Prompt。
+    """
+    projected: list[dict[str, Any]] = []
+    for item in items:
+        candidate_id = _candidate_field(item, "id")
+        if candidate_id is None:
+            continue
+        path_name = _candidate_field(item, "pathName")
+        if path_name is None:
+            path_name = _candidate_field(item, "name")
+        node_type = _candidate_field(item, "nodeType") or "unknown"
+        candidate = {
+            "id": candidate_id,
+            "pathName": str(path_name or ""),
+            "nodeType": str(node_type),
+        }
+        remark = _candidate_field(item, "remark")
+        if remark is not None and str(remark).strip():
+            candidate["remark"] = str(remark).strip()[:MAX_ARCHITECTURE_REMARK_CHARS]
+        projected.append(candidate)
+    return projected
+
+
+def build_architecture_classification_prompt(
+    request_params: Mapping[str, Any],
+    architecture_candidates: Iterable[Any],
+) -> str:
+    """构造两阶段流程的纯领域分类 Prompt。
+
+    该 Prompt 只暴露召回模块已经裁剪过的模型候选，不包含完整领域树，也不要求模型
+    同时完成字段抽取。返回值契约只有一个可为空的数字 ``architectureId``。
+    """
+    candidates = _project_architecture_candidates(architecture_candidates)
+    if not candidates:
+        raise ValueError("architecture_candidates 不能为空")
+    return (
+        "你是文档领域分类器。请仅依据文档内容和下方有限候选确定所属领域。\n"
+        "【请求上下文】\n"
+        f"fileName: {request_params.get('fileName', '')}\n"
+        f"originalFileName: {request_params.get('originalFileName', '')}\n"
+        "【分类规则】\n"
+        "1. 只能选择下方模型候选中的数字 id，不得输出候选外 ID、分类名称或默认值。\n"
+        "2. 文档证据足以支持叶子候选时，优先选择 nodeType=leaf 的最具体候选。\n"
+        "3. 叶子证据不足但能够可靠确定父级领域时，只能选择候选中已有的 nodeType=parent 节点，并选择证据支持的最深层父节点。\n"
+        "4. 文档证据不足以支持任一候选时，architectureId 必须输出 null，不得猜测。\n"
+        "5. architectureId 有值时必须是 JSON 数字，不能是字符串。\n"
+        "6. 只输出严格 JSON 对象，唯一键为 architectureId；不要输出 Markdown、概率、解释、候选列表或思考过程。\n"
+        "【输出结构】\n"
+        '{"architectureId": null}\n'
+        "【模型候选】\n"
+        f"{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}\n"
+    )
+
+
 def build_chat_title_prompt(
     messages: Sequence[Mapping[str, str]],
     *,
@@ -219,6 +307,147 @@ def build_file_analysis_prompt(request_params: dict) -> str:
     )
 
 
+def _normalize_confirmed_architecture_id(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("resolved_architecture_id 必须是正整数")
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or any(char not in "0123456789" for char in stripped):
+            raise ValueError("resolved_architecture_id 必须是正整数")
+        normalized = int(stripped)
+    else:
+        raise ValueError("resolved_architecture_id 必须是正整数")
+    if normalized <= 0:
+        raise ValueError("resolved_architecture_id 必须是正整数")
+    return normalized
+
+
+def build_file_extraction_prompt(
+    request_params: dict,
+    *,
+    resolved_architecture_id: int,
+    resolved_architecture_path_name: str = "",
+    resolved_architecture_node_type: str = "",
+    include_data_standard_fields: bool = False,
+) -> str:
+    """构造两阶段流程中不再承担分类职责的字段抽取 Prompt。
+
+    已确认分类只作为只读上下文帮助模型理解文档，不属于输出 schema。数据标准扩展字段
+    是否出现完全由调用方传入的布尔值决定，函数不会再次检查请求中的标准候选范围。
+    """
+    from app.services.llm_service.analysis_service import build_effective_analysis_ranges
+
+    ranges = build_effective_analysis_ranges(request_params)
+    classification_context = {
+        "id": _normalize_confirmed_architecture_id(resolved_architecture_id),
+        "pathName": str(resolved_architecture_path_name or ""),
+        "nodeType": str(resolved_architecture_node_type or ""),
+    }
+    schema = {
+        "country": "",
+        "channel": "",
+        "maturity": "",
+        "security": "",
+        "format": "",
+        "fileDataItem": {
+            "fileName": request_params.get("fileName", ""),
+            "dataTime": "",
+            "keyword": "",
+            "summary": "",
+            "score": 55,
+            "fileNo": "",
+            "source": "",
+            "originalLink": "",
+            "language": "",
+            "dataFormat": "",
+            "associatedEquipment": "",
+            "relatedTechnology": "",
+            "equipmentModel": "",
+            "documentOverview": "",
+            "originalText": "",
+            "documentTranslationOne": "",
+            "documentTranslationTwo": "",
+        },
+    }
+    standard_contract = ""
+    standard_priority = ""
+    standard_self_check = ""
+    if include_data_standard_fields:
+        schema["fileDataItem"].update(
+            {
+                "militaryName": "",
+                "num": "",
+                "startTime": "",
+                "implTime": "",
+                "approvalDept": "",
+            }
+        )
+        standard_contract = (
+            "11. 调用方已确认当前分类需要数据标准扩展字段；fileDataItem 必须额外抽取 "
+            "militaryName、num、startTime、implTime、approvalDept。startTime 和 implTime "
+            "使用 yyyy-MM-dd；找不到则输出空字符串。\n"
+        )
+        standard_priority = (
+            "【数据标准额外字段】militaryName=国军标名称，num=编号，startTime=发布时间，"
+            "implTime=实施时间，approvalDept=批准部门。\n"
+        )
+        standard_self_check = (
+            "5. 数据标准扩展字段是否完整，startTime/implTime 是否为 yyyy-MM-dd 或空字符串。\n"
+        )
+
+    return (
+        "你是结构化字段抽取器。请仅基于文档内容抽取字段，并且只输出一个严格合法 JSON 对象。\n"
+        "【请求上下文】\n"
+        f"fileName: {request_params.get('fileName', '')}\n"
+        f"originalFileName: {request_params.get('originalFileName', '')}\n"
+        "已确认领域分类（只读，不得修改或写入输出）: "
+        f"{json.dumps(classification_context, ensure_ascii=False, separators=(',', ':'))}\n"
+        "【输出契约】\n"
+        "1. 必须只输出 JSON，不要输出 Markdown、解释文本、候选列表或思考过程。\n"
+        "2. 顶层键只能是：country, channel, maturity, security, format, fileDataItem；不得输出任何领域分类字段。\n"
+        "3. 不要直接原样返回候选对象、候选数组、key/value 对象或中文键名。\n"
+        "4. country/maturity/security/format 只能输出候选项中的 value 字符串或者空字符串；"
+        "channel 规则见第 12 条；security 表示文件密级，必须根据文档开头、首页、页眉或标题附近的密级/保密说明判断；"
+        "找不到相关说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value；"
+        "fileDataItem.dataFormat 必须与顶层 format 完全一致，也只能输出格式候选中的 value；不能输出 key，也不能输出对象。\n"
+        "5. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
+        "6. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
+        "7. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
+        "8. fileDataItem 中的 summary、keyword、score、source、fileNo、dataFormat 字段不允许留空，必须根据文档内容推断；"
+        "source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
+        "9. documentOverview 字段为文件概述，必须按资料原有目录、章节或标题层级进行概述，全文不超过 1000 字。"
+        "优先说明全文整体结构，再按章节顺序概述主题、关键对象、重要结论或核心信息；不得机械复述目录或编造原文不存在的内容。\n"
+        "10. fileDataItem.dataTime 必须输出文档中明确提到的资料年代，格式为 yyyy-MM-dd，找不到时输出空字符串。\n"
+        + standard_contract
+        + "12. channel 字段表示“资料来源机构”，当 channel 候选为空时输出空字符串；候选不为空时必须选择一个 value。\n"
+        "13. fileDataItem.language 表示原始资料正文的主要语种，不是回答、摘要、翻译结果、文件名或提示词的语言。\n"
+        + SOURCE_SCORE_RULES
+        + SOURCE_FIELD_RULES
+        + "输出 JSON 必须严格匹配以下结构：\n"
+        + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
+        + _format_options("国家候选", ranges["country"])
+        + _format_options("渠道候选", ranges["channel"])
+        + _format_options("成熟度候选", ranges["maturity"])
+        + _format_options("密级候选", ranges["security"])
+        + _format_options("格式候选", ranges["format"])
+        + "【抽取优先级】请优先抽取：密级、资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
+        + standard_priority
+        + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；"
+        "keyword：由至少 10 个关键词构成并按占比从高到低排列；score：资料来源权威性评分；"
+        "source：具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；"
+        "dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
+        "【输出前自检清单】\n"
+        "1. 顶层是否只包含允许字段，且未输出领域分类字段。\n"
+        "2. country/channel/maturity/security/format 是否为候选 value 或空字符串；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
+        "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”。\n"
+        "4. fileDataItem.dataTime 是否为 yyyy-MM-dd 或空字符串。\n"
+        + standard_self_check
+        + "6. 是否仅使用英文键名且 JSON 语法可解析。\n"
+    )
+
+
 def build_json_repair_prompt(raw_response: str) -> str:
     """构造一次独立、受限且可审计的 JSON 语法修复 Prompt。
 
@@ -241,17 +470,14 @@ def build_architecture_repair_prompt(
 ) -> str:
     """构造 architectureId 领域契约修复 Prompt。
 
-    Prompt 显式携带失败原因、原始结构化结果和允许选择的候选，因而不依赖对话历史中的
-    隐含上下文。候选仅保留分类判断需要的字段，降低无关数据和提示词注入面。
+    Prompt 显式携带失败原因、原始分类结果和首次分类使用的同一候选集，因而不依赖
+    对话历史中的隐含上下文。候选使用与首次分类相同的最小投影。
     """
-    candidate_fields = ("id", "name", "parentId", "path", "pathName", "remark")
-    normalized_candidates = [
-        {field: item.get(field) for field in candidate_fields if field in item}
-        for item in architecture_candidates
-        if isinstance(item, dict)
-    ]
+    normalized_candidates = _project_architecture_candidates(architecture_candidates)
+    if not normalized_candidates:
+        raise ValueError("architecture_candidates 不能为空")
     raw_result = json.dumps(
-        parsed_result,
+        {"architectureId": parsed_result.get("architectureId")},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -262,8 +488,8 @@ def build_architecture_repair_prompt(
         f"失败原因: {str(failure_reason or '').strip()}\n"
         f"允许候选: {json.dumps(normalized_candidates, ensure_ascii=False, separators=(',', ':'))}\n"
         f"待修复原始结果: {raw_result}\n"
-        "必须基于文档对话中已有证据选择一个允许候选的数字 id；证据不足时不要猜测。\n"
-        "只输出严格 JSON 对象 {\"architectureId\": 数字}，不得输出其他键、Markdown 或解释。\n"
+        "必须基于文档中已有证据选择一个允许候选的数字 id；证据不足时不要猜测，输出 null。\n"
+        "只输出严格 JSON 对象 {\"architectureId\": 数字或null}，不得输出其他键、Markdown 或解释。\n"
     )
 
 
