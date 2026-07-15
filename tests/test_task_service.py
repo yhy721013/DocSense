@@ -725,10 +725,13 @@ class LLMTaskServiceTests(unittest.TestCase):
             interaction_id = _create_audited_interaction(service)
             conflicting_event = RagLifecycleEvent(
                 sequence_no=2,
-                operation="document_upload",
+                # append 接口只接受包含删除事件的关闭批次。这里使用合法的
+                # context_delete，确保测试越过批次前置校验，真正命中“已存在
+                # sequence_no=2 但内容不同”的审计冲突分支。
+                operation="context_delete",
                 attempt=1,
                 success=True,
-                external_ref="document-001",
+                external_ref="context-001",
                 failure_stage=None,
                 error_message=None,
             )

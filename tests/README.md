@@ -26,11 +26,22 @@
 
 `fakes/` 子目录保存端口替身，具体见其 README。
 
+## 阶段 0 离线资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `offline_application.py` | 为路由测试装配临时 SQLite 和 Fake AnythingLLM，避免 `create_app()` 隐式构造生产依赖。 |
+| `contracts/stage0_contracts.json` | 当前已批准但尚待对应波次实现的 HTTP/WS 目标契约，以及继续冻结的 Callback/SSE 黄金样例。 |
+| `test_stage0_contract_assets.py` | 校验空成功响应、report 409、无 action Progress、回调与 SSE 黄金样例。 |
+| `test_stage0_baseline_tools.py` | 校验容量工具的回环地址、重型场景和并发安全门禁，不发出网络请求。 |
+| `test_stage0_sqlite_inventory.py` | 验证 SQLite 盘点器使用只读连接且不输出业务正文。 |
+
 ## 推荐验证流程
 
 1. 先运行文件对话范围测试：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_chat*.py" -q`。
 2. 再运行网关与容器边界测试：`venv\Scripts\python.exe -B -m unittest tests.test_anythingllm_chat_gateway tests.test_dependency_container -q`。
-3. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给响应。
+3. 运行阶段 0 资产测试：`venv\Scripts\python.exe -B -m unittest tests.test_stage0_contract_assets tests.test_stage0_baseline_tools tests.test_stage0_sqlite_inventory -q`。
+4. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给响应。
 
 ## 执行限制
 

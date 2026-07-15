@@ -8,7 +8,7 @@
 | 所属计划 | 总计划阶段 1～2、专项计划波次 1A～1B |
 | 文档层级 | L3 跨阶段内部契约预设计 |
 | 文档状态 | 已冻结可从代码确认的现状；带决策 ID 的部分待确认 |
-| 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；另已确认 report 活动任务重复提交返回 HTTP 409，不增删参数，代码待波次 1C 实现 |
+| 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；已确认三类受理成功与 check-task 成功为空响应体、report 活动任务 409、Progress 显式 action/ack 下线；请求参数、错误体、回调和 chat 契约不变 |
 
 本文只定义阶段 1 开始拆分业务时必须稳定的最小任务、查询、回调恢复和进度契约。完整 MySQL DDL、租约、fencing、Outbox 和 RabbitMQ 消息实现在后续阶段另行设计。
 
@@ -61,20 +61,19 @@
 1. 读取当前任务。
 2. 若任务为终态且回调状态为 `pending/failed`，并且配置了 Callback URL，则尝试补发。
 3. 未配置 Callback URL 时，终态 `pending` 会转为 `skipped`。
-4. 补发后重新读取任务，返回最新 callback 状态。
+4. 补发后重新读取任务，形成内部恢复结果并记录日志/审计。
 5. 单项缺失返回 404；批量缺失在对应元素返回 `exists=false`。
-6. 单项的 `callbackReplayed` 位于响应顶层；批量当前由每个数据项携带。
+6. 当前代码会序列化任务状态与 `callbackReplayed`；目标契约在波次 1B 将成功响应统一改为 HTTP 200 空响应体，单项缺失 404 和参数错误 400 保持。
 
 因此目标服务命名为 `CheckTaskStatusService`，内部组合 Task Read 与 Callback Recovery；不得把补发逻辑藏进只读 Repository。
 
-### 1.5 当前 Progress 行为
+### 1.5 当前与目标 Progress 行为
 
 - 支持 file、report、weaponry。
-- action 缺省时按 legacy subscribe 处理，不发送 ack。
-- 显式 subscribe/query/unsubscribe 完成后发送 ack。
+- action 缺省时按订阅处理，不发送 ack；这是目标公开协议保留的格式。
+- 当前代码还支持显式 subscribe/query/unsubscribe 并发送 ack；仓库没有甲方或生产前端需求证据，已确认在波次 1B 下线，不进入目标黄金契约。
 - subscribe 会为每个 key 发送当前 Hub 最新值；Hub 无值时发送数据库任务快照。
-- query 只发送快照，不建立订阅。
-- unsubscribe 只移除当前连接拥有的订阅。
+- 连接关闭时释放该连接拥有的全部订阅；目标协议不再提供显式 query/unsubscribe 控制消息。
 - 批量响应顺序遵循 params 顺序。
 - 任务不存在时发送 `progress=0.0` 和 `exists=false`。
 - progress 统一归一化到 0～1，并消除可见浮点尾差。
@@ -275,7 +274,7 @@ Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须
 ```text
 ProgressKey(task_type/business_type, business_key)
 ProgressSnapshot(task_id, progress, message, internal_state, sequence_no, updated_at)
-ProgressCommand(action, ordered_keys, explicit_action)
+ProgressSubscriptionRequest(ordered_keys)
 ProgressNotification(task_id, sequence_no)
 ```
 
@@ -299,14 +298,13 @@ class ProgressSubscriptionPort(Protocol):
 
 ### 6.3 快照选择规则
 
-为了保持现有协议：
+为了保持已批准的目标协议：
 
-1. subscribe/query 必须为每个 key 生成一个当前快照。
+1. 每次无 action 订阅必须为每个 key 生成一个当前快照并建立连接级订阅。
 2. 内存适配器存在更近的最新值时优先使用；否则读取 Task Read 投影。
 3. 任务不存在时 Presenter 输出现有 `progress=0.0, exists=false`。
-4. file 输出 fileName；report 输出整数 reportId；weaponry 继续保持当前 Progress Presenter 的 architectureId 类型。
-5. 显式 action 的 ack 位于该 action 产生的快照之后。
-6. legacy subscribe 不发送 ack。
+4. 目标公开范围只冻结接口文档已描述的 file/report 消息；当前代码中的 weaponry Progress 视为内部实现扩展，未经确认不得新增为外部承诺。
+5. 不输出 ack，也不接受显式 action；连接关闭幂等释放该连接全部订阅。
 
 ### 6.4 并发与失败约束
 
@@ -329,7 +327,7 @@ Worker 条件更新任务/事件并提交 MySQL
   → 使用现有 Presenter 发送 WebSocket/SSE
 ```
 
-Redis 通知丢失不影响任务事实；客户端再次 query 时仍能得到最新快照。当前接口不增加断线重放能力。
+Redis 通知丢失不影响任务事实；客户端重新建立连接并发送原订阅即可取得最新快照。当前接口不增加断线重放能力。
 
 ---
 
@@ -373,6 +371,7 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 | TASK-04 | chat run 与通用 task 的确切表关系 | 阶段 2/9 联合设计 |
 | TASK-05 | 回调超时后能否自动重试 | **已决策**：请求发送后的超时不自动重试，标记内部 `delivery_outcome_unknown`；仅明确未送达错误有限重试，check-task 显式补发除外 |
 | TASK-06 | Progress InMemory Adapter 的有界缓冲实现 | 阶段 7/8 结合 50 连接压测决定 |
+| TASK-07 | 显式 Progress action/ack 是否保留 | **已确认**：无甲方或生产前端需求证据；波次 1B 删除，只保留无 action 订阅与连接关闭清理 |
 
 ---
 
@@ -383,8 +382,9 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 - [ ] TaskId、TaskType、BusinessKey、输入快照和 Dispatch 信封在代码中有框架无关类型。
 - [ ] `/llm/check-task` 由 `CheckTaskStatusService` 显式编排读取与回调恢复。
 - [ ] Task Read Repository 不执行网络 I/O。
-- [ ] `/llm/progress` 由 Progress Command/Port/Presenter 处理，现有消息顺序不变。
+- [ ] `/llm/check-task` 成功返回 HTTP 200 空响应体，内部恢复结果仍可测试和审计；400/404 不变。
+- [ ] `/llm/progress` 由 Subscription/Port/Presenter 处理，仅接受无 action 订阅，不输出 ack。
 - [ ] InMemory Progress Adapter 线程安全且不在锁内调用订阅者。
 - [ ] 所有任务写入开始携带 task ID；旧执行不能覆盖新投影的规则已设计。
-- [ ] TASK-01、TASK-05 已按确认方案实现；TASK-02～TASK-04、TASK-06 均已解决或有明确的后置门禁。
+- [ ] TASK-01、TASK-05、TASK-07 已按确认方案实现；TASK-02～TASK-04、TASK-06 均已解决或有明确的后置门禁。
 - [ ] 没有向 HTTP、WebSocket、SSE 或 Callback 暴露内部 ID/序号。

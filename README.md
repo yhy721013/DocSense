@@ -146,7 +146,7 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 | POST | `/llm/generate-report` | 报告生成，使用 `params[0]` |
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
-| WS | `/llm/progress` | 进度订阅/查询/取消订阅 |
+| WS | `/llm/progress` | 任务进度订阅（目标公开契约只保留无 action 格式） |
 | POST | `/llm/chat` | 基于指定文件内容发起对话请求（SSE 流式响应下发） |
 | POST | `/llm/chat/title` | 根据指定会话的本地已提交消息生成标题 |
 | GET | `/llm/chat/history` | 查询指定会话在本地持久化的已提交消息 |
@@ -205,10 +205,11 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 4. `/llm/check-task`
    - 支持 `file` / `report` / `weaponry`。
    - 支持批量查询（`params` 多项）；单项与批量返回结构略有差异。
+   - 2026-07-15 已确认目标成功响应为 HTTP 200 空响应体，内部仍执行必要的回调补发；当前代码尚未切换，400/404 错误体保持不变。
 
 5. `/llm/progress`（WebSocket）
-   - 支持动作：`subscribe`、`query`、`unsubscribe`。
-   - 未显式传 `action` 时默认按订阅处理。
+   - 当前代码仍支持 `subscribe`、`query`、`unsubscribe` 和 ack；这些是项目内部扩展，没有甲方或生产前端需求依据。
+   - 2026-07-15 已确认目标公开契约只保留不带 `action` 的订阅消息，并在连接关闭时释放该连接全部订阅；代码待波次 1B 切换。
    - 单连接可管理多个任务订阅。
 
 6. `/llm/chat`（文件对话体系）

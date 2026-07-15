@@ -1,13 +1,12 @@
 import unittest
-from dataclasses import replace
 from unittest.mock import patch
 
 from app import create_app
 from app.blueprints.llm import _handle_progress_command, _parse_progress_command
-from app.container import APPLICATION_SERVICES_EXTENSION
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.offline_application import build_offline_application_services
 
 
 class LLMProgressAndCheckTaskTests(unittest.TestCase):
@@ -69,14 +68,15 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
 
     def test_legacy_progress_message_replays_snapshot_without_ack_when_repeated(self):
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            services = build_offline_application_services(tmp)
+            service = services.task_service
             service.create_file_task(
                 "demo.pdf",
                 {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
                 status="1",
             )
             service.update_task_progress("file", "demo.pdf", progress=0.65, message="处理中", status="1")
-            hub = LLMProgressHub()
+            hub = services.progress_hub
             sent_messages = []
             subscriptions = {}
             command = _parse_progress_command(
@@ -86,12 +86,6 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
                 }
             )
 
-            app = create_app()
-            services = replace(
-                app.extensions[APPLICATION_SERVICES_EXTENSION],
-                task_service=service,
-                progress_hub=hub,
-            )
             _handle_progress_command(
                 sent_messages.append,
                 subscriptions,
@@ -145,18 +139,14 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
             self.assertTrue(replayed)
 
     def test_batch_check_task_returns_data_array(self):
-        app = create_app()
-        client = app.test_client()
-
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            services = build_offline_application_services(tmp)
+            service = services.task_service
             service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
             service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
 
-            app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
-                app.extensions[APPLICATION_SERVICES_EXTENSION],
-                task_service=service,
-            )
+            app = create_app(services=services)
+            client = app.test_client()
             response = client.post(
                 "/llm/check-task",
                 json={

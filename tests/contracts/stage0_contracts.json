@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-07-15",
+  "authority": "docs/接口文档",
+  "contractState": "target-approved",
+  "taskSubmissions": [
+    {
+      "name": "analysis",
+      "method": "POST",
+      "path": "/llm/analysis",
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "implementationStatus": "pending",
+      "implementationWave": "1F"
+    },
+    {
+      "name": "report",
+      "method": "POST",
+      "path": "/llm/generate-report",
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "activeDuplicate": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        }
+      },
+      "implementationStatus": "pending",
+      "implementationWave": "1C"
+    },
+    {
+      "name": "weaponry",
+      "method": "POST",
+      "path": "/llm/weaponry",
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "implementationStatus": "pending",
+      "implementationWave": "1D"
+    }
+  ],
+  "checkTask": {
+    "method": "POST",
+    "path": "/llm/check-task",
+    "documentedBusinessTypes": [
+      "file",
+      "report"
+    ],
+    "currentInternalExtension": "weaponry is implemented but is not newly frozen as a public request contract",
+    "success": {
+      "status": 200,
+      "body": "",
+      "sideEffect": "may_recover_terminal_callback"
+    },
+    "singleMissing": {
+      "status": 404,
+      "body": {
+        "error": "任务不存在"
+      }
+    },
+    "invalidRequestStatus": 400,
+    "batchMissingPolicy": "continue_existing_items_and_return_empty_success",
+    "implementationStatus": "pending",
+    "implementationWave": "1B"
+  },
+  "progress": {
+    "transport": "WebSocket",
+    "path": "/llm/progress",
+    "publicBusinessTypes": [
+      "file",
+      "report"
+    ],
+    "requestExamples": [
+      {
+        "businessType": "file",
+        "params": [
+          {
+            "fileName": "示例资料.pdf"
+          }
+        ]
+      },
+      {
+        "businessType": "report",
+        "params": [
+          {
+            "reportId": 132
+          },
+          {
+            "reportId": 133
+          }
+        ]
+      }
+    ],
+    "serverMessageExamples": [
+      {
+        "businessType": "file",
+        "data": {
+          "fileName": "示例资料.pdf",
+          "progress": 0.35
+        }
+      },
+      {
+        "businessType": "report",
+        "data": {
+          "reportId": 132,
+          "progress": 1.0
+        }
+      }
+    ],
+    "ackMessages": false,
+    "explicitActions": false,
+    "closeBehavior": "release_all_connection_subscriptions",
+    "weaponryProgressStatus": "current_internal_extension_not_frozen_as_public_contract",
+    "implementationStatus": "pending",
+    "implementationWave": "1B"
+  },
+  "callbacks": {
+    "fileFailure": {
+      "businessType": "file",
+      "data": {
+        "fileName": "示例资料.pdf",
+        "status": "3"
+      },
+      "msg": "解析失败"
+    },
+    "reportFailure": {
+      "businessType": "report",
+      "data": {
+        "reportId": 132,
+        "status": "2",
+        "details": ""
+      },
+      "msg": "生成失败"
+    },
+    "weaponryFailure": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "3",
+        "architectureId": 132
+      },
+      "msg": "解析失败"
+    }
+  },
+  "chatSseFrames": [
+    {
+      "eventType": "chatInfo",
+      "data": {
+        "chatId": 10001,
+        "isNewChat": true
+      },
+      "wire": "event: chatInfo\ndata: {\"chatId\": 10001, \"isNewChat\": true}\n\n"
+    },
+    {
+      "eventType": "textChunk",
+      "data": {
+        "content": "你好"
+      },
+      "wire": "event: textChunk\ndata: {\"content\": \"你好\"}\n\n"
+    },
+    {
+      "eventType": "done",
+      "data": {
+        "chatId": 10001
+      },
+      "wire": "event: done\ndata: {\"chatId\": 10001}\n\n"
+    }
+  ],
+  "currentImplementationDifferences": [
+    {
+      "scope": "task submission success responses",
+      "current": "JSON task snapshot",
+      "target": "empty body",
+      "scheduledWaves": [
+        "1C",
+        "1D",
+        "1F"
+      ]
+    },
+    {
+      "scope": "/llm/check-task success response",
+      "current": "JSON task and callback replay result",
+      "target": "empty body",
+      "scheduledWaves": [
+        "1B"
+      ]
+    },
+    {
+      "scope": "/llm/progress control messages",
+      "current": "explicit actions and ack are accepted",
+      "target": "no-action subscription only",
+      "scheduledWaves": [
+        "1B"
+      ]
+    }
+  ]
+}

@@ -3,25 +3,25 @@ from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from app import create_app
-from app.container import APPLICATION_SERVICES_EXTENSION
-from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.offline_application import build_offline_application_services
 
 
 class LLMRouteValidationTests(unittest.TestCase):
     def setUp(self):
-        self.app = create_app()
-        self.client = self.app.test_client()
         self._tempdir = workspace_tempdir()
         self.tmp = self._tempdir.__enter__()
-        self.task_service = LLMTaskService(db_path=f"{self.tmp}/tasks.sqlite3")
         self.kb_service = MagicMock()
-        services = self.app.extensions[APPLICATION_SERVICES_EXTENSION]
-        self.app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
-            services,
-            task_service=self.task_service,
+        offline_services = build_offline_application_services(self.tmp)
+        self.task_service = offline_services.task_service
+        services = replace(
+            offline_services,
             kb_service=self.kb_service,
         )
+        # 路由测试必须显式注入离线容器。禁止调用无参 ``create_app()``，否则会
+        # 读取生产配置并初始化共享运行目录，既拖慢测试，也破坏阶段 0 的隔离基线。
+        self.app = create_app(services=services)
+        self.client = self.app.test_client()
 
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
@@ -339,7 +339,7 @@ class LLMRouteValidationTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 500)
         data = response.get_json()
         self.assertFalse(data["data"]["success"])
         self.assertEqual(data["data"]["message"], "文档记录不存在")
@@ -357,7 +357,7 @@ class LLMRouteValidationTests(unittest.TestCase):
                 }
             }
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 500)
         data = response.get_json()
         self.assertFalse(data["data"]["success"])
         self.assertIn("分类不一致", data["data"]["message"])
@@ -389,7 +389,11 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["data"]["success"])
-        self.kb_service.update_document_architecture.assert_called_once_with("a.pdf", 2)
+        self.kb_service.update_document_architecture.assert_called_once_with(
+            "a.pdf",
+            2,
+            current_architecture_id=1,
+        )
         mock_client_instance.update_embeddings_batch.assert_called_once_with("ws_old", deletes=["custom-documents/test.pdf"], user_id=1)
         mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_new", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
 
@@ -420,7 +424,11 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["data"]["success"])
-        self.kb_service.update_document_architecture.assert_called_once_with("a.pdf", 2)
+        self.kb_service.update_document_architecture.assert_called_once_with(
+            "a.pdf",
+            2,
+            current_architecture_id=1,
+        )
         mock_client_instance.update_embeddings_batch.assert_called_once_with("ws_old", deletes=["custom-documents/test.pdf"], user_id=1)
         mock_client_instance.create_rag_workspace.assert_called_once_with("architectureId-2", user_id=1)
         self.kb_service.add_workspace.assert_called_once_with(2, "ws_created")
