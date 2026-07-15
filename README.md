@@ -75,11 +75,13 @@ app/
       database.py                   # 知识库映射持久化（architecture_id <-> workspace_slug）
       progress_hub.py               # 进度发布/订阅中枢
       prompts.py                    # 统一 Prompt 构建
+      architecture_tree.py          # 完整领域树校验、不可变索引与进程内 LRU 缓存
     llm_service/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
+      architecture_recall_service.py # 本地 lexical/tree/rule 召回、RRF 融合与有界候选投影
       report_service.py             # 报告生成主流程
       weaponry_service.py           # 知识谱系字段提取主流程
-      task_service.py               # 任务状态、结果、回调状态持久化
+      task_service.py               # 任务状态、结果、回调状态与领域召回审计持久化
       translation_service.py        # 翻译服务编排层
     chat/
       application/                  # 对话命令、历史、标题、中断、删除与运行执行器
@@ -172,12 +174,16 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - `params[].originalFileName` 表示业务原始文件名；服务端保留其请求原值，除作为文件解析提示词上下文外，还用于知识谱系回调中的来源展示。
    - `params[].channel` 表示资料来源机构候选范围（字典编码），服务端只使用请求中提供的候选，不再注入“装发、军情、科技、训练”等默认值；未传、传空数组或没有有效候选对象时，Prompt 要求模型输出空字符串，回调 `data.channel` 也返回空字符串。
    - `params[].security` 表示密级候选范围（字典编码），回调 `data.security` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时，候选包含“公开”则返回“公开”，否则返回密级候选中的第一个 `value`。
-   - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
-   - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
-   - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
-   - 主 Prompt 的多节点分类合同是：`architectureId` 必须返回有唯一文档证据支持的候选叶子节点 ID；叶子证据不足、无法区分或无法匹配时保持为空，不得返回父节点、公共父节点或任意默认值。
-   - 当前服务端尚未验证普通候选是否为叶子：单候选会直接返回该节点 ID；多候选成功路径要求非空 `architectureId`，并只校验它是请求 `architectureList` 中的整数候选。因而主 Prompt 输出的空值会先被视为合同不合规，普通领域的非叶子候选却可能通过校验；这两点都是当前实现限制，不代表主 Prompt 的目标口径。首次结果不合规时，服务端会先尝试下述 GJB 确定性兜底，未命中再发起一次 architecture repair，repair 仍不合规才将任务置为失败。
-   - GJB、国军标、国家军用标准资料的兜底分类只会返回候选中“数据标准”分支下的叶子节点，禁止返回“数据标准”父节点。服务端保留前端 `architectureList` 原始顺序：多个数据标准叶子均可选或无法区分时，返回其中第一个叶子；模型直接返回数据标准父节点时，也会触发相同的叶子兜底，父节点不会进入成功回调或永久知识库。
+   - 请求与 callback 结构保持不变。甲方继续在每个 `params[]` 中传完整 `architectureList`；服务端保留完整树用于结果合法性、数据标准判断、知识库存储归并和 callback，仅将本地 Top-K 召回后的有界候选投影发送给模型。
+   - `architectureList` 节点结构不变：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为可选的节点名词概述。节点 ID 兼容正数字符串，但布尔值、非正数和重复 ID 会使任务失败。
+   - 默认 `topk_two_stage` 模式先用文件名、标题、型号/标准号及有界正文片段在本地执行 exact、字符 BM25、树路由和规则召回，再让模型对最多 128 个候选分类；分类 Prompt 最多 32,000 字符，超限或召回失败不会降级为发送完整领域树。
+   - 若 `architectureList` 只有一个合法节点，直接确定该节点 ID，并以字段抽取作为首次模型查询；多候选时先分类，再在同一文档 Session 中抽取字段。抽取 Prompt 不再包含完整领域树，只携带已确认 ID、语义路径和节点类型。
+   - 多候选优先选择证据充分的叶子。证据不足时只允许返回模型可见的最深可靠父节点；父节点必须属于完整树、深度至少为 2 且通过召回资格检查，八个根节点和“数据标准”父节点均禁止返回。
+   - 分类返回空值或非法 ID 时，仅在相同候选集合和阶段预算内执行有限 repair；无有效召回信号，或分类与 repair 后仍无法确定时，文件任务置为 `status=3`，不会默认回退到 ID `1`，也不会成功回调或写入永久知识库。
+   - GJB、国军标、国家军用标准资料的兜底分类只会返回模型候选中“数据标准”分支下的六类叶子之一，禁止返回“数据标准”父节点；兜底保持完整 `architectureList` 的原始顺序。
+   - `architectureStandardList` 仍是独立的数据标准扩展字段开关；只有最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 才额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。它不替代完整 `architectureList`，也不改变领域分类候选。
+   - 运行模式由 `DOCSENSE_ANALYSIS_CLASSIFICATION_MODE` 控制：`topk_two_stage` 为默认模式；`topk_single` 保留 Top-K 有界候选但回滚为单阶段分类与抽取；`legacy` 仅适用于完整树候选不超过 128 且最终完整 Prompt 不超过 32,000 字符的小树。
+   - 召回决策按任务 execution 持久化 tree fingerprint、query digest、候选与排名、Prompt 字符数、返回 ID/rank、耗时和失败阶段，不保存正文。AnythingLLM 标签向量召回不在本轮实现范围；在人工 gold 门禁通过前，不据此宣称生产分类准确率已经提升。
    - 当最终分类名称严格符合 `<武器装备名称>-基础数据`、`<武器装备名称>-战技指标`、`<武器装备名称>-运用数据` 或 `<武器装备名称>-效能数据` 时，回调 `data.architectureId` 返回具体子分类 ID；本地知识库关系和 AnythingLLM workspace 按解析出的装备级父节点 ID 归并。业务 metadata 以 DocSense 本地数据库为准，AnythingLLM 上传 metadata 当前仅写入用于来源追踪的 `docSource`，不写入分类 ID。
    - 主 Prompt 要求 `fileDataItem.score` 必填且只能是 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料；服务端映射会将缺失、无法转为数值、数值不是整数值或候选外的评分归一化为 `55`，可转换为整值的 `95.0`、`"95"` 等输入会保留为对应整数档位。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。
@@ -452,6 +458,16 @@ zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/chec
 zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
 ```
 
+领域召回 benchmark 可直接读取包含 `params[0].architectureList` 的请求 JSON；输出只包含 tree fingerprint、query digest、候选数、Prompt 字符数和 Recall@64 等有界统计，不输出正文：
+
+```bash
+.venv/bin/python scripts/benchmark_architecture_recall.py \
+  --tree-json /path/to/analysis-request-with-full-tree.json \
+  --cases-json /path/to/architecture-recall-cases.json
+```
+
+三文件真实 E2E 必须直接读取验收提供的 `文件解析领域树.json` 中 `.params[0].architectureList` 的完整节点内容。当前固定验收树为 6,822 个节点；构造多文件请求时须逐项保持节点原始顺序与字段内容，不得改用默认树、合成树、截断树或二次生成的节点。外部 fixture 的本机绝对路径和原始运行产物不提交到仓库。
+
 目录级武器装备字段抽取自动化脚本：
 
 ```bash
@@ -513,10 +529,19 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
 ```
 
-当前完整测试集中有用例直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`；未准备这些本地请求文件时，完整发现命令会因 fixture 缺失失败。除此之外，当前分支的完整测试仍有其他既有失败，因此不能把上述命令当作全绿基线；应按实际运行结果区分通过项和失败项。核对 analysis service 合同、候选默认值、callback debug 路由和 security 迁移时，可运行不依赖这些本地请求文件的定向测试：
+当前完整测试集中有用例直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`；未准备这些本地请求文件时，完整发现命令会因 fixture 缺失失败。除此之外，当前分支的完整测试仍有其他既有失败，因此不能把上述命令当作全绿基线；应按实际运行结果区分通过项和失败项。核对 analysis 树索引、Top-K 召回、两阶段 Prompt、运行模式、字段合同、候选默认值、callback debug 路由和 security 迁移时，可运行不依赖这些本地请求文件的定向测试：
 
 ```bash
-.venv/bin/python -m unittest tests.test_analysis_service tests.test_range_defaults tests.test_callback_debug_routes tests.test_migrate_analysis_security
+.venv/bin/python -m unittest \
+  tests.test_architecture_tree \
+  tests.test_architecture_recall_service \
+  tests.test_architecture_recall_benchmark \
+  tests.test_analysis_prompts \
+  tests.test_analysis_classification_config \
+  tests.test_analysis_service \
+  tests.test_range_defaults \
+  tests.test_callback_debug_routes \
+  tests.test_migrate_analysis_security
 ```
 
 ## 9. 协议文档
