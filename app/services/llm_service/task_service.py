@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -49,6 +52,61 @@ _COMPLETED_TASK_STATUSES = {
     "weaponry": frozenset({"2", "3"}),
 }
 """允许进入回调终态的现有业务完成状态。"""
+
+
+ARCHITECTURE_RECALL_FAILURE_STAGES = frozenset(
+    {
+        "architecture_index",
+        "architecture_recall",
+        "architecture_prompt_budget",
+        "architecture_contract",
+        "analysis_extraction",
+    }
+)
+"""领域召回与两阶段分类链路允许持久化的稳定失败阶段。"""
+
+MAX_ARCHITECTURE_RECALL_EXECUTION_ID_CHARS = 128
+MAX_ARCHITECTURE_RECALL_BASE_CANDIDATES = 64
+MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES = 128
+MAX_ARCHITECTURE_RECALL_CHANNELS = 16
+MAX_ARCHITECTURE_RECALL_CHANNEL_CANDIDATES = 512
+MAX_ARCHITECTURE_RECALL_RRF_SCORES = 4096
+MAX_ARCHITECTURE_RECALL_PROTECTED_CANDIDATES = 128
+MAX_ARCHITECTURE_RECALL_PROTECTED_REASONS_PER_CANDIDATE = 8
+MAX_ARCHITECTURE_RECALL_REASON_CHARS = 512
+MAX_ARCHITECTURE_RECALL_PATH_CHARS = 2048
+MAX_ARCHITECTURE_RECALL_NODE_TYPE_CHARS = 32
+MAX_ARCHITECTURE_RECALL_REMARK_CHARS = 512
+MAX_ARCHITECTURE_RECALL_JSON_CHARS = 512_000
+MAX_ARCHITECTURE_RECALL_PROMPT_CHARS = 2_000_000
+MAX_ARCHITECTURE_RECALL_ELAPSED_MS = 86_400_000
+MAX_ARCHITECTURE_RECALL_ERROR_CHARS = 4096
+
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MAX_SQLITE_INTEGER = (1 << 63) - 1
+
+
+class ArchitectureRecallAuditError(RuntimeError):
+    """领域召回决策无法安全持久化时抛出的稳定应用异常。"""
+
+    stage = "architecture_recall_audit"
+
+
+@dataclass(frozen=True)
+class ArchitectureRecallAuditWriteResult:
+    """领域召回审计写入的幂等结果。"""
+
+    execution_id: str
+    created: bool
+    reused: bool
+    finalized: bool
+
+    def __post_init__(self) -> None:
+        if not self.execution_id:
+            raise ValueError("execution_id不能为空")
+        if self.created == self.reused:
+            raise ValueError("created与reused必须且只能有一个为True")
+
 
 class LLMTaskService:
     """持久化异步 LLM 任务、交互审计和回调状态。
@@ -330,6 +388,47 @@ class LLMTaskService:
                 ON weaponry_task_document_snapshots (execution_id, sequence_no)
                 """
             )
+            # 召回决策按 execution_id 独立留存，故意不关联 llm_tasks 外键。同一业务键
+            # 重跑会替换 llm_tasks 当前 execution_id；若在此处使用 ON DELETE CASCADE，
+            # 历史分类证据会随任务重跑丢失，无法用于 E2E 取证和线上复盘。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_architecture_recall_decisions (
+                    execution_id TEXT PRIMARY KEY,
+                    tree_fingerprint TEXT NOT NULL,
+                    query_digest TEXT NOT NULL,
+                    decision_digest TEXT NOT NULL,
+                    base_top64_json TEXT NOT NULL,
+                    final_candidates_json TEXT NOT NULL,
+                    channel_rankings_json TEXT NOT NULL,
+                    rrf_scores_json TEXT NOT NULL,
+                    protected_reasons_json TEXT NOT NULL,
+                    prompt_chars INTEGER NOT NULL CHECK (prompt_chars >= 0),
+                    recall_elapsed_ms INTEGER NOT NULL CHECK (recall_elapsed_ms >= 0),
+                    returned_architecture_id INTEGER,
+                    returned_rank INTEGER,
+                    total_elapsed_ms INTEGER,
+                    failure_stage TEXT,
+                    error_message TEXT NOT NULL DEFAULT '',
+                    finalization_digest TEXT,
+                    finalized_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (returned_architecture_id IS NULL AND returned_rank IS NULL)
+                        OR
+                        (returned_architecture_id >= 1 AND returned_rank >= 1)
+                    ),
+                    CHECK (total_elapsed_ms IS NULL OR total_elapsed_ms >= 0)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_architecture_recall_created_at
+                ON llm_architecture_recall_decisions (created_at)
+                """
+            )
 
     def _serialize(self, value: Any) -> str:
         """生成严格 JSON，拒绝 SQLite 之外无法可靠交换的 NaN/Infinity。"""
@@ -344,6 +443,272 @@ class LLMTaskService:
         if not value:
             return None
         return json.loads(value)
+
+    @staticmethod
+    def _normalize_recall_execution_id(execution_id: Any) -> str:
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            raise ValueError("execution_id不能为空")
+        if len(normalized) > MAX_ARCHITECTURE_RECALL_EXECUTION_ID_CHARS:
+            raise ValueError("execution_id超出召回审计长度上限")
+        return normalized
+
+    @staticmethod
+    def _normalize_recall_digest(
+        value: Any,
+        *,
+        field_name: str,
+        allow_empty: bool = False,
+    ) -> str:
+        normalized = str(value or "").strip().lower()
+        if allow_empty and not normalized:
+            return ""
+        if not _SHA256_PATTERN.fullmatch(normalized):
+            raise ValueError(f"{field_name}必须是64位SHA-256十六进制摘要")
+        return normalized
+
+    @staticmethod
+    def _normalize_recall_positive_id(value: Any, *, field_name: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name}必须是正整数")
+        if isinstance(value, int):
+            normalized = value
+        elif isinstance(value, str) and value.isascii() and value.isdigit():
+            normalized = int(value)
+        else:
+            raise ValueError(f"{field_name}必须是正整数")
+        if normalized < 1 or normalized > _MAX_SQLITE_INTEGER:
+            raise ValueError(f"{field_name}超出SQLite正整数范围")
+        return normalized
+
+    @staticmethod
+    def _normalize_recall_non_negative_int(
+        value: Any,
+        *,
+        field_name: str,
+        upper_bound: int,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{field_name}必须是非负整数")
+        if value < 0 or value > upper_bound:
+            raise ValueError(f"{field_name}超出允许范围")
+        return value
+
+    @classmethod
+    def _normalize_recall_ranked_ids(
+        cls,
+        values: Sequence[Any],
+        *,
+        field_name: str,
+        max_items: int,
+    ) -> list[int]:
+        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+            raise TypeError(f"{field_name}必须是ID序列")
+        if len(values) > max_items:
+            raise ValueError(f"{field_name}数量超出上限{max_items}")
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw_id in values:
+            node_id = cls._normalize_recall_positive_id(
+                raw_id,
+                field_name=f"{field_name}节点ID",
+            )
+            if node_id in seen:
+                raise ValueError(f"{field_name}存在重复节点ID")
+            seen.add(node_id)
+            normalized.append(node_id)
+        return normalized
+
+    @classmethod
+    def _normalize_recall_final_candidates(
+        cls,
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> list[Dict[str, Any]]:
+        if isinstance(candidates, (str, bytes)) or not isinstance(
+            candidates,
+            Sequence,
+        ):
+            raise TypeError("final_candidates必须是Mapping序列")
+        if len(candidates) > MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES:
+            raise ValueError(
+                "final_candidates数量超出上限"
+                f"{MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES}"
+            )
+
+        allowed_fields = {"id", "pathName", "nodeType", "remark"}
+        normalized: list[Dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, Mapping):
+                raise TypeError("final_candidates只能包含Mapping")
+            unknown_fields = set(candidate) - allowed_fields
+            if unknown_fields:
+                raise ValueError(
+                    "final_candidates包含非模型投影字段: "
+                    + ",".join(sorted(str(item) for item in unknown_fields))
+                )
+            node_id = cls._normalize_recall_positive_id(
+                candidate.get("id"),
+                field_name=f"final_candidates[{index}].id",
+            )
+            if node_id in seen_ids:
+                raise ValueError("final_candidates存在重复节点ID")
+            seen_ids.add(node_id)
+
+            path_name = str(candidate.get("pathName") or "").strip()
+            if not path_name:
+                raise ValueError(f"final_candidates[{index}].pathName不能为空")
+            if len(path_name) > MAX_ARCHITECTURE_RECALL_PATH_CHARS:
+                raise ValueError(f"final_candidates[{index}].pathName超出长度上限")
+            node_type = str(candidate.get("nodeType") or "").strip()
+            if not node_type:
+                raise ValueError(f"final_candidates[{index}].nodeType不能为空")
+            if len(node_type) > MAX_ARCHITECTURE_RECALL_NODE_TYPE_CHARS:
+                raise ValueError(f"final_candidates[{index}].nodeType超出长度上限")
+            if node_type not in {"leaf", "parent"}:
+                raise ValueError(
+                    f"final_candidates[{index}].nodeType只能是leaf或parent"
+                )
+
+            item: Dict[str, Any] = {
+                "id": node_id,
+                "pathName": path_name,
+                "nodeType": node_type,
+            }
+            if "remark" in candidate and candidate.get("remark") is not None:
+                remark = str(candidate.get("remark") or "").strip()
+                if len(remark) > MAX_ARCHITECTURE_RECALL_REMARK_CHARS:
+                    raise ValueError(f"final_candidates[{index}].remark超出长度上限")
+                if remark:
+                    item["remark"] = remark
+            normalized.append(item)
+        return normalized
+
+    @classmethod
+    def _normalize_recall_channel_rankings(
+        cls,
+        channel_rankings: Mapping[str, Sequence[Any]],
+    ) -> Dict[str, list[int]]:
+        if not isinstance(channel_rankings, Mapping):
+            raise TypeError("channel_rankings必须是Mapping")
+        if len(channel_rankings) > MAX_ARCHITECTURE_RECALL_CHANNELS:
+            raise ValueError(
+                "channel_rankings通道数量超出上限"
+                f"{MAX_ARCHITECTURE_RECALL_CHANNELS}"
+            )
+        normalized: Dict[str, list[int]] = {}
+        for raw_name, ranked_ids in channel_rankings.items():
+            channel_name = str(raw_name or "").strip()
+            if not channel_name:
+                raise ValueError("channel_rankings通道名不能为空")
+            if len(channel_name) > 64:
+                raise ValueError("channel_rankings通道名超出长度上限")
+            if channel_name in normalized:
+                raise ValueError("channel_rankings规范化后存在重复通道名")
+            normalized[channel_name] = cls._normalize_recall_ranked_ids(
+                ranked_ids,
+                field_name=f"channel_rankings[{channel_name}]",
+                max_items=MAX_ARCHITECTURE_RECALL_CHANNEL_CANDIDATES,
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_recall_rrf_scores(
+        cls,
+        rrf_scores: Mapping[Any, Any],
+    ) -> Dict[str, float]:
+        if not isinstance(rrf_scores, Mapping):
+            raise TypeError("rrf_scores必须是Mapping")
+        if len(rrf_scores) > MAX_ARCHITECTURE_RECALL_RRF_SCORES:
+            raise ValueError("rrf_scores数量超出上限")
+        normalized: Dict[str, float] = {}
+        for raw_id, raw_score in rrf_scores.items():
+            node_id = cls._normalize_recall_positive_id(
+                raw_id,
+                field_name="rrf_scores节点ID",
+            )
+            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                raise ValueError("rrf_scores分数必须是有限非负数")
+            score = float(raw_score)
+            if not math.isfinite(score) or score < 0.0 or score > 1000.0:
+                raise ValueError("rrf_scores分数必须是有限非负数")
+            if str(node_id) in normalized:
+                raise ValueError("rrf_scores规范化后存在重复节点ID")
+            normalized[str(node_id)] = score
+        return normalized
+
+    @classmethod
+    def _normalize_recall_protected_reasons(
+        cls,
+        protected_reasons: Mapping[Any, Sequence[Any]],
+        *,
+        final_candidate_ids: set[int],
+    ) -> Dict[str, list[str]]:
+        if not isinstance(protected_reasons, Mapping):
+            raise TypeError("protected_reasons必须是Mapping")
+        if len(protected_reasons) > MAX_ARCHITECTURE_RECALL_PROTECTED_CANDIDATES:
+            raise ValueError("protected_reasons节点数量超出上限")
+
+        normalized: Dict[str, list[str]] = {}
+        for raw_id, raw_reasons in protected_reasons.items():
+            node_id = cls._normalize_recall_positive_id(
+                raw_id,
+                field_name="protected_reasons节点ID",
+            )
+            if node_id not in final_candidate_ids:
+                raise ValueError("protected_reasons只能引用最终模型候选")
+            if str(node_id) in normalized:
+                raise ValueError("protected_reasons规范化后存在重复节点ID")
+            if isinstance(raw_reasons, (str, bytes)) or not isinstance(
+                raw_reasons,
+                Sequence,
+            ):
+                raise TypeError("protected_reasons中的原因必须是字符串序列")
+            if len(raw_reasons) > MAX_ARCHITECTURE_RECALL_PROTECTED_REASONS_PER_CANDIDATE:
+                raise ValueError("protected_reasons单节点原因数量超出上限")
+            reasons: list[str] = []
+            seen: set[str] = set()
+            for raw_reason in raw_reasons:
+                reason = str(raw_reason or "").strip()
+                if not reason:
+                    raise ValueError("protected_reasons原因不能为空")
+                if len(reason) > MAX_ARCHITECTURE_RECALL_REASON_CHARS:
+                    raise ValueError("protected_reasons原因超出长度上限")
+                if reason in seen:
+                    raise ValueError("protected_reasons存在重复原因")
+                seen.add(reason)
+                reasons.append(reason)
+            normalized[str(node_id)] = reasons
+        return normalized
+
+    def _serialize_recall_json(self, value: Any, *, field_name: str) -> str:
+        serialized = self._serialize(value)
+        if len(serialized) > MAX_ARCHITECTURE_RECALL_JSON_CHARS:
+            raise ValueError(f"{field_name}序列化后超出召回审计长度上限")
+        return serialized
+
+    @staticmethod
+    def _recall_payload_digest(payload: Mapping[str, Any]) -> str:
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _run_recall_audit_write(
+        self,
+        *,
+        operation: str,
+        writer: Any,
+    ) -> Any:
+        try:
+            return self._audit_executor.run(operation=operation, writer=writer)
+        except InteractionAuditError as exc:
+            message = str(exc).replace("交互审计", "领域召回审计")
+            raise ArchitectureRecallAuditError(message) from exc
 
     def _row_to_task(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
@@ -620,6 +985,386 @@ class LLMTaskService:
             if task is not None:
                 tasks.append(task)
         return tasks
+
+    def upsert_architecture_recall_decision(
+        self,
+        *,
+        execution_id: str,
+        tree_fingerprint: str,
+        query_digest: str,
+        base_top64: Sequence[Any],
+        final_candidates: Sequence[Mapping[str, Any]],
+        channel_rankings: Mapping[str, Sequence[Any]],
+        rrf_scores: Mapping[Any, Any],
+        protected_reasons: Mapping[Any, Sequence[Any]],
+        prompt_chars: int,
+        recall_elapsed_ms: int,
+    ) -> ArchitectureRecallAuditWriteResult:
+        """在创建远端 RAG Session 前幂等保存完整召回决策。
+
+        同一 ``execution_id`` 重放完全相同的决策会返回 ``reused=True``；任何字段变化
+        都视为幂等冲突，禁止静默覆盖首次召回证据。该表不保存正文，调用方只能传递模型
+        投影、排名、分数、摘要和计数。
+
+        ``tree_fingerprint`` 仅在领域树索引尚未构建时允许为空，使
+        ``architecture_index`` 失败仍可先落审计再终结；成功召回必须传 64 位摘要。
+        """
+        normalized_execution_id = self._normalize_recall_execution_id(execution_id)
+        normalized_tree_fingerprint = self._normalize_recall_digest(
+            tree_fingerprint,
+            field_name="tree_fingerprint",
+            allow_empty=True,
+        )
+        normalized_query_digest = self._normalize_recall_digest(
+            query_digest,
+            field_name="query_digest",
+        )
+        normalized_base = self._normalize_recall_ranked_ids(
+            base_top64,
+            field_name="base_top64",
+            max_items=MAX_ARCHITECTURE_RECALL_BASE_CANDIDATES,
+        )
+        normalized_final = self._normalize_recall_final_candidates(final_candidates)
+        final_ids = {item["id"] for item in normalized_final}
+        if not set(normalized_base).issubset(final_ids):
+            raise ValueError("base_top64必须全部包含在最终模型候选中")
+        normalized_channels = self._normalize_recall_channel_rankings(channel_rankings)
+        normalized_rrf = self._normalize_recall_rrf_scores(rrf_scores)
+        normalized_protected = self._normalize_recall_protected_reasons(
+            protected_reasons,
+            final_candidate_ids=final_ids,
+        )
+        normalized_prompt_chars = self._normalize_recall_non_negative_int(
+            prompt_chars,
+            field_name="prompt_chars",
+            upper_bound=MAX_ARCHITECTURE_RECALL_PROMPT_CHARS,
+        )
+        normalized_recall_elapsed = self._normalize_recall_non_negative_int(
+            recall_elapsed_ms,
+            field_name="recall_elapsed_ms",
+            upper_bound=MAX_ARCHITECTURE_RECALL_ELAPSED_MS,
+        )
+
+        serialized_base = self._serialize_recall_json(
+            normalized_base,
+            field_name="base_top64",
+        )
+        serialized_final = self._serialize_recall_json(
+            normalized_final,
+            field_name="final_candidates",
+        )
+        serialized_channels = self._serialize_recall_json(
+            normalized_channels,
+            field_name="channel_rankings",
+        )
+        serialized_rrf = self._serialize_recall_json(
+            normalized_rrf,
+            field_name="rrf_scores",
+        )
+        serialized_protected = self._serialize_recall_json(
+            normalized_protected,
+            field_name="protected_reasons",
+        )
+        decision_payload = {
+            "tree_fingerprint": normalized_tree_fingerprint,
+            "query_digest": normalized_query_digest,
+            "base_top64": normalized_base,
+            "final_candidates": normalized_final,
+            "channel_rankings": normalized_channels,
+            "rrf_scores": normalized_rrf,
+            "protected_reasons": normalized_protected,
+            "prompt_chars": normalized_prompt_chars,
+            "recall_elapsed_ms": normalized_recall_elapsed,
+        }
+        decision_digest = self._recall_payload_digest(decision_payload)
+        now = _utc_now_iso()
+
+        def _write(conn: sqlite3.Connection) -> tuple[bool, bool]:
+            task = conn.execute(
+                """
+                SELECT business_type
+                FROM llm_tasks
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if task is None:
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：对应execution不存在或已被新执行替换"
+                )
+            if task["business_type"] != "file":
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：仅file任务允许写入召回决策"
+                )
+
+            existing = conn.execute(
+                """
+                SELECT decision_digest, finalized_at
+                FROM llm_architecture_recall_decisions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["decision_digest"] != decision_digest:
+                    raise ArchitectureRecallAuditError(
+                        "领域召回审计失败：同一execution的初始决策发生幂等冲突"
+                    )
+                return False, existing["finalized_at"] is not None
+
+            conn.execute(
+                """
+                INSERT INTO llm_architecture_recall_decisions (
+                    execution_id, tree_fingerprint, query_digest, decision_digest,
+                    base_top64_json, final_candidates_json, channel_rankings_json,
+                    rrf_scores_json, protected_reasons_json, prompt_chars,
+                    recall_elapsed_ms, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_execution_id,
+                    normalized_tree_fingerprint,
+                    normalized_query_digest,
+                    decision_digest,
+                    serialized_base,
+                    serialized_final,
+                    serialized_channels,
+                    serialized_rrf,
+                    serialized_protected,
+                    normalized_prompt_chars,
+                    normalized_recall_elapsed,
+                    now,
+                    now,
+                ),
+            )
+            return True, False
+
+        created, finalized = self._run_recall_audit_write(
+            operation="upsert_architecture_recall_decision",
+            writer=_write,
+        )
+        logger.info(
+            "领域召回初始决策已提交: execution_id=%s created=%s reused=%s "
+            "base_count=%s candidate_count=%s prompt_chars=%s",
+            normalized_execution_id,
+            created,
+            not created,
+            len(normalized_base),
+            len(normalized_final),
+            normalized_prompt_chars,
+        )
+        return ArchitectureRecallAuditWriteResult(
+            execution_id=normalized_execution_id,
+            created=created,
+            reused=not created,
+            finalized=finalized,
+        )
+
+    def finalize_architecture_recall_decision(
+        self,
+        *,
+        execution_id: str,
+        returned_architecture_id: int | None,
+        returned_rank: int | None,
+        total_elapsed_ms: int,
+        failure_stage: str | None = None,
+        error_message: str = "",
+    ) -> ArchitectureRecallAuditWriteResult:
+        """幂等终结召回决策，只补写结果字段，不覆盖任何初始召回证据。"""
+        normalized_execution_id = self._normalize_recall_execution_id(execution_id)
+        normalized_total_elapsed = self._normalize_recall_non_negative_int(
+            total_elapsed_ms,
+            field_name="total_elapsed_ms",
+            upper_bound=MAX_ARCHITECTURE_RECALL_ELAPSED_MS,
+        )
+        normalized_failure_stage = str(failure_stage or "").strip() or None
+        if (
+            normalized_failure_stage is not None
+            and normalized_failure_stage not in ARCHITECTURE_RECALL_FAILURE_STAGES
+        ):
+            raise ValueError("failure_stage不是允许的领域分类稳定失败阶段")
+        normalized_error = str(error_message or "").strip()
+        if len(normalized_error) > MAX_ARCHITECTURE_RECALL_ERROR_CHARS:
+            raise ValueError("error_message超出召回审计长度上限")
+        if normalized_failure_stage is None and normalized_error:
+            raise ValueError("成功召回终结不得携带error_message")
+        if normalized_failure_stage is not None and not normalized_error:
+            raise ValueError("失败召回终结必须携带error_message")
+
+        if returned_architecture_id is None and returned_rank is None:
+            normalized_returned_id = None
+            normalized_returned_rank = None
+        elif returned_architecture_id is None or returned_rank is None:
+            raise ValueError("returned_architecture_id与returned_rank必须同时为空或同时提供")
+        else:
+            normalized_returned_id = self._normalize_recall_positive_id(
+                returned_architecture_id,
+                field_name="returned_architecture_id",
+            )
+            normalized_returned_rank = self._normalize_recall_positive_id(
+                returned_rank,
+                field_name="returned_rank",
+            )
+            if normalized_returned_rank > MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES:
+                raise ValueError("returned_rank超出最终候选数量上限")
+        if normalized_returned_id is None and normalized_failure_stage is None:
+            raise ValueError("终结召回决策必须包含返回ID或失败阶段")
+
+        finalization_payload = {
+            "returned_architecture_id": normalized_returned_id,
+            "returned_rank": normalized_returned_rank,
+            "total_elapsed_ms": normalized_total_elapsed,
+            "failure_stage": normalized_failure_stage,
+            "error_message": normalized_error,
+        }
+        finalization_digest = self._recall_payload_digest(finalization_payload)
+        now = _utc_now_iso()
+
+        def _write(conn: sqlite3.Connection) -> bool:
+            task = conn.execute(
+                """
+                SELECT business_type
+                FROM llm_tasks
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if task is None:
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：对应execution不存在或已被新执行替换"
+                )
+            if task["business_type"] != "file":
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：仅file任务允许终结召回决策"
+                )
+            existing = conn.execute(
+                """
+                SELECT final_candidates_json, recall_elapsed_ms,
+                       finalization_digest, finalized_at
+                FROM llm_architecture_recall_decisions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if existing is None:
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：缺少初始召回决策"
+                )
+            if normalized_total_elapsed < int(existing["recall_elapsed_ms"]):
+                raise ValueError("total_elapsed_ms不得小于recall_elapsed_ms")
+
+            stored_candidates = json.loads(existing["final_candidates_json"])
+            if normalized_returned_id is not None:
+                candidate_ids = [int(item["id"]) for item in stored_candidates]
+                if normalized_returned_id not in candidate_ids:
+                    raise ValueError("returned_architecture_id不在最终模型候选中")
+                expected_rank = candidate_ids.index(normalized_returned_id) + 1
+                if normalized_returned_rank != expected_rank:
+                    raise ValueError("returned_rank与最终模型候选顺序不一致")
+
+            if existing["finalized_at"] is not None:
+                if existing["finalization_digest"] != finalization_digest:
+                    raise ArchitectureRecallAuditError(
+                        "领域召回审计失败：同一execution的终结结果发生幂等冲突"
+                    )
+                return False
+
+            conn.execute(
+                """
+                UPDATE llm_architecture_recall_decisions
+                SET returned_architecture_id = ?, returned_rank = ?,
+                    total_elapsed_ms = ?, failure_stage = ?, error_message = ?,
+                    finalization_digest = ?, finalized_at = ?, updated_at = ?
+                WHERE execution_id = ? AND finalized_at IS NULL
+                """,
+                (
+                    normalized_returned_id,
+                    normalized_returned_rank,
+                    normalized_total_elapsed,
+                    normalized_failure_stage,
+                    normalized_error,
+                    finalization_digest,
+                    now,
+                    now,
+                    normalized_execution_id,
+                ),
+            )
+            return True
+
+        created = self._run_recall_audit_write(
+            operation="finalize_architecture_recall_decision",
+            writer=_write,
+        )
+        logger.info(
+            "领域召回决策已终结: execution_id=%s created=%s reused=%s "
+            "returned_architecture_id=%s returned_rank=%s failure_stage=%s",
+            normalized_execution_id,
+            created,
+            not created,
+            normalized_returned_id,
+            normalized_returned_rank,
+            normalized_failure_stage or "",
+        )
+        return ArchitectureRecallAuditWriteResult(
+            execution_id=normalized_execution_id,
+            created=created,
+            reused=not created,
+            finalized=True,
+        )
+
+    def get_architecture_recall_decision(
+        self,
+        execution_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """读取一条召回决策，供测试、E2E 和离线复盘取证。"""
+        normalized_execution_id = self._normalize_recall_execution_id(execution_id)
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT execution_id, tree_fingerprint, query_digest,
+                       base_top64_json, final_candidates_json,
+                       channel_rankings_json, rrf_scores_json,
+                       protected_reasons_json, prompt_chars,
+                       recall_elapsed_ms, returned_architecture_id,
+                       returned_rank, total_elapsed_ms, failure_stage,
+                       error_message, finalized_at, created_at, updated_at
+                FROM llm_architecture_recall_decisions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        rrf_scores = {
+            int(node_id): float(score)
+            for node_id, score in json.loads(row["rrf_scores_json"]).items()
+        }
+        protected_reasons = {
+            int(node_id): list(reasons)
+            for node_id, reasons in json.loads(row["protected_reasons_json"]).items()
+        }
+        return {
+            "execution_id": row["execution_id"],
+            "tree_fingerprint": row["tree_fingerprint"],
+            "query_digest": row["query_digest"],
+            "base_top64": json.loads(row["base_top64_json"]),
+            "final_candidates": json.loads(row["final_candidates_json"]),
+            "channel_rankings": json.loads(row["channel_rankings_json"]),
+            "rrf_scores": rrf_scores,
+            "protected_reasons": protected_reasons,
+            "prompt_chars": row["prompt_chars"],
+            "recall_elapsed_ms": row["recall_elapsed_ms"],
+            "returned_architecture_id": row["returned_architecture_id"],
+            "returned_rank": row["returned_rank"],
+            "total_elapsed_ms": row["total_elapsed_ms"],
+            "failure_stage": row["failure_stage"],
+            "error_message": row["error_message"],
+            "finalized": row["finalized_at"] is not None,
+            "finalized_at": row["finalized_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def get_weaponry_task_document_snapshots(
         self,

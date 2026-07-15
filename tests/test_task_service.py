@@ -10,6 +10,7 @@ from app.ports.rag import (
     RagSource,
 )
 from app.services.llm_service.task_service import (
+    ArchitectureRecallAuditError,
     InteractionAuditError,
     LLMTaskService,
 )
@@ -82,6 +83,41 @@ def _create_audited_interaction(service: LLMTaskService) -> int:
         status="succeeded",
     )
     return result.interaction_id
+
+
+def _recall_decision_args(execution_id: str) -> dict:
+    """构造包含 64 位领域 ID 的最小召回审计输入。"""
+    first_id = 1_778_670_713_864_013
+    second_id = 1_778_670_713_864_014
+    return {
+        "execution_id": execution_id,
+        "tree_fingerprint": "a" * 64,
+        "query_digest": "b" * 64,
+        "base_top64": [first_id, second_id],
+        "final_candidates": [
+            {
+                "id": first_id,
+                "pathName": "装备领域/CVN-78/基础数据",
+                "nodeType": "leaf",
+            },
+            {
+                "id": second_id,
+                "pathName": "装备领域/CVN-78/战技指标",
+                "nodeType": "leaf",
+                "remark": "用于模型判别的短备注",
+            },
+        ],
+        "channel_rankings": {
+            "exact": [first_id],
+            "lexical": [second_id, first_id],
+            "tree": [first_id, second_id],
+            "rule": [],
+        },
+        "rrf_scores": {first_id: 0.043, second_id: 0.039},
+        "protected_reasons": {first_id: ["exact:model_alias"]},
+        "prompt_chars": 2400,
+        "recall_elapsed_ms": 18,
+    }
 
 
 class LLMTaskServiceTests(unittest.TestCase):
@@ -276,6 +312,369 @@ class LLMTaskServiceTests(unittest.TestCase):
                 interaction["execution_id"].startswith("legacy-interaction:")
             )
             self.assertEqual(interaction["audit_schema_version"], 1)
+
+    def test_legacy_task_database_incrementally_creates_recall_audit_table(self):
+        """旧任务库升级只增建召回表，且不以外键级联删除历史 execution。"""
+        with workspace_tempdir() as tmp:
+            db_path = f"{tmp}/tasks.sqlite3"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE llm_tasks (
+                        business_type TEXT NOT NULL,
+                        business_key TEXT NOT NULL,
+                        request_payload TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        progress REAL NOT NULL DEFAULT 0,
+                        message TEXT NOT NULL DEFAULT '',
+                        result_payload TEXT,
+                        callback_status TEXT NOT NULL DEFAULT 'pending',
+                        callback_attempts INTEGER NOT NULL DEFAULT 0,
+                        last_callback_error TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (business_type, business_key)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO llm_tasks (
+                        business_type, business_key, request_payload, status,
+                        created_at, updated_at
+                    ) VALUES ('file', 'legacy-recall.pdf', '{}', '1', 'now', 'now')
+                    """
+                )
+
+            service = LLMTaskService(db_path=db_path)
+            task = service.get_task("file", "legacy-recall.pdf")
+            result = service.upsert_architecture_recall_decision(
+                **_recall_decision_args(task["execution_id"])
+            )
+            with sqlite3.connect(db_path) as conn:
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(llm_architecture_recall_decisions)"
+                    ).fetchall()
+                }
+                foreign_keys = conn.execute(
+                    "PRAGMA foreign_key_list(llm_architecture_recall_decisions)"
+                ).fetchall()
+
+            self.assertTrue(result.created)
+            self.assertIn("tree_fingerprint", columns)
+            self.assertIn("finalization_digest", columns)
+            self.assertEqual(foreign_keys, [])
+
+    def test_recall_audit_upsert_finalize_and_get_preserve_initial_decision(self):
+        """终结只补结果字段，模型候选、排名、分数和保护原因必须保持原值。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("ford.pdf", {"businessType": "file"})
+            decision_args = _recall_decision_args(task["execution_id"])
+
+            initial_result = service.upsert_architecture_recall_decision(
+                **decision_args
+            )
+            initial_record = service.get_architecture_recall_decision(
+                task["execution_id"]
+            )
+            finalize_result = service.finalize_architecture_recall_decision(
+                execution_id=task["execution_id"],
+                returned_architecture_id=decision_args["base_top64"][1],
+                returned_rank=2,
+                total_elapsed_ms=240,
+            )
+            final_record = service.get_architecture_recall_decision(
+                task["execution_id"]
+            )
+
+            self.assertTrue(initial_result.created)
+            self.assertFalse(initial_result.finalized)
+            self.assertTrue(finalize_result.created)
+            self.assertTrue(finalize_result.finalized)
+            for field_name in (
+                "tree_fingerprint",
+                "query_digest",
+                "base_top64",
+                "final_candidates",
+                "channel_rankings",
+                "rrf_scores",
+                "protected_reasons",
+                "prompt_chars",
+                "recall_elapsed_ms",
+                "created_at",
+            ):
+                self.assertEqual(initial_record[field_name], final_record[field_name])
+            self.assertEqual(
+                final_record["returned_architecture_id"],
+                decision_args["base_top64"][1],
+            )
+            self.assertEqual(final_record["returned_rank"], 2)
+            self.assertEqual(final_record["total_elapsed_ms"], 240)
+            self.assertTrue(final_record["finalized"])
+
+    def test_recall_audit_is_idempotent_and_rejects_conflicting_replays(self):
+        """同 execution 同内容可重放，不同初始或终结内容必须稳定报冲突。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("nimitz.pdf", {"businessType": "file"})
+            decision_args = _recall_decision_args(task["execution_id"])
+
+            service.upsert_architecture_recall_decision(**decision_args)
+            replay = service.upsert_architecture_recall_decision(**decision_args)
+            conflicting_args = dict(decision_args)
+            conflicting_args["prompt_chars"] = decision_args["prompt_chars"] + 1
+            with self.assertRaisesRegex(
+                ArchitectureRecallAuditError,
+                "初始决策发生幂等冲突",
+            ):
+                service.upsert_architecture_recall_decision(**conflicting_args)
+
+            first_finalize = service.finalize_architecture_recall_decision(
+                execution_id=task["execution_id"],
+                returned_architecture_id=decision_args["base_top64"][0],
+                returned_rank=1,
+                total_elapsed_ms=120,
+            )
+            finalize_replay = service.finalize_architecture_recall_decision(
+                execution_id=task["execution_id"],
+                returned_architecture_id=decision_args["base_top64"][0],
+                returned_rank=1,
+                total_elapsed_ms=120,
+            )
+            with self.assertRaisesRegex(
+                ArchitectureRecallAuditError,
+                "终结结果发生幂等冲突",
+            ):
+                service.finalize_architecture_recall_decision(
+                    execution_id=task["execution_id"],
+                    returned_architecture_id=decision_args["base_top64"][0],
+                    returned_rank=1,
+                    total_elapsed_ms=121,
+                )
+
+            self.assertTrue(replay.reused)
+            self.assertTrue(first_finalize.created)
+            self.assertTrue(finalize_replay.reused)
+
+    def test_recall_audit_validates_candidate_quantity_and_text_limits(self):
+        """Top-64、最终 128 候选及模型投影文本均受严格持久化上限约束。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("limits.pdf", {"businessType": "file"})
+            decision_args = _recall_decision_args(task["execution_id"])
+
+            too_many_base = dict(decision_args)
+            too_many_base["base_top64"] = list(range(1, 66))
+            too_many_base["final_candidates"] = [
+                {"id": node_id, "pathName": f"领域/{node_id}", "nodeType": "leaf"}
+                for node_id in range(1, 66)
+            ]
+            with self.assertRaisesRegex(ValueError, "base_top64数量超出上限64"):
+                service.upsert_architecture_recall_decision(**too_many_base)
+
+            too_many_final = dict(decision_args)
+            too_many_final["base_top64"] = []
+            too_many_final["final_candidates"] = [
+                {"id": node_id, "pathName": f"领域/{node_id}", "nodeType": "leaf"}
+                for node_id in range(1, 130)
+            ]
+            too_many_final["protected_reasons"] = {}
+            with self.assertRaisesRegex(ValueError, "final_candidates数量超出上限128"):
+                service.upsert_architecture_recall_decision(**too_many_final)
+
+            oversized_remark = dict(decision_args)
+            oversized_remark["final_candidates"] = [
+                dict(decision_args["final_candidates"][0], remark="x" * 513),
+                decision_args["final_candidates"][1],
+            ]
+            with self.assertRaisesRegex(ValueError, "remark超出长度上限"):
+                service.upsert_architecture_recall_decision(**oversized_remark)
+
+            unicode_numeric_id = dict(decision_args)
+            unicode_numeric_id["final_candidates"] = [
+                dict(decision_args["final_candidates"][0], id="１２３"),
+                decision_args["final_candidates"][1],
+            ]
+            with self.assertRaisesRegex(
+                ValueError,
+                r"final_candidates\[0\]\.id必须是正整数",
+            ):
+                service.upsert_architecture_recall_decision(**unicode_numeric_id)
+
+            invalid_node_type = dict(decision_args)
+            invalid_node_type["final_candidates"] = [
+                dict(decision_args["final_candidates"][0], nodeType="branch"),
+                decision_args["final_candidates"][1],
+            ]
+            with self.assertRaisesRegex(ValueError, "nodeType只能是leaf或parent"):
+                service.upsert_architecture_recall_decision(**invalid_node_type)
+
+            with self.assertRaisesRegex(ValueError, "error_message超出"):
+                service.finalize_architecture_recall_decision(
+                    execution_id=task["execution_id"],
+                    returned_architecture_id=None,
+                    returned_rank=None,
+                    total_elapsed_ms=20,
+                    failure_stage="architecture_recall",
+                    error_message="x" * 4097,
+                )
+
+    @patch(
+        "app.services.llm_service.interaction_audit_service.time.sleep",
+        return_value=None,
+    )
+    def test_recall_audit_reuses_bounded_sqlite_lock_retry(self, sleep_mock):
+        """召回审计与交互审计共用有限 SQLite 锁重试执行器。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("locked.pdf", {"businessType": "file"})
+            decision_args = _recall_decision_args(task["execution_id"])
+            original_connect = service._connect
+            lock_failures = 0
+
+            def flaky_connect(*, timeout_seconds=5.0):
+                nonlocal lock_failures
+                if timeout_seconds == 0.0 and lock_failures < 2:
+                    lock_failures += 1
+                    raise sqlite3.OperationalError("database is locked")
+                return original_connect(timeout_seconds=timeout_seconds)
+
+            with patch.object(service, "_connect", side_effect=flaky_connect):
+                result = service.upsert_architecture_recall_decision(**decision_args)
+
+            self.assertTrue(result.created)
+            self.assertEqual(lock_failures, 2)
+            self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_recall_audit_history_survives_task_execution_replacement(self):
+        """同文件重跑替换当前 execution 后，旧召回记录仍必须可读取。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = service.create_file_task("rerun.pdf", {"businessType": "file"})
+            service.upsert_architecture_recall_decision(
+                **_recall_decision_args(first["execution_id"])
+            )
+            service.finalize_architecture_recall_decision(
+                execution_id=first["execution_id"],
+                returned_architecture_id=1_778_670_713_864_013,
+                returned_rank=1,
+                total_elapsed_ms=90,
+            )
+
+            second = service.create_file_task("rerun.pdf", {"businessType": "file"})
+            historical = service.get_architecture_recall_decision(
+                first["execution_id"]
+            )
+
+            self.assertNotEqual(first["execution_id"], second["execution_id"])
+            self.assertIsNotNone(historical)
+            self.assertTrue(historical["finalized"])
+            with self.assertRaisesRegex(
+                ArchitectureRecallAuditError,
+                "execution不存在或已被新执行替换",
+            ):
+                service.finalize_architecture_recall_decision(
+                    execution_id=first["execution_id"],
+                    returned_architecture_id=1_778_670_713_864_013,
+                    returned_rank=1,
+                    total_elapsed_ms=90,
+                )
+
+    def test_recall_audit_requires_current_execution_and_initial_record(self):
+        """不存在 execution 或未先落初始决策时必须以稳定错误失败。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            with self.assertRaisesRegex(
+                ArchitectureRecallAuditError,
+                "对应execution不存在",
+            ):
+                service.upsert_architecture_recall_decision(
+                    **_recall_decision_args("missing-execution")
+                )
+
+            task = service.create_file_task("missing-initial.pdf", {"businessType": "file"})
+            with self.assertRaisesRegex(
+                ArchitectureRecallAuditError,
+                "缺少初始召回决策",
+            ):
+                service.finalize_architecture_recall_decision(
+                    execution_id=task["execution_id"],
+                    returned_architecture_id=None,
+                    returned_rank=None,
+                    total_elapsed_ms=5,
+                    failure_stage="architecture_recall",
+                    error_message="没有有效召回信号",
+                )
+
+    def test_recall_audit_validates_failure_stage_and_records_index_failure(self):
+        """稳定阶段仅允许约定枚举，索引失败可在无树指纹和无候选时留痕。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("bad-tree.pdf", {"businessType": "file"})
+            empty_decision = _recall_decision_args(task["execution_id"])
+            empty_decision.update(
+                {
+                    "tree_fingerprint": "",
+                    "base_top64": [],
+                    "final_candidates": [],
+                    "channel_rankings": {},
+                    "rrf_scores": {},
+                    "protected_reasons": {},
+                    "prompt_chars": 0,
+                    "recall_elapsed_ms": 3,
+                }
+            )
+            service.upsert_architecture_recall_decision(**empty_decision)
+
+            with self.assertRaisesRegex(ValueError, "稳定失败阶段"):
+                service.finalize_architecture_recall_decision(
+                    execution_id=task["execution_id"],
+                    returned_architecture_id=None,
+                    returned_rank=None,
+                    total_elapsed_ms=5,
+                    failure_stage="unknown_stage",
+                    error_message="bad tree",
+                )
+
+            result = service.finalize_architecture_recall_decision(
+                execution_id=task["execution_id"],
+                returned_architecture_id=None,
+                returned_rank=None,
+                total_elapsed_ms=5,
+                failure_stage="architecture_index",
+                error_message="领域树存在环",
+            )
+            record = service.get_architecture_recall_decision(task["execution_id"])
+
+            self.assertTrue(result.finalized)
+            self.assertEqual(record["tree_fingerprint"], "")
+            self.assertEqual(record["failure_stage"], "architecture_index")
+            self.assertEqual(record["error_message"], "领域树存在环")
+
+    def test_recall_audit_records_prompt_chars_above_runtime_budget(self):
+        """32K 是模型发送门禁，审计仍须保存实际超限值和预算失败阶段。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("oversized-prompt.pdf", {"businessType": "file"})
+            decision_args = _recall_decision_args(task["execution_id"])
+            decision_args["prompt_chars"] = 32_001
+
+            service.upsert_architecture_recall_decision(**decision_args)
+            service.finalize_architecture_recall_decision(
+                execution_id=task["execution_id"],
+                returned_architecture_id=None,
+                returned_rank=None,
+                total_elapsed_ms=30,
+                failure_stage="architecture_prompt_budget",
+                error_message="分类Prompt超过32000字符发送门禁",
+            )
+            record = service.get_architecture_recall_decision(task["execution_id"])
+
+            self.assertEqual(record["prompt_chars"], 32_001)
+            self.assertEqual(record["failure_stage"], "architecture_prompt_budget")
 
     def test_get_tasks_returns_snapshots_in_request_order(self):
         with workspace_tempdir() as tmp:
