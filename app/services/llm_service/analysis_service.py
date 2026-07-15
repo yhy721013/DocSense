@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import math
 import re
+import time
 import unicodedata
 from datetime import date
 from pathlib import Path
@@ -29,22 +32,48 @@ from app.ports import (
     normalize_rag_prompt,
 )
 from app.services.core.config import load_ocr_config
+from app.services.core.architecture_tree import (
+    ArchitectureNodeProfile,
+    ArchitectureTreeIndex,
+    ArchitectureTreeIndexCache,
+    ArchitectureTreeValidationError,
+)
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
 from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
+from app.services.utils.word_extractor import extract_text_from_word
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
+    build_architecture_classification_prompt,
     build_architecture_repair_prompt,
     build_file_analysis_prompt,
+    build_file_extraction_prompt,
     build_json_repair_prompt,
+)
+from app.services.llm_service.architecture_recall_service import (
+    ArchitecturePromptBudgetError,
+    ArchitectureRecallDecision,
+    ArchitectureRecallError,
+    DocumentArchitectureSignals,
+    build_document_architecture_signals,
+    recall_architecture_candidates,
 )
 from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.translation_service import get_translation_service
 
 
 logger = logging.getLogger(__name__)
+
+
+ANALYSIS_CLASSIFICATION_MODES = frozenset(
+    {"topk_two_stage", "topk_single", "legacy"}
+)
+MAX_ANALYSIS_PROMPT_CHARS = 32_000
+MAX_ANALYSIS_MODEL_CALLS = 4
+MAX_ANALYSIS_PHASE_CALLS = 2
+_ARCHITECTURE_TREE_INDEX_CACHE = ArchitectureTreeIndexCache(capacity=4)
 
 DEFAULT_COUNTRY_OPTIONS = [
     {"key": "02", "value": "美国"},
@@ -92,6 +121,9 @@ WEAPONRY_DETAIL_CATEGORY_SUFFIXES = frozenset({
     "效能数据",
 })
 SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
+DATA_STANDARD_LEAF_NAMES = frozenset(
+    {"建模与仿真", "军用软件", "目标特性", "术语与定义", "通用要求", "元数据"}
+)
 MAX_KEYWORD_COUNT = 10
 MAX_KEYWORD_LENGTH = 30
 DATA_STANDARD_FIELD_ALIASES = {
@@ -248,11 +280,15 @@ def _ordered_data_standard_leaf_ids(
     standard_ids = _data_standard_candidate_ids(nodes)
     leaf_ids: list[int] = []
     seen_ids: set[int] = set()
-    for item_id, _item in nodes:
+    for item_id, item in nodes:
+        leaf_name = _as_text(item.get("name"))
+        if leaf_name.endswith("标准"):
+            leaf_name = leaf_name[:-2].strip()
         if (
                 item_id in standard_ids
                 and item_id not in parent_ids
                 and item_id not in seen_ids
+                and leaf_name in DATA_STANDARD_LEAF_NAMES
         ):
             leaf_ids.append(item_id)
             seen_ids.add(item_id)
@@ -1069,6 +1105,8 @@ def _read_original_text(file_path: str) -> str:
     if suffix == ".pdf":
         with fitz.open(path) as doc:
             return "\n".join(page.get_text() for page in doc)
+    if suffix == ".docx":
+        return extract_text_from_word(str(path))
     if is_mhtml_file(str(path)):
         return extract_text_from_mhtml(str(path))
     return ""
@@ -1237,6 +1275,207 @@ def _validate_architecture_repair_result(
     if set(repaired) != {"architectureId"}:
         raise ArchitectureContractError("architecture 修复结果只能包含 architectureId")
     return _resolve_analysis_architecture_id(repaired, request_params)
+
+
+def _normalize_analysis_classification_mode(value: Any) -> str:
+    mode = _as_text(value) or "topk_two_stage"
+    if mode not in ANALYSIS_CLASSIFICATION_MODES:
+        raise ValueError(
+            "analysis_classification_mode 必须是 "
+            "topk_two_stage、topk_single 或 legacy"
+        )
+    return mode
+
+
+def _extract_recall_headings(original_text: str) -> tuple[str, ...]:
+    """从正文提取最多 64 条短标题信号，不把长正文行重复塞入召回查询。"""
+    headings: list[str] = []
+    heading_pattern = re.compile(
+        r"^(?:#{1,6}\s+|第[一二三四五六七八九十百0-9]+[章节篇部]\s*|"
+        r"(?:\d{1,3}|[一二三四五六七八九十]+)(?:[.、．]\d{0,3})*[.、．)）]?\s*)"
+    )
+    for raw_line in original_text.splitlines():
+        line = raw_line.strip()
+        if not line or len(line) > 160:
+            continue
+        if heading_pattern.match(line) or (
+                len(line) <= 80
+                and line.endswith(("章", "节", "概述", "简介", "说明", "要求", "范围"))
+        ):
+            if line not in headings:
+                headings.append(line)
+        if len(headings) >= 64:
+            break
+    return tuple(headings)
+
+
+def _build_analysis_architecture_signals(
+        *,
+        file_name: str,
+        original_name: str,
+        original_text: str,
+) -> DocumentArchitectureSignals:
+    return build_document_architecture_signals(
+        filename=file_name,
+        original_filename=original_name,
+        title=_extract_title(original_text),
+        headings=_extract_recall_headings(original_text),
+        body=original_text,
+    )
+
+
+def _architecture_signal_digest(signals: DocumentArchitectureSignals) -> str:
+    serialized = json.dumps(
+        {
+            "filename": signals.filename,
+            "originalFilename": signals.original_filename,
+            "title": signals.title,
+            "headings": signals.headings,
+            "identifiers": signals.identifiers,
+            "bodyExcerpt": signals.body_excerpt,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _node_prompt_projection(node: ArchitectureNodeProfile) -> Dict[str, Any]:
+    projected: Dict[str, Any] = {
+        "id": node.id,
+        "pathName": node.semantic_path,
+        "nodeType": "leaf" if node.is_leaf else "parent",
+    }
+    if node.remark:
+        projected["remark"] = node.remark[:512]
+    return projected
+
+
+def _normalize_bounded_analysis_prompt(prompt: str) -> str:
+    normalized = normalize_rag_prompt(prompt)
+    if len(normalized) > MAX_ANALYSIS_PROMPT_CHARS:
+        raise ArchitecturePromptBudgetError(
+            f"模型 Prompt 共 {len(normalized)} 字符，超过 "
+            f"{MAX_ANALYSIS_PROMPT_CHARS} 字符上限"
+        )
+    return normalized
+
+
+def _validate_topk_architecture_id(
+        raw_id: Any,
+        *,
+        visible_ids: set[int],
+        tree_index: ArchitectureTreeIndex,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int:
+    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+        raise ArchitectureContractError("architectureId 必须是数字 ID")
+    if raw_id not in visible_ids or raw_id not in tree_index.nodes_by_id:
+        raise ArchitectureContractError("architectureId 不属于模型可见候选")
+    node = tree_index.require(raw_id)
+    if node.parent_id is None:
+        raise ArchitectureContractError("领域树根节点不能作为最终分类")
+    if not node.is_leaf:
+        if node.depth < 2:
+            raise ArchitectureContractError("父节点深度必须至少为 2")
+        if _is_data_standard_parent_id(raw_id, architecture_list):
+            raise DataStandardParentContractError(
+                "architectureId 是数据标准父节点，必须兜底到其下叶子节点"
+            )
+    return raw_id
+
+
+def _parse_topk_classification_result(
+        raw_result: Any,
+        *,
+        visible_ids: set[int],
+        tree_index: ArchitectureTreeIndex,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> tuple[Dict[str, Any], int]:
+    parsed = _parse_strict_json_object(raw_result)
+    if parsed is None:
+        raise ArchitectureContractError("分类结果不是严格 JSON 对象")
+    if set(parsed) != {"architectureId"}:
+        raise ArchitectureContractError("分类结果只能包含 architectureId")
+    if parsed.get("architectureId") is None:
+        raise ArchitectureContractError("architectureId 为 null，证据不足")
+    return parsed, _validate_topk_architecture_id(
+        parsed.get("architectureId"),
+        visible_ids=visible_ids,
+        tree_index=tree_index,
+        architecture_list=architecture_list,
+    )
+
+
+def _visible_data_standard_fallback_id(
+        *,
+        visible_ids: set[int],
+        architecture_list: Iterable[Dict[str, Any]],
+        force: bool,
+        context_values: Iterable[Any],
+) -> int | None:
+    if not force and not _contains_gjb_standard_reference(*context_values):
+        return None
+    for node_id in _ordered_data_standard_leaf_ids(architecture_list):
+        if node_id in visible_ids:
+            return node_id
+    return None
+
+
+def _phase_attempt_count(session: DocumentRagSession, start_count: int) -> int:
+    return max(0, len(session.trace.attempts) - start_count)
+
+
+def _elapsed_ms(started_at: float, *, floor: int = 0) -> int:
+    return max(floor, int(math.ceil((time.perf_counter() - started_at) * 1000.0)))
+
+
+def _recall_audit_fields(
+        decision: ArchitectureRecallDecision,
+        *,
+        prompt_chars: int,
+) -> Dict[str, Any]:
+    return {
+        "tree_fingerprint": decision.tree_fingerprint,
+        "query_digest": decision.query_digest,
+        "base_top64": list(decision.base_leaf_ids),
+        "final_candidates": list(decision.prompt_candidates),
+        "channel_rankings": {
+            ranking.channel: list(ranking.node_ids)
+            for ranking in decision.channel_rankings
+        },
+        "rrf_scores": dict(decision.rrf_scores),
+        "protected_reasons": dict(decision.protected_reasons),
+        "prompt_chars": prompt_chars,
+        "recall_elapsed_ms": int(math.ceil(decision.elapsed_ms)),
+    }
+
+
+def _direct_recall_audit_fields(
+        *,
+        tree_index: ArchitectureTreeIndex,
+        signals: DocumentArchitectureSignals,
+        candidates: Iterable[ArchitectureNodeProfile],
+        prompt_chars: int,
+        recall_elapsed_ms: int,
+        channel_name: str,
+) -> Dict[str, Any]:
+    nodes = tuple(candidates)
+    return {
+        "tree_fingerprint": tree_index.fingerprint,
+        "query_digest": _architecture_signal_digest(signals),
+        "base_top64": [node.id for node in nodes if node.is_leaf][:64],
+        "final_candidates": [_node_prompt_projection(node) for node in nodes],
+        "channel_rankings": {channel_name: [node.id for node in nodes]},
+        "rrf_scores": {},
+        "protected_reasons": (
+            {nodes[0].id: ["single_candidate"]}
+            if len(nodes) == 1 and channel_name == "direct"
+            else {}
+        ),
+        "prompt_chars": prompt_chars,
+        "recall_elapsed_ms": recall_elapsed_ms,
+    }
 
 
 def _safe_task_error(error: BaseException, *, fallback: str) -> str:
@@ -1591,6 +1830,7 @@ def _execute_file_analysis_task(
         callback_timeout: float,
         document_rag_factory: DocumentRagFactory,
         knowledge_index_factory: KnowledgeIndexFactory,
+        analysis_classification_mode: str = "topk_two_stage",
 ) -> None:
     """按审计硬前置契约执行单文件分析和永久知识库转交。
 
@@ -1602,6 +1842,12 @@ def _execute_file_analysis_task(
         raise TypeError("document_rag_factory 必须实现 DocumentRagFactory")
     if not isinstance(knowledge_index_factory, KnowledgeIndexFactory):
         raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
+    classification_mode = _normalize_analysis_classification_mode(
+        analysis_classification_mode
+    )
+    # 三种运行模式都必须先持久化模型可见候选，审计故障时禁止创建远端 Session。
+    # legacy 仍发送完整小树，但同样受全局 128 候选与 32K Prompt 硬门禁约束。
+    recall_audit_enabled = True
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
     requested_original_name = _as_business_original_file_name(
@@ -1620,7 +1866,67 @@ def _execute_file_analysis_task(
     if task is None:
         raise ValueError(f"文件分析任务不存在: {file_name}")
     execution_id = _as_text(task.get("execution_id"))
+    workflow_started_at = time.perf_counter()
     analysis_prompt = ""
+    original_text = ""
+    tree_index: ArchitectureTreeIndex | None = None
+    recall_decision: ArchitectureRecallDecision | None = None
+    recall_audit_fields: Dict[str, Any] | None = None
+    recall_audit_finalized = False
+    visible_candidates: tuple[Dict[str, Any], ...] = ()
+    visible_ids: set[int] = set()
+    resolved_direct_architecture_id: int | None = None
+
+    def persist_initial_recall_audit(fields: Dict[str, Any]) -> None:
+        task_service.upsert_architecture_recall_decision(
+            execution_id=execution_id,
+            **fields,
+        )
+
+    def fail_before_remote_session(
+            *,
+            stage: str,
+            error: BaseException,
+            fields: Dict[str, Any],
+    ) -> None:
+        nonlocal recall_audit_finalized
+        error_message = _safe_task_error(error, fallback="领域分类前置处理失败")
+        try:
+            persist_initial_recall_audit(fields)
+            task_service.finalize_architecture_recall_decision(
+                execution_id=execution_id,
+                returned_architecture_id=None,
+                returned_rank=None,
+                total_elapsed_ms=_elapsed_ms(
+                    workflow_started_at,
+                    floor=int(fields["recall_elapsed_ms"]),
+                ),
+                failure_stage=stage,
+                error_message=error_message,
+            )
+            recall_audit_finalized = True
+        except Exception as audit_exc:
+            error_message = _safe_task_error(
+                audit_exc,
+                fallback="领域召回审计失败",
+            )
+            logger.exception(
+                "领域召回审计失败，禁止创建远端 Session: "
+                "file_name=%s execution_id=%s stage=%s",
+                file_name,
+                execution_id,
+                stage,
+            )
+        _finalize_file_failure(
+            task_service=task_service,
+            progress_hub=progress_hub,
+            file_name=file_name,
+            original_name=original_name,
+            stage=stage,
+            error_message=error_message,
+            callback_url=callback_url,
+            callback_timeout=callback_timeout,
+        )
 
     logger.info(
         "开始执行文件分析任务: file_name=%s execution_id=%s",
@@ -1653,7 +1959,8 @@ def _execute_file_analysis_task(
                 type(exc).__name__,
             )
         llm_file_path = _prepare_analysis_upload_file(llm_file_path)
-        analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
+        # 正文只读取一次，并在任何 Factory/Session 创建前同时提供给召回和 mapper。
+        original_text = _read_original_text(llm_file_path)
     except Exception as exc:
         error_message = _safe_task_error(exc, fallback="文件预处理失败")
         logger.exception(
@@ -1673,6 +1980,258 @@ def _execute_file_analysis_task(
         )
         return
 
+    ranges = build_effective_analysis_ranges(params)
+    architecture_list = ranges["architectureList"]
+    signals = _build_analysis_architecture_signals(
+        file_name=file_name,
+        original_name=original_name,
+        original_text=original_text,
+    )
+    signal_digest = _architecture_signal_digest(signals)
+    index_started_at = time.perf_counter()
+    try:
+        tree_index = _ARCHITECTURE_TREE_INDEX_CACHE.get_or_build(architecture_list)
+    except Exception as exc:
+        fields = {
+            "tree_fingerprint": "",
+            "query_digest": signal_digest,
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(index_started_at),
+        }
+        fail_before_remote_session(
+            stage="architecture_index",
+            error=exc,
+            fields=fields,
+        )
+        return
+
+    try:
+        if classification_mode == "legacy":
+            analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
+            if (
+                    len(tree_index.nodes) > 128
+                    or len(analysis_prompt) > MAX_ANALYSIS_PROMPT_CHARS
+            ):
+                raise ArchitecturePromptBudgetError(
+                    "legacy 完整领域树候选必须不超过 128 个且 Prompt "
+                    "必须不超过 32000 字符"
+                )
+            visible_candidates = tuple(
+                _node_prompt_projection(node) for node in tree_index.nodes
+            )
+            visible_ids = {node.id for node in tree_index.nodes}
+            recall_audit_fields = _direct_recall_audit_fields(
+                tree_index=tree_index,
+                signals=signals,
+                candidates=tree_index.nodes,
+                prompt_chars=len(analysis_prompt),
+                recall_elapsed_ms=_elapsed_ms(index_started_at),
+                channel_name="legacy",
+            )
+        else:
+            if len(tree_index.nodes) == 1:
+                direct_node = tree_index.nodes[0]
+                visible_candidates = (_node_prompt_projection(direct_node),)
+                visible_ids = {direct_node.id}
+                resolved_direct_architecture_id = _validate_topk_architecture_id(
+                    direct_node.id,
+                    visible_ids=visible_ids,
+                    tree_index=tree_index,
+                    architecture_list=architecture_list,
+                )
+            else:
+                # 召回服务先以宽松估算上限返回实际候选；真实 Prompt 随后执行 32K 硬门禁。
+                recall_decision = recall_architecture_candidates(
+                    tree_index,
+                    signals,
+                    prompt_char_limit=2_000_000,
+                    prompt_overhead_chars=0,
+                )
+                visible_candidates = recall_decision.prompt_candidates
+                visible_ids = set(recall_decision.final_candidate_ids)
+                if len(visible_candidates) == 1:
+                    resolved_direct_architecture_id = _validate_topk_architecture_id(
+                        visible_candidates[0]["id"],
+                        visible_ids=visible_ids,
+                        tree_index=tree_index,
+                        architecture_list=architecture_list,
+                    )
+
+            if resolved_direct_architecture_id is not None:
+                direct_node = tree_index.require(resolved_direct_architecture_id)
+                include_standard_fields = _is_architecture_in_standard_range(
+                    resolved_direct_architecture_id,
+                    architecture_list,
+                    ranges["architectureStandardList"],
+                )
+                analysis_prompt = normalize_rag_prompt(
+                    build_file_extraction_prompt(
+                        params,
+                        resolved_architecture_id=resolved_direct_architecture_id,
+                        resolved_architecture_path_name=direct_node.semantic_path,
+                        resolved_architecture_node_type=(
+                            "leaf" if direct_node.is_leaf else "parent"
+                        ),
+                        include_data_standard_fields=include_standard_fields,
+                    )
+                )
+            elif classification_mode == "topk_two_stage":
+                analysis_prompt = normalize_rag_prompt(
+                    build_architecture_classification_prompt(
+                        params,
+                        visible_candidates,
+                    )
+                )
+            else:
+                limited_params = dict(params)
+                limited_params["architectureList"] = list(visible_candidates)
+                analysis_prompt = normalize_rag_prompt(
+                    build_file_analysis_prompt(limited_params)
+                    + "\n【topk_single 受限候选补充合同】\n"
+                    + "下方 JSON 是本次完整且唯一可选的模型候选，nodeType 必须保留语义。"
+                    + "证据足以支持 leaf 时优先叶子；叶子证据不足但能可靠确定 parent 时，"
+                    + "允许返回候选中最深的 parent。此规则替代上文只允许叶子的旧规则。\n"
+                    + json.dumps(
+                        list(visible_candidates),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+
+            if len(visible_candidates) > 128:
+                raise ArchitecturePromptBudgetError("领域模型候选数量超过 128 个")
+            if len(analysis_prompt) > MAX_ANALYSIS_PROMPT_CHARS:
+                raise ArchitecturePromptBudgetError(
+                    f"模型 Prompt 共 {len(analysis_prompt)} 字符，超过 32000 字符上限"
+                )
+
+            if recall_decision is not None:
+                recall_audit_fields = _recall_audit_fields(
+                    recall_decision,
+                    prompt_chars=len(analysis_prompt),
+                )
+            else:
+                direct_nodes = tuple(
+                    tree_index.require(candidate["id"])
+                    for candidate in visible_candidates
+                )
+                recall_audit_fields = _direct_recall_audit_fields(
+                    tree_index=tree_index,
+                    signals=signals,
+                    candidates=direct_nodes,
+                    prompt_chars=len(analysis_prompt),
+                    recall_elapsed_ms=_elapsed_ms(index_started_at),
+                    channel_name="direct",
+                )
+    except ArchitectureTreeValidationError as exc:
+        fields = {
+            "tree_fingerprint": tree_index.fingerprint,
+            "query_digest": signal_digest,
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(index_started_at),
+        }
+        fail_before_remote_session(
+            stage="architecture_index",
+            error=exc,
+            fields=fields,
+        )
+        return
+    except ArchitecturePromptBudgetError as exc:
+        if recall_decision is not None:
+            fields = _recall_audit_fields(
+                recall_decision,
+                prompt_chars=len(analysis_prompt),
+            )
+        else:
+            auditable_nodes = tree_index.nodes if len(tree_index.nodes) <= 128 else ()
+            fields = _direct_recall_audit_fields(
+                tree_index=tree_index,
+                signals=signals,
+                candidates=auditable_nodes,
+                prompt_chars=len(analysis_prompt),
+                recall_elapsed_ms=_elapsed_ms(index_started_at),
+                channel_name="legacy" if classification_mode == "legacy" else "direct",
+            )
+        fail_before_remote_session(
+            stage="architecture_prompt_budget",
+            error=exc,
+            fields=fields,
+        )
+        return
+    except ArchitectureRecallError as exc:
+        fields = {
+            "tree_fingerprint": tree_index.fingerprint,
+            "query_digest": signal_digest,
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(index_started_at),
+        }
+        fail_before_remote_session(
+            stage="architecture_recall",
+            error=exc,
+            fields=fields,
+        )
+        return
+    except ArchitectureContractError as exc:
+        direct_nodes = tuple(
+            tree_index.require(candidate["id"])
+            for candidate in visible_candidates
+        )
+        fields = _direct_recall_audit_fields(
+            tree_index=tree_index,
+            signals=signals,
+            candidates=direct_nodes,
+            prompt_chars=len(analysis_prompt),
+            recall_elapsed_ms=_elapsed_ms(index_started_at),
+            channel_name="direct",
+        )
+        fail_before_remote_session(
+            stage="architecture_contract",
+            error=exc,
+            fields=fields,
+        )
+        return
+
+    if recall_audit_enabled and recall_audit_fields is None:
+        raise RuntimeError("领域召回未生成可审计决策")
+    if recall_audit_enabled:
+        try:
+            # 该写入是远端 Session 创建的硬前置；失败时下面的 Factory 代码不会执行。
+            persist_initial_recall_audit(recall_audit_fields)
+        except Exception as exc:
+            error_message = _safe_task_error(exc, fallback="领域召回审计失败")
+            logger.exception(
+                "领域召回审计失败，禁止创建远端 Session: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                original_name=original_name,
+                stage="architecture_recall",
+                error_message=error_message,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+            return
+
     with document_rag_factory.create() as document_rag:
         try:
             task_service.rag_resource_leases.begin(
@@ -1689,6 +2248,26 @@ def _execute_file_analysis_task(
                 file_name,
                 execution_id,
             )
+            if recall_audit_enabled:
+                try:
+                    task_service.finalize_architecture_recall_decision(
+                        execution_id=execution_id,
+                        returned_architecture_id=None,
+                        returned_rank=None,
+                        total_elapsed_ms=_elapsed_ms(
+                            workflow_started_at,
+                            floor=int(recall_audit_fields["recall_elapsed_ms"]),
+                        ),
+                        failure_stage="architecture_contract",
+                        error_message=lease_error,
+                    )
+                    recall_audit_finalized = True
+                except Exception:
+                    logger.critical(
+                        "资源租约失败后无法终结召回审计: execution_id=%s",
+                        execution_id,
+                        exc_info=True,
+                    )
             _finalize_file_failure(
                 task_service=task_service,
                 progress_hub=progress_hub,
@@ -1703,6 +2282,7 @@ def _execute_file_analysis_task(
         session: DocumentRagSession | None = None
         prepared_document: PreparedDocumentRef | None = None
         final_prompt = analysis_prompt
+        workflow_failure_stage = "architecture_contract"
         try:
             session = document_rag.open_isolated_session(
                 context_name=f"llm-file-{execution_id}",
@@ -1713,94 +2293,318 @@ def _execute_file_analysis_task(
                 execution_id,
                 session.trace,
             )
-            rag_result = session.analyse(
-                llm_file_path,
-                analysis_prompt,
-                require_sources=True,
-                max_attempts=2,
-            )
-            prepared_document = rag_result.prepared_document
-            _record_lease_resources(
-                task_service,
-                execution_id,
-                rag_result.trace,
-                prepared_document,
-            )
-
-            parsed_result = _parse_strict_json_object(rag_result.text)
-            if parsed_result is None:
-                final_prompt = normalize_rag_prompt(
-                    build_json_repair_prompt(rag_result.text)
-                )
-                repaired_result = session.ask(
-                    final_prompt,
-                    prompt_kind=RagPromptKind.JSON_REPAIR,
+            if (
+                    classification_mode == "topk_two_stage"
+                    and resolved_direct_architecture_id is None
+            ):
+                classification_started = len(session.trace.attempts)
+                rag_result = session.analyse(
+                    llm_file_path,
+                    analysis_prompt,
+                    prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
                     require_sources=True,
-                    max_attempts=1,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
                 )
-                parsed_result = _parse_strict_json_object(repaired_result.text)
-                if parsed_result is None:
-                    raise AnalysisContractError("JSON 修复后仍不是严格 JSON 对象")
-
-            original_text = _read_original_text(llm_file_path)
-            try:
-                architecture_id = _resolve_analysis_architecture_id(
-                    parsed_result,
-                    params,
+                prepared_document = rag_result.prepared_document
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    rag_result.trace,
+                    prepared_document,
                 )
-            except ArchitectureContractError as contract_error:
-                candidates, allowed_ids = _architecture_candidates(params)
-                if isinstance(contract_error, DataStandardParentContractError):
-                    # 模型已返回合法候选 ID，但该 ID 是数据标准父节点。该场景不依赖
-                    # GJB 关键词，按前端原始候选顺序直接兜底到数据标准叶子节点。
-                    architecture_id = _first_data_standard_leaf_id(candidates)
-                    fallback_reason = "data_standard_parent"
-                else:
-                    # 保留既有 GJB 兜底：首次结果缺失、类型错误或超出候选范围时，若正文
-                    # 存在 GJB 线索，则按候选顺序选择数据标准分支中的第一个叶子节点。
-                    architecture_id = _match_gjb_architecture_candidate(
-                        parsed_result,
-                        params,
-                        original_text,
-                        candidates,
-                    )
-                    fallback_reason = "gjb_reference"
-                if architecture_id is not None:
-                    logger.info(
-                        "文件分析分类已按候选顺序兜底到数据标准叶子: "
-                        "file_name=%s fallback_reason=%s architecture_id=%s",
-                        file_name,
-                        fallback_reason,
-                        architecture_id,
-                    )
-                else:
-                    final_prompt = normalize_rag_prompt(
-                        build_architecture_repair_prompt(
-                            parsed_result,
-                            [
-                                item
-                                for item in candidates
-                                if _coerce_int(item.get("id")) in allowed_ids
-                            ],
-                            str(contract_error),
+                parsed_classification = _parse_strict_json_object(rag_result.text)
+                architecture_id: int | None = None
+                try:
+                    parsed_classification, architecture_id = (
+                        _parse_topk_classification_result(
+                            rag_result.text,
+                            visible_ids=visible_ids,
+                            tree_index=tree_index,
+                            architecture_list=architecture_list,
                         )
+                    )
+                except ArchitectureContractError as contract_error:
+                    force_standard = isinstance(
+                        contract_error,
+                        DataStandardParentContractError,
+                    )
+                    architecture_id = _visible_data_standard_fallback_id(
+                        visible_ids=visible_ids,
+                        architecture_list=architecture_list,
+                        force=force_standard,
+                        context_values=(original_text, original_name),
+                    )
+                    if architecture_id is None:
+                        attempts_used = _phase_attempt_count(
+                            session,
+                            classification_started,
+                        )
+                        if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                            raise ArchitectureContractError(
+                                "分类阶段实际模型调用预算已耗尽，无法 repair"
+                            ) from contract_error
+                        final_prompt = _normalize_bounded_analysis_prompt(
+                            build_architecture_repair_prompt(
+                                parsed_classification or {"architectureId": None},
+                                visible_candidates,
+                                str(contract_error),
+                            )
+                        )
+                        repaired_result = session.ask(
+                            final_prompt,
+                            prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                            require_sources=True,
+                            max_attempts=(
+                                MAX_ANALYSIS_PHASE_CALLS - attempts_used
+                            ),
+                        )
+                        _repaired, architecture_id = (
+                            _parse_topk_classification_result(
+                                repaired_result.text,
+                                visible_ids=visible_ids,
+                                tree_index=tree_index,
+                                architecture_list=architecture_list,
+                            )
+                        )
+
+                if architecture_id is None:
+                    raise ArchitectureContractError("无法确定领域分类")
+                selected_node = tree_index.require(architecture_id)
+                include_standard_fields = _is_architecture_in_standard_range(
+                    architecture_id,
+                    architecture_list,
+                    ranges["architectureStandardList"],
+                )
+                final_prompt = _normalize_bounded_analysis_prompt(
+                    build_file_extraction_prompt(
+                        params,
+                        resolved_architecture_id=architecture_id,
+                        resolved_architecture_path_name=selected_node.semantic_path,
+                        resolved_architecture_node_type=(
+                            "leaf" if selected_node.is_leaf else "parent"
+                        ),
+                        include_data_standard_fields=include_standard_fields,
+                    )
+                )
+                workflow_failure_stage = "analysis_extraction"
+                extraction_started = len(session.trace.attempts)
+                extraction_result = session.ask(
+                    final_prompt,
+                    prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+                    require_sources=True,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
+                )
+                parsed_result = _parse_strict_json_object(extraction_result.text)
+                if parsed_result is None:
+                    attempts_used = _phase_attempt_count(session, extraction_started)
+                    if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                        raise AnalysisContractError(
+                            "字段抽取阶段实际模型调用预算已耗尽，无法 JSON repair"
+                        )
+                    final_prompt = _normalize_bounded_analysis_prompt(
+                        build_json_repair_prompt(extraction_result.text)
                     )
                     repaired_result = session.ask(
                         final_prompt,
-                        prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                        prompt_kind=RagPromptKind.JSON_REPAIR,
                         require_sources=True,
-                        max_attempts=1,
+                        max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
                     )
-                    architecture_id = _validate_architecture_repair_result(
-                        repaired_result.text,
-                        params,
+                    parsed_result = _parse_strict_json_object(repaired_result.text)
+                    if parsed_result is None:
+                        raise AnalysisContractError(
+                            "JSON 修复后仍不是严格 JSON 对象"
+                        )
+            elif resolved_direct_architecture_id is not None:
+                architecture_id = resolved_direct_architecture_id
+                workflow_failure_stage = "analysis_extraction"
+                extraction_started = len(session.trace.attempts)
+                rag_result = session.analyse(
+                    llm_file_path,
+                    analysis_prompt,
+                    prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+                    require_sources=True,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
+                )
+                prepared_document = rag_result.prepared_document
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    rag_result.trace,
+                    prepared_document,
+                )
+                parsed_result = _parse_strict_json_object(rag_result.text)
+                if parsed_result is None:
+                    attempts_used = _phase_attempt_count(session, extraction_started)
+                    if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                        raise AnalysisContractError(
+                            "字段抽取阶段实际模型调用预算已耗尽，无法 JSON repair"
+                        )
+                    final_prompt = _normalize_bounded_analysis_prompt(
+                        build_json_repair_prompt(rag_result.text)
                     )
+                    repaired_result = session.ask(
+                        final_prompt,
+                        prompt_kind=RagPromptKind.JSON_REPAIR,
+                        require_sources=True,
+                        max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
+                    )
+                    parsed_result = _parse_strict_json_object(repaired_result.text)
+                    if parsed_result is None:
+                        raise AnalysisContractError(
+                            "JSON 修复后仍不是严格 JSON 对象"
+                        )
+            else:
+                workflow_failure_stage = "analysis_extraction"
+                combined_started = len(session.trace.attempts)
+                rag_result = session.analyse(
+                    llm_file_path,
+                    analysis_prompt,
+                    prompt_kind=RagPromptKind.ANALYSIS,
+                    require_sources=True,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
+                )
+                prepared_document = rag_result.prepared_document
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    rag_result.trace,
+                    prepared_document,
+                )
+                parsed_result = _parse_strict_json_object(rag_result.text)
+                if parsed_result is None:
+                    attempts_used = _phase_attempt_count(session, combined_started)
+                    if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                        raise AnalysisContractError(
+                            "combined 阶段实际模型调用预算已耗尽，无法 JSON repair"
+                        )
+                    final_prompt = _normalize_bounded_analysis_prompt(
+                        build_json_repair_prompt(rag_result.text)
+                    )
+                    repaired_result = session.ask(
+                        final_prompt,
+                        prompt_kind=RagPromptKind.JSON_REPAIR,
+                        require_sources=True,
+                        max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
+                    )
+                    parsed_result = _parse_strict_json_object(repaired_result.text)
+                    if parsed_result is None:
+                        raise AnalysisContractError(
+                            "JSON 修复后仍不是严格 JSON 对象"
+                        )
+
+                workflow_failure_stage = "architecture_contract"
+                try:
+                    if classification_mode == "legacy":
+                        architecture_id = _resolve_analysis_architecture_id(
+                            parsed_result,
+                            params,
+                        )
+                        architecture_id = _validate_topk_architecture_id(
+                            architecture_id,
+                            visible_ids=visible_ids,
+                            tree_index=tree_index,
+                            architecture_list=architecture_list,
+                        )
+                    else:
+                        if "architectureId" not in parsed_result:
+                            raise ArchitectureContractError("architectureId 缺失")
+                        architecture_id = _validate_topk_architecture_id(
+                            parsed_result.get("architectureId"),
+                            visible_ids=visible_ids,
+                            tree_index=tree_index,
+                            architecture_list=architecture_list,
+                        )
+                except ArchitectureContractError as contract_error:
+                    force_standard = isinstance(
+                        contract_error,
+                        DataStandardParentContractError,
+                    )
+                    if classification_mode == "legacy":
+                        architecture_id = (
+                            _first_data_standard_leaf_id(architecture_list)
+                            if force_standard
+                            else _match_gjb_architecture_candidate(
+                                parsed_result,
+                                params,
+                                original_text,
+                                architecture_list,
+                            )
+                        )
+                    else:
+                        architecture_id = _visible_data_standard_fallback_id(
+                            visible_ids=visible_ids,
+                            architecture_list=architecture_list,
+                            force=force_standard,
+                            context_values=(original_text, original_name),
+                        )
+                    if architecture_id is None:
+                        attempts_used = _phase_attempt_count(
+                            session,
+                            combined_started,
+                        )
+                        if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                            raise ArchitectureContractError(
+                                "combined 阶段实际模型调用预算已耗尽，无法 architecture repair"
+                            ) from contract_error
+                        final_prompt = _normalize_bounded_analysis_prompt(
+                            build_architecture_repair_prompt(
+                                parsed_result,
+                                visible_candidates,
+                                str(contract_error),
+                            )
+                        )
+                        repaired_result = session.ask(
+                            final_prompt,
+                            prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                            require_sources=True,
+                            max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
+                        )
+                        if classification_mode == "legacy":
+                            architecture_id = _validate_architecture_repair_result(
+                                repaired_result.text,
+                                params,
+                            )
+                            architecture_id = _validate_topk_architecture_id(
+                                architecture_id,
+                                visible_ids=visible_ids,
+                                tree_index=tree_index,
+                                architecture_list=architecture_list,
+                            )
+                        else:
+                            _repaired, architecture_id = (
+                                _parse_topk_classification_result(
+                                    repaired_result.text,
+                                    visible_ids=visible_ids,
+                                    tree_index=tree_index,
+                                    architecture_list=architecture_list,
+                                )
+                            )
+
+            if len(session.trace.attempts) > MAX_ANALYSIS_MODEL_CALLS:
+                raise AnalysisContractError("文件分析实际模型调用超过 4 次")
             mapped_result = map_analysis_result(
                 parsed_result,
                 params,
                 original_text=original_text,
                 resolved_architecture_id=architecture_id,
             )
+            returned_rank = next(
+                index + 1
+                for index, candidate in enumerate(visible_candidates)
+                if candidate["id"] == architecture_id
+            )
+            if recall_audit_enabled:
+                task_service.finalize_architecture_recall_decision(
+                    execution_id=execution_id,
+                    returned_architecture_id=architecture_id,
+                    returned_rank=returned_rank,
+                    total_elapsed_ms=_elapsed_ms(
+                        workflow_started_at,
+                        floor=int(recall_audit_fields["recall_elapsed_ms"]),
+                    ),
+                )
+                recall_audit_finalized = True
         except Exception as exc:
             trace = exc.trace if isinstance(exc, RagOperationError) else (
                 session.trace if session is not None else None
@@ -1822,7 +2626,37 @@ def _execute_file_analysis_task(
                     exc_info=True,
                 )
             error_message = _safe_task_error(exc, fallback="RAG 或业务契约失败")
-            failure_stage = trace.failure_stage or "business_contract"
+            failure_stage = (
+                "architecture_prompt_budget"
+                if isinstance(exc, ArchitecturePromptBudgetError)
+                else workflow_failure_stage
+            )
+            if recall_audit_enabled and not recall_audit_finalized:
+                try:
+                    task_service.finalize_architecture_recall_decision(
+                        execution_id=execution_id,
+                        returned_architecture_id=None,
+                        returned_rank=None,
+                        total_elapsed_ms=_elapsed_ms(
+                            workflow_started_at,
+                            floor=int(recall_audit_fields["recall_elapsed_ms"]),
+                        ),
+                        failure_stage=failure_stage,
+                        error_message=error_message,
+                    )
+                    recall_audit_finalized = True
+                except Exception as recall_audit_exc:
+                    error_message = _safe_task_error(
+                        recall_audit_exc,
+                        fallback="领域召回终结审计失败",
+                    )
+                    logger.critical(
+                        "文件分析失败后无法终结领域召回审计: "
+                        "file_name=%s execution_id=%s",
+                        file_name,
+                        execution_id,
+                        exc_info=True,
+                    )
             try:
                 audit_result = task_service.create_llm_interaction_with_trace(
                     business_type="file",
@@ -2173,6 +3007,7 @@ def run_file_analysis_task(
         callback_timeout: float,
         document_rag_factory: DocumentRagFactory,
         knowledge_index_factory: KnowledgeIndexFactory,
+        analysis_classification_mode: str = "topk_two_stage",
 ) -> None:
     """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
 
@@ -2190,6 +3025,7 @@ def run_file_analysis_task(
             callback_timeout=callback_timeout,
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
+            analysis_classification_mode=analysis_classification_mode,
         )
     except Exception as exc:
         params_list = request_payload.get("params", [])
@@ -2200,6 +3036,62 @@ def run_file_analysis_task(
             or file_name
         )
         error_message = _safe_task_error(exc, fallback="文件分析编排失败")
+        failure_stage = "orchestration"
+
+        # Factory create/__enter__ 和无法提供 trace 的 Session 打开异常发生在召回
+        # 决策已经写入之后。最终异常边界必须补齐该审计终态，不能把一条未终结决策
+        # 永久留在库中，也不能用笼统 orchestration 隐藏稳定领域阶段。
+        if file_name:
+            task = task_service.get_task("file", file_name)
+            if task and _as_text(task.get("status")) in {"2", "3"}:
+                # 正常/失败业务终态已经提交后，Factory 退出阶段仅可能剩下本地
+                # Transport 关闭等资源告警。不得覆盖终态或再发送一份相反 callback。
+                logger.critical(
+                    "文件分析 Factory 退出异常，但业务任务已有终态，保持原结果: "
+                    "file_name=%s status=%s error_type=%s",
+                    file_name,
+                    task.get("status"),
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                return
+            execution_id = _as_text(task.get("execution_id")) if task else ""
+            if execution_id:
+                try:
+                    recall_audit = task_service.get_architecture_recall_decision(
+                        execution_id
+                    )
+                except Exception:
+                    recall_audit = None
+                    logger.critical(
+                        "文件分析兜底无法读取领域召回审计: execution_id=%s",
+                        execution_id,
+                        exc_info=True,
+                    )
+                if recall_audit and not recall_audit.get("finalized_at"):
+                    failure_stage = "architecture_contract"
+                    try:
+                        task_service.finalize_architecture_recall_decision(
+                            execution_id=execution_id,
+                            returned_architecture_id=None,
+                            returned_rank=None,
+                            total_elapsed_ms=int(
+                                recall_audit.get("recall_elapsed_ms") or 0
+                            ),
+                            failure_stage=failure_stage,
+                            error_message=error_message,
+                        )
+                    except Exception as audit_exc:
+                        error_message = _safe_task_error(
+                            audit_exc,
+                            fallback="领域召回终结审计失败",
+                        )
+                        logger.critical(
+                            "文件分析兜底无法终结领域召回审计: "
+                            "execution_id=%s",
+                            execution_id,
+                            exc_info=True,
+                        )
         logger.exception(
             "文件分析后台线程未处理异常: file_name=%s error_type=%s",
             file_name,
@@ -2211,7 +3103,7 @@ def run_file_analysis_task(
                 progress_hub=progress_hub,
                 file_name=file_name,
                 original_name=original_name,
-                stage="orchestration",
+                stage=failure_stage,
                 error_message=error_message,
                 callback_url=callback_url,
                 callback_timeout=callback_timeout,
@@ -2228,6 +3120,7 @@ def run_file_analysis_batch_task(
         callback_timeout: float,
         document_rag_factory: DocumentRagFactory,
         knowledge_index_factory: KnowledgeIndexFactory,
+        analysis_classification_mode: str = "topk_two_stage",
 ) -> None:
     """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
@@ -2255,4 +3148,5 @@ def run_file_analysis_batch_task(
             callback_timeout=callback_timeout,
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
+            analysis_classification_mode=analysis_classification_mode,
         )

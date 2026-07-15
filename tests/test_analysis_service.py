@@ -909,6 +909,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=document_rag_factory,
                 knowledge_index_factory=knowledge_index_factory,
+                analysis_classification_mode="legacy",
             )
 
     def test_stage9_success_audits_then_transfers_prepared_document(self):
@@ -918,7 +919,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("stage 9", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9001, "name": "阶段九分类", "parentId": None}],
+                [{"id": 9001, "name": "阶段九分类", "parentId": 8999}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -977,7 +978,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9051, "name": "父节点", "parentId": None},
+                    {"id": 9050, "name": "根节点", "parentId": None},
+                    {"id": 9051, "name": "父节点", "parentId": 9050},
                     {"id": 9052, "name": "子节点", "parentId": 9051},
                 ],
             )
@@ -1039,8 +1041,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9061, "name": "候选一", "parentId": None},
-                    {"id": 9062, "name": "候选二", "parentId": None},
+                    {"id": 9061, "name": "候选一", "parentId": 9060},
+                    {"id": 9062, "name": "候选二", "parentId": 9060},
                 ],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
@@ -1083,7 +1085,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9071, "name": "普通候选", "parentId": None},
+                    {"id": 9071, "name": "普通候选", "parentId": 9070},
                     {"id": 9072, "name": "数据标准", "parentId": None},
                     {
                         "id": 9073,
@@ -1285,7 +1287,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9101, "name": "候选一", "parentId": None},
+                    {"id": 9100, "name": "根节点", "parentId": None},
+                    {"id": 9101, "name": "候选一", "parentId": 9100},
                     {"id": 9102, "name": "候选二", "parentId": 9101},
                 ],
             )
@@ -1382,7 +1385,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("json repair", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9201, "name": "唯一候选", "parentId": None}],
+                [{"id": 9201, "name": "唯一候选", "parentId": 9200}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1419,7 +1422,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("audit", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9301, "name": "审计候选", "parentId": None}],
+                [{"id": 9301, "name": "审计候选", "parentId": 9300}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1462,7 +1465,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("retention", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9401, "name": "保留候选", "parentId": None}],
+                [{"id": 9401, "name": "保留候选", "parentId": 9400}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1498,7 +1501,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("released", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9451, "name": "补偿候选", "parentId": None}],
+                [{"id": 9451, "name": "补偿候选", "parentId": 9450}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1542,7 +1545,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("cleanup", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9471, "name": "清理候选", "parentId": None}],
+                [{"id": 9471, "name": "清理候选", "parentId": 9470}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1584,7 +1587,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "params": [
                     self._stage9_request(
                         file_name,
-                        [{"id": architecture_id, "name": f"批量候选{architecture_id}", "parentId": None}],
+                        [{"id": architecture_id, "name": f"批量候选{architecture_id}", "parentId": 9500}],
                     )["params"][0]
                     for file_name, architecture_id in zip(file_names, architecture_ids)
                 ],
@@ -1639,6 +1642,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     callback_timeout=5,
                     document_rag_factory=rag_factory,
                     knowledge_index_factory=knowledge_factory,
+                    analysis_classification_mode="legacy",
                 )
 
             tasks = [task_service.get_task("file", name) for name in file_names]

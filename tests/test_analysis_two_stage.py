@@ -1,0 +1,781 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import unittest
+import zipfile
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
+
+from app.ports import RagPromptKind, RagSource
+from app.services.core.progress_hub import LLMProgressHub
+from app.services.llm_service import analysis_service
+from app.services.llm_service.architecture_recall_service import (
+    ArchitectureRecallCandidate,
+    ArchitectureRecallDecision,
+    RecallChannelRanking,
+)
+from app.services.llm_service.task_service import LLMTaskService
+from tests import workspace_tempdir
+from tests.fakes.knowledge_index import FakeKnowledgeIndexFactory
+from tests.fakes.rag import FakeDocumentRagFactory, FakeRagOutcome
+
+
+class AnalysisTwoStageTests(unittest.TestCase):
+    SOURCE = RagSource(document_ref="document:two-stage", text="领域分类测试证据")
+
+    @staticmethod
+    def _tree() -> list[dict]:
+        return [
+            {"id": 1, "name": "装备型号", "parentId": None},
+            {"id": 10, "name": "CVN-78", "parentId": 1},
+            {"id": 11, "name": "CVN-78-基础数据", "parentId": 10},
+            {"id": 12, "name": "CVN-78-战技指标", "parentId": 10},
+        ]
+
+    @staticmethod
+    def _request(file_name: str, tree: list[dict]) -> dict:
+        return {
+            "businessType": "file",
+            "params": [
+                {
+                    "fileName": file_name,
+                    "originalFileName": file_name,
+                    "filePath": f"https://example.invalid/{file_name}",
+                    "enableFullTranslation": False,
+                    "architectureList": tree,
+                    "architectureStandardList": [],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _extraction(file_name: str, *, architecture_id: int = 999999) -> str:
+        return json.dumps(
+            {
+                # 抽取阶段即使越权输出分类，mapper 也必须由已确认 ID 覆盖。
+                "architectureId": architecture_id,
+                "country": "",
+                "channel": "",
+                "maturity": "",
+                "security": "",
+                "format": "",
+                "fileDataItem": {
+                    "fileName": file_name,
+                    "summary": "两阶段抽取摘要",
+                    "keyword": "航母, CVN-78",
+                    "score": 55,
+                    "source": "未明确数据来源",
+                    "dataFormat": "",
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _decision(index, candidate_ids=(11, 12, 10)) -> ArchitectureRecallDecision:
+        candidates = []
+        for rank, node_id in enumerate(candidate_ids, start=1):
+            node = index.require(node_id)
+            candidates.append(
+                ArchitectureRecallCandidate(
+                    architecture_id=node_id,
+                    path_name=node.semantic_path,
+                    node_type="leaf" if node.is_leaf else "parent",
+                    remark=node.remark,
+                    rank=rank,
+                    rrf_score=1.0 / rank,
+                    channel_ranks=(("tree", rank),),
+                    protected_reasons=(),
+                )
+            )
+        return ArchitectureRecallDecision(
+            tree_fingerprint=index.fingerprint,
+            query_digest=hashlib.sha256(b"two-stage-query").hexdigest(),
+            base_leaf_ids=tuple(
+                node_id for node_id in candidate_ids if index.require(node_id).is_leaf
+            ),
+            candidates=tuple(candidates),
+            channel_rankings=(
+                RecallChannelRanking(channel="tree", node_ids=tuple(candidate_ids)),
+            ),
+            rrf_scores=tuple((node_id, 1.0 / rank) for rank, node_id in enumerate(candidate_ids, 1)),
+            protected_reasons=(),
+            direct_exact_ids=(),
+            direct_tree_ids=tuple(candidate_ids),
+            candidate_projection_chars=128,
+            prompt_chars=128,
+            elapsed_ms=1.0,
+        )
+
+    def _run(
+            self,
+            *,
+            tmp: str,
+            request: dict,
+            rag_factory: FakeDocumentRagFactory,
+            knowledge_factory: FakeKnowledgeIndexFactory | None = None,
+            recall_side_effect=None,
+            mode: str = "topk_two_stage",
+    ):
+        file_name = request["params"][0]["fileName"]
+        local_file = Path(tmp, file_name)
+        if not local_file.exists():
+            local_file.write_text("CVN-78 航空母舰\n第一章 概述\n正文证据", encoding="utf-8")
+        task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+        task = task_service.create_file_task(file_name, request)
+        knowledge_factory = knowledge_factory or FakeKnowledgeIndexFactory()
+        recall_patch = (
+            patch(
+                "app.services.llm_service.analysis_service.recall_architecture_candidates",
+                side_effect=recall_side_effect,
+            )
+            if recall_side_effect is not None
+            else patch(
+                "app.services.llm_service.analysis_service.recall_architecture_candidates",
+                wraps=analysis_service.recall_architecture_candidates,
+            )
+        )
+        with (
+            patch(
+                "app.services.llm_service.analysis_service.download_to_temp_file",
+                return_value=str(local_file),
+            ),
+            patch(
+                "app.services.llm_service.analysis_service.normalize_file_for_llm",
+                side_effect=lambda path: path,
+            ),
+            patch(
+                "app.services.llm_service.analysis_service.prepare_analysis_file_for_upload",
+                side_effect=lambda path, *_args: path,
+            ),
+            patch(
+                "app.services.llm_service.analysis_service.enrich_with_translations",
+                side_effect=lambda result, *_args, **_kwargs: result,
+            ),
+            recall_patch,
+        ):
+            analysis_service.run_file_analysis_task(
+                task_service=task_service,
+                progress_hub=LLMProgressHub(),
+                request_payload=request,
+                download_root=tmp,
+                callback_url="",
+                callback_timeout=5,
+                document_rag_factory=rag_factory,
+                knowledge_index_factory=knowledge_factory,
+                analysis_classification_mode=mode,
+            )
+        return (
+            task_service,
+            task_service.get_task("file", file_name),
+            task_service.get_architecture_recall_decision(task["execution_id"]),
+            rag_factory,
+            knowledge_factory,
+        )
+
+    def test_single_candidate_skips_classification_and_starts_with_extraction(self):
+        with workspace_tempdir() as tmp:
+            file_name = "single.txt"
+            request = self._request(
+                file_name,
+                [{"id": 11, "name": "CVN-78-基础数据", "parentId": 10}],
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+            )
+            task_service, task, recall, rag_factory, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 11)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis_extraction"])
+        self.assertEqual(recall["returned_architecture_id"], 11)
+        self.assertEqual(recall["returned_rank"], 1)
+        self.assertEqual(len(rag_factory.ports[0].sessions[0].trace.attempts), 1)
+
+    def test_classification_and_extraction_are_isolated_and_resolved_id_wins(self):
+        with workspace_tempdir() as tmp:
+            file_name = "cvn78.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":11}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name, architecture_id=999999),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service.build_architecture_classification_prompt",
+                    wraps=analysis_service.build_architecture_classification_prompt,
+                ) as classification_prompt,
+                patch(
+                    "app.services.llm_service.analysis_service.build_file_extraction_prompt",
+                    wraps=analysis_service.build_file_extraction_prompt,
+                ) as extraction_prompt,
+            ):
+                task_service, task, recall, _rag, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            ["architecture_classification", "analysis_extraction"],
+        )
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 11)
+        self.assertEqual(recall["returned_architecture_id"], 11)
+        self.assertEqual(classification_prompt.call_count, 1)
+        self.assertEqual(extraction_prompt.call_count, 1)
+        self.assertNotIn("模型候选", interaction["prompt"])
+        # 完整树仍用于 storage，基础数据叶子归并到装备父节点 10。
+        self.assertIn(10, knowledge.ports[0]._collections_by_architecture)
+
+    def test_full_tree_root_outside_visible_candidates_is_repaired_with_identical_candidates(self):
+        with workspace_tempdir() as tmp:
+            file_name = "repair.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":1}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":12}', sources=(self.SOURCE,)),
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,)),
+                ],
+            )
+            with patch(
+                "app.services.llm_service.analysis_service.build_architecture_repair_prompt",
+                wraps=analysis_service.build_architecture_repair_prompt,
+            ) as repair_prompt:
+                task_service, task, _recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 12)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            ["architecture_classification", "architecture_repair", "analysis_extraction"],
+        )
+        repaired_candidates = repair_prompt.call_args.args[1]
+        self.assertEqual([item["id"] for item in repaired_candidates], [11, 12, 10])
+        self.assertTrue(all("nodeType" in item for item in repaired_candidates))
+
+    def test_visible_ordinary_parent_is_allowed_as_deepest_reliable_fallback(self):
+        with workspace_tempdir() as tmp:
+            file_name = "parent.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":10}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 10)
+        self.assertEqual(recall["returned_rank"], 3)
+
+    def test_gjb_null_classification_falls_back_to_first_visible_standard_leaf(self):
+        tree = [
+            {"id": 100, "name": "数据标准", "parentId": None},
+            {"id": 107, "name": "其他标准", "parentId": 100},
+            {"id": 101, "name": "建模与仿真", "parentId": 100},
+            {"id": 102, "name": "军用软件", "parentId": 100},
+            {"id": 103, "name": "目标特性", "parentId": 100},
+            {"id": 104, "name": "术语与定义", "parentId": 100},
+            {"id": 105, "name": "通用要求", "parentId": 100},
+            {"id": 106, "name": "元数据", "parentId": 100},
+        ]
+        with workspace_tempdir() as tmp:
+            file_name = "GJB-9001C.txt"
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text("GJB 9001C-2017 国家军用标准", encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":null}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, rag_factory, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (107, 101, 102, 103, 104, 105, 106),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 101)
+        self.assertEqual(recall["returned_architecture_id"], 101)
+        self.assertEqual(
+            [attempt.prompt_kind for attempt in rag_factory.ports[0].sessions[0].trace.attempts],
+            [RagPromptKind.ARCHITECTURE_CLASSIFICATION, RagPromptKind.ANALYSIS_EXTRACTION],
+        )
+
+    def test_repairs_share_phase_budgets_and_total_model_calls_are_four(self):
+        with workspace_tempdir() as tmp:
+            file_name = "four-calls.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":999}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":11}', sources=(self.SOURCE,)),
+                    FakeRagOutcome(text="```json\n{bad}\n```", sources=(self.SOURCE,)),
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,)),
+                ],
+            )
+            task_service, task, _recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [
+                "architecture_classification",
+                "architecture_repair",
+                "analysis_extraction",
+                "json_repair",
+            ],
+        )
+
+    def test_supplier_retry_consumes_classification_budget_and_prevents_repair(self):
+        with workspace_tempdir() as tmp:
+            file_name = "retry-budget.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=None,
+                        sources=(),
+                        failure_stage="provider",
+                        error_message="temporary",
+                    ),
+                    FakeRagOutcome(text='{"architectureId":999}', sources=(self.SOURCE,)),
+                ],
+            )
+            task_service, task, recall, _rag, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(recall["failure_stage"], "architecture_contract")
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_recall_audit_failure_prevents_remote_session_creation(self):
+        with workspace_tempdir() as tmp:
+            file_name = "audit-block.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":11}', sources=(self.SOURCE,))
+                ]
+            )
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_file_task(file_name, request)
+            Path(tmp, file_name).write_text("CVN-78", encoding="utf-8")
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service.download_to_temp_file",
+                    return_value=str(Path(tmp, file_name)),
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service.normalize_file_for_llm",
+                    side_effect=lambda path: path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service.prepare_analysis_file_for_upload",
+                    side_effect=lambda path, *_args: path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service.recall_architecture_candidates",
+                    side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                ),
+                patch.object(
+                    task_service,
+                    "upsert_architecture_recall_decision",
+                    side_effect=OSError("recall audit unavailable"),
+                ),
+            ):
+                analysis_service.run_file_analysis_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=FakeKnowledgeIndexFactory(),
+                )
+            task = task_service.get_task("file", file_name)
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(len(rag_factory.ports), 0)
+
+    def test_oversized_classification_prompt_fails_before_remote_session(self):
+        with workspace_tempdir() as tmp:
+            file_name = "prompt-budget.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory()
+            with patch(
+                "app.services.llm_service.analysis_service.build_architecture_classification_prompt",
+                return_value="x" * 32_001,
+            ):
+                _service, task, recall, _rag, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                )
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_prompt_budget")
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_recall_finalize_failure_blocks_permanent_knowledge_store(self):
+        with workspace_tempdir() as tmp:
+            file_name = "finalize-block.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":11}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            knowledge = FakeKnowledgeIndexFactory()
+            with patch.object(
+                LLMTaskService,
+                "finalize_architecture_recall_decision",
+                side_effect=OSError("finalize unavailable"),
+            ):
+                _service, task, recall, _rag, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    knowledge_factory=knowledge,
+                    recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                )
+
+        self.assertEqual(task["status"], "3")
+        self.assertIsNone(recall["finalized_at"])
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_topk_single_keeps_bounded_parent_projection_and_audit(self):
+        with workspace_tempdir() as tmp:
+            file_name = "topk-single.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name, architecture_id=10),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+            )
+            task_service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                mode="topk_single",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 10)
+        self.assertEqual(recall["returned_architecture_id"], 10)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+        self.assertIn("topk_single 受限候选补充合同", interaction["prompt"])
+        self.assertIn('"nodeType":"parent"', interaction["prompt"])
+
+    def test_legacy_small_tree_is_audited_before_success(self):
+        with workspace_tempdir() as tmp:
+            file_name = "legacy-success.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name, architecture_id=11),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+            )
+            task_service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                mode="legacy",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 11)
+        self.assertEqual(recall["returned_architecture_id"], 11)
+        self.assertEqual(recall["returned_rank"], 3)
+        self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
+
+    def test_legacy_rejects_root_from_initial_and_repair_results(self):
+        with workspace_tempdir() as tmp:
+            file_name = "legacy-root.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name, architecture_id=1),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":1}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            task_service, task, recall, _rag, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                mode="legacy",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_contract")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_legacy_tree_over_global_candidate_limit_fails_before_session(self):
+        tree = [{"id": 1, "name": "root", "parentId": None}]
+        tree.extend(
+            {"id": index, "name": f"leaf-{index}", "parentId": 1}
+            for index in range(2, 130)
+        )
+        with workspace_tempdir() as tmp:
+            file_name = "legacy-too-many.txt"
+            request = self._request(file_name, tree)
+            rag_factory = FakeDocumentRagFactory()
+            _service, task, recall, _rag, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                mode="legacy",
+            )
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_prompt_budget")
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_factory_acquisition_failure_finalizes_existing_recall_audit(self):
+        with workspace_tempdir() as tmp:
+            file_name = "factory-failure.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory()
+            knowledge = FakeKnowledgeIndexFactory()
+            with patch.object(
+                rag_factory,
+                "create",
+                side_effect=OSError("factory unavailable"),
+            ):
+                _service, task, recall, _rag, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    knowledge_factory=knowledge,
+                    recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                )
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_contract")
+        self.assertIsNotNone(recall["finalized_at"])
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_factory_exit_failure_does_not_overwrite_committed_success(self):
+        with workspace_tempdir() as tmp:
+            file_name = "factory-exit-failure.txt"
+            request = self._request(
+                file_name,
+                [{"id": 11, "name": "CVN-78-基础数据", "parentId": 10}],
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+            )
+            original_create = rag_factory.create
+
+            @contextmanager
+            def create_with_exit_failure():
+                with original_create() as port:
+                    yield port
+                raise OSError("transport close failed")
+
+            with patch.object(rag_factory, "create", side_effect=create_with_exit_failure):
+                _service, task, recall, _rag, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 11)
+        self.assertEqual(recall["returned_architecture_id"], 11)
+        self.assertEqual(len(knowledge.ports), 1)
+
+    def test_topk_single_json_failure_uses_analysis_extraction_stage(self):
+        with workspace_tempdir() as tmp:
+            file_name = "topk-single-json-failure.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text="{bad", sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text="still bad", sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+                mode="topk_single",
+            )
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(recall["failure_stage"], "analysis_extraction")
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_extraction_repair_prompt_budget_is_checked_before_second_call(self):
+        with workspace_tempdir() as tmp:
+            file_name = "extraction-repair-budget.txt"
+            request = self._request(
+                file_name,
+                [{"id": 11, "name": "CVN-78-基础数据", "parentId": 10}],
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text="{bad", sources=(self.SOURCE,))
+                ]
+            )
+            with patch(
+                "app.services.llm_service.analysis_service.build_json_repair_prompt",
+                return_value="x" * 32_001,
+            ):
+                task_service, task, recall, _rag, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_prompt_budget")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(knowledge.ports), 0)
+
+    def test_docx_body_is_read_before_session_and_reused_by_mapper(self):
+        with workspace_tempdir() as tmp:
+            file_name = "single.docx"
+            docx_path = Path(tmp, file_name)
+            document_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<w:body><w:p><w:r><w:t>CVN-78 Word 正文证据</w:t></w:r></w:p></w:body>'
+                '</w:document>'
+            )
+            with zipfile.ZipFile(docx_path, "w") as archive:
+                archive.writestr("word/document.xml", document_xml)
+            request = self._request(
+                file_name,
+                [{"id": 11, "name": "CVN-78-基础数据", "parentId": 10}],
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+            )
+            _service, task, _recall, rag_factory, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertIn(
+            "CVN-78 Word 正文证据",
+            task["result_payload"]["data"]["fileDataItem"]["originalText"],
+        )
+        self.assertEqual(len(rag_factory.ports), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
