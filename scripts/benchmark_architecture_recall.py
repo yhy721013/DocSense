@@ -318,16 +318,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         result = run_benchmark(nodes, cases)
     except (OSError, TypeError, ValueError) as exc:
-        print(f"benchmark 失败: {exc}", file=sys.stderr)
+        sys.stderr.write(f"benchmark 失败: {exc}\n")
         return 2
 
-    print(
+    sys.stdout.write(
         json.dumps(
             result,
             ensure_ascii=False,
             indent=2 if args.pretty else None,
             separators=None if args.pretty else (",", ":"),
         )
+        + "\n"
     )
     return 0
 
