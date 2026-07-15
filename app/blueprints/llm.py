@@ -392,6 +392,9 @@ def llm_analysis():
         # Gateway 在后台任务线程内部按文件创建，批量任务也不会跨文件共享有状态对象。
         "document_rag_factory": services.document_rag_factory,
         "knowledge_index_factory": services.knowledge_index_factory,
+        "analysis_classification_mode": (
+            services.analysis_classification_config.mode
+        ),
     }
     worker = threading.Thread(
         target=services.upload_task_limiter.run,

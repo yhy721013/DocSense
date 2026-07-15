@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -22,7 +23,13 @@ from app.ports import (
     KnowledgeIndexFactory,
     KnowledgeIndexPort,
 )
-from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
+from app.services.core.config import (
+    ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+    ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+    AnalysisClassificationConfig,
+    AnythingLLMConfig,
+    LLMIntegrationConfig,
+)
 from app.container import (
     APPLICATION_SERVICES_EXTENSION,
     ApplicationServices,
@@ -317,6 +324,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
         self.assertIsInstance(self.services.chat_delete, ChatDeleteService)
+        self.assertEqual(
+            AnalysisClassificationConfig.topk_two_stage(),
+            self.services.analysis_classification_config,
+        )
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
 
@@ -359,7 +370,13 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         thread_type: MagicMock,
     ) -> None:
         """路由只把两个无状态 Factory 交给线程，不在请求线程创建 Gateway 或 Transport。"""
-        app = create_app(services=self.services)
+        configured_services = replace(
+            self.services,
+            analysis_classification_config=AnalysisClassificationConfig(
+                mode=ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE
+            ),
+        )
+        app = create_app(services=configured_services)
 
         response = app.test_client().post(
             "/llm/analysis",
@@ -383,6 +400,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIs(
             self.knowledge_index_factory,
             task_kwargs["knowledge_index_factory"],
+        )
+        self.assertEqual(
+            ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+            task_kwargs["analysis_classification_mode"],
         )
         target = thread_type.call_args.kwargs["target"]
         self.assertIs(

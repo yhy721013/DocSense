@@ -47,6 +47,82 @@ class LLMIntegrationConfig:
     download_dir: str
 
 
+ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE = "topk_two_stage"
+ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE = "topk_single"
+ANALYSIS_CLASSIFICATION_MODE_LEGACY = "legacy"
+ANALYSIS_CLASSIFICATION_MODES = frozenset(
+    {
+        ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+        ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+        ANALYSIS_CLASSIFICATION_MODE_LEGACY,
+    }
+)
+
+
+class AnalysisClassificationConfigurationError(RuntimeError):
+    """领域分类运行模式或固定合同上限非法时抛出。"""
+
+
+@dataclass(frozen=True)
+class AnalysisClassificationConfig:
+    """``/llm/analysis`` 领域分类运行模式与不可变合同上限。"""
+
+    mode: str = ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE
+    model_candidate_limit: int = 128
+    classification_prompt_char_limit: int = 32_000
+    base_leaf_limit: int = 64
+    parent_candidate_limit: int = 16
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, str):
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE 必须是字符串"
+            )
+        mode = self.mode.strip().lower()
+        if mode not in ANALYSIS_CLASSIFICATION_MODES:
+            allowed = ", ".join(sorted(ANALYSIS_CLASSIFICATION_MODES))
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE 配置非法："
+                f"{self.mode!r}；仅支持 {allowed}"
+            )
+
+        for field_name in (
+            "model_candidate_limit",
+            "classification_prompt_char_limit",
+            "base_leaf_limit",
+            "parent_candidate_limit",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise AnalysisClassificationConfigurationError(
+                    f"{field_name} 必须是正整数"
+                )
+
+        hard_limits = {
+            "model_candidate_limit": 128,
+            "classification_prompt_char_limit": 32_000,
+            "base_leaf_limit": 64,
+            "parent_candidate_limit": 16,
+        }
+        for field_name, hard_limit in hard_limits.items():
+            if getattr(self, field_name) > hard_limit:
+                raise AnalysisClassificationConfigurationError(
+                    f"{field_name} 不得超过硬上限 {hard_limit}"
+                )
+        if self.base_leaf_limit + self.parent_candidate_limit > self.model_candidate_limit:
+            raise AnalysisClassificationConfigurationError(
+                "base_leaf_limit 与 parent_candidate_limit 之和"
+                "不得超过 model_candidate_limit"
+            )
+
+        object.__setattr__(self, "mode", mode)
+
+    @classmethod
+    def topk_two_stage(cls) -> "AnalysisClassificationConfig":
+        """创建不依赖环境变量的两阶段默认配置。"""
+        return cls(mode=ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE)
+
+
 CHAT_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
 
 
@@ -162,6 +238,18 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
         download_timeout=float(os.getenv("FILE_DOWNLOAD_TIMEOUT", "60").strip() or "60"),
         download_dir=str(LLM_DOWNLOAD_DIR),
     )
+
+
+def load_analysis_classification_config() -> AnalysisClassificationConfig:
+    """读取并严格校验领域分类运行模式。
+
+    仅在环境变量缺失时使用 ``topk_two_stage``；显式空值或未知值
+    都必须拒绝，避免误配时静默切换分类链路。
+    """
+    raw_mode = os.getenv("DOCSENSE_ANALYSIS_CLASSIFICATION_MODE")
+    if raw_mode is None:
+        return AnalysisClassificationConfig.topk_two_stage()
+    return AnalysisClassificationConfig(mode=raw_mode)
 
 
 def load_chat_infrastructure_config() -> ChatInfrastructureConfig:
