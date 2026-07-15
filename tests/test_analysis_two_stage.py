@@ -739,6 +739,342 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertEqual(len(knowledge.ports), 0)
 
+    def test_explicit_gjb_signal_overrides_valid_non_standard_model_choice(self):
+        tree = [
+            {"id": 100, "name": "数据标准", "parentId": None},
+            {"id": 101, "name": "建模与仿真", "parentId": 100},
+            {"id": 102, "name": "军用软件", "parentId": 100},
+            {"id": 103, "name": "目标特性", "parentId": 100},
+            {"id": 104, "name": "术语与定义", "parentId": 100},
+            {"id": 105, "name": "通用要求", "parentId": 100},
+            {"id": 106, "name": "元数据", "parentId": 100},
+            {"id": 600, "name": "其他资料", "parentId": None},
+            {"id": 654, "name": "普通资料叶", "parentId": 600},
+        ]
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text("GJB 9001C-2017 国家军用标准", encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":654}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (101, 102, 103, 104, 105, 106, 654),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 101)
+        self.assertEqual(recall["returned_architecture_id"], 101)
+
+    def test_strong_gjb_filename_keeps_model_selected_visible_standard_leaf(self):
+        tree = [
+            {"id": 100, "name": "数据标准", "parentId": None},
+            {"id": 101, "name": "建模与仿真", "parentId": 100},
+            {"id": 102, "name": "军用软件", "parentId": 100},
+            {"id": 103, "name": "目标特性", "parentId": 100},
+            {"id": 104, "name": "术语与定义", "parentId": 100},
+            {"id": 105, "name": "通用要求", "parentId": 100},
+            {"id": 106, "name": "元数据", "parentId": 100},
+        ]
+        with workspace_tempdir() as tmp:
+            file_name = "GJB-Z 9001C-2017.txt"
+            request = self._request(file_name, tree)
+            request["params"][0]["originalFileName"] = "quality-system.pdf"
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":103}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (101, 102, 103, 104, 105, 106),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 103)
+        self.assertEqual(recall["returned_architecture_id"], 103)
+
+    def test_body_gjb_reference_does_not_override_valid_equipment_choice(self):
+        tree = [
+            {"id": 100, "name": "数据标准", "parentId": None},
+            {"id": 101, "name": "建模与仿真", "parentId": 100},
+            {"id": 102, "name": "军用软件", "parentId": 100},
+            {"id": 103, "name": "目标特性", "parentId": 100},
+            {"id": 104, "name": "术语与定义", "parentId": 100},
+            {"id": 105, "name": "通用要求", "parentId": 100},
+            {"id": 106, "name": "元数据", "parentId": 100},
+            {"id": 600, "name": "装备资料", "parentId": None},
+            {"id": 654, "name": "雷达装备叶", "parentId": 600},
+        ]
+        with workspace_tempdir() as tmp:
+            file_name = "radar-equipment-overview.txt"
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text(
+                "该装备设计参考 GJB 9001C-2017，但本文是装备性能资料。",
+                encoding="utf-8",
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":654}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (101, 102, 103, 104, 105, 106, 654),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 654)
+        self.assertEqual(recall["returned_architecture_id"], 654)
+
+    def test_strong_gjb_filename_does_not_select_invisible_standard_leaf(self):
+        tree = [
+            {"id": 100, "name": "数据标准", "parentId": None},
+            {"id": 101, "name": "建模与仿真", "parentId": 100},
+            {"id": 102, "name": "军用软件", "parentId": 100},
+            {"id": 600, "name": "其他资料", "parentId": None},
+            {"id": 654, "name": "普通资料甲", "parentId": 600},
+            {"id": 655, "name": "普通资料乙", "parentId": 600},
+        ]
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(file_name, tree)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":654}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (654, 655),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 654)
+        self.assertEqual(recall["returned_architecture_id"], 654)
+
+    @staticmethod
+    def _two_equipment_tree() -> list[dict]:
+        detail_kinds = (
+            "基础数据",
+            "战技指标",
+            "运用数据",
+            "效能数据",
+            "模型数据",
+            "目特数据",
+            "声像数据",
+        )
+        nodes = [
+            {"id": 1, "name": "装备型号", "parentId": None},
+            {"id": 56, "name": "CVN-68", "parentId": 1},
+            {"id": 67, "name": "CVN-78", "parentId": 1},
+            {"id": 515, "name": "AN/SPS-48", "parentId": 1},
+        ]
+        for parent_id, parent_name, first_leaf_id in (
+            (56, "CVN-68", 561),
+            (67, "CVN-78", 671),
+            (515, "AN/SPS-48", 516),
+        ):
+            nodes.extend(
+                {
+                    "id": first_leaf_id + offset,
+                    "name": f"{parent_name}-{kind}",
+                    "parentId": parent_id,
+                }
+                for offset, kind in enumerate(detail_kinds)
+            )
+        return nodes
+
+    def test_unique_cvn68_filename_identifier_forces_cross_branch_choice_to_parent(self):
+        with workspace_tempdir() as tmp:
+            file_name = "e2e-topk-cvn68-20260715.txt"
+            request = self._request(file_name, self._two_equipment_tree())
+            request["params"][0]["originalFileName"] = (
+                "Nimitz (CVN 68) class (CVNM) 16-Aug-2023.pdf"
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":515}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (561, 562, 516, 56, 515),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 56)
+        self.assertEqual(recall["returned_architecture_id"], 56)
+        self.assertEqual(recall["returned_rank"], 4)
+
+    def test_unique_cvn78_filename_identifier_keeps_correct_visible_descendant(self):
+        with workspace_tempdir() as tmp:
+            file_name = "Gerald R Ford (CVN 78) class 14-Jul-2023.txt"
+            request = self._request(file_name, self._two_equipment_tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":671}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (671, 516, 67, 515),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 671)
+        self.assertEqual(recall["returned_architecture_id"], 671)
+        self.assertEqual(recall["returned_rank"], 1)
+
+    def test_ambiguous_or_non_numeric_filename_does_not_force_equipment_branch(self):
+        cases = (
+            "CVN-68 + CVN-78 comparison.txt",
+            "Nimitz carrier overview.txt",
+            "Nimitz CVN-680 boundary.txt",
+        )
+        for file_name in cases:
+            with self.subTest(file_name=file_name), workspace_tempdir() as tmp:
+                request = self._request(file_name, self._two_equipment_tree())
+                rag_factory = FakeDocumentRagFactory(
+                    analyse_outcomes=[
+                        FakeRagOutcome(text='{"architectureId":515}', sources=(self.SOURCE,))
+                    ],
+                    ask_outcomes=[
+                        FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                    ],
+                )
+                _service, task, recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                        index,
+                        (561, 671, 516, 56, 67, 515),
+                    ),
+                )
+
+            self.assertEqual(task["status"], "2")
+            self.assertEqual(task["result_payload"]["data"]["architectureId"], 515)
+            self.assertEqual(recall["returned_architecture_id"], 515)
+
+    def test_filename_match_does_not_force_invisible_equipment_parent(self):
+        with workspace_tempdir() as tmp:
+            file_name = "Nimitz CVN-68 overview.txt"
+            request = self._request(file_name, self._two_equipment_tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":515}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                # 56 在完整树存在，但没有进入模型可见候选。
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (561, 516, 515),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 515)
+        self.assertEqual(recall["returned_architecture_id"], 515)
+
+    def test_duplicate_equipment_identifier_parents_do_not_force_branch(self):
+        tree = self._two_equipment_tree()
+        detail_kinds = (
+            "基础数据", "战技指标", "运用数据", "效能数据",
+            "模型数据", "目特数据", "声像数据",
+        )
+        tree.append({"id": 68, "name": "CVN-68", "parentId": 1})
+        tree.extend(
+            {
+                "id": 681 + offset,
+                "name": f"CVN-68-{kind}",
+                "parentId": 68,
+            }
+            for offset, kind in enumerate(detail_kinds)
+        )
+        with workspace_tempdir() as tmp:
+            file_name = "Nimitz CVN-68 duplicate.txt"
+            request = self._request(file_name, tree)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(text='{"architectureId":515}', sources=(self.SOURCE,))
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(text=self._extraction(file_name), sources=(self.SOURCE,))
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (561, 681, 516, 56, 68, 515),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 515)
+        self.assertEqual(recall["returned_architecture_id"], 515)
+
     def test_docx_body_is_read_before_session_and_reused_by_mapper(self):
         with workspace_tempdir() as tmp:
             file_name = "single.docx"

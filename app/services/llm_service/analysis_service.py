@@ -1422,6 +1422,204 @@ def _visible_data_standard_fallback_id(
     return None
 
 
+_STRONG_FILENAME_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"([A-Za-z]{1,12}(?:[/_]+[A-Za-z]{1,12})?[/_\-\s]*"
+    r"\d{1,8}[A-Za-z]?)"
+    r"(?![A-Za-z0-9])"
+)
+_FILENAME_DATE_IDENTIFIER_PREFIXES = frozenset(
+    {
+        "jan", "january", "feb", "february", "mar", "march",
+        "apr", "april", "may", "jun", "june", "jul", "july",
+        "aug", "august", "sep", "sept", "september", "oct", "october",
+        "nov", "november", "dec", "december",
+    }
+)
+_EQUIPMENT_DETAIL_KINDS = frozenset(
+    {
+        "基础数据",
+        "战技指标",
+        "运用数据",
+        "效能数据",
+        "模型数据",
+        "目特数据",
+        "声像数据",
+    }
+)
+_STRONG_GJB_FILENAME_RE = re.compile(
+    r"(?<![A-Za-z0-9])GJB(?:\s*[/_-]\s*Z)?\s*[- ]?\s*\d+[A-Za-z]?",
+    re.IGNORECASE,
+)
+
+
+def _strong_filename_identifiers(*values: Any) -> set[str]:
+    """提取文件名中的数字型强标识，忽略正文、短词和纯年份。"""
+    identifiers: set[str] = set()
+    for value in values:
+        normalized = unicodedata.normalize("NFKC", _as_text(value)).casefold()
+        for match in _STRONG_FILENAME_IDENTIFIER_RE.finditer(normalized):
+            raw_identifier = match.group(1).strip()
+            compact = re.sub(r"[^a-z0-9]+", "", raw_identifier)
+            letters = re.sub(r"[^a-z]+", "", compact)
+            digits = re.sub(r"[^0-9]+", "", compact)
+            if not letters or not digits:
+                continue
+            # 单字母紧凑写法（如正文序号 B2）过于宽泛；带显式分隔符的 F-35 仍保留。
+            if len(letters) == 1 and re.fullmatch(r"[a-z]\d+", raw_identifier):
+                continue
+            if letters in _FILENAME_DATE_IDENTIFIER_PREFIXES:
+                continue
+            identifiers.add(compact)
+    return identifiers
+
+
+def _has_strong_gjb_filename_identity(*values: Any) -> bool:
+    for value in values:
+        normalized = unicodedata.normalize("NFKC", _as_text(value))
+        if not normalized:
+            continue
+        if "国家军用标准" in normalized or "国军标" in normalized:
+            return True
+        if _STRONG_GJB_FILENAME_RE.search(normalized):
+            return True
+    return False
+
+
+def _equipment_detail_kind(node_name: str, parent_name: str) -> str:
+    if node_name in _EQUIPMENT_DETAIL_KINDS:
+        return node_name
+    for separator in ("-", "－", "—", "–", "﹣"):
+        prefix = f"{parent_name}{separator}"
+        if node_name.startswith(prefix):
+            return node_name[len(prefix):].strip()
+    return ""
+
+
+def _has_seven_equipment_detail_leaves(
+        node: ArchitectureNodeProfile,
+        tree_index: ArchitectureTreeIndex,
+) -> bool:
+    detail_kinds = {
+        _equipment_detail_kind(tree_index.require(child_id).name, node.name)
+        for child_id in tree_index.children_by_id[node.id]
+        if tree_index.require(child_id).is_leaf
+    }
+    return _EQUIPMENT_DETAIL_KINDS.issubset(detail_kinds)
+
+
+def _unique_visible_equipment_identifier_parent(
+        *,
+        file_name: str,
+        original_name: str,
+        visible_ids: set[int],
+        tree_index: ArchitectureTreeIndex,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int | None:
+    """返回文件名唯一强匹配的、合法且模型可见的装备父节点。"""
+    filename_identifiers = _strong_filename_identifiers(file_name, original_name)
+    if not filename_identifiers:
+        return None
+
+    # 数据标准拓扑只计算一次。逐节点调用 _is_data_standard_parent_id() 会对完整
+    # 6k+ 节点树反复重建拓扑，导致确定性约束退化为 O(n²)。
+    topology_nodes, parent_ids = _architecture_candidate_topology(architecture_list)
+    data_standard_parent_ids = _data_standard_candidate_ids(topology_nodes).intersection(
+        parent_ids
+    )
+
+    matched_parent_ids: list[int] = []
+    for node in tree_index.nodes:
+        if (
+                node.is_leaf
+                or node.parent_id is None
+                or node.depth < 2
+                or node.id in data_standard_parent_ids
+                or not _has_seven_equipment_detail_leaves(node, tree_index)
+        ):
+            continue
+        node_identifiers = _strong_filename_identifiers(node.name)
+        if not filename_identifiers.intersection(node_identifiers):
+            continue
+        matched_parent_ids.append(node.id)
+
+    unique_ids = tuple(dict.fromkeys(matched_parent_ids))
+    if len(unique_ids) != 1 or unique_ids[0] not in visible_ids:
+        return None
+    return unique_ids[0]
+
+
+def _apply_topk_deterministic_architecture_constraints(
+        architecture_id: int,
+        *,
+        file_name: str,
+        original_name: str,
+        visible_ids: set[int],
+        tree_index: ArchitectureTreeIndex,
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int:
+    """应用高置信文件信号约束，防止模型越过明确的数据标准或装备分支。"""
+    if _has_strong_gjb_filename_identity(file_name, original_name):
+        visible_standard_ids = tuple(
+            node_id
+            for node_id in _ordered_data_standard_leaf_ids(architecture_list)
+            if node_id in visible_ids
+        )
+        if visible_standard_ids:
+            constrained_id = (
+                architecture_id
+                if architecture_id in visible_standard_ids
+                else visible_standard_ids[0]
+            )
+            if constrained_id != architecture_id:
+                logger.info(
+                    "GJB 文件身份约束覆盖普通分类: "
+                    "original_architecture_id=%s fallback_standard_leaf_id=%s",
+                    architecture_id,
+                    constrained_id,
+                )
+            return _validate_topk_architecture_id(
+                constrained_id,
+                visible_ids=visible_ids,
+                tree_index=tree_index,
+                architecture_list=architecture_list,
+            )
+
+    matched_parent_id = _unique_visible_equipment_identifier_parent(
+        file_name=file_name,
+        original_name=original_name,
+        visible_ids=visible_ids,
+        tree_index=tree_index,
+        architecture_list=architecture_list,
+    )
+    if matched_parent_id is None:
+        return architecture_id
+
+    allowed_branch_ids = {
+        node_id
+        for node_id in visible_ids
+        if (
+            node_id == matched_parent_id
+            or matched_parent_id in tree_index.ancestors_by_id[node_id]
+        )
+    }
+    if architecture_id in allowed_branch_ids:
+        return architecture_id
+
+    logger.info(
+        "文件名强标识约束覆盖越支分类: original_architecture_id=%s "
+        "fallback_parent_id=%s",
+        architecture_id,
+        matched_parent_id,
+    )
+    return _validate_topk_architecture_id(
+        matched_parent_id,
+        visible_ids=visible_ids,
+        tree_index=tree_index,
+        architecture_list=architecture_list,
+    )
+
+
 def _phase_attempt_count(session: DocumentRagSession, start_count: int) -> int:
     return max(0, len(session.trace.attempts) - start_count)
 
@@ -2369,6 +2567,14 @@ def _execute_file_analysis_task(
 
                 if architecture_id is None:
                     raise ArchitectureContractError("无法确定领域分类")
+                architecture_id = _apply_topk_deterministic_architecture_constraints(
+                    architecture_id,
+                    file_name=file_name,
+                    original_name=original_name,
+                    visible_ids=visible_ids,
+                    tree_index=tree_index,
+                    architecture_list=architecture_list,
+                )
                 selected_node = tree_index.require(architecture_id)
                 include_standard_fields = _is_architecture_in_standard_range(
                     architecture_id,
@@ -2581,6 +2787,14 @@ def _execute_file_analysis_task(
                                 )
                             )
 
+            architecture_id = _apply_topk_deterministic_architecture_constraints(
+                architecture_id,
+                file_name=file_name,
+                original_name=original_name,
+                visible_ids=visible_ids,
+                tree_index=tree_index,
+                architecture_list=architecture_list,
+            )
             if len(session.trace.attempts) > MAX_ANALYSIS_MODEL_CALLS:
                 raise AnalysisContractError("文件分析实际模型调用超过 4 次")
             mapped_result = map_analysis_result(
