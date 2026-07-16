@@ -295,6 +295,9 @@ Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须
 - 阶段 4～6 必须按 task ID 持久化 delivery attempt、触发来源、错误阶段和内部 delivery outcome，但出站 Presenter 仍使用现有载荷。
 - 仅 DNS/连接建立等能够确认请求尚未送达的失败允许有限自动重试。
 - 请求发出后的读取超时、连接中断或响应丢失标记为内部 `delivery_outcome_unknown`，callback Worker 不自动重试。
+- 同业务键使用 callback Guard 串行化提交与外发：旧 callback 已先取得发送权时，新提交
+  最多等待当前 callback timeout；结果未知或等待到期仍被占用时，新提交返回对应接口
+  既有 409 并冻结该键，直至内部人工核查解除。
 - 非 2xx 响应记录为失败并进入死信/人工处理，不自动重试。
 - `/llm/check-task` 保留显式补发触发行为，但请求只可靠登记/复用恢复命令；Worker 投递
   记录 `trigger=check_task`，且不会再被后台自动重试链重复放大。
@@ -415,7 +418,7 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 | TASK-06 | Progress 连接有界缓冲实现 | **1B-2 已接入**：每连接唯一缓冲、初始快照屏障、按 key 合并、慢连接隔离、丢弃计数和路由线程单写入已进入当前运行路径；容量值仍在阶段 7/8 结合 50 连接压测调优 |
 | TASK-07 | 显式 Progress action/ack 是否保留 | **已实现**：无甲方或生产前端需求证据；1B-2 已删除显式动作处理，只保留无 action 订阅与连接关闭清理；收到 action 时返回 error 消息、保持连接且无 ack |
 | TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **Progress 已实现、check-task 待阶段 6**：不兼容过滤；任一非对象元素使整次 HTTP 请求或 WebSocket 消息报参数错误，不做部分处理 |
-| TASK-09 | 旧终态执行恢复回调期间，同一业务键已提交新执行时是否继续发送旧回调 | **核心语义已确认（2026-07-16）**：采用 latest-wins，判定旧执行回调过期并跳过。`fileName` 是前端唯一逻辑任务键；同名文件的不同 `execution_id` 只是该逻辑任务的不同执行代次。实现必须在外发前于同业务键串行化边界内复核最新 TaskId；不匹配时禁止网络调用，并持久化 stale/skipped 审计原因。已发请求若进入 `delivery_outcome_unknown`，在不增加回调版本字段时无法撤回或证明甲方不会迟到处理，其后是否允许新执行受理仍待负责人确认 |
+| TASK-09 | 旧终态执行恢复回调期间，同一业务键已提交新执行时是否继续发送旧回调 | **完整语义已确认（2026-07-16）**：采用 latest-wins，判定旧执行回调过期并跳过。`fileName` 是前端唯一逻辑任务键；同名文件的不同 `execution_id` 只是该逻辑任务的不同执行代次。实现必须在外发前于同业务键串行化边界内复核最新 TaskId；不匹配时禁止网络调用，并持久化 stale/skipped 审计原因。旧 callback 已先取得发送权时，新提交最多等待当前 callback timeout；若进入 `delivery_outcome_unknown` 或等待到期仍被占用，新提交返回既有 409 并冻结同键，直至内部人工解除。冻结 Callback 载荷下仍无法撤回已发请求，因此不自动重试 |
 | TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **已确认（2026-07-16）**：直接采用 MySQL Outbox + RabbitMQ + callback Worker；不实现同步 Adapter、有界同步并行、本地线程/内存队列或总超时过渡方案。阶段 1B-1 命令边界已完成，阶段 4～5 建基础设施，阶段 6 一次性切换生产路由 |
 
 ---
@@ -450,6 +453,6 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
   不等待外部回调；任一非对象 params 元素整次 400，其他 400/404 不变。
 - [ ] 所有任务写入携带 task ID；TASK-09 latest-wins 已在 Worker Guard、提交端串行化和
   expected TaskId 条件持久化中实现。
-- [ ] `delivery_outcome_unknown` 后同业务键新执行准入已取得负责人确认并进入阶段 6 L3
-  设计；TASK-01～TASK-10 的到期事项均已实现或通过明确后置门禁。
+- [ ] `delivery_outcome_unknown` 后同业务键新执行按已确认的等待/409/人工解除策略进入
+  1C 兼容 Guard 和阶段 4～6 可靠实现；TASK-01～TASK-10 的到期事项均已实现或通过明确后置门禁。
 - [ ] 全部公开 HTTP、WebSocket、SSE 和 Callback 回归证明未暴露内部 ID/序号。
