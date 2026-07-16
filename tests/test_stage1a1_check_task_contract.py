@@ -187,7 +187,7 @@ class CheckTaskCurrentRouteContractTests(unittest.TestCase):
 
         cases = (
             ("file", {"fileName": "demo.pdf"}, "fileName", "demo.pdf", str, "1"),
-            ("report", {"reportId": 132}, "reportId", 132, int, "0"),
+            ("report", {"reportId": "00132"}, "reportId", 132, int, "0"),
             (
                 "weaponry",
                 {"architectureId": 10502},
@@ -210,6 +210,48 @@ class CheckTaskCurrentRouteContractTests(unittest.TestCase):
                 self.assertIs(key_type, type(data[key_name]))
                 self.assertEqual(status, data["status"])
                 self.assertIs(str, type(data["status"]))
+
+    def test_report_id_has_no_64_bit_range_limit(self) -> None:
+        """整数字符串按整数值查找，公开旧响应仍保持 JSON number。"""
+
+        report_id = 10**80 + 132
+        self.task_service.create_report_task(
+            report_id,
+            {
+                "businessType": "report",
+                "params": [{"reportId": report_id}],
+            },
+        )
+
+        response = self.client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "report",
+                "params": [{"reportId": f"+000{report_id}"}],
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        value = response.get_json()["data"]["reportId"]
+        self.assertEqual(report_id, value)
+        self.assertIs(int, type(value))
+
+    def test_report_id_rejects_non_integer_values_with_400(self) -> None:
+        for invalid in (True, 132.0, "132.0", "not-an-integer", [], {}):
+            with self.subTest(invalid=invalid):
+                response = self.client.post(
+                    "/llm/check-task",
+                    json={
+                        "businessType": "report",
+                        "params": [{"reportId": invalid}],
+                    },
+                )
+
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(
+                    {"error": "reportId必须是整数或整数字符串"},
+                    response.get_json(),
+                )
 
     def test_batch_all_existing_preserves_request_order(self) -> None:
         """批量存在项必须按 params 顺序返回，不能按数据库顺序重排。"""

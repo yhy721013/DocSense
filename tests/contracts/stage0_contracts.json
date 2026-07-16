@@ -1,8 +1,21 @@
 {
   "schemaVersion": 1,
   "frozenAt": "2026-07-15",
+  "updatedAt": "2026-07-16",
   "authority": "docs/接口文档",
   "contractState": "target-approved",
+  "reportIdInputPolicy": {
+    "acceptedJsonTypes": [
+      "integer",
+      "string"
+    ],
+    "stringFormat": "optional_sign_and_decimal_digits_after_trim",
+    "businessRange": "no_application_level_min_or_max",
+    "canonicalization": "same_integer_value_is_same_business_key",
+    "invalidHttpStatus": 400,
+    "invalidProgressBehavior": "error_message_and_keep_connection",
+    "serverOutputType": "json_number"
+  },
   "taskSubmissions": [
     {
       "name": "analysis",
@@ -96,7 +109,7 @@
             "reportId": 132
           },
           {
-            "reportId": 133
+            "reportId": "00133"
           }
         ]
       }
@@ -133,8 +146,8 @@
     },
     "closeBehavior": "release_all_connection_subscriptions",
     "weaponryProgressStatus": "current_internal_extension_not_frozen_as_public_contract",
-    "implementationStatus": "pending",
-    "implementationWave": "1B"
+    "implementationStatus": "implemented",
+    "implementationWave": "1B-2"
   },
   "callbacks": {
     "fileFailure": {
@@ -206,21 +219,13 @@
         "1B"
       ]
     },
-    {
-      "scope": "/llm/progress control messages",
-      "current": "explicit actions and ack are accepted",
-      "target": "explicit action receives an error message without ack and the connection remains open",
-      "scheduledWaves": [
-        "1B"
-      ]
-    },
-    {
-      "scope": "check-task/progress mixed params elements",
-      "current": "non-object elements are silently filtered when valid object elements remain",
-      "target": "any non-object element rejects the entire HTTP request or WebSocket message",
-      "scheduledWaves": [
-        "1B"
-      ]
-    }
+        {
+            "scope": "/llm/check-task mixed params elements",
+            "current": "non-object elements are silently filtered when valid object elements remain; Progress has implemented strict rejection in 1B-2",
+            "target": "any non-object element rejects the entire HTTP request",
+            "scheduledWaves": [
+                "6"
+            ]
+        }
   ]
 }

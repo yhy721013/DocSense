@@ -31,7 +31,7 @@
 | 文件 | 覆盖内容 |
 | --- | --- |
 | `offline_application.py` | 为路由测试装配临时 SQLite 和 Fake AnythingLLM，避免 `create_app()` 隐式构造生产依赖。 |
-| `contracts/stage0_contracts.json` | 当前已批准但尚待对应波次实现的 HTTP/WS 目标契约，以及继续冻结的 Callback/SSE 黄金样例。 |
+| `contracts/stage0_contracts.json` | 已批准目标契约及其实施状态，以及继续冻结的 Callback/SSE 黄金样例；Progress 目标已标记为 1B-2 implemented，check-task 仍待阶段 6。 |
 | `test_stage0_contract_assets.py` | 校验空成功响应、report 409、严格 params 元素校验、显式 action 错误后保持连接且无 ack、回调与 SSE 黄金样例。 |
 | `test_stage0_baseline_tools.py` | 校验容量工具的回环地址、重型场景、有界 Future 窗口、成功/失败延迟拆分、WebSocket 持续存活探测与配置门禁，不发出网络请求。 |
 | `test_stage0_sqlite_inventory.py` | 验证 SQLite 盘点器使用显式只读事务，识别 WAL/SHM，区分数据版本与物理文件变化且不输出业务正文。 |
@@ -41,9 +41,11 @@
 | 文件 | 覆盖内容 |
 | --- | --- |
 | `test_stage1a1_check_task_contract.py` | `/llm/check-task` 当前 400/404/成功 JSON 迁移基线、批量顺序、缺失策略、回调恢复，以及波次 1B 的 HTTP 200 空响应与严格 params 元素目标。 |
-| `test_stage1a1_progress_contract.py` | `/llm/progress` 当前 action/ack 与混合 params 迁移基线、无 action 快照、Hub 回退、归一化、断连清理、多连接隔离，以及波次 1B 的严格元素校验和 action 错误后保持连接/无 ack 目标。 |
+| `test_stage1a1_progress_contract.py` | `/llm/progress` 阶段 1B-2 切换后的无 action 契约、严格整条消息校验、无 ack、批量顺序/重复位置、Hub 回退、实时通知单写入、多连接隔离、发送失败和断连清理。 |
 
-两个文件中的“当前成功 JSON”“当前混合 params 过滤”和“当前显式 action/ack”断言只用于波次 1B 切换前的回归，不是新增公开承诺。目标行为继续以 `contracts/stage0_contracts.json` 和 `docs/接口文档/` 为准。
+check-task 文件仍保留切换前的成功 JSON/同步恢复基线；Progress 文件已经切换为批准后的
+当前行为。目标与当前状态以 `contracts/stage0_contracts.json` 区分，对外字段仍以
+`docs/接口文档/` 为准。
 
 ## 阶段 1A-2 架构资产
 
@@ -71,7 +73,35 @@
 
 这两组测试不创建 Flask 应用、SQLite、Hub、WebSocket、网络 Session 或后台服务；
 它们证明应用服务只依赖 domain/ports，并冻结连接缓冲的线程安全边界。生产路由、旧
-Task Service 和旧 Progress Hub 仍要到波次 1B 才切换。
+Task Service 和旧 Progress Hub 在阶段 1A 均未切换。
+
+## 阶段 1B-1 可靠恢复命令资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_task_callback_recovery_application.py` | 最小命令信封、四类 outcome、单次批量端口调用、重复活动命令 ID 复用、事务失败整批回滚、Task Read/Command 返回值门禁、追踪字段和旧请求 DTO 兼容别名。 |
+| `test_task_status_presenter.py` | 单项/批量 200 零字节体、批量缺失空成功、单项 404、既有 400 `error` JSON，以及内部 TaskId/recovery request ID 不泄露。 |
+
+这 20 项测试只使用 Fake 和框架无关 Presenter；其中 1 项以 50 个线程验证 Fake 所表达
+的活动命令唯一/复用契约。测试不创建 MySQL、Outbox、RabbitMQ、Worker
+或 Flask Response。它们证明未来可靠登记链路的形状，不代表生产 `/llm/check-task`
+已异步化；旧 Blueprint 和同步回调恢复仍保留到阶段 6。
+
+## 阶段 1B-2 Progress 迁移资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_progress_request_adapter.py` | 无 action 请求解析、reportId 整数/整数字符串无范围规范化、显式 action 拒绝，以及混合/非法 params 整条消息失败。 |
+| `test_task_progress_presenter.py` | file/report/weaponry 字段类型、缺失快照、错误结构、严格 JSON 及内部字段不泄露。 |
+| `test_legacy_task_read_adapter.py` | 遗留 Task Service 到不可变 Task DTO 的只读转换、顺序/缺失保留和 execution ID 读取。 |
+| `test_in_memory_progress_adapter.py` | 50 个 Barrier 同步线程并发订阅/发布、同键多订阅者、锁外通知、异常隔离、发布/释放竞争、深拷贝隔离和 TaskId/序号。 |
+| `test_progress_connection_registry.py` | 连接归属、先登记后发送、幂等释放、失败令牌保留和有限重试。 |
+
+`test_task_progress_application.py` 另覆盖初始快照屏障期间的新旧 TaskId 交错、连接已
+接受 sequence 水位，以及通知出队后才完成的旧回调：屏障前旧执行通知会被当前快照
+淘汰，读取当前快照后到达的新执行通知必须保留，同 TaskId 的迟到旧序号不得使进度
+倒退。上述测试只证明单实例内存并发边界，不代替 50 条真实 WebSocket、Redis 跨实例
+和稳态容量测试。
 
 ## 推荐验证流程
 
@@ -81,7 +111,9 @@ Task Service 和旧 Progress Hub 仍要到波次 1B 才切换。
 4. 运行阶段 1A-1 契约测试：`venv\Scripts\python.exe -B -m unittest tests.test_stage1a1_check_task_contract tests.test_stage1a1_progress_contract tests.test_stage0_contract_assets -q`。
 5. 运行阶段 1A-2 架构测试：`venv\Scripts\python.exe -B -m unittest tests.test_architecture_boundaries -q`。
 6. 运行阶段 1A-3 内部契约测试：`venv\Scripts\python.exe -B -m unittest tests.test_task_check_application tests.test_task_progress_application tests.test_architecture_boundaries -q`。
-7. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
+7. 运行阶段 1B-1 可靠命令与 Presenter 测试：`venv\Scripts\python.exe -B -m unittest tests.test_task_callback_recovery_application tests.test_task_status_presenter tests.test_architecture_boundaries -q`。
+8. 运行阶段 1B-2 Progress 迁移测试：`venv\Scripts\python.exe -B -m unittest tests.test_progress_request_adapter tests.test_task_progress_presenter tests.test_legacy_task_read_adapter tests.test_in_memory_progress_adapter tests.test_progress_connection_registry tests.test_stage1a1_progress_contract tests.test_progress_and_check_task tests.test_task_progress_application tests.test_dependency_container tests.test_architecture_boundaries -q`。
+9. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
 
 ## 执行限制
 

@@ -13,6 +13,7 @@ from .rag import (
     FakeRagOutcome,
 )
 from .tasks import (
+    FakeCallbackRecoveryCommandPort,
     FakeCallbackRecoveryPort,
     FakeProgressSnapshotPort,
     FakeProgressSubscriptionPort,
@@ -28,6 +29,7 @@ __all__ = [
     "FakeKnowledgeIndexFactory",
     "FakeKnowledgeIndexPort",
     "FakeRagOutcome",
+    "FakeCallbackRecoveryCommandPort",
     "FakeCallbackRecoveryPort",
     "FakeProgressSnapshotPort",
     "FakeProgressSubscriptionPort",

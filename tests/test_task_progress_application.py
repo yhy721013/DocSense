@@ -55,10 +55,13 @@ def _progress_snapshot(
     *,
     progress: float = 0.8,
     sequence_no: int = 2,
+    task_id: str | None = None,
 ) -> ProgressSnapshot:
     return ProgressSnapshot(
         key=key,
-        task_id=TaskId(f"task-{key.business_type}-{key.business_key}"),
+        task_id=TaskId(
+            task_id or f"task-{key.business_type}-{key.business_key}"
+        ),
         progress=progress,
         message="通知层快照",
         internal_state="running",
@@ -435,7 +438,105 @@ class ProgressSubscriptionServiceTests(unittest.TestCase):
         with self.assertRaises(ProgressInitialBatchStateError):
             result.complete_initial_delivery()
 
-    def test_repeated_initial_batch_blocks_and_filters_already_queued_stale_item(self) -> None:
+    def test_initial_barrier_keeps_new_task_arriving_after_current_read(self) -> None:
+        """不同 TaskId 的屏障期通知可能是新执行，不能被当前快照误删。"""
+
+        key = ProgressKey("file", "new-execution.pdf")
+        current = _progress_snapshot(
+            key,
+            task_id="task-old",
+            sequence_no=8,
+            progress=1.0,
+        )
+        new_execution = _progress_snapshot(
+            key,
+            task_id="task-new",
+            sequence_no=1,
+            progress=0.0,
+        )
+        service, _, snapshots, subscriptions = self._service(progress=(current,))
+        delivery = _delivery()
+        original_get_latest = snapshots.get_latest
+
+        def get_latest_before_new_execution(
+            requested_key: ProgressKey,
+        ) -> ProgressSnapshot | None:
+            selected = original_get_latest(requested_key)
+            # 模拟当前快照读取完成后、首帧真正发送前受理了同业务键的新执行。
+            subscriptions.publish(new_execution)
+            return selected
+
+        snapshots.get_latest = (  # type: ignore[method-assign]
+            get_latest_before_new_execution
+        )
+
+        result = service.subscribe(
+            ProgressSubscriptionRequest((key,)),
+            delivery=delivery,
+        )
+        self.assertEqual(TaskId("task-old"), result.current_items[0].snapshot.task_id)
+
+        result.complete_initial_delivery()
+
+        self.assertEqual((new_execution,), delivery.drain())
+
+    def test_delivery_watermark_rejects_delayed_same_task_after_newer_item_drains(self) -> None:
+        """新通知出队后，迟到的同任务旧回调也不能让连接进度倒退。"""
+
+        key = ProgressKey("file", "out-of-order.pdf")
+        newer = _progress_snapshot(key, sequence_no=2, progress=0.8)
+        delayed_older = _progress_snapshot(key, sequence_no=1, progress=0.2)
+        delivery = _delivery()
+
+        delivery.publish(newer)
+        self.assertEqual((newer,), delivery.drain())
+
+        # 模拟 Hub 已按 seq=2 更新 latest，但 seq=1 的锁外 subscriber 回调后完成。
+        delivery.publish(delayed_older)
+
+        self.assertEqual((), delivery.drain())
+        self.assertEqual(1, delivery.coalesced_count)
+
+    def test_initial_snapshot_establishes_watermark_for_delayed_callback(self) -> None:
+        """初始快照发送完成后，晚到的旧回调不得重新进入空队列。"""
+
+        key = ProgressKey("file", "initial-watermark.pdf")
+        current = _progress_snapshot(key, sequence_no=5, progress=0.8)
+        delayed_older = _progress_snapshot(key, sequence_no=4, progress=0.4)
+        delivery = _delivery()
+        token = delivery.begin_initial_batch()
+
+        delivery.finish_initial_batch(
+            token,
+            authoritative_snapshots=(current,),
+        )
+        delivery.publish(delayed_older)
+
+        self.assertEqual((), delivery.drain())
+
+    def test_repeated_initial_batch_keeps_queued_item_for_other_key(self) -> None:
+        """订阅新 key 的屏障不得误删其他既有订阅尚未发送的通知。"""
+
+        existing_key = ProgressKey("file", "existing.pdf")
+        newly_requested_key = ProgressKey("file", "new.pdf")
+        queued = _progress_snapshot(existing_key, sequence_no=3, progress=0.3)
+        new_current = _progress_snapshot(
+            newly_requested_key,
+            sequence_no=1,
+            progress=0.1,
+        )
+        delivery = _delivery()
+        delivery.publish(queued)
+        token = delivery.begin_initial_batch()
+
+        delivery.finish_initial_batch(
+            token,
+            authoritative_snapshots=(new_current,),
+        )
+
+        self.assertEqual((queued,), delivery.drain())
+
+    def test_delayed_stale_item_is_rejected_before_repeated_initial_batch(self) -> None:
         key = ProgressKey("file", "repeat.pdf")
         current = _progress_snapshot(key, sequence_no=5, progress=0.5)
         stale = _progress_snapshot(key, sequence_no=4, progress=0.4)
@@ -447,7 +548,7 @@ class ProgressSubscriptionServiceTests(unittest.TestCase):
         )
         first.complete_initial_delivery()
         subscriptions.publish(stale)
-        self.assertEqual(1, delivery.queued_count)
+        self.assertEqual(0, delivery.queued_count)
 
         second = service.subscribe(
             ProgressSubscriptionRequest((key,)),
@@ -458,6 +559,50 @@ class ProgressSubscriptionServiceTests(unittest.TestCase):
         self.assertEqual((), delivery.drain(), "屏障期间不得取出既有排队通知")
         second.complete_initial_delivery()
         self.assertEqual((), delivery.drain(), "初始快照之后不得发送更旧 sequence")
+
+    def test_repeated_initial_batch_drops_queued_snapshot_from_old_task(self) -> None:
+        """屏障建立前已排队的旧 TaskId 通知不得覆盖新执行当前快照。"""
+
+        key = ProgressKey("file", "replace-execution.pdf")
+        old_snapshot = _progress_snapshot(
+            key,
+            task_id="task-old",
+            sequence_no=9,
+            progress=1.0,
+        )
+        queued_old_snapshot = _progress_snapshot(
+            key,
+            task_id="task-old",
+            sequence_no=10,
+            progress=1.0,
+        )
+        new_snapshot = _progress_snapshot(
+            key,
+            task_id="task-new",
+            sequence_no=1,
+            progress=0.0,
+        )
+        service, _, snapshots, subscriptions = self._service(
+            progress=(old_snapshot,)
+        )
+        delivery = _delivery()
+        first = service.subscribe(
+            ProgressSubscriptionRequest((key,)),
+            delivery=delivery,
+        )
+        first.complete_initial_delivery()
+        subscriptions.publish(queued_old_snapshot)
+        self.assertEqual(1, delivery.queued_count)
+        snapshots.set_for_key(key, new_snapshot)
+
+        second = service.subscribe(
+            ProgressSubscriptionRequest((key,)),
+            delivery=delivery,
+            existing_subscriptions=first.active_subscriptions,
+        )
+        second.complete_initial_delivery()
+
+        self.assertEqual((), delivery.drain())
 
     def test_slow_connection_buffer_is_bounded_and_keeps_latest_snapshots(self) -> None:
         keys = tuple(ProgressKey("file", f"slow-{index}.pdf") for index in range(8))

@@ -7,7 +7,7 @@
 | 编写日期 | 2026-07-15 |
 | 所属计划 | 总计划阶段 1～2、专项计划波次 1A～1B |
 | 文档层级 | L3 跨阶段内部契约预设计 |
-| 文档状态 | 阶段 1A 的 Task/Progress 最小内部契约已于 2026-07-16 落地；带决策 ID 的后续状态、存储与队列事项继续待对应门禁处理 |
+| 文档状态 | 阶段 1A 的 Task/Progress 最小契约、1B-1 check-task 可靠命令边界与 **1B-2 Progress 当前运行路径迁移**已于 2026-07-16 落地；后续状态、共享存储、可靠队列和跨实例通知待对应门禁处理 |
 | 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；已确认三类受理成功与 check-task 成功为空响应体、report 活动任务 409、check-task/Progress 严格 `params` 元素校验，以及 Progress 显式 action 错误后保持连接且无 ack；参数集合、错误字段结构、回调和 chat 契约不变 |
 | check-task 队列决策 | 2026-07-16 已确认直接采用可靠队列异步恢复，不实施同步/并行过渡；目标 HTTP 200 表示 recovery request + Outbox 已在 MySQL 事务中可靠登记或复用，不等待 callback Worker 完成。接口文档措辞在生产切换前另行确认 |
 
@@ -71,12 +71,13 @@
 因此最终目标服务命名为 `RequestCallbackRecoveryService`，内部组合 Task Read 与
 Callback Recovery Command；不得把命令登记藏进只读 Repository，也不得在 Web 请求内
 执行 Callback Delivery。阶段 1A 的 `CheckTaskStatusService` 是已完成的同步原型证据。
+阶段 1B-1 已实现该服务的框架无关命令登记边界，但尚未装配生产。
 
 ### 1.5 当前与目标 Progress 行为
 
 - 支持 file、report、weaponry。
-- action 缺省时按订阅处理，不发送 ack；这是目标公开协议保留的格式。
-- 当前代码还支持显式 subscribe/query/unsubscribe 并发送 ack；仓库没有甲方或生产前端需求证据，已确认在波次 1B 下线，不进入目标黄金契约。
+- 当前只接受不带 action 的订阅消息，不发送 ack；这是阶段 1B-2 已切换的公开格式。
+- 阶段 1B-2 以前的代码曾支持显式 subscribe/query/unsubscribe 并发送 ack；仓库没有甲方或生产前端需求证据，现已下线。任何显式 action 都返回 error 消息并保持连接。
 - subscribe 会为每个 key 发送当前 Hub 最新值；Hub 无值时发送数据库任务快照。
 - 连接关闭时释放该连接拥有的全部订阅；目标协议不再提供显式 query/unsubscribe 控制消息。
 - 批量响应顺序遵循 params 顺序。
@@ -95,7 +96,7 @@ Callback Recovery Command；不得把命令登记藏进只读 Repository，也�
 | `TaskId` | 一次具体执行的不可变内部 ID；兼容期复用现有 `execution_id` | 不可见 |
 | `TaskType` | `file_analysis`、`report_generation`、`weaponry_extraction` 等内部执行类型 | 不可见 |
 | `BusinessType` | 与现有协议对应的 file/report/weaponry | 已存在，但不得新增值改变协议 |
-| `BusinessKey` | 内部规范化字符串；fileName/reportId/architectureId 的统一查询键 | 外部仍保持原类型 |
+| `BusinessKey` | 内部规范化字符串；fileName/reportId/architectureId 的统一查询键 | reportId 入站已批准接受整数或整数字符串并按整数值归一；既有输出类型保持不变 |
 | `BatchId` | file 批量请求内部关联 ID | 不可见 |
 | `AttemptNo` | 同一 Task 被领取执行的次数 | 不可见 |
 | `TraceId` | Web、Outbox、消息和 Worker 的追踪 ID | 不可见 |
@@ -234,7 +235,10 @@ Dispatcher 只接收稳定内部标识和信封元数据，不接收业务大对
 
 ```python
 class CallbackRecoveryCommandPort(Protocol):
-    def request_recovery(self, task_id: str) -> CallbackRecoveryCommandResult: ...
+    def request_many(
+        self,
+        commands: tuple[CallbackRecoveryCommand, ...],
+    ) -> tuple[CallbackRecoveryCommandResult, ...]: ...
 
 class CallbackDeliveryPort(Protocol):
     def deliver(self, recovery_request_id: str) -> CallbackDeliveryResult: ...
@@ -243,6 +247,10 @@ class CallbackDeliveryPort(Protocol):
 Command Port 只允许在 MySQL 事务内创建或复用活动 recovery request 并写 Outbox，禁止
 执行外部 HTTP。Delivery Port 只由 callback Worker 调用，负责按 recovery request ID
 读取事实、执行 latest-wins、外发和条件持久化；二者都必须独立于 Task Read。
+
+阶段 1B-1 已固定批量原子签名：输入只含 expected TaskId、业务引用、固定触发源、Schema
+版本和追踪信息；recovery request ID 由持久化 Adapter 在事务内生成/复用，并通过
+`created/already_active` 结果返回。端口必须返回等长同序 tuple，事务失败不得部分提交。
 
 Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须分开建模。后者只
 新增/复用一条 `trigger=check_task` 的恢复命令；同一 TaskId 同时最多一条活动命令，
@@ -259,7 +267,8 @@ Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须
 - 每项记录 recovery command 是 created、already_active、not_needed 还是 stale；不声称
   callback 已在本次请求中完成。
 - 不直接生成 Flask Response。
-- 不改变 reportId/architectureId 的公开类型。
+- 除已批准的 reportId 入站“JSON 整数或十进制整数字符串、无业务范围限制”外，不改变
+  reportId 的既有输出类型，也不改变 architectureId 的公开类型。
 
 全部数据库操作成功提交后，Presenter 才可返回 HTTP 200 空响应体。RabbitMQ 暂时不可用
 但 Outbox 已提交时仍是可靠登记成功；MySQL/Outbox 未提交时禁止成功。阶段 1A 已实现的
@@ -322,9 +331,10 @@ class ProgressSubscriptionPort(Protocol):
 
 阶段 1B 的 InMemory Adapter 仍是单实例兼容实现；阶段 7 的实现以 MySQL 快照为事实、Redis 为唤醒。
 
-> 实施状态（阶段 1A-3）：应用服务只返回当前快照项和不透明订阅令牌，不持有或
+> 实施状态（阶段 1B-2）：应用服务只返回当前快照项和不透明订阅令牌，不持有或
 > 调用 WebSocket；连接级 Registry 留在 Web Adapter。缺失订阅先注册再读当前快照，
-> 建立失败时只补偿本次新增令牌。InMemory Adapter 的线程安全与锁外通知仍属于 1B。
+> 建立失败时只补偿本次新增令牌。线程安全 InMemory Adapter 已接入唯一 Hub，并在
+> Hub 锁外通知；当前实现仍只具备单实例内存语义。
 
 ### 6.3 快照选择规则
 
@@ -344,7 +354,8 @@ class ProgressSubscriptionPort(Protocol):
 - 单个断开的订阅者不能阻止其他订阅者收到通知。
 - 订阅释放必须幂等，连接关闭后不保留 callback 引用。
 - 业务 Worker 发布进度不能无限阻塞在某个慢 WebSocket 上。
-- 阶段 1B 只建立兼容边界；有界连接缓冲和跨实例唤醒在阶段 7/8 实现并压测。
+- 阶段 1B-2 已接入连接级有界合并缓冲、初始快照屏障和单写入发送循环；缓冲容量的
+  生产调优、50 条真实长连接验收及跨实例唤醒仍在阶段 7/8 和阶段 10 完成。
 
 ### 6.5 持久化与通知顺序
 
@@ -401,26 +412,44 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 | TASK-03 | file 批量采用父子任务还是 Coordinator | 阶段 2 工程设计，必须保持顺序语义 |
 | TASK-04 | chat run 与通用 task 的确切表关系 | 阶段 2/9 联合设计 |
 | TASK-05 | 回调超时后能否自动重试 | **已决策**：请求发送后的超时不自动重试，标记内部 `delivery_outcome_unknown`；仅明确未送达错误有限重试，check-task 显式补发除外 |
-| TASK-06 | Progress 连接有界缓冲实现 | **内部契约已完成**：阶段 1A 审查修正加入连接级有界缓冲、初始快照屏障、按 key 合并、慢连接隔离和丢弃计数；波次 1B 必须接入，容量值仍在阶段 7/8 结合 50 连接压测调优 |
-| TASK-07 | 显式 Progress action/ack 是否保留 | **已确认**：无甲方或生产前端需求证据；波次 1B 删除，只保留无 action 订阅与连接关闭清理；收到 action 时返回 error 消息、保持连接且无 ack |
-| TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **已确认**：不兼容过滤；任一非对象元素使整次 HTTP 请求或 WebSocket 消息报参数错误，波次 1B 实现 |
+| TASK-06 | Progress 连接有界缓冲实现 | **1B-2 已接入**：每连接唯一缓冲、初始快照屏障、按 key 合并、慢连接隔离、丢弃计数和路由线程单写入已进入当前运行路径；容量值仍在阶段 7/8 结合 50 连接压测调优 |
+| TASK-07 | 显式 Progress action/ack 是否保留 | **已实现**：无甲方或生产前端需求证据；1B-2 已删除显式动作处理，只保留无 action 订阅与连接关闭清理；收到 action 时返回 error 消息、保持连接且无 ack |
+| TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **Progress 已实现、check-task 待阶段 6**：不兼容过滤；任一非对象元素使整次 HTTP 请求或 WebSocket 消息报参数错误，不做部分处理 |
 | TASK-09 | 旧终态执行恢复回调期间，同一业务键已提交新执行时是否继续发送旧回调 | **核心语义已确认（2026-07-16）**：采用 latest-wins，判定旧执行回调过期并跳过。`fileName` 是前端唯一逻辑任务键；同名文件的不同 `execution_id` 只是该逻辑任务的不同执行代次。实现必须在外发前于同业务键串行化边界内复核最新 TaskId；不匹配时禁止网络调用，并持久化 stale/skipped 审计原因。已发请求若进入 `delivery_outcome_unknown`，在不增加回调版本字段时无法撤回或证明甲方不会迟到处理，其后是否允许新执行受理仍待负责人确认 |
-| TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **已确认（2026-07-16）**：直接采用 MySQL Outbox + RabbitMQ + callback Worker；不实现同步 Adapter、有界同步并行、本地线程/内存队列或总超时过渡方案。阶段 1B 只完成命令边界，阶段 4～5 建基础设施，阶段 6 一次性切换生产路由 |
+| TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **已确认（2026-07-16）**：直接采用 MySQL Outbox + RabbitMQ + callback Worker；不实现同步 Adapter、有界同步并行、本地线程/内存队列或总超时过渡方案。阶段 1B-1 命令边界已完成，阶段 4～5 建基础设施，阶段 6 一次性切换生产路由 |
 
 ---
 
-## 10. 完成门禁
+## 10. 分层完成门禁
 
-进入波次 1C 前至少满足：
+### 10.1 阶段 1B-1 内部边界（已完成）
 
-- [ ] TaskId、TaskType、BusinessKey、输入快照和 Dispatch 信封在代码中有框架无关类型。
-- [ ] `/llm/check-task` 由 `RequestCallbackRecoveryService` 显式编排读取与可靠命令登记，
-  callback Worker 独立执行外部恢复；Web 请求内不发送 callback。
-- [ ] Task Read Repository 不执行网络 I/O。
+- [x] `TaskId`、`TaskBusinessRef`、`TaskSnapshot` 和有序 Task Read 已有框架无关类型。
+- [x] `RequestCallbackRecoveryService` 只组合 Task Read 与批量原子 Command Port；不依赖
+  Flask、HTTP Transport、RabbitMQ 或 Celery。
+- [x] created、already_active、not_needed、stale、重复活动命令复用和事务失败整批回滚
+  均有 Fake 测试。
+- [x] 空成功 Presenter、单项 404、既有 400 结构及内部 TaskId/recovery request ID 不
+  泄露已有测试；当前生产 route/container 明确保留旧实现。
+
+### 10.2 阶段 1B-2 Progress 门禁（已完成）
+
+- [x] `/llm/progress` 由 Subscription/Port/Presenter 处理，仅接受无 action 订阅；显式 action 或非对象 params 元素返回 error 消息并保持连接，不输出 ack。
+- [x] InMemory Progress Adapter 线程安全且不在 Hub 锁内调用订阅者；单个订阅者异常不会阻断其他订阅者。
+- [x] 每连接 Registry 拥有唯一有界缓冲和全部令牌；初始发送失败、断连及释放失败均有补偿/重试测试，任务线程不执行 `ws.send`。
+- [x] 当前路由、旧发布方和类型化 Adapter 共用一个权威 Hub；没有把单实例内存通知误写为 Redis、可靠队列或跨实例能力。
+
+### 10.3 阶段 2～6 后置门禁（不得由 1B Fake 冒充）
+
+- [ ] TaskType、输入快照和 Dispatch 信封随对应任务波次形成完整框架无关类型。
+- [ ] 生产 Task Read Repository 不执行网络 I/O，MySQL recovery request + Outbox 使用同一
+  事务，事务提交失败时 `/llm/check-task` 不返回成功。
+- [ ] callback Worker 独立执行恢复；Web 请求内不发送 callback；RabbitMQ、ACK/DLQ 和
+  delivery attempt 审计通过故障注入。
 - [ ] `/llm/check-task` 仅在 recovery request + Outbox 事务提交后返回 HTTP 200 空响应体，
   不等待外部回调；任一非对象 params 元素整次 400，其他 400/404 不变。
-- [ ] `/llm/progress` 由 Subscription/Port/Presenter 处理，仅接受无 action 订阅；显式 action 或非对象 params 元素返回 error 消息并保持连接，不输出 ack。
-- [ ] InMemory Progress Adapter 线程安全且不在锁内调用订阅者。
-- [ ] 所有任务写入开始携带 task ID；旧执行不能覆盖新投影的规则已设计。
-- [ ] TASK-01、TASK-05、TASK-07、TASK-08、TASK-10 已按确认方案实现；TASK-02～TASK-04、TASK-06 均已解决或有明确的后置门禁；TASK-09 已按确认的 latest-wins 方案在 Worker、提交端串行化和持久化审计中实现，并明确处理 `delivery_outcome_unknown` 后的新执行准入。
-- [ ] 没有向 HTTP、WebSocket、SSE 或 Callback 暴露内部 ID/序号。
+- [ ] 所有任务写入携带 task ID；TASK-09 latest-wins 已在 Worker Guard、提交端串行化和
+  expected TaskId 条件持久化中实现。
+- [ ] `delivery_outcome_unknown` 后同业务键新执行准入已取得负责人确认并进入阶段 6 L3
+  设计；TASK-01～TASK-10 的到期事项均已实现或通过明确后置门禁。
+- [ ] 全部公开 HTTP、WebSocket、SSE 和 Callback 回归证明未暴露内部 ID/序号。

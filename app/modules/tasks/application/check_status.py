@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from app.modules.tasks.application.check_task_request import CheckTaskRequest
 from app.modules.tasks.domain.models import TaskLookupItem, TaskSnapshot
 from app.modules.tasks.ports.callback_recovery import (
     CallbackRecoveryPort,
@@ -16,26 +17,9 @@ from app.modules.tasks.ports.task_read import TaskReadPort
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class CheckTaskStatusRequest:
-    """已经由 Web Adapter 完整校验的一次 check-task 请求。"""
-
-    ordered_items: tuple[TaskLookupItem, ...]
-
-    def __post_init__(self) -> None:
-        items = tuple(self.ordered_items)
-        if not items:
-            raise ValueError("ordered_items 不能为空")
-        if any(not isinstance(item, TaskLookupItem) for item in items):
-            raise TypeError("ordered_items 只能包含 TaskLookupItem")
-        business_types = {item.business_ref.business_type for item in items}
-        if len(business_types) != 1:
-            raise ValueError("同一次 check-task 请求只能包含一种 business_type")
-        object.__setattr__(self, "ordered_items", items)
-
-    @property
-    def business_type(self) -> str:
-        return self.ordered_items[0].business_ref.business_type
+# 旧同步原型的公开内部名称继续保留，避免阶段 1A 测试和后续审查证据失效。
+# 两个名称指向同一个不可变类型，不存在双份校验规则或 DTO 转换。
+CheckTaskStatusRequest = CheckTaskRequest
 
 
 @dataclass(frozen=True)

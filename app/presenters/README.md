@@ -1,6 +1,6 @@
 # 展示层目录说明
 
-本目录负责把领域事件或应用结果转换为对外展示协议。文件对话中，它将供应商无关的 `ChatStreamEvent` 转换为既有 SSE 文本；状态机、消息持久化和远端调用均不应放在这里。
+本目录负责把领域事件或应用结果转换为对外展示协议。文件对话中，它将供应商无关的 `ChatStreamEvent` 转换为既有 SSE 文本；任务状态中，它把可靠恢复命令结果映射为已批准的空成功或既有错误语义。状态机、消息持久化和远端调用均不应放在这里。
 
 ## 文件说明
 
@@ -8,6 +8,8 @@
 | --- | --- |
 | `__init__.py` | 导出展示层函数。 |
 | `chat_stream.py` | 格式化单个 SSE 事件，并包装流迭代器的关闭逻辑，确保资源释放回调在正常结束、异常和客户端断开后均可执行。 |
+| `task_status.py` | 将 `RequestCallbackRecoveryResult` 映射为 HTTP 状态、零字节成功体或既有 JSON 错误体；不创建 Flask/FastAPI Response。 |
+| `task_progress.py` | 将类型化当前项/快照映射为既有 Progress WebSocket 数据消息或 `error` 消息，并负责严格 JSON 序列化；不持有连接。 |
 
 ## 工作流程
 
@@ -15,6 +17,14 @@
 2. 路由将事件流传给 `present_chat_stream()`。
 3. 展示层按已冻结协议生成 `event:` 与 `data:` 行，不暴露内部 `run_id`、租约或数据库字段。
 4. 流关闭时调用传入的清理回调；运行状态收敛由应用层和路由协作完成。
+
+check-task Presenter 当前只作为阶段 1B-1 内部契约存在：单项/批量成功返回 200 与严格
+零字节体，单项缺失返回既有 404 `error` JSON，已由 Web Adapter 判定的参数错误返回
+既有 400 `error` JSON。生产路由未切换，内部 TaskId、恢复请求 ID 和 outcome 一律丢弃。
+
+Progress Presenter 已在阶段 1B-2 接入当前 WebSocket 路由，只输出既有
+`businessType/data`、缺失项 `exists=false` 或 `type/message` 错误结构。内部 TaskId、
+sequence、订阅令牌和连接 ID 均不会进入公开消息。
 
 ## 维护规则
 

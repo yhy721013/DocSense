@@ -18,6 +18,8 @@
 | `260715-阶段1A-2模块骨架与架构边界执行记录.md` | tasks/Flask Adapter 包骨架、AST 导入门禁、规则自证、完整回归结果与 1A-3 后续边界。 |
 | `260716-阶段1A-3内部任务契约执行记录.md` | 不可变 Task/Progress DTO、三类 Port、两个应用服务、Fake 契约测试、波次 1A 门禁与完整回归。 |
 | `260716-阶段0与1A审查修正记录.md` | WebSocket/SQLite 基线工具修正、回调持久化一致性、连接有界缓冲、正向架构白名单、latest-wins TASK-09，以及 check-task 直接采用可靠队列异步恢复的 TASK-10 决策。 |
+| `260716-阶段1B-1可靠恢复命令边界执行记录.md` | check-task 共享请求 DTO、批量原子可靠命令 Port/Application、空响应 Presenter、活动命令复用、Fake 故障测试和未切生产边界。 |
+| `260716-阶段1B-2Progress控制面迁移执行记录.md` | `/llm/progress` 无 action 契约切换、类型化应用服务、线程安全 Hub/Adapter、连接级有界缓冲与单写入；并记录全面审查后的同任务 sequence 水位、reportId 统一入站规范化、Barrier 50 线程纠偏与扩大回归。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 

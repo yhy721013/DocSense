@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app
-from app.blueprints.llm import _handle_progress_command, _parse_progress_command
+from app.adapters.web.flask import (
+    ProgressRequestValidationError,
+    parse_progress_subscription,
+)
+from app.modules.tasks.application import ProgressDeliveryBuffer
+from app.presenters.task_progress import ProgressWebSocketPresenter
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
@@ -42,31 +47,31 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
         self.assertEqual(hub.get_latest("file", "a.pdf")["data"]["fileName"], "a.pdf")
         self.assertEqual(hub.get_latest("file", "b.pdf")["data"]["fileName"], "b.pdf")
 
-    def test_parse_progress_command_supports_legacy_subscribe(self):
-        command = _parse_progress_command(
+    def test_parse_progress_request_supports_no_action_subscribe(self):
+        request_model = parse_progress_subscription(
             {
                 "businessType": "file",
                 "params": [{"fileName": "a.pdf"}],
             }
         )
 
-        self.assertEqual(command["action"], "subscribe")
-        self.assertEqual(command["business_type"], "file")
-        self.assertEqual(command["keys"], [("file", "a.pdf")])
-
-    def test_parse_progress_command_supports_query(self):
-        command = _parse_progress_command(
-            {
-                "action": "query",
-                "businessType": "file",
-                "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
-            }
+        self.assertEqual(request_model.business_type, "file")
+        self.assertEqual(
+            [(item.business_type, item.business_key) for item in request_model.ordered_keys],
+            [("file", "a.pdf")],
         )
 
-        self.assertEqual(command["action"], "query")
-        self.assertEqual(command["keys"], [("file", "a.pdf"), ("file", "b.pdf")])
+    def test_parse_progress_request_rejects_explicit_query(self):
+        with self.assertRaisesRegex(ProgressRequestValidationError, "action"):
+            parse_progress_subscription(
+                {
+                    "action": "query",
+                    "businessType": "file",
+                    "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
+                }
+            )
 
-    def test_legacy_progress_message_replays_snapshot_without_ack_when_repeated(self):
+    def test_no_action_progress_message_replays_snapshot_without_duplicate_subscription(self):
         with workspace_tempdir() as tmp:
             services = build_offline_application_services(tmp)
             service = services.task_service
@@ -76,33 +81,40 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
                 status="1",
             )
             service.update_task_progress("file", "demo.pdf", progress=0.65, message="处理中", status="1")
-            hub = services.progress_hub
-            sent_messages = []
-            subscriptions = {}
-            command = _parse_progress_command(
+            request_model = parse_progress_subscription(
                 {
                     "businessType": "file",
                     "params": [{"fileName": "demo.pdf"}],
                 }
             )
-
-            _handle_progress_command(
-                sent_messages.append,
-                subscriptions,
-                command,
-                emit_ack=False,
-                services=services,
+            presenter = ProgressWebSocketPresenter()
+            delivery = ProgressDeliveryBuffer(
+                delivery_id="repeated-progress-message",
+                capacity=16,
             )
-            _handle_progress_command(
-                sent_messages.append,
-                subscriptions,
-                command,
-                emit_ack=False,
-                services=services,
+            first = services.progress_subscription_service.subscribe(
+                request_model,
+                delivery=delivery,
+            )
+            first_messages = [
+                presenter.present_current(item) for item in first.current_items
+            ]
+            first.complete_initial_delivery()
+            second = services.progress_subscription_service.subscribe(
+                request_model,
+                delivery=delivery,
+                existing_subscriptions=first.active_subscriptions,
+            )
+            second_messages = [
+                presenter.present_current(item) for item in second.current_items
+            ]
+            second.complete_initial_delivery()
+            services.progress_subscription_service.release(
+                second.active_subscriptions,
             )
 
         self.assertEqual(
-            sent_messages,
+            first_messages + second_messages,
             [
                 {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
                 {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},

@@ -63,6 +63,21 @@ class Stage0ContractAssetTests(unittest.TestCase):
             report["activeDuplicate"],
         )
 
+    def test_report_id_input_policy_accepts_integer_strings_without_range_limit(self) -> None:
+        self.assertEqual("2026-07-16", self.contract["updatedAt"])
+        self.assertEqual(
+            {
+                "acceptedJsonTypes": ["integer", "string"],
+                "stringFormat": "optional_sign_and_decimal_digits_after_trim",
+                "businessRange": "no_application_level_min_or_max",
+                "canonicalization": "same_integer_value_is_same_business_key",
+                "invalidHttpStatus": 400,
+                "invalidProgressBehavior": "error_message_and_keep_connection",
+                "serverOutputType": "json_number",
+            },
+            self.contract["reportIdInputPolicy"],
+        )
+
     def test_check_task_success_is_empty_but_recovery_side_effect_remains(self) -> None:
         check_task = self.contract["checkTask"]
         self.assertEqual(200, check_task["success"]["status"])

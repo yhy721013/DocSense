@@ -28,6 +28,8 @@ from app.container import (
     ApplicationServices,
     UploadTaskLimiter,
 )
+from app.modules.tasks.adapters import InMemoryProgressAdapter, LegacyTaskReadAdapter
+from app.modules.tasks.application import ProgressSubscriptionService
 from app.services.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
@@ -245,13 +247,21 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         chat_dispatcher = InlineChatRunDispatcher(
             execute=chat_run_executor.execute_chat_run,
         )
+        task_service = LLMTaskService(
+            db_path=f"{self.runtime_directory}/tasks.sqlite3"
+        )
+        progress_hub = LLMProgressHub()
+        progress_adapter = InMemoryProgressAdapter(progress_hub)
+        progress_subscription_service = ProgressSubscriptionService(
+            progress_snapshots=progress_adapter,
+            progress_subscriptions=progress_adapter,
+            task_reader=LegacyTaskReadAdapter(task_service),
+        )
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
             chat_conversation_factory=self.chat_conversation_factory,
-            task_service=LLMTaskService(
-                db_path=f"{self.runtime_directory}/tasks.sqlite3"
-            ),
+            task_service=task_service,
             kb_service=kb_service,
             chat_store=chat_store,
             chat_commands=chat_commands,
@@ -277,7 +287,8 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 cleanup_executor=chat_cleanup_executor,
             ),
             chat_cleanup_executor=chat_cleanup_executor,
-            progress_hub=LLMProgressHub(),
+            progress_hub=progress_hub,
+            progress_subscription_service=progress_subscription_service,
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
             llm_config=LLMIntegrationConfig(
                 callback_url=None,

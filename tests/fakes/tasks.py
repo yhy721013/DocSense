@@ -18,6 +18,9 @@ from app.modules.tasks.domain import (
     TaskSnapshot,
 )
 from app.modules.tasks.ports import (
+    CallbackRecoveryCommand,
+    CallbackRecoveryCommandOutcome,
+    CallbackRecoveryCommandResult,
     CallbackRecoveryResult,
     ProgressSubscriber,
     ProgressSubscription,
@@ -153,6 +156,164 @@ class FakeCallbackRecoveryPort:
         return self._results[task_id]
 
 
+class FakeCallbackRecoveryCommandPort:
+    """模拟单事务批量登记和活动命令复用的可靠命令替身。
+
+    本 Fake 不启动线程或发送消息。它先在局部副本中计算整批结果，全部成功后才替换
+    活动命令状态；事务故障或批内配置错误不会留下部分提交，从而让应用测试能够验证
+    未来 MySQL Adapter 必须提供的 all-or-nothing 边界。
+    """
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._sequence = count(1)
+        self._configured_outcomes: dict[
+            TaskId,
+            CallbackRecoveryCommandOutcome,
+        ] = {}
+        self._configured_request_ids: dict[TaskId, str] = {}
+        self._active_request_ids: dict[TaskId, str] = {}
+        self.request_many_calls: list[tuple[CallbackRecoveryCommand, ...]] = []
+        self.transaction_error: BaseException | None = None
+        self.committed_batches = 0
+
+    @property
+    def active_request_ids(self) -> dict[TaskId, str]:
+        """返回测试观察用副本，防止用例绕过端口直接改写内部状态。"""
+
+        with self._lock:
+            return dict(self._active_request_ids)
+
+    def configure(
+        self,
+        task_id: TaskId,
+        *,
+        outcome: CallbackRecoveryCommandOutcome,
+        recovery_request_id: str = "",
+    ) -> None:
+        """配置任务首次登记的分类结果。
+
+        ``created`` 可省略 ID，由 Fake 在提交时生成；``already_active`` 必须提供已经
+        存在的 ID；``not_needed``/``stale`` 不得携带 ID。后续重复请求已存在活动命令
+        时，无论初始配置如何都会返回 ``already_active`` 并复用同一个 ID。
+        """
+
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        if not isinstance(outcome, CallbackRecoveryCommandOutcome):
+            raise TypeError("outcome 必须是 CallbackRecoveryCommandOutcome")
+        if not isinstance(recovery_request_id, str):
+            raise TypeError("recovery_request_id 必须是 str")
+        request_id = recovery_request_id.strip()
+        with self._lock:
+            self._configure_locked(
+                task_id,
+                outcome=outcome,
+                request_id=request_id,
+            )
+
+    def _configure_locked(
+        self,
+        task_id: TaskId,
+        *,
+        outcome: CallbackRecoveryCommandOutcome,
+        request_id: str,
+    ) -> None:
+        """在持有 ``_lock`` 时更新测试配置和预置活动状态。"""
+
+        if outcome is CallbackRecoveryCommandOutcome.ALREADY_ACTIVE:
+            if not request_id:
+                raise ValueError("already_active 配置必须包含 recovery_request_id")
+            self._active_request_ids[task_id] = request_id
+        elif outcome in {
+            CallbackRecoveryCommandOutcome.NOT_NEEDED,
+            CallbackRecoveryCommandOutcome.STALE,
+        } and request_id:
+            raise ValueError("not_needed/stale 配置不得包含 recovery_request_id")
+
+        self._configured_outcomes[task_id] = outcome
+        if request_id:
+            self._configured_request_ids[task_id] = request_id
+        else:
+            self._configured_request_ids.pop(task_id, None)
+
+    def request_many(
+        self,
+        commands: tuple[CallbackRecoveryCommand, ...],
+    ) -> tuple[CallbackRecoveryCommandResult, ...]:
+        batch = tuple(commands)
+        if any(not isinstance(command, CallbackRecoveryCommand) for command in batch):
+            raise TypeError("commands 只能包含 CallbackRecoveryCommand")
+        with self._lock:
+            return self._request_many_locked(batch)
+
+    def _request_many_locked(
+        self,
+        batch: tuple[CallbackRecoveryCommand, ...],
+    ) -> tuple[CallbackRecoveryCommandResult, ...]:
+        """在同一临界区模拟数据库事务、唯一约束和提交。"""
+
+        self.request_many_calls.append(batch)
+        if self.transaction_error is not None:
+            raise self.transaction_error
+
+        working_active = dict(self._active_request_ids)
+        results: list[CallbackRecoveryCommandResult] = []
+        for command in batch:
+            active_request_id = working_active.get(command.expected_task_id)
+            if active_request_id is not None:
+                results.append(
+                    CallbackRecoveryCommandResult(
+                        expected_task_id=command.expected_task_id,
+                        business_ref=command.business_ref,
+                        outcome=CallbackRecoveryCommandOutcome.ALREADY_ACTIVE,
+                        recovery_request_id=active_request_id,
+                    )
+                )
+                continue
+
+            try:
+                configured_outcome = self._configured_outcomes[
+                    command.expected_task_id
+                ]
+            except KeyError as exc:
+                raise AssertionError(
+                    f"未配置 TaskId={command.expected_task_id} 的可靠命令结果"
+                ) from exc
+
+            if configured_outcome is CallbackRecoveryCommandOutcome.CREATED:
+                request_id = self._configured_request_ids.get(
+                    command.expected_task_id
+                ) or f"fake-recovery-{next(self._sequence)}"
+                working_active[command.expected_task_id] = request_id
+                results.append(
+                    CallbackRecoveryCommandResult(
+                        expected_task_id=command.expected_task_id,
+                        business_ref=command.business_ref,
+                        outcome=CallbackRecoveryCommandOutcome.CREATED,
+                        recovery_request_id=request_id,
+                    )
+                )
+                continue
+
+            if configured_outcome is CallbackRecoveryCommandOutcome.ALREADY_ACTIVE:
+                # configure() 会预先建立活动命令，因此正常不会进入该分支；保留显式
+                # 失败可防止测试替身悄悄掩盖损坏的活动命令状态。
+                raise AssertionError("already_active 配置缺少活动恢复请求")
+
+            results.append(
+                CallbackRecoveryCommandResult(
+                    expected_task_id=command.expected_task_id,
+                    business_ref=command.business_ref,
+                    outcome=configured_outcome,
+                )
+            )
+
+        self._active_request_ids = working_active
+        self.committed_batches += 1
+        return tuple(results)
+
+
 class FakeProgressSnapshotPort:
     """可按请求 key 返回任意快照或异常的 Progress Snapshot 替身。"""
 
@@ -246,6 +407,7 @@ class FakeProgressSubscriptionPort:
 
 
 __all__ = [
+    "FakeCallbackRecoveryCommandPort",
     "FakeCallbackRecoveryPort",
     "FakeProgressSnapshotPort",
     "FakeProgressSubscriptionPort",

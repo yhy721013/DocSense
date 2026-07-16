@@ -1,5 +1,6 @@
-"""任务模块应用层：任务检查与 Progress 订阅的框架无关编排。"""
+"""任务模块应用层：可靠恢复登记、同步检查原型与 Progress 的框架无关编排。"""
 
+from .check_task_request import CheckTaskRequest
 from .check_status import (
     CallbackRecoveryConsistencyError,
     CallbackRecoveryContractError,
@@ -9,6 +10,13 @@ from .check_status import (
     TaskCheckItemResult,
     TaskReadContractError,
     TaskSnapshotUnavailableError,
+)
+from .request_callback_recovery import (
+    CallbackRecoveryCommandContractError,
+    CallbackRecoveryTaskReadContractError,
+    RequestCallbackRecoveryItemResult,
+    RequestCallbackRecoveryResult,
+    RequestCallbackRecoveryService,
 )
 from .progress import (
     CurrentProgressItem,
@@ -27,8 +35,11 @@ from .progress_delivery import (
 )
 
 __all__ = [
+    "CallbackRecoveryCommandContractError",
     "CallbackRecoveryConsistencyError",
     "CallbackRecoveryContractError",
+    "CallbackRecoveryTaskReadContractError",
+    "CheckTaskRequest",
     "CheckTaskStatusRequest",
     "CheckTaskStatusResult",
     "CheckTaskStatusService",
@@ -43,6 +54,9 @@ __all__ = [
     "ProgressSubscriptionRollbackError",
     "ProgressSubscriptionResult",
     "ProgressSubscriptionService",
+    "RequestCallbackRecoveryItemResult",
+    "RequestCallbackRecoveryResult",
+    "RequestCallbackRecoveryService",
     "TaskCheckItemResult",
     "TaskReadContractError",
     "TaskSnapshotUnavailableError",

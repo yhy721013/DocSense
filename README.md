@@ -121,6 +121,11 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `report`：`reportId`
 - `weaponry`：`architectureId`
 
+`reportId` 的三个入站位置（`/llm/generate-report`、报告类型 `/llm/check-task` 和
+报告类型 `/llm/progress`）统一接受 JSON 整数或十进制整数字符串，不设置 32/64 位
+业务范围，并按整数值规范化为同一任务键；例如 `132` 与 `"00132"` 指向同一报告。
+公开响应与 Progress 推送中的 `reportId` 仍保持 JSON number。
+
 业务状态码：
 
 | businessType | 状态含义 |
@@ -208,9 +213,10 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - 2026-07-15 已确认目标成功响应为 HTTP 200 空响应体，内部仍执行必要的回调补发；当前代码尚未切换，400/404 错误体保持不变。
 
 5. `/llm/progress`（WebSocket）
-   - 当前代码仍支持 `subscribe`、`query`、`unsubscribe` 和 ack；这些是项目内部扩展，没有甲方或生产前端需求依据。
-   - 2026-07-15 已确认目标公开契约只保留不带 `action` 的订阅消息，并在连接关闭时释放该连接全部订阅；代码待波次 1B 切换。
-   - 单连接可管理多个任务订阅。
+   - 阶段 1B-2 已完成控制面切换：当前只接受不带 `action` 的订阅消息；只要出现显式 `action` 就返回既有 `error` 结构、保持连接且不发送 ack。
+   - `params` 中任一元素不是对象或任一业务键无效时，整条消息失败，不建立部分订阅；后续合法消息仍可继续使用同一连接。
+   - 单连接可管理多个任务订阅。每个连接拥有独立的有界合并缓冲，后台任务线程只入队，由该连接的路由线程唯一执行 WebSocket `send`，慢连接不会在 Hub 锁内阻塞其他发布者。
+   - 当前 Progress Hub/Adapter 仍是单实例内存实现，不提供跨进程广播、断线重放或可靠事件日志；50 条真实长连接和跨实例通知仍须在后续 Redis/MySQL 与集成压测阶段验收。
 
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。

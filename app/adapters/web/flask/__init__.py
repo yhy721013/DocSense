@@ -1,4 +1,13 @@
-"""Flask 入站适配器包。
+"""Flask 入站适配器包。"""
 
-阶段 1A-2 仅保留命名空间；波次 1B 才迁入 check-task/Progress 请求解析器。
-"""
+from .progress_connection import ProgressConnectionRegistry
+from .progress_requests import (
+    ProgressRequestValidationError,
+    parse_progress_subscription,
+)
+
+__all__ = [
+    "ProgressConnectionRegistry",
+    "ProgressRequestValidationError",
+    "parse_progress_subscription",
+]

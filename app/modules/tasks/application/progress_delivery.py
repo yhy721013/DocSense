@@ -65,6 +65,10 @@ class ProgressDeliveryBuffer:
         self._condition = Condition(RLock())
         self._queue: deque[ProgressSnapshot] = deque()
         self._pending: OrderedDict[ProgressKey, ProgressSnapshot] = OrderedDict()
+        # 队列项被连接线程取走后，仍需记住该 key 已接受的最新同任务序号。否则 Hub
+        # 在锁外通知订阅者时发生回调乱序，迟到的旧通知会在新通知出队后重新入队，
+        # 造成客户端进度倒退。该水位只属于当前连接，连接关闭时一并释放。
+        self._accepted_watermarks: dict[ProgressKey, ProgressSnapshot] = {}
         self._active_batch: ProgressInitialBatchToken | None = None
         self._generation = 0
         self._closed = False
@@ -147,13 +151,42 @@ class ProgressDeliveryBuffer:
             self._pending.clear()
             self._active_batch = None
 
-            # 屏障打开前已经排队的旧通知也必须与刚发送的权威快照比较，否则重复订阅
-            # 时可能先发 sequence=5 的初始快照，随后又倒退发送队列中的 sequence=4。
-            for snapshot in queued_before_barrier + pending:
+            # 客户端刚刚收到的初始快照就是这些 key 的新投递水位。必须在处理屏障前后
+            # 的暂存通知前写入；直接覆盖还能把旧执行遗留在连接队列中的水位切换到当前
+            # TaskId。不同 TaskId 的最终 latest-wins 仍由阶段 1C 的持久化 Guard 负责。
+            for snapshot in authoritative.values():
+                self._accepted_watermarks[snapshot.key] = snapshot
+
+            # 屏障建立前已经排队的通知一定早于本批次读取到的当前快照。即使 TaskId
+            # 不同，也应以刚发送的权威快照为准；否则重复订阅可能先发新执行快照，
+            # 随后又倒退发送旧执行遗留在连接队列中的通知。
+            for snapshot in queued_before_barrier:
                 current = authoritative.get(snapshot.key)
                 if current is not None and (
                     snapshot.task_id != current.task_id
                     or snapshot.sequence_no <= current.sequence_no
+                ):
+                    self._coalesced_count += 1
+                    continue
+                dropped_before = self._dropped_count
+                # 该项在屏障建立前已经通过水位检查；队列临时清空后不能再次拿它与
+                # 自身水位比较，否则订阅其他 key 时会误删尚未发送的既有通知。
+                self._accepted_watermarks[snapshot.key] = snapshot
+                self._offer_accepted_queue_locked(snapshot)
+                should_warn = should_warn or self._should_log_drop(
+                    dropped_before,
+                    self._dropped_count,
+                )
+
+            # ``pending`` 是本批屏障开启后到达的通知。相同 TaskId 下仍用序号过滤
+            # 重复/倒退项；TaskId 不同时必须保留，因为它可能正是在当前快照读取之后
+            # 受理的新执行。阶段 1C 会进一步通过持久化 latest-wins Guard 阻止旧执行
+            # 写入；1B-2 的连接缓冲不能在缺少该持久化事实时擅自丢弃新执行通知。
+            for snapshot in pending:
+                current = authoritative.get(snapshot.key)
+                if current is not None and (
+                    snapshot.task_id == current.task_id
+                    and snapshot.sequence_no <= current.sequence_no
                 ):
                     self._coalesced_count += 1
                     continue
@@ -263,6 +296,7 @@ class ProgressDeliveryBuffer:
             self._active_batch = None
             self._pending.clear()
             self._queue.clear()
+            self._accepted_watermarks.clear()
             self._condition.notify_all()
 
     def _require_active_token(self, token: ProgressInitialBatchToken) -> None:
@@ -286,6 +320,13 @@ class ProgressDeliveryBuffer:
         self._pending[snapshot.key] = snapshot
 
     def _offer_queue_locked(self, snapshot: ProgressSnapshot) -> None:
+        if not self._accept_against_watermark_locked(snapshot):
+            return
+        self._offer_accepted_queue_locked(snapshot)
+
+    def _offer_accepted_queue_locked(self, snapshot: ProgressSnapshot) -> None:
+        """把已经通过水位检查的快照写入有界队列。"""
+
         for index, existing in enumerate(self._queue):
             if existing.key != snapshot.key:
                 continue
@@ -298,6 +339,26 @@ class ProgressDeliveryBuffer:
             self._queue.popleft()
             self._dropped_count += 1
         self._queue.append(snapshot)
+
+    def _accept_against_watermark_locked(
+        self,
+        snapshot: ProgressSnapshot,
+    ) -> bool:
+        """按连接已接受水位拒绝同一 TaskId 的重复或倒退通知。
+
+        水位在通知入队时更新，而不是在网络发送完成后更新。这样即使队列合并、容量
+        淘汰或连接线程已经取走新通知，随后迟到的旧回调也不能重新进入队列。
+
+        不同 TaskId 之间没有可比较的全局序号，因此当前阶段仍允许切换水位；判断旧
+        执行是否已过期需要任务库中的当前 execution_id，按既定计划在阶段 1C 实现。
+        """
+
+        current = self._accepted_watermarks.get(snapshot.key)
+        if current is not None and self._is_stale_or_equal(snapshot, current):
+            self._coalesced_count += 1
+            return False
+        self._accepted_watermarks[snapshot.key] = snapshot
+        return True
 
     @staticmethod
     def _is_stale_or_equal(

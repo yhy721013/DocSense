@@ -14,6 +14,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.kb_service = MagicMock()
         offline_services = build_offline_application_services(self.tmp)
         self.task_service = offline_services.task_service
+        self.progress_hub = offline_services.progress_hub
         services = replace(
             offline_services,
             kb_service=self.kb_service,
@@ -131,6 +132,62 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 202)
         mock_thread.assert_called_once()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_generate_report_normalizes_unbounded_integer_string_id(self, mock_thread):
+        report_id = 10**80 + 132
+
+        response = self.client.post(
+            "/llm/generate-report",
+            json={
+                "businessType": "report",
+                "params": [
+                    {
+                        "reportId": f"+000{report_id}",
+                        "filePathList": ["http://127.0.0.1:8000/sample.txt"],
+                        "templateOutline": "http://127.0.0.1:8000/template.docx",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(202, response.status_code)
+        self.assertIsNotNone(self.task_service.get_task("report", str(report_id)))
+        latest = self.progress_hub.get_latest("report", str(report_id))
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(report_id, latest["data"]["reportId"])
+        worker_payload = mock_thread.call_args.kwargs["kwargs"]["request_payload"]
+        normalized_value = worker_payload["params"][0]["reportId"]
+        self.assertEqual(report_id, normalized_value)
+        self.assertIs(int, type(normalized_value))
+
+    def test_generate_report_rejects_non_integer_report_id(self):
+        for invalid in (True, 132.0, "132.0", "not-an-integer"):
+            with self.subTest(invalid=invalid):
+                response = self.client.post(
+                    "/llm/generate-report",
+                    json={
+                        "businessType": "report",
+                        "params": [
+                            {
+                                "reportId": invalid,
+                                "filePathList": [
+                                    "http://127.0.0.1:8000/sample.txt"
+                                ],
+                                "templateOutline": (
+                                    "http://127.0.0.1:8000/template.docx"
+                                ),
+                            }
+                        ],
+                    },
+                )
+
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(
+                    {"error": "reportId必须是整数或整数字符串"},
+                    response.get_json(),
+                )
 
     def test_generate_report_rejects_missing_template_outline(self):
         response = self.client.post(

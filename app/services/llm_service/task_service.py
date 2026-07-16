@@ -613,6 +613,31 @@ class LLMTaskService:
             ).fetchone()
         return self._row_to_task(row) if row else None
 
+    def get_task_by_execution_id(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        """按不可变执行身份读取同一次任务。
+
+        旧接口主要按 ``business_type + business_key`` 查询当前投影；任务模块的只读
+        Port 还需要在恢复和一致性校验时锁定同一次执行，因此在兼容 Service 上补充
+        只读入口。该方法不改变状态、不触发回调，也不会把 execution_id 暴露给前端。
+        """
+
+        normalized_execution_id = str(execution_id or "").strip()
+        if not normalized_execution_id:
+            raise ValueError("execution_id不能为空")
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message,
+                       result_payload, callback_status, callback_attempts, last_callback_error,
+                       created_at, updated_at
+                FROM llm_tasks
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+        return self._row_to_task(row) if row else None
+
     def get_tasks(self, business_type: str, business_keys: list[str]) -> list[Dict[str, Any]]:
         tasks: list[Dict[str, Any]] = []
         for business_key in business_keys:

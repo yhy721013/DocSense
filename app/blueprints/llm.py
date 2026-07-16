@@ -6,14 +6,23 @@ import threading
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
+from app.adapters.web import ReportIdValidationError, normalize_report_id
+from app.adapters.web.flask import (
+    ProgressConnectionRegistry,
+    ProgressRequestValidationError,
+    parse_progress_subscription,
+)
 from app.container import ApplicationServices, get_application_services
+from app.modules.tasks.application import ProgressSubscriptionRollbackError
 from app.presenters.chat_stream import (
     finalize_chat_run_stream,
 )
+from app.presenters.task_progress import ProgressWebSocketPresenter
 from app.services.chat import (
     ChatDeleteBusyError,
     ChatDeleteCleanupError,
@@ -30,7 +39,6 @@ from app.services.chat.domain.chat_id import (
     parse_query_chat_id,
     require_public_chat_id,
 )
-from app.services.core.progress import normalize_progress
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
     CHAT_MAX_MESSAGE_CHARS,
@@ -54,6 +62,9 @@ llm_bp = Blueprint("llm", __name__)
 sock = Sock()
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_RECEIVE_POLL_SECONDS = 0.1
+_PROGRESS_RELEASE_ATTEMPTS = 3
 
 
 def _services() -> ApplicationServices:
@@ -150,166 +161,6 @@ def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return params[0] if params else None
 
 
-def _extract_progress_key(payload: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    business_type = payload.get("businessType")
-    if business_type not in {"file", "report", "weaponry"}:
-        return None, None
-
-    params = _get_first_param(payload)
-    if params is None:
-        return None, None
-
-    if business_type == "file":
-        file_name = params.get("fileName")
-        if not isinstance(file_name, str) or not file_name.strip():
-            return None, None
-        return business_type, file_name.strip()
-
-    if business_type == "weaponry":
-        architecture_id = params.get("architectureId")
-        if architecture_id is None:
-            return None, None
-        return business_type, str(architecture_id)
-
-    report_id = params.get("reportId")
-    if report_id is None:
-        return None, None
-    return business_type, str(report_id)
-
-
-def _parse_progress_command(payload: Dict[str, Any]) -> Dict[str, Any]:
-    action = payload.get("action") or "subscribe"
-    if action not in {"subscribe", "unsubscribe", "query"}:
-        raise ValueError("不支持的action")
-
-    business_type = payload.get("businessType")
-    if business_type not in {"file", "report", "weaponry"}:
-        raise ValueError("businessType无效")
-
-    params_list = _get_params(payload)
-    if not params_list:
-        raise ValueError("params不能为空")
-
-    keys = []
-    for params in params_list:
-        if business_type == "file":
-            file_name = params.get("fileName")
-            if not isinstance(file_name, str) or not file_name.strip():
-                raise ValueError("fileName不能为空")
-            keys.append((business_type, file_name.strip()))
-        elif business_type == "weaponry":
-            architecture_id = params.get("architectureId")
-            if architecture_id is None:
-                raise ValueError("architectureId不能为空")
-            keys.append((business_type, str(architecture_id)))
-        else:
-            report_id = params.get("reportId")
-            if report_id is None:
-                raise ValueError("reportId不能为空")
-            keys.append((business_type, str(report_id)))
-
-    return {"action": action, "business_type": business_type, "keys": keys}
-
-
-def _build_progress_snapshot(business_type: str, business_key: str, task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    data: Dict[str, Any] = {
-        "progress": 0.0,
-    }
-    if business_type == "file":
-        data["fileName"] = business_key
-    elif business_type == "report":
-        data["reportId"] = int(business_key)
-    elif business_type == "weaponry":
-        data["architectureId"] = business_key
-
-    if task is not None:
-        data["progress"] = normalize_progress(task["progress"])
-    else:
-        data["exists"] = False
-
-    return {"businessType": business_type, "data": data}
-
-
-def _send_latest_progress(
-    send_message,
-    business_type: str,
-    business_key: str,
-    *,
-    services: ApplicationServices,
-) -> None:
-    """从显式应用依赖读取并发送任务最新进度或数据库快照。"""
-    latest = services.progress_hub.get_latest(business_type, business_key)
-    if latest is not None:
-        send_message(latest)
-        return
-
-    current_task = services.task_service.get_task(business_type, business_key)
-    send_message(_build_progress_snapshot(business_type, business_key, current_task))
-
-
-def _handle_progress_command(
-    send_message,
-    subscriptions: dict[tuple[str, str], Any],
-    command: Dict[str, Any],
-    *,
-    emit_ack: bool,
-    services: Optional[ApplicationServices] = None,
-) -> None:
-    """执行进度订阅命令，并允许纯函数测试显式注入应用依赖。"""
-    resolved_services = services or _services()
-    progress_hub = resolved_services.progress_hub
-    task_service = resolved_services.task_service
-    action = command["action"]
-    keys = command["keys"]
-
-    if action == "subscribe":
-        for business_type, business_key in keys:
-            key = (business_type, business_key)
-            if key not in subscriptions:
-                def _forward(message: Dict[str, Any]) -> None:
-                    send_message(message)
-
-                subscriptions[key] = _forward
-                progress_hub.subscribe(business_type, business_key, _forward)
-
-                if progress_hub.get_latest(business_type, business_key) is None:
-                    current_task = task_service.get_task(business_type, business_key)
-                    send_message(_build_progress_snapshot(business_type, business_key, current_task))
-                continue
-
-            _send_latest_progress(
-                send_message,
-                business_type,
-                business_key,
-                services=resolved_services,
-            )
-
-        if emit_ack:
-            send_message({"type": "ack", "action": action, "count": len(keys)})
-        return
-
-    if action == "query":
-        for business_type, business_key in keys:
-            _send_latest_progress(
-                send_message,
-                business_type,
-                business_key,
-                services=resolved_services,
-            )
-
-        if emit_ack:
-            send_message({"type": "ack", "action": action, "count": len(keys)})
-        return
-
-    for business_type, business_key in keys:
-        callback = subscriptions.pop((business_type, business_key), None)
-        if callback is not None:
-            progress_hub.unsubscribe(business_type, business_key, callback)
-
-    if emit_ack:
-        send_message({"type": "ack", "action": action, "count": len(keys)})
-
-
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
     services = _services()
@@ -378,6 +229,7 @@ def llm_analysis():
             "file",
             file_name.strip(),
             {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
+            task_id=task["execution_id"],
         )
 
     _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
@@ -429,6 +281,18 @@ def llm_generate_report():
     if report_id is None:
         logger.warning("报告生成请求被拒绝: reportId为空")
         return jsonify({"error": "reportId不能为空"}), 400
+    try:
+        normalized_report_id = normalize_report_id(report_id)
+    except ReportIdValidationError as exc:
+        logger.warning(
+            "报告生成请求被拒绝: reportId格式无效 report_id_type=%s",
+            type(report_id).__name__,
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    # 进入任务服务和后台执行器前统一保存为整数。这样整数字符串不会在任务库、
+    # Progress Hub 与后续回调中形成不同业务键；该规范化只改变内部表示，不增删接口字段。
+    params["reportId"] = normalized_report_id.value
     file_path_list = params.get("filePathList")
     if not isinstance(file_path_list, list) or not file_path_list:
         logger.warning(
@@ -443,11 +307,21 @@ def llm_generate_report():
         logger.warning("报告生成请求被拒绝: templateOutline为空 reportId=%s", report_id)
         return jsonify({"error": "templateOutline不能为空"}), 400
 
-    task = task_service.create_report_task(report_id=int(report_id), request_payload=payload)
+    task = task_service.create_report_task(
+        report_id=normalized_report_id.value,
+        request_payload=payload,
+    )
     progress_hub.publish(
         "report",
-        str(report_id),
-        {"businessType": "report", "data": {"reportId": int(report_id), "progress": 0.0}},
+        normalized_report_id.business_key,
+        {
+            "businessType": "report",
+            "data": {
+                "reportId": normalized_report_id.value,
+                "progress": 0.0,
+            },
+        },
+        task_id=task["execution_id"],
     )
 
     _report_kwargs = {
@@ -465,7 +339,10 @@ def llm_generate_report():
         daemon=True,
     )
     worker.start()
-    logger.info("已启动后台报告生成线程: report_id=%s", report_id)
+    logger.info(
+        "已启动后台报告生成线程: report_id=%s",
+        normalized_report_id.business_key,
+    )
     return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
 
 
@@ -596,6 +473,7 @@ def llm_weaponry():
         "weaponry",
         architecture_id_str,
         {"businessType": "weaponry", "data": {"architectureId": architecture_id_str, "progress": 0.0}},
+        task_id=task["execution_id"],
     )
 
     worker = threading.Thread(
@@ -673,9 +551,19 @@ def llm_check_task():
                     index,
                 )
                 return jsonify({"error": "reportId不能为空"}), 400
+            try:
+                normalized_report_id = normalize_report_id(report_id)
+            except ReportIdValidationError as exc:
+                logger.warning(
+                    "任务查询请求被拒绝: reportId格式无效 index=%s "
+                    "report_id_type=%s",
+                    index,
+                    type(report_id).__name__,
+                )
+                return jsonify({"error": str(exc)}), 400
             response_key = "reportId"
-            normalized_key = str(report_id)
-            response_value = int(normalized_key)
+            normalized_key = normalized_report_id.business_key
+            response_value = normalized_report_id.value
 
         task = task_service.get_task(business_type, normalized_key)
         if not task:
@@ -876,45 +764,118 @@ def llm_reassign():
 @sock.route("/llm/progress")
 def llm_progress(ws):
     services = _services()
-    progress_hub = services.progress_hub
-    subscriptions: dict[tuple[str, str], Any] = {}
+    subscription_service = services.progress_subscription_service
+    presenter = ProgressWebSocketPresenter()
+    registry = ProgressConnectionRegistry(
+        connection_id=f"progress-{uuid4().hex}",
+    )
+    logger.info(
+        "Progress WebSocket 连接已建立: connection_id=%s",
+        registry.connection_id,
+    )
+
+    def _send(message: dict[str, Any]) -> None:
+        """本路由线程是当前连接唯一 WebSocket 写入者。"""
+
+        ws.send(presenter.serialize(message))
+
+    def _flush_notifications() -> None:
+        """从连接有界缓冲取出通知；业务发布线程绝不执行网络 I/O。"""
+
+        for snapshot in registry.delivery.drain():
+            _send(presenter.present_snapshot(snapshot))
+
     try:
         while True:
-            raw_message = ws.receive()
+            # ``simple-websocket`` 的超时返回 None；连接仍处于 connected 时继续轮询，
+            # 让同一线程能够在没有新客户端帧时发送后台任务产生的进度通知。
+            _flush_notifications()
+            raw_message = ws.receive(timeout=_PROGRESS_RECEIVE_POLL_SECONDS)
             if raw_message is None:
+                if bool(getattr(ws, "connected", False)):
+                    continue
                 break
 
             try:
                 payload = json.loads(raw_message)
-            except json.JSONDecodeError:
-                logger.warning("进度订阅消息被拒绝: 非法JSON")
-                ws.send(json.dumps({"type": "error", "message": "订阅消息不是合法JSON"}, ensure_ascii=False))
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                logger.warning(
+                    "Progress 订阅消息被拒绝: connection_id=%s reason=invalid_json",
+                    registry.connection_id,
+                )
+                _send(presenter.present_error("订阅消息不是合法JSON"))
                 continue
 
             try:
-                command = _parse_progress_command(payload)
-            except ValueError as exc:
+                request_model = parse_progress_subscription(payload)
+            except ProgressRequestValidationError as exc:
                 logger.warning(
-                    "进度订阅消息被拒绝: error_type=%s payload_keys=%s",
+                    "Progress 订阅消息被拒绝: connection_id=%s error_type=%s "
+                    "payload_keys=%s",
+                    registry.connection_id,
                     type(exc).__name__,
                     list(payload.keys()) if isinstance(payload, dict) else "n/a",
                 )
-                ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
+                _send(presenter.present_error(str(exc)))
                 continue
 
-            def _send_message(message: Dict[str, Any]) -> None:
-                ws.send(json.dumps(message, ensure_ascii=False))
+            try:
+                result = subscription_service.subscribe(
+                    request_model,
+                    delivery=registry.delivery,
+                    existing_subscriptions=registry.subscriptions,
+                    connection_id=registry.connection_id,
+                )
+            except ProgressSubscriptionRollbackError as exc:
+                # 应用服务已经尽力补偿；未释放令牌必须进入连接 Registry，finally
+                # 才能再次重试，而不是仅记录异常后遗失。
+                registry.retain(exc.failed_subscriptions)
+                raise
 
-            _handle_progress_command(
-                _send_message,
-                subscriptions,
-                command,
-                emit_ack="action" in payload,
-                services=services,
+            try:
+                # 必须在首条网络写入前登记令牌；若 send 失败，finally 仍能释放。
+                registry.register_result(result)
+                for item in result.current_items:
+                    _send(presenter.present_current(item))
+                result.complete_initial_delivery()
+            except Exception:
+                if registry.delivery.buffering_initial_batch:
+                    try:
+                        result.abort_initial_delivery()
+                    except Exception:
+                        logger.exception(
+                            "Progress 初始快照屏障撤销失败: connection_id=%s",
+                            registry.connection_id,
+                        )
+                raise
+
+            logger.info(
+                "Progress 订阅消息处理完成: connection_id=%s business_type=%s "
+                "key_count=%s active_subscription_count=%s",
+                registry.connection_id,
+                request_model.business_type,
+                len(request_model.ordered_keys),
+                registry.active_count,
             )
+            _flush_notifications()
     finally:
-        for (business_type, business_key), callback in list(subscriptions.items()):
-            progress_hub.unsubscribe(business_type, business_key, callback)
+        remaining = registry.close_and_release(
+            subscription_service,
+            max_attempts=_PROGRESS_RELEASE_ATTEMPTS,
+        )
+        if remaining:
+            logger.error(
+                "Progress WebSocket 关闭后仍有订阅释放失败: connection_id=%s "
+                "remaining_count=%s subscription_ids=%s",
+                registry.connection_id,
+                len(remaining),
+                ",".join(item.subscription_id for item in remaining),
+            )
+        logger.info(
+            "Progress WebSocket 连接已关闭: connection_id=%s remaining_count=%s",
+            registry.connection_id,
+            len(remaining),
+        )
 
 
 # ══════════════════════════════════════════════════════════════

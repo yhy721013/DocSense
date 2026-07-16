@@ -20,6 +20,11 @@ from app.integrations.anythingllm.factory import (
 )
 from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.policies import document_rag_workspace_settings
+from app.modules.tasks.adapters import (
+    InMemoryProgressAdapter,
+    LegacyTaskReadAdapter,
+)
+from app.modules.tasks.application import ProgressSubscriptionService
 from app.ports import (
     ChatConversationFactory,
     DocumentRagFactory,
@@ -128,6 +133,7 @@ class ApplicationServices:
     chat_delete: ChatDeleteService
     chat_cleanup_executor: ChatCleanupJobExecutor
     progress_hub: LLMProgressHub
+    progress_subscription_service: ProgressSubscriptionService
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
@@ -153,6 +159,7 @@ class ApplicationServices:
             "chat_delete": self.chat_delete,
             "chat_cleanup_executor": self.chat_cleanup_executor,
             "progress_hub": self.progress_hub,
+            "progress_subscription_service": self.progress_subscription_service,
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
             "anythingllm_config": self.anythingllm_config,
@@ -193,6 +200,13 @@ class ApplicationServices:
             raise TypeError("chat_delete must be ChatDeleteService")
         if not isinstance(self.chat_cleanup_executor, ChatCleanupJobExecutor):
             raise TypeError("chat_cleanup_executor must be ChatCleanupJobExecutor")
+        if not isinstance(
+            self.progress_subscription_service,
+            ProgressSubscriptionService,
+        ):
+            raise TypeError(
+                "progress_subscription_service 必须是 ProgressSubscriptionService"
+            )
         if not isinstance(self.chat_infrastructure_config, ChatInfrastructureConfig):
             raise TypeError(
                 "chat_infrastructure_config must be ChatInfrastructureConfig"
@@ -280,6 +294,15 @@ def create_application_services() -> ApplicationServices:
     chat_dispatcher = InlineChatRunDispatcher(
         execute=chat_run_executor.execute_chat_run,
     )
+    # 旧业务发布方与新应用服务必须共享同一个 Hub。类型化 Adapter 只做边界转换，
+    # 不另建 latest 或订阅者副本，避免切换期出现两个权威进度源。
+    progress_hub = LLMProgressHub()
+    progress_adapter = InMemoryProgressAdapter(progress_hub)
+    progress_subscription_service = ProgressSubscriptionService(
+        progress_snapshots=progress_adapter,
+        progress_subscriptions=progress_adapter,
+        task_reader=LegacyTaskReadAdapter(task_service),
+    )
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
@@ -318,7 +341,8 @@ def create_application_services() -> ApplicationServices:
             cleanup_executor=chat_cleanup_executor,
         ),
         chat_cleanup_executor=chat_cleanup_executor,
-        progress_hub=LLMProgressHub(),
+        progress_hub=progress_hub,
+        progress_subscription_service=progress_subscription_service,
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,
         anythingllm_config=anythingllm_config,

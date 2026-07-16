@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Iterable
 
 from app.container import ApplicationServices, UploadTaskLimiter
+from app.modules.tasks.adapters import InMemoryProgressAdapter, LegacyTaskReadAdapter
+from app.modules.tasks.application import ProgressSubscriptionService
 from app.services.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
@@ -81,6 +83,13 @@ def build_offline_application_services(
     )
 
     task_service = LLMTaskService(db_path=str(task_db_path))
+    progress_hub = LLMProgressHub()
+    progress_adapter = InMemoryProgressAdapter(progress_hub)
+    progress_subscription_service = ProgressSubscriptionService(
+        progress_snapshots=progress_adapter,
+        progress_subscriptions=progress_adapter,
+        task_reader=LegacyTaskReadAdapter(task_service),
+    )
     knowledge_service = DatabaseService(db_path=str(knowledge_db_path))
     chat_store = ChatStore(db_path=str(chat_db_path))
     chat_commands = ChatCommandService(ChatRunLockService(str(chat_db_path)))
@@ -136,7 +145,8 @@ def build_offline_application_services(
             cleanup_executor=chat_cleanup_executor,
         ),
         chat_cleanup_executor=chat_cleanup_executor,
-        progress_hub=LLMProgressHub(),
+        progress_hub=progress_hub,
+        progress_subscription_service=progress_subscription_service,
         upload_task_limiter=UploadTaskLimiter(
             max_concurrency=max_upload_concurrency,
         ),
