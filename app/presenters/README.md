@@ -20,3 +20,4 @@
 
 - 不得在本目录新增业务事件类型、改变事件名称、修改 `data` 结构或加入 SSE `id:` 行。
 - 任何协议变更都属于接口文档变更，必须先确认；本目录只实现已确认的契约。
+- Presenter 只能依赖正向白名单中的标准库、领域类型或框架无关应用结果，不得导入 Flask/FastAPI、具体数据库、`app.modules.*.adapters`、AnythingLLM Client，也不得通过动态导入绕过门禁；该约束由 `tests/test_architecture_boundaries.py` 持续校验。

@@ -28,6 +28,7 @@
       "path": "/llm/progress",
       "concurrency": 50,
       "holdSeconds": 10,
+      "livenessProbeSeconds": 1,
       "receiveTimeoutSeconds": 10,
       "message": {
         "businessType": "file",
@@ -37,7 +38,7 @@
           }
         ]
       },
-      "purpose": "验证50条无action Progress长连接、初始快照和连接关闭清理。"
+      "purpose": "验证50条无action Progress长连接在保持窗口内持续存活，并分别统计首帧与保持耗时；客户端会显式关闭连接，但服务端订阅清理仍需结合内部指标验证。"
     },
     {
       "name": "chat_sse_50",

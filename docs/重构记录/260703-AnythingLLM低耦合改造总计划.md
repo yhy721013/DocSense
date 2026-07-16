@@ -1,6 +1,11 @@
 # AnythingLLM 低耦合与文件解析改造总计划
 
-> 契约更新提示（2026-07-15）：本文 13.3 节记录的是该专项形成时的兼容基线。后续阶段 0 已批准 analysis/report/weaponry 成功受理改为 HTTP 202 空响应体、check-task 成功改为 HTTP 200 空响应体、Progress 显式 action/ack 下线，并批准 report 活动任务返回 409；以 `docs/接口文档/` 和 `260715-阶段0契约容量与基础设施决策清单.md` 为准，请勿按旧字段结构恢复已批准删除的协议。
+> 契约更新提示（2026-07-15）：本文 13.3 节记录的是该专项形成时的兼容基线。后续阶段 0 已批准 analysis/report/weaponry 成功受理改为 HTTP 202 空响应体、check-task 成功改为 HTTP 200 空响应体、report 活动任务返回 409、check-task/Progress 严格校验 `params` 元素，以及 Progress 显式 action 改为 error 后保持连接且无 ack；以 `docs/接口文档/` 和 `260715-阶段0契约容量与基础设施决策清单.md` 为准，请勿按旧行为恢复已批准删除的协议。
+
+> 实施顺序更新（2026-07-16）：check-task 回调恢复已决定直接采用 MySQL Outbox +
+> RabbitMQ + callback Worker，不建设同步 Adapter 或并行过渡方案。波次 1B 只形成可靠
+> 命令边界并迁移 Progress；check-task 生产路由待总计划阶段 6 一次性切换。目标 200
+> 表示恢复命令已可靠登记而非 callback 已完成，接口文档措辞须在切换前另行确认。
 
 **日期：** 2026-07-03
 
@@ -1482,7 +1487,7 @@ anythingllm.session.cleanup
 ### 13.3 API兼容
 
 - `/llm/analysis` 请求/回调结构不变；
-- （本专项完成时的历史基线）`/llm/check-task`、`/llm/progress` 当时保持不变；后续阶段 0 已批准在波次 1B 将 check-task 成功响应改为空体，并删除 Progress 显式 action/ack。
+- （本专项完成时的历史基线）`/llm/check-task`、`/llm/progress` 当时保持不变；后续阶段 0 已批准 check-task 成功响应改为空体、严格拒绝含非对象 params 元素的整次请求/消息，并将 Progress 显式 action 改为 error 后保持连接且无 ack。2026-07-16 决定 Progress 仍在波次 1B 切换，check-task 则在阶段 4～6 可靠链路完成后直接异步切换。
 - `callbackStatus=skipped` 仍是内部回调事实，用于表示未配置回调；check-task 成功空响应实施后不再通过该接口公开，内部恢复与审计规则保持。
 - 失败状态仍按现有业务协议返回，但 message 应包含明确阶段；
 - 审计失败使用文件任务失败状态，不新增甲方协议状态码；失败 message 明确包含 `stage=audit`，且不得发送成功回调；

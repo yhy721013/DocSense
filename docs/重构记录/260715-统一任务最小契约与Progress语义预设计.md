@@ -7,8 +7,9 @@
 | 编写日期 | 2026-07-15 |
 | 所属计划 | 总计划阶段 1～2、专项计划波次 1A～1B |
 | 文档层级 | L3 跨阶段内部契约预设计 |
-| 文档状态 | 已冻结可从代码确认的现状；带决策 ID 的部分待确认 |
-| 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；已确认三类受理成功与 check-task 成功为空响应体、report 活动任务 409、Progress 显式 action/ack 下线；请求参数、错误体、回调和 chat 契约不变 |
+| 文档状态 | 阶段 1A 的 Task/Progress 最小内部契约已于 2026-07-16 落地；带决策 ID 的后续状态、存储与队列事项继续待对应门禁处理 |
+| 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；已确认三类受理成功与 check-task 成功为空响应体、report 活动任务 409、check-task/Progress 严格 `params` 元素校验，以及 Progress 显式 action 错误后保持连接且无 ack；参数集合、错误字段结构、回调和 chat 契约不变 |
+| check-task 队列决策 | 2026-07-16 已确认直接采用可靠队列异步恢复，不实施同步/并行过渡；目标 HTTP 200 表示 recovery request + Outbox 已在 MySQL 事务中可靠登记或复用，不等待 callback Worker 完成。接口文档措辞在生产切换前另行确认 |
 
 本文只定义阶段 1 开始拆分业务时必须稳定的最小任务、查询、回调恢复和进度契约。完整 MySQL DDL、租约、fencing、Outbox 和 RabbitMQ 消息实现在后续阶段另行设计。
 
@@ -63,9 +64,13 @@
 3. 未配置 Callback URL 时，终态 `pending` 会转为 `skipped`。
 4. 补发后重新读取任务，形成内部恢复结果并记录日志/审计。
 5. 单项缺失返回 404；批量缺失在对应元素返回 `exists=false`。
-6. 当前代码会序列化任务状态与 `callbackReplayed`；目标契约在波次 1B 将成功响应统一改为 HTTP 200 空响应体，单项缺失 404 和参数错误 400 保持。
+6. 当前代码会序列化任务状态与 `callbackReplayed`；最终目标在总计划阶段 6 直接切可靠
+   异步恢复并返回 HTTP 200 空响应体，单项缺失 404 和参数错误 400 保持。波次 1B 不切
+   check-task 生产路由。
 
-因此目标服务命名为 `CheckTaskStatusService`，内部组合 Task Read 与 Callback Recovery；不得把补发逻辑藏进只读 Repository。
+因此最终目标服务命名为 `RequestCallbackRecoveryService`，内部组合 Task Read 与
+Callback Recovery Command；不得把命令登记藏进只读 Repository，也不得在 Web 请求内
+执行 Callback Delivery。阶段 1A 的 `CheckTaskStatusService` 是已完成的同步原型证据。
 
 ### 1.5 当前与目标 Progress 行为
 
@@ -185,12 +190,18 @@ accepted → queued → leased → running → succeeded
 
 ```python
 class TaskReadPort(Protocol):
-    def get_by_id(self, task_id: str) -> TaskSnapshot | None: ...
-    def get_latest(self, business_type: str, business_key: str) -> TaskSnapshot | None: ...
-    def get_latest_many(self, business_type: str, business_keys: tuple[str, ...]) -> tuple[TaskSnapshot | None, ...]: ...
+    def get_by_id(self, task_id: TaskId) -> TaskSnapshot | None: ...
+    def get_latest(self, business_ref: TaskBusinessRef) -> TaskSnapshot | None: ...
+    def get_latest_many(
+        self,
+        business_refs: tuple[TaskBusinessRef, ...],
+    ) -> tuple[TaskSnapshot | None, ...]: ...
 ```
 
 返回顺序必须与请求业务键顺序一致；Repository 不执行回调或网络 I/O。
+
+> 实施状态（阶段 1A-3）：已按上述领域类型落地。应用服务会校验批量返回长度、
+> 业务引用，以及恢复后按 TaskId 重读的身份一致性；Adapter 违反契约时显式失败。
 
 ### 4.2 Task Submission
 
@@ -219,26 +230,40 @@ TaskDispatchRef = {
 
 Dispatcher 只接收稳定内部标识和信封元数据，不接收业务大对象。Worker 必须按 task ID 重新读取输入。
 
-### 4.4 Callback Recovery
+### 4.4 Callback Recovery Command 与 Worker Delivery
 
 ```python
-class CallbackRecoveryPort(Protocol):
-    def recover_if_needed(self, task_id: str) -> CallbackRecoveryResult: ...
+class CallbackRecoveryCommandPort(Protocol):
+    def request_recovery(self, task_id: str) -> CallbackRecoveryCommandResult: ...
+
+class CallbackDeliveryPort(Protocol):
+    def deliver(self, recovery_request_id: str) -> CallbackDeliveryResult: ...
 ```
 
-该 Port 的实现可以执行外部 HTTP，因此必须独立于 Task Read。`CheckTaskStatusService` 的标准顺序为：读取 → 判断/恢复 → 再读取 → Presenter。
+Command Port 只允许在 MySQL 事务内创建或复用活动 recovery request 并写 Outbox，禁止
+执行外部 HTTP。Delivery Port 只由 callback Worker 调用，负责按 recovery request ID
+读取事实、执行 latest-wins、外发和条件持久化；二者都必须独立于 Task Read。
 
-Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须分开建模。前者受 D0-06 保守策略限制；后者是现有公开行为，允许调用方明确触发一次恢复，但每次都必须形成独立 delivery attempt 和审计记录。
+Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须分开建模。后者只
+新增/复用一条 `trigger=check_task` 的恢复命令；同一 TaskId 同时最多一条活动命令，
+避免重复 HTTP 请求在 Worker 消费前放大。每次真正投递仍必须形成独立 delivery attempt
+和审计记录，并遵守 D0-06 保守重试策略。
 
-### 4.5 CheckTaskStatusService
+### 4.5 RequestCallbackRecoveryService
 
 输入为已经由 Web Adapter 按当前协议解析的 typed request，输出为框架无关结果：
 
 - 保留 params 顺序。
+- 任一 params 元素不是对象时整次请求失败，不过滤后部分处理。
 - 单项和批量的缺失语义不同。
-- 每项记录 callback 是否在本次请求中成功重放。
+- 每项记录 recovery command 是 created、already_active、not_needed 还是 stale；不声称
+  callback 已在本次请求中完成。
 - 不直接生成 Flask Response。
 - 不改变 reportId/architectureId 的公开类型。
+
+全部数据库操作成功提交后，Presenter 才可返回 HTTP 200 空响应体。RabbitMQ 暂时不可用
+但 Outbox 已提交时仍是可靠登记成功；MySQL/Outbox 未提交时禁止成功。阶段 1A 已实现的
+同步 `CheckTaskStatusService` 作为历史原型保留到命令服务测试替代完成，但不得装配生产。
 
 ---
 
@@ -262,7 +287,8 @@ Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须
 - 仅 DNS/连接建立等能够确认请求尚未送达的失败允许有限自动重试。
 - 请求发出后的读取超时、连接中断或响应丢失标记为内部 `delivery_outcome_unknown`，callback Worker 不自动重试。
 - 非 2xx 响应记录为失败并进入死信/人工处理，不自动重试。
-- `/llm/check-task` 保留现有显式补发行为；补发记录 `trigger=check_task`，且不会再被后台自动重试链重复放大。
+- `/llm/check-task` 保留显式补发触发行为，但请求只可靠登记/复用恢复命令；Worker 投递
+  记录 `trigger=check_task`，且不会再被后台自动重试链重复放大。
 - `delivery_outcome_unknown` 不是新的公开 callback 状态；对外继续兼容映射为 `failed`，业务任务状态保持独立。
 
 ---
@@ -296,6 +322,10 @@ class ProgressSubscriptionPort(Protocol):
 
 阶段 1B 的 InMemory Adapter 仍是单实例兼容实现；阶段 7 的实现以 MySQL 快照为事实、Redis 为唤醒。
 
+> 实施状态（阶段 1A-3）：应用服务只返回当前快照项和不透明订阅令牌，不持有或
+> 调用 WebSocket；连接级 Registry 留在 Web Adapter。缺失订阅先注册再读当前快照，
+> 建立失败时只补偿本次新增令牌。InMemory Adapter 的线程安全与锁外通知仍属于 1B。
+
 ### 6.3 快照选择规则
 
 为了保持已批准的目标协议：
@@ -304,7 +334,8 @@ class ProgressSubscriptionPort(Protocol):
 2. 内存适配器存在更近的最新值时优先使用；否则读取 Task Read 投影。
 3. 任务不存在时 Presenter 输出现有 `progress=0.0, exists=false`。
 4. 目标公开范围只冻结接口文档已描述的 file/report 消息；当前代码中的 weaponry Progress 视为内部实现扩展，未经确认不得新增为外部承诺。
-5. 不输出 ack，也不接受显式 action；连接关闭幂等释放该连接全部订阅。
+5. 不输出 ack，也不接受显式 action；收到 action 时拒绝整条消息，发送既有结构的 error 消息并保持连接。
+6. `params` 任一元素不是对象时拒绝整条消息，不建立部分订阅；发送 error 消息并保持连接。
 
 ### 6.4 并发与失败约束
 
@@ -370,8 +401,11 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 | TASK-03 | file 批量采用父子任务还是 Coordinator | 阶段 2 工程设计，必须保持顺序语义 |
 | TASK-04 | chat run 与通用 task 的确切表关系 | 阶段 2/9 联合设计 |
 | TASK-05 | 回调超时后能否自动重试 | **已决策**：请求发送后的超时不自动重试，标记内部 `delivery_outcome_unknown`；仅明确未送达错误有限重试，check-task 显式补发除外 |
-| TASK-06 | Progress InMemory Adapter 的有界缓冲实现 | 阶段 7/8 结合 50 连接压测决定 |
-| TASK-07 | 显式 Progress action/ack 是否保留 | **已确认**：无甲方或生产前端需求证据；波次 1B 删除，只保留无 action 订阅与连接关闭清理 |
+| TASK-06 | Progress 连接有界缓冲实现 | **内部契约已完成**：阶段 1A 审查修正加入连接级有界缓冲、初始快照屏障、按 key 合并、慢连接隔离和丢弃计数；波次 1B 必须接入，容量值仍在阶段 7/8 结合 50 连接压测调优 |
+| TASK-07 | 显式 Progress action/ack 是否保留 | **已确认**：无甲方或生产前端需求证据；波次 1B 删除，只保留无 action 订阅与连接关闭清理；收到 action 时返回 error 消息、保持连接且无 ack |
+| TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **已确认**：不兼容过滤；任一非对象元素使整次 HTTP 请求或 WebSocket 消息报参数错误，波次 1B 实现 |
+| TASK-09 | 旧终态执行恢复回调期间，同一业务键已提交新执行时是否继续发送旧回调 | **核心语义已确认（2026-07-16）**：采用 latest-wins，判定旧执行回调过期并跳过。`fileName` 是前端唯一逻辑任务键；同名文件的不同 `execution_id` 只是该逻辑任务的不同执行代次。实现必须在外发前于同业务键串行化边界内复核最新 TaskId；不匹配时禁止网络调用，并持久化 stale/skipped 审计原因。已发请求若进入 `delivery_outcome_unknown`，在不增加回调版本字段时无法撤回或证明甲方不会迟到处理，其后是否允许新执行受理仍待负责人确认 |
+| TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **已确认（2026-07-16）**：直接采用 MySQL Outbox + RabbitMQ + callback Worker；不实现同步 Adapter、有界同步并行、本地线程/内存队列或总超时过渡方案。阶段 1B 只完成命令边界，阶段 4～5 建基础设施，阶段 6 一次性切换生产路由 |
 
 ---
 
@@ -380,11 +414,13 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 进入波次 1C 前至少满足：
 
 - [ ] TaskId、TaskType、BusinessKey、输入快照和 Dispatch 信封在代码中有框架无关类型。
-- [ ] `/llm/check-task` 由 `CheckTaskStatusService` 显式编排读取与回调恢复。
+- [ ] `/llm/check-task` 由 `RequestCallbackRecoveryService` 显式编排读取与可靠命令登记，
+  callback Worker 独立执行外部恢复；Web 请求内不发送 callback。
 - [ ] Task Read Repository 不执行网络 I/O。
-- [ ] `/llm/check-task` 成功返回 HTTP 200 空响应体，内部恢复结果仍可测试和审计；400/404 不变。
-- [ ] `/llm/progress` 由 Subscription/Port/Presenter 处理，仅接受无 action 订阅，不输出 ack。
+- [ ] `/llm/check-task` 仅在 recovery request + Outbox 事务提交后返回 HTTP 200 空响应体，
+  不等待外部回调；任一非对象 params 元素整次 400，其他 400/404 不变。
+- [ ] `/llm/progress` 由 Subscription/Port/Presenter 处理，仅接受无 action 订阅；显式 action 或非对象 params 元素返回 error 消息并保持连接，不输出 ack。
 - [ ] InMemory Progress Adapter 线程安全且不在锁内调用订阅者。
 - [ ] 所有任务写入开始携带 task ID；旧执行不能覆盖新投影的规则已设计。
-- [ ] TASK-01、TASK-05、TASK-07 已按确认方案实现；TASK-02～TASK-04、TASK-06 均已解决或有明确的后置门禁。
+- [ ] TASK-01、TASK-05、TASK-07、TASK-08、TASK-10 已按确认方案实现；TASK-02～TASK-04、TASK-06 均已解决或有明确的后置门禁；TASK-09 已按确认的 latest-wins 方案在 Worker、提交端串行化和持久化审计中实现，并明确处理 `delivery_outcome_unknown` 后的新执行准入。
 - [ ] 没有向 HTTP、WebSocket、SSE 或 Callback 暴露内部 ID/序号。

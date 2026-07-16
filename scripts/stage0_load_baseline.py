@@ -16,16 +16,20 @@ import logging
 import math
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 
 LOGGER = logging.getLogger("docsense.stage0_load_baseline")
 SUPPORTED_SCENARIO_TYPES = frozenset({"http", "sse", "websocket"})
 TERMINAL_SSE_EVENTS = frozenset({"aborted", "done", "error"})
+_MAX_TIMEOUT_SECONDS = 3600.0
+_MAX_SSE_EVENTS = 1_000_000
+_MAX_SCENARIOS = 100
+_FUTURE_WINDOW_MULTIPLIER = 2
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,66 @@ class SampleResult:
     latency_ms: float
     status_code: int | None = None
     error_type: str | None = None
+    ready_latency_ms: float | None = None
+    hold_duration_ms: float | None = None
+
+
+def _write_stdout(payload: str) -> None:
+    """向标准输出写入机器可读结果，不把结果 JSON 混入运行日志。"""
+
+    sys.stdout.write(payload)
+    if not payload.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _write_stderr(message: str) -> None:
+    """向标准错误输出适合 CLI 调用方读取的单行失败原因。"""
+
+    sys.stderr.write(message.rstrip("\n") + "\n")
+    sys.stderr.flush()
+
+
+def _require_number(
+    scenario: Mapping[str, Any],
+    field: str,
+    *,
+    minimum: float,
+    maximum: float,
+    default: float,
+) -> float:
+    """读取有限数值配置并统一执行上下界检查。"""
+
+    value = scenario.get(field, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"场景 {scenario['name']} 的 {field} 必须是数字")
+    numeric = float(value)
+    if not math.isfinite(numeric) or not minimum <= numeric <= maximum:
+        raise ValueError(
+            f"场景 {scenario['name']} 的 {field} 必须位于 "
+            f"{minimum:g}..{maximum:g}"
+        )
+    return numeric
+
+
+def _validate_expected_statuses(scenario: Mapping[str, Any]) -> None:
+    """保证 HTTP 状态白名单是非空且不包含 bool 的标准状态码数组。"""
+
+    statuses = scenario.get("expectedStatuses", [200])
+    if (
+        not isinstance(statuses, list)
+        or not statuses
+        or any(
+            isinstance(status, bool)
+            or not isinstance(status, int)
+            or not 100 <= status <= 599
+            for status in statuses
+        )
+    ):
+        raise ValueError(
+            f"场景 {scenario['name']} 的 expectedStatuses "
+            "必须是 100..599 的非空整数数组"
+        )
 
 
 def percentile(values: Sequence[float], quantile: float) -> float:
@@ -108,6 +172,15 @@ def validate_workload(workload: Mapping[str, Any]) -> None:
     scenarios = workload.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("workload.scenarios 必须是非空数组")
+    if len(scenarios) > _MAX_SCENARIOS:
+        raise ValueError(f"workload.scenarios 最多允许 {_MAX_SCENARIOS} 项")
+    schema_version = workload.get("schemaVersion", 1)
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+    ):
+        raise ValueError("workload.schemaVersion 当前只支持整数 1")
 
     seen_names: set[str] = set()
     for scenario in scenarios:
@@ -122,6 +195,9 @@ def validate_workload(workload: Mapping[str, Any]) -> None:
         seen_names.add(name)
         if scenario_type not in SUPPORTED_SCENARIO_TYPES:
             raise ValueError(f"不支持的场景类型: {scenario_type}")
+        for flag in ("enabled", "templateOnly", "requiresHeavyServices"):
+            if flag in scenario and not isinstance(scenario[flag], bool):
+                raise ValueError(f"场景 {name} 的 {flag} 必须是 bool")
         if scenario.get("templateOnly", False) and scenario.get("enabled", False):
             raise ValueError(
                 f"模板场景 {name} 不能直接启用；请复制后填入唯一测试数据并删除 "
@@ -132,12 +208,52 @@ def validate_workload(workload: Mapping[str, Any]) -> None:
         build_endpoint_url("http://localhost", scenario["path"])
 
         concurrency = scenario.get("concurrency")
-        if not isinstance(concurrency, int) or not 1 <= concurrency <= 500:
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or not 1 <= concurrency <= 500
+        ):
             raise ValueError(f"场景 {name} 的 concurrency 必须位于 1..500")
         if scenario_type in {"http", "sse"}:
+            method = scenario.get(
+                "method",
+                "POST" if scenario_type == "sse" else "GET",
+            )
+            if not isinstance(method, str) or method.upper() not in {
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "HEAD",
+                "OPTIONS",
+            }:
+                raise ValueError(f"场景 {name} 的 method 不是受支持的 HTTP 方法")
             total_requests = scenario.get("totalRequests")
-            if not isinstance(total_requests, int) or not 1 <= total_requests <= 100000:
+            if (
+                isinstance(total_requests, bool)
+                or not isinstance(total_requests, int)
+                or not 1 <= total_requests <= 100000
+            ):
                 raise ValueError(f"场景 {name} 的 totalRequests 必须位于 1..100000")
+            _require_number(
+                scenario,
+                "timeoutSeconds",
+                minimum=0.1,
+                maximum=_MAX_TIMEOUT_SECONDS,
+                default=120.0 if scenario_type == "sse" else 10.0,
+            )
+            _validate_expected_statuses(scenario)
+        if scenario_type == "sse":
+            max_events = scenario.get("maxEvents", 10000)
+            if (
+                isinstance(max_events, bool)
+                or not isinstance(max_events, int)
+                or not 1 <= max_events <= _MAX_SSE_EVENTS
+            ):
+                raise ValueError(
+                    f"场景 {name} 的 maxEvents 必须位于 1..{_MAX_SSE_EVENTS}"
+                )
         if scenario_type == "websocket":
             if not isinstance(scenario.get("message"), dict):
                 raise ValueError(f"WebSocket 场景 {name} 必须提供 message 对象")
@@ -145,9 +261,45 @@ def validate_workload(workload: Mapping[str, Any]) -> None:
                 raise ValueError(
                     f"WebSocket 场景 {name} 不得使用已下线目标契约中的 action"
                 )
-            hold_seconds = scenario.get("holdSeconds", 5)
-            if not isinstance(hold_seconds, (int, float)) or not 0 <= hold_seconds <= 60:
-                raise ValueError(f"场景 {name} 的 holdSeconds 必须位于 0..60")
+            business_type = scenario["message"].get("businessType")
+            params = scenario["message"].get("params")
+            if not isinstance(business_type, str) or not business_type.strip():
+                raise ValueError(
+                    f"WebSocket 场景 {name} 的 message.businessType 必须是非空字符串"
+                )
+            if (
+                not isinstance(params, list)
+                or not params
+                or any(not isinstance(item, dict) for item in params)
+            ):
+                raise ValueError(
+                    f"WebSocket 场景 {name} 的 message.params 必须是非空对象数组"
+                )
+            hold_seconds = _require_number(
+                scenario,
+                "holdSeconds",
+                minimum=0.1,
+                maximum=60.0,
+                default=5.0,
+            )
+            _require_number(
+                scenario,
+                "receiveTimeoutSeconds",
+                minimum=0.1,
+                maximum=300.0,
+                default=10.0,
+            )
+            probe_seconds = _require_number(
+                scenario,
+                "livenessProbeSeconds",
+                minimum=0.1,
+                maximum=30.0,
+                default=1.0,
+            )
+            if probe_seconds > hold_seconds:
+                raise ValueError(
+                    f"场景 {name} 的 livenessProbeSeconds 不得大于 holdSeconds"
+                )
 
 
 def select_scenarios(
@@ -186,10 +338,10 @@ def select_scenarios(
 def _http_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResult:
     """执行一次普通 HTTP 请求；每个线程独立调用，避免共享 Session 串扰。"""
 
-    import requests
-
     started = time.perf_counter()
     try:
+        import requests
+
         response = requests.request(
             method=str(scenario.get("method", "GET")).upper(),
             url=build_endpoint_url(base_url, scenario["path"]),
@@ -216,11 +368,11 @@ def _http_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResult:
 def _sse_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResult:
     """读取一条 SSE 流到首个终态事件或事件上限，防止无限占用连接。"""
 
-    import requests
-
     started = time.perf_counter()
     response = None
     try:
+        import requests
+
         response = requests.request(
             method=str(scenario.get("method", "POST")).upper(),
             url=build_endpoint_url(base_url, scenario["path"]),
@@ -264,16 +416,66 @@ def _sse_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResult:
             response.close()
 
 
-def _websocket_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResult:
-    """建立一个进度连接、发送无 action 订阅、接收首个快照并短时保持。"""
+def _decode_progress_message(
+    message: str | bytes,
+    *,
+    request_message: Mapping[str, Any],
+) -> dict[str, Any]:
+    """校验容量探针收到的 Progress 消息，但不记录其中的业务正文。"""
 
-    from simple_websocket import Client
+    if isinstance(message, bytes):
+        message = message.decode("utf-8")
+    snapshot = json.loads(message)
+    if not isinstance(snapshot, dict) or "error" in snapshot:
+        raise ValueError("WebSocket 消息不是有效进度快照")
+    expected_business_type = request_message.get("businessType")
+    if snapshot.get("businessType") != expected_business_type:
+        raise ValueError("进度快照的 businessType 与订阅不一致")
+    data = snapshot.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("进度快照的 data 必须是对象")
+    progress = data.get("progress")
+    if (
+        isinstance(progress, bool)
+        or not isinstance(progress, (int, float))
+        or not math.isfinite(float(progress))
+        or not 0.0 <= float(progress) <= 1.0
+    ):
+        raise ValueError("进度快照的 data.progress 必须位于 0..1")
+
+    key_by_type = {
+        "file": "fileName",
+        "report": "reportId",
+        "weaponry": "architectureId",
+    }
+    key_name = key_by_type.get(str(expected_business_type))
+    if key_name is not None:
+        requested_values = {
+            item.get(key_name)
+            for item in request_message.get("params", ())
+            if isinstance(item, dict) and key_name in item
+        }
+        if data.get(key_name) not in requested_values:
+            raise ValueError("进度快照的业务键不属于本次订阅")
+    return snapshot
+
+
+def _websocket_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResult:
+    """建立 Progress 连接，并在保持窗口内主动检测断连和 Ping/Pong。"""
 
     started = time.perf_counter()
+    ready_at: float | None = None
     client = None
     try:
+        from simple_websocket import Client
+
+        hold_seconds = float(scenario.get("holdSeconds", 5))
+        probe_seconds = float(scenario.get("livenessProbeSeconds", 1))
         client = Client.connect(
-            build_endpoint_url(base_url, scenario["path"], websocket=True)
+            build_endpoint_url(base_url, scenario["path"], websocket=True),
+            # simple-websocket 的后台线程会按该周期发送 Ping；未收到 Pong 时主动
+            # 关闭连接。单纯 sleep 无法发现对端在首帧后立即断开的假阳性。
+            ping_interval=probe_seconds if hold_seconds > 0 else None,
         )
         client.send(json.dumps(scenario["message"], ensure_ascii=False))
         first_message = client.receive(
@@ -281,28 +483,55 @@ def _websocket_sample(base_url: str, scenario: Mapping[str, Any]) -> SampleResul
         )
         if first_message is None:
             raise TimeoutError("未收到初始进度快照")
-        if isinstance(first_message, bytes):
-            first_message = first_message.decode("utf-8")
-        snapshot = json.loads(first_message)
-        if not isinstance(snapshot, dict) or "error" in snapshot:
-            raise ValueError("初始 WebSocket 消息不是有效进度快照")
-        expected_business_type = scenario["message"].get("businessType")
-        if snapshot.get("businessType") != expected_business_type:
-            raise ValueError("初始进度快照的 businessType 与订阅不一致")
-        # 保持窗口只为验证连接稳定性；不解析或记录业务正文，避免基线日志泄漏。
-        hold_seconds = float(scenario.get("holdSeconds", 5))
-        if hold_seconds:
-            time.sleep(hold_seconds)
+        _decode_progress_message(
+            first_message,
+            request_message=scenario["message"],
+        )
+        ready_at = time.perf_counter()
+
+        # 在保持窗口内持续调用 receive。超时返回 None 只表示当前没有业务消息；
+        # ``connected`` 变为 False 或 receive 抛出 ConnectionClosed 才表示连接失活。
+        deadline = ready_at + hold_seconds
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            if not bool(getattr(client, "connected", False)):
+                raise ConnectionError("WebSocket 在保持窗口内已断开")
+            message = client.receive(timeout=min(probe_seconds, remaining))
+            if message is not None:
+                _decode_progress_message(
+                    message,
+                    request_message=scenario["message"],
+                )
+            if not bool(getattr(client, "connected", False)):
+                raise ConnectionError("WebSocket 在保持窗口内已断开")
+
+        if not bool(getattr(client, "connected", False)):
+            raise ConnectionError("WebSocket 在保持窗口结束前已断开")
+        completed_at = time.perf_counter()
+        # 客户端 close 返回只证明本地关闭调用完成，不冒充服务端订阅表已经清理。
+        client.close()
+        client = None
         return SampleResult(
             succeeded=True,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(completed_at - started) * 1000,
             status_code=101,
+            ready_latency_ms=(ready_at - started) * 1000,
+            hold_duration_ms=(completed_at - ready_at) * 1000,
         )
     except Exception as exc:
+        failed_at = time.perf_counter()
         return SampleResult(
             succeeded=False,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(failed_at - started) * 1000,
             error_type=type(exc).__name__,
+            ready_latency_ms=(ready_at - started) * 1000
+            if ready_at is not None
+            else None,
+            hold_duration_ms=(failed_at - ready_at) * 1000
+            if ready_at is not None
+            else None,
         )
     finally:
         if client is not None:
@@ -318,10 +547,29 @@ def summarize_results(
     *,
     elapsed_seconds: float,
 ) -> dict[str, Any]:
-    """生成不含业务正文的吞吐、成功率、分位延迟和错误分类。"""
+    """生成不含业务正文的吞吐、成功率、分位延迟和错误分类。
+
+    主 ``latencyMs`` 只统计成功样本，避免快速失败或超时失败把成功链路分位数
+    混成一个无法解释的值。失败耗时、WebSocket 首帧耗时和实际保持时间分别输出。
+    """
 
     samples = list(results)
-    latencies = [sample.latency_ms for sample in samples]
+    successful_latencies = [
+        sample.latency_ms for sample in samples if sample.succeeded
+    ]
+    failed_latencies = [
+        sample.latency_ms for sample in samples if not sample.succeeded
+    ]
+    ready_latencies = [
+        sample.ready_latency_ms
+        for sample in samples
+        if sample.succeeded and sample.ready_latency_ms is not None
+    ]
+    hold_durations = [
+        sample.hold_duration_ms
+        for sample in samples
+        if sample.succeeded and sample.hold_duration_ms is not None
+    ]
     statuses: dict[str, int] = {}
     errors: dict[str, int] = {}
     for sample in samples:
@@ -332,6 +580,16 @@ def summarize_results(
             errors[sample.error_type] = errors.get(sample.error_type, 0) + 1
     succeeded = sum(sample.succeeded for sample in samples)
     total = len(samples)
+
+    def _statistics(values: Sequence[float]) -> dict[str, float | int]:
+        return {
+            "samples": len(values),
+            "p50": round(percentile(values, 0.50), 3),
+            "p95": round(percentile(values, 0.95), 3),
+            "p99": round(percentile(values, 0.99), 3),
+            "max": round(max(values), 3) if values else 0.0,
+        }
+
     return {
         "scenario": scenario["name"],
         "type": scenario["type"],
@@ -344,15 +602,59 @@ def summarize_results(
         "throughputPerSecond": round(total / elapsed_seconds, 3)
         if elapsed_seconds > 0
         else 0.0,
-        "latencyMs": {
-            "p50": round(percentile(latencies, 0.50), 3),
-            "p95": round(percentile(latencies, 0.95), 3),
-            "p99": round(percentile(latencies, 0.99), 3),
-            "max": round(max(latencies), 3) if latencies else 0.0,
-        },
+        "successfulThroughputPerSecond": round(succeeded / elapsed_seconds, 3)
+        if elapsed_seconds > 0
+        else 0.0,
+        "latencyMs": _statistics(successful_latencies),
+        "failedLatencyMs": _statistics(failed_latencies),
+        "readyLatencyMs": _statistics(ready_latencies),
+        "holdDurationMs": _statistics(hold_durations),
         "statusCounts": statuses,
         "errorTypeCounts": errors,
     }
+
+
+def _run_bounded_samples(
+    executor: ThreadPoolExecutor,
+    *,
+    sample_function: Callable[[str, Mapping[str, Any]], SampleResult],
+    base_url: str,
+    scenario: Mapping[str, Any],
+    sample_count: int,
+) -> list[SampleResult]:
+    """以有限在途 Future 运行样本，避免大场景一次创建十万个对象。"""
+
+    max_in_flight = max(
+        1,
+        int(scenario["concurrency"]) * _FUTURE_WINDOW_MULTIPLIER,
+    )
+    submitted = 0
+    results: list[SampleResult] = []
+    in_flight: set[Future[SampleResult]] = set()
+
+    def _fill_window() -> None:
+        nonlocal submitted
+        while submitted < sample_count and len(in_flight) < max_in_flight:
+            in_flight.add(executor.submit(sample_function, base_url, scenario))
+            submitted += 1
+
+    _fill_window()
+    while in_flight:
+        completed, pending = wait(in_flight, return_when=FIRST_COMPLETED)
+        in_flight = set(pending)
+        for future in completed:
+            try:
+                results.append(future.result())
+            except Exception as exc:  # 最后一道样本隔离，不让单线程异常中止整轮。
+                results.append(
+                    SampleResult(
+                        succeeded=False,
+                        latency_ms=0.0,
+                        error_type=type(exc).__name__,
+                    )
+                )
+        _fill_window()
+    return results
 
 
 def run_scenario(base_url: str, scenario: Mapping[str, Any]) -> dict[str, Any]:
@@ -377,17 +679,17 @@ def run_scenario(base_url: str, scenario: Mapping[str, Any]) -> dict[str, Any]:
         sample_count,
     )
     started = time.perf_counter()
-    results: list[SampleResult] = []
     with ThreadPoolExecutor(
         max_workers=scenario["concurrency"],
         thread_name_prefix=f"stage0-{scenario_type}",
     ) as executor:
-        futures = [
-            executor.submit(sample_function, base_url, scenario)
-            for _ in range(sample_count)
-        ]
-        for future in as_completed(futures):
-            results.append(future.result())
+        results = _run_bounded_samples(
+            executor,
+            sample_function=sample_function,
+            base_url=base_url,
+            scenario=scenario,
+            sample_count=sample_count,
+        )
     elapsed = time.perf_counter() - started
     summary = summarize_results(scenario, results, elapsed_seconds=elapsed)
     LOGGER.info(
@@ -448,7 +750,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not selected:
             raise ValueError("没有满足 enabled 和安全门禁的可运行场景")
         if args.dry_run:
-            print(
+            _write_stdout(
                 json.dumps(
                     {
                         "mode": "dry-run",
@@ -475,11 +777,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 summaries = [future.result() for future in futures]
         else:
             summaries = [run_scenario(args.base_url, item) for item in selected]
-        print(json.dumps({"results": summaries}, ensure_ascii=False, indent=2))
+        _write_stdout(
+            json.dumps({"results": summaries}, ensure_ascii=False, indent=2)
+        )
         return 0 if all(item["failed"] == 0 for item in summaries) else 2
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         LOGGER.error("容量基线配置或执行前置检查失败: error_type=%s", type(exc).__name__)
-        print(str(exc), file=sys.stderr)
+        _write_stderr(str(exc))
         return 2
 
 

@@ -12,6 +12,12 @@ from .rag import (
     FakeDocumentRagSession,
     FakeRagOutcome,
 )
+from .tasks import (
+    FakeCallbackRecoveryPort,
+    FakeProgressSnapshotPort,
+    FakeProgressSubscriptionPort,
+    FakeTaskReadPort,
+)
 
 __all__ = [
     "FakeChatConversationFactory",
@@ -22,4 +28,8 @@ __all__ = [
     "FakeKnowledgeIndexFactory",
     "FakeKnowledgeIndexPort",
     "FakeRagOutcome",
+    "FakeCallbackRecoveryPort",
+    "FakeProgressSnapshotPort",
+    "FakeProgressSubscriptionPort",
+    "FakeTaskReadPort",
 ]

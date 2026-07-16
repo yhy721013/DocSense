@@ -72,6 +72,14 @@ class Stage0ContractAssetTests(unittest.TestCase):
             check_task["success"]["sideEffect"],
         )
         self.assertEqual(400, check_task["invalidRequestStatus"])
+        self.assertEqual(
+            {
+                "requiredType": "object",
+                "onInvalid": "reject_entire_request",
+                "status": 400,
+            },
+            check_task["paramsElementPolicy"],
+        )
         self.assertEqual(404, check_task["singleMissing"]["status"])
         self.assertEqual(["file", "report"], check_task["documentedBusinessTypes"])
         self.assertEqual("1B", check_task["implementationWave"])
@@ -80,6 +88,24 @@ class Stage0ContractAssetTests(unittest.TestCase):
         progress = self.contract["progress"]
         self.assertFalse(progress["explicitActions"])
         self.assertFalse(progress["ackMessages"])
+        self.assertEqual(
+            {
+                "requiredType": "object",
+                "onInvalid": "reject_entire_message",
+                "response": "error_message",
+                "connection": "keep_open",
+            },
+            progress["paramsElementPolicy"],
+        )
+        self.assertEqual(
+            {
+                "onPresent": "reject_entire_message",
+                "response": "error_message",
+                "connection": "keep_open",
+                "ack": False,
+            },
+            progress["explicitActionPolicy"],
+        )
         self.assertEqual(["file", "report"], progress["publicBusinessTypes"])
         self.assertEqual(
             "release_all_connection_subscriptions",
