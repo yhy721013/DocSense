@@ -58,9 +58,18 @@ ANALYSIS_CLASSIFICATION_MODES = frozenset(
     }
 )
 
+ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY = "legacy"
+ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD = "scope_guard"
+ANALYSIS_FILENAME_CONSTRAINT_MODES = frozenset(
+    {
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    }
+)
+
 
 class AnalysisClassificationConfigurationError(RuntimeError):
-    """领域分类运行模式或固定合同上限非法时抛出。"""
+    """领域分类运行模式、文件名约束模式或固定合同上限非法时抛出。"""
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,9 @@ class AnalysisClassificationConfig:
     """``/llm/analysis`` 领域分类运行模式与不可变合同上限。"""
 
     mode: str = ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE
+    filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+    )
     model_candidate_limit: int = 128
     classification_prompt_char_limit: int = 32_000
     base_leaf_limit: int = 64
@@ -84,6 +96,18 @@ class AnalysisClassificationConfig:
             raise AnalysisClassificationConfigurationError(
                 "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE 配置非法："
                 f"{self.mode!r}；仅支持 {allowed}"
+            )
+
+        if not isinstance(self.filename_constraint_mode, str):
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE 必须是字符串"
+            )
+        filename_constraint_mode = self.filename_constraint_mode.strip().lower()
+        if filename_constraint_mode not in ANALYSIS_FILENAME_CONSTRAINT_MODES:
+            allowed = ", ".join(sorted(ANALYSIS_FILENAME_CONSTRAINT_MODES))
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE 配置非法："
+                f"{self.filename_constraint_mode!r}；仅支持 {allowed}"
             )
 
         for field_name in (
@@ -116,6 +140,11 @@ class AnalysisClassificationConfig:
             )
 
         object.__setattr__(self, "mode", mode)
+        object.__setattr__(
+            self,
+            "filename_constraint_mode",
+            filename_constraint_mode,
+        )
 
     @classmethod
     def topk_two_stage(cls) -> "AnalysisClassificationConfig":
@@ -241,15 +270,29 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
 
 
 def load_analysis_classification_config() -> AnalysisClassificationConfig:
-    """读取并严格校验领域分类运行模式。
+    """读取并严格校验领域分类运行模式和文件名约束模式。
 
-    仅在环境变量缺失时使用 ``topk_two_stage``；显式空值或未知值
-    都必须拒绝，避免误配时静默切换分类链路。
+    仅在环境变量缺失时分别使用 ``topk_two_stage`` 和 ``scope_guard``；
+    显式空值或未知值都必须拒绝，避免误配时静默切换分类链路。
     """
     raw_mode = os.getenv("DOCSENSE_ANALYSIS_CLASSIFICATION_MODE")
-    if raw_mode is None:
+    raw_filename_constraint_mode = os.getenv(
+        "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE"
+    )
+    if raw_mode is None and raw_filename_constraint_mode is None:
         return AnalysisClassificationConfig.topk_two_stage()
-    return AnalysisClassificationConfig(mode=raw_mode)
+    return AnalysisClassificationConfig(
+        mode=(
+            ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE
+            if raw_mode is None
+            else raw_mode
+        ),
+        filename_constraint_mode=(
+            ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+            if raw_filename_constraint_mode is None
+            else raw_filename_constraint_mode
+        ),
+    )
 
 
 def load_chat_infrastructure_config() -> ChatInfrastructureConfig:

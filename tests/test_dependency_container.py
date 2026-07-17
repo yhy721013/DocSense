@@ -26,6 +26,7 @@ from app.ports import (
 from app.services.core.config import (
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     AnalysisClassificationConfig,
     AnythingLLMConfig,
     LLMIntegrationConfig,
@@ -373,7 +374,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         configured_services = replace(
             self.services,
             analysis_classification_config=AnalysisClassificationConfig(
-                mode=ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE
+                mode=ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+                filename_constraint_mode=(
+                    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+                ),
             ),
         )
         app = create_app(services=configured_services)
@@ -404,6 +408,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertEqual(
             ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
             task_kwargs["analysis_classification_mode"],
+        )
+        self.assertEqual(
+            ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+            task_kwargs["analysis_filename_constraint_mode"],
         )
         target = thread_type.call_args.kwargs["target"]
         self.assertIs(

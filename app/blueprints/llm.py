@@ -395,6 +395,9 @@ def llm_analysis():
         "analysis_classification_mode": (
             services.analysis_classification_config.mode
         ),
+        "analysis_filename_constraint_mode": (
+            services.analysis_classification_config.filename_constraint_mode
+        ),
     }
     worker = threading.Thread(
         target=services.upload_task_limiter.run,
