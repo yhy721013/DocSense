@@ -250,6 +250,8 @@ python -m pip install -r requirements.txt
 
 扫描 PDF 的内置 OCR 还依赖系统安装的 Tesseract 及所配置语言的数据包；`requirements.txt` 只安装 Python 依赖，不安装这些系统组件。默认 analysis 扫描件引擎为 MinerU，需要相应的本地运行环境，或通过 `DOCSENSE_MINERU_API_URL` 复用外部 MinerU API；MinerU 或内置 OCR 失败时，代码会按既有降级链路继续处理原 PDF。
 
+解析 `.doc`、`.xls` 或 `.ppt` 前还需按目标系统部署 `office-converter-offline-windows-x64-*`、`office-converter-offline-macos-arm64-*` 或 `office-converter-offline-centos7-x86_64-*` 离线包。若 `soffice` 不在 `PATH` 中，将 `.env` 的 `SOFFICE_PATH` 指向包内或安装后的 LibreOffice 可执行文件。
+
 2. 配置环境变量（建议使用 `.env`）
 
 启动代码当前直接读取以下变量且未在代码中提供兜底值，使用 `run.py` 前必须通过环境变量或 `.env` 配置：

@@ -29,6 +29,7 @@ from app.ports import (
     normalize_rag_prompt,
 )
 from app.services.core.config import load_ocr_config
+from app.services.utils.legacy_office_converter import convert_legacy_office_file
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 
 from app.services.utils.callback_client import post_callback_payload
@@ -1638,6 +1639,7 @@ def _execute_file_analysis_task(
             download_root,
             timeout=60,
         )
+        downloaded_path = convert_legacy_office_file(downloaded_path)
         task_service.update_task_progress(
             "file", file_name, progress=0.35, message="正在执行文档解析"
         )
