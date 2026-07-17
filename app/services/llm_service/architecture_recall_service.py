@@ -123,6 +123,27 @@ class DocumentArchitectureSignals:
             if value
         )
 
+    @property
+    def strong_identity_text(self) -> str:
+        """返回仅可用于强匹配的双源身份文本。
+
+        业务原文件名存在时，不再把技术 ``fileName`` 当作身份来源；正文、章节和
+        Fleetlist 型号仍留在 ``query_text`` 中参与普通词法召回。
+        """
+
+        identity_filename = self.original_filename or self.filename
+        return "\n".join(
+            value
+            for value in (identity_filename, self.title)
+            if value
+        )
+
+    @property
+    def strong_identifiers(self) -> tuple[str, ...]:
+        """返回原文件名（优先）与首页标题中的有序型号标识。"""
+
+        return _extract_identifiers(self.strong_identity_text)
+
 
 @dataclass(frozen=True, slots=True)
 class RecallChannelRanking:
@@ -452,11 +473,25 @@ def _contains_ascii_name(query: str, name: str) -> bool:
 def _direct_exact_ids(
     index: ArchitectureTreeIndex,
     signals: DocumentArchitectureSignals,
+    *,
+    strong_evidence_only: bool,
+    strong_identity_enabled: bool,
 ) -> tuple[int, ...]:
-    query = _normalize_text(signals.query_text)
+    if strong_evidence_only and not strong_identity_enabled:
+        return ()
+    query = _normalize_text(
+        signals.strong_identity_text
+        if strong_evidence_only
+        else signals.query_text
+    )
+    identifiers = (
+        signals.strong_identifiers
+        if strong_evidence_only
+        else signals.identifiers
+    )
     identifier_alias_set = {
         alias
-        for identifier in signals.identifiers
+        for identifier in identifiers
         for alias in identifier_aliases(identifier)
     }
     direct: list[int] = []
@@ -646,6 +681,9 @@ def _rule_rank(
     signals: DocumentArchitectureSignals,
     direct_exact_ids: Sequence[int],
     lexical_ids: Sequence[int],
+    *,
+    strong_evidence_only: bool,
+    strong_identity_enabled: bool,
 ) -> tuple[int, ...]:
     ranked: list[int] = []
     query = _normalize_text(signals.query_text)
@@ -653,6 +691,18 @@ def _rule_rank(
         ranked.extend(_data_standard_leaves(index))
 
     family_parent_ids: list[int] = []
+    family_identifiers = (
+        signals.strong_identifiers
+        if strong_evidence_only and strong_identity_enabled
+        else ()
+        if strong_evidence_only
+        else signals.identifiers
+    )
+    family_identifier_aliases = {
+        value
+        for identifier in family_identifiers
+        for value in identifier_aliases(identifier)
+    }
     for node_id in (*direct_exact_ids, *lexical_ids[:16]):
         node = index.require(node_id)
         parent_id = node.id if not node.is_leaf else node.parent_id
@@ -660,11 +710,7 @@ def _rule_rank(
             family = _equipment_family(index, parent_id)
             if family:
                 if node.id in direct_exact_ids or any(
-                    alias in {
-                        value
-                        for identifier in signals.identifiers
-                        for value in identifier_aliases(identifier)
-                    }
+                    alias in family_identifier_aliases
                     for alias in index.require(parent_id).aliases
                 ):
                     family_parent_ids.append(parent_id)
@@ -734,11 +780,23 @@ def _augment_leaf_candidates(
     direct_exact_ids: Sequence[int],
     direct_tree_ids: Sequence[int],
     rrf: Mapping[int, float],
+    *,
+    strong_evidence_only: bool,
+    preferred_parent_ids: Sequence[int] = (),
 ) -> tuple[int, ...]:
     selected = list(base_ids)
 
     family_parent_ids: list[int] = []
-    trigger_ids = set(rule_ids) | set(direct_exact_ids) | set(direct_tree_ids)
+    for parent_id in preferred_parent_ids:
+        family = _equipment_family(index, parent_id)
+        if not family:
+            continue
+        family_parent_ids.append(parent_id)
+        _append_unique(selected, family, MAX_LEAF_CANDIDATES)
+
+    trigger_ids = set(rule_ids) | set(direct_exact_ids)
+    if not strong_evidence_only:
+        trigger_ids.update(direct_tree_ids)
     for leaf_id in (*base_ids, *rule_ids):
         leaf = index.require(leaf_id)
         if leaf.parent_id not in index.nodes_by_id:
@@ -829,6 +887,64 @@ def _eligible_parent_ids(
     return tuple(item[0] for item in eligible[:MAX_PARENT_CANDIDATES])
 
 
+_PREFERRED_PARENT_REASON_PRIORITY = {
+    "jane_scope_parent": 0,
+    "jane_tree_gap_lead_parent": 1,
+    "jane_high_level_branch": 2,
+    "jane_branch_guard": 3,
+}
+
+
+def _normalize_preferred_parent_reasons(
+    index: ArchitectureTreeIndex,
+    values: Mapping[int, Sequence[str]] | None,
+) -> dict[int, tuple[str, ...]]:
+    if values is None:
+        return {}
+    if not isinstance(values, Mapping):
+        raise TypeError("preferred_parent_reasons 必须是 Mapping")
+
+    normalized: dict[int, tuple[str, ...]] = {}
+    for raw_node_id, raw_reasons in values.items():
+        if isinstance(raw_node_id, bool) or not isinstance(raw_node_id, int):
+            raise TypeError("preferred_parent_reasons 的键必须是数字 ID")
+        node = index.require(raw_node_id)
+        if node.is_leaf or node.parent_id is None:
+            raise ArchitectureRecallError(
+                f"受保护作用域候选必须是非根父节点: {raw_node_id}"
+            )
+        if isinstance(raw_reasons, (str, bytes)):
+            raw_reasons = (str(raw_reasons),)
+        reasons = tuple(
+            dict.fromkeys(
+                reason
+                for reason in (_as_text(value) for value in raw_reasons)
+                if reason
+            )
+        )
+        if not reasons:
+            raise ArchitectureRecallError(
+                f"受保护作用域候选缺少保护原因: {raw_node_id}"
+            )
+        normalized[raw_node_id] = reasons
+
+    return dict(
+        sorted(
+            normalized.items(),
+            key=lambda item: (
+                min(
+                    (
+                        _PREFERRED_PARENT_REASON_PRIORITY.get(reason, 99)
+                        for reason in item[1]
+                    ),
+                    default=99,
+                ),
+                index.require(item[0]).ordinal,
+            ),
+        )
+    )
+
+
 def _projection_chars(candidates: Sequence[ArchitectureRecallCandidate]) -> int:
     payload = [candidate.to_prompt_dict() for candidate in candidates]
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
@@ -860,21 +976,56 @@ class ArchitectureRecallService:
         self._prompt_char_limit = prompt_char_limit
         self._prompt_overhead_chars = prompt_overhead_chars
 
-    def recall(self, signals: DocumentArchitectureSignals) -> ArchitectureRecallDecision:
+    def recall(
+        self,
+        signals: DocumentArchitectureSignals,
+        *,
+        strong_evidence_only: bool = False,
+        strong_identity_enabled: bool = True,
+        preferred_parent_reasons: Mapping[int, Sequence[str]] | None = None,
+    ) -> ArchitectureRecallDecision:
         started_at = time.perf_counter()
         if not isinstance(signals, DocumentArchitectureSignals):
             raise TypeError("signals 必须是 DocumentArchitectureSignals")
+        if not isinstance(strong_evidence_only, bool):
+            raise TypeError("strong_evidence_only 必须是布尔值")
+        if not isinstance(strong_identity_enabled, bool):
+            raise TypeError("strong_identity_enabled 必须是布尔值")
         if signals.is_empty:
             raise ArchitectureRecallError("文档不包含可用于领域召回的有效信号")
 
+        preferred_parents = _normalize_preferred_parent_reasons(
+            self._index,
+            preferred_parent_reasons,
+        )
         query_tokens = _tokenize(signals.query_text)
+        strong_identifiers = (
+            signals.strong_identifiers
+            if strong_evidence_only and strong_identity_enabled
+            else ()
+            if strong_evidence_only
+            else signals.identifiers
+        )
         identifier_alias_set = {
             alias
-            for identifier in signals.identifiers
+            for identifier in strong_identifiers
             for alias in identifier_aliases(identifier)
         }
-        direct_exact_ids = _direct_exact_ids(self._index, signals)
-        exact_leaf_ids, protected = _expand_exact_leaves(self._index, direct_exact_ids)
+        direct_exact_ids = _direct_exact_ids(
+            self._index,
+            signals,
+            strong_evidence_only=strong_evidence_only,
+            strong_identity_enabled=strong_identity_enabled,
+        )
+        exact_leaf_ids, exact_protected = _expand_exact_leaves(
+            self._index,
+            direct_exact_ids,
+        )
+        protected: dict[int, tuple[str, ...]] = dict(exact_protected)
+        for node_id, reasons in preferred_parents.items():
+            protected[node_id] = tuple(
+                dict.fromkeys((*protected.get(node_id, ()), *reasons))
+            )
         lexical_ids = _bm25_rank(self._index, query_tokens)
         tree_ids, direct_tree_ids = _tree_rank(
             self._index,
@@ -886,9 +1037,13 @@ class ArchitectureRecallService:
             signals,
             direct_exact_ids,
             lexical_ids,
+            strong_evidence_only=strong_evidence_only,
+            strong_identity_enabled=strong_identity_enabled,
         )
 
-        if not any((exact_leaf_ids, lexical_ids, tree_ids, rule_ids)):
+        if not any(
+            (exact_leaf_ids, lexical_ids, tree_ids, rule_ids, preferred_parents)
+        ):
             raise ArchitectureRecallError("文档信号未命中任何领域树候选")
 
         channel_ids = {
@@ -915,14 +1070,23 @@ class ArchitectureRecallService:
             direct_exact_ids,
             direct_tree_ids,
             rrf,
+            strong_evidence_only=strong_evidence_only,
+            preferred_parent_ids=tuple(preferred_parents),
         )
-        parent_ids = _eligible_parent_ids(
+        ordinary_parent_ids = _eligible_parent_ids(
             self._index,
             fused_ids,
             direct_exact_ids,
             direct_tree_ids,
             rrf,
         )
+        parent_ids: list[int] = list(preferred_parents)
+        _append_unique(
+            parent_ids,
+            ordinary_parent_ids,
+            MAX_PARENT_CANDIDATES,
+        )
+        parent_ids = parent_ids[:MAX_PARENT_CANDIDATES]
         final_ids = (*leaf_ids, *parent_ids)
         if len(final_ids) > MAX_FINAL_CANDIDATES:
             raise ArchitectureRecallError("领域候选数量超过 128 个")
@@ -999,6 +1163,9 @@ def recall_architecture_candidates(
     *,
     prompt_char_limit: int = MAX_CLASSIFICATION_PROMPT_CHARS,
     prompt_overhead_chars: int = CLASSIFICATION_PROMPT_OVERHEAD_CHARS,
+    strong_evidence_only: bool = False,
+    strong_identity_enabled: bool = True,
+    preferred_parent_reasons: Mapping[int, Sequence[str]] | None = None,
 ) -> ArchitectureRecallDecision:
     """便于主链按请求索引执行一次召回的无状态入口。"""
 
@@ -1006,4 +1173,9 @@ def recall_architecture_candidates(
         index,
         prompt_char_limit=prompt_char_limit,
         prompt_overhead_chars=prompt_overhead_chars,
-    ).recall(signals)
+    ).recall(
+        signals,
+        strong_evidence_only=strong_evidence_only,
+        strong_identity_enabled=strong_identity_enabled,
+        preferred_parent_reasons=preferred_parent_reasons,
+    )

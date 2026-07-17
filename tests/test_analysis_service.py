@@ -798,12 +798,16 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
             hub = LLMProgressHub()
             transitions = []
+            filename_constraint_modes = []
 
             def capture_transition(*, task_service, request_payload, **kwargs):
                 current = request_payload["params"][0]["fileName"]
                 status_a = task_service.get_task("file", "a.txt")["status"]
                 status_b = task_service.get_task("file", "b.txt")["status"]
                 transitions.append((current, status_a, status_b))
+                filename_constraint_modes.append(
+                    kwargs["analysis_filename_constraint_mode"]
+                )
                 task_service.mark_business_result("file", current, {"ok": True}, status="2", message="完成")
 
             mock_run_single.side_effect = capture_transition
@@ -819,6 +823,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=Mock(),
                 knowledge_index_factory=Mock(),
+                analysis_filename_constraint_mode="scope_guard",
             )
 
             self.assertEqual(
@@ -827,6 +832,10 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     ("a.txt", "1", "0"),
                     ("b.txt", "2", "1"),
                 ],
+            )
+            self.assertEqual(
+                filename_constraint_modes,
+                ["scope_guard", "scope_guard"],
             )
 
     @staticmethod

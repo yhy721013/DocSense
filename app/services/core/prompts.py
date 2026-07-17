@@ -121,6 +121,8 @@ def _project_architecture_candidates(items: Iterable[Any]) -> list[dict[str, Any
 def build_architecture_classification_prompt(
     request_params: Mapping[str, Any],
     architecture_candidates: Iterable[Any],
+    *,
+    classification_context: Mapping[str, Any] | None = None,
 ) -> str:
     """构造两阶段流程的纯领域分类 Prompt。
 
@@ -130,18 +132,62 @@ def build_architecture_classification_prompt(
     candidates = _project_architecture_candidates(architecture_candidates)
     if not candidates:
         raise ValueError("architecture_candidates 不能为空")
+    context_payload = {
+        key: classification_context[key]
+        for key in (
+            "title",
+            "primaryIdentifier",
+            "qualifier",
+            "scopeKind",
+            "highLevelBranchHint",
+            "dominantDetailKind",
+            "matchedScopeParentId",
+            "treeGap",
+        )
+        if classification_context is not None
+        and key in classification_context
+        and classification_context[key] not in (None, "", ())
+    }
+    context_text = (
+        "serverExtractedClassificationContext: "
+        + json.dumps(
+            context_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+        if context_payload
+        else ""
+    )
+    if context_payload:
+        classification_rules = (
+            "1. 只能选择下方模型候选中的数字 id，不得输出候选外 ID、分类名称或默认值。\n"
+            "2. 按全文主要对象和覆盖粒度分类；class/舰级资料应选择对应舰级或批次父节点，不能因首舰号而缩小成单舰资料。\n"
+            "3. Fleetlist、Ship totals 或 Aircraft totals 中的成员型号只能辅助确认文档作用域，不能单独成为最终分类依据。\n"
+            "4. 标题中的 Flight、Block、批次限定词优先于基础型号；存在对应作用域父节点时，应选择该父节点。\n"
+            "5. 只有全文主要描述某个明细类别时，才选择该明细 leaf；serverExtractedClassificationContext 中 dominantDetailKind=technical_specifications 表示服务端已确认 Specifications 是短篇全文的主体标题而非 Contents 中的普通章节，此时必须选择兼容装备分支内的战技指标 leaf，不能退回装备父节点；没有该标记时，不得因综合资料中的局部 Specifications 章节，或 class 文档中的局部参数，把全文缩小到某一明细叶子。\n"
+            "6. 叶子证据不足但能够可靠确定父级领域时，只能选择候选中已有的 nodeType=parent 节点，并选择与全文作用域一致的最深层父节点。\n"
+            "7. 文档证据不足以支持任一候选时，architectureId 必须输出 null，不得猜测。\n"
+            "8. architectureId 有值时必须是 JSON 数字，不能是字符串。\n"
+            "9. 只输出严格 JSON 对象，唯一键为 architectureId；不要输出 Markdown、概率、解释、候选列表或思考过程。\n"
+        )
+    else:
+        classification_rules = (
+            "1. 只能选择下方模型候选中的数字 id，不得输出候选外 ID、分类名称或默认值。\n"
+            "2. 文档证据足以支持叶子候选时，优先选择 nodeType=leaf 的最具体候选。\n"
+            "3. 叶子证据不足但能够可靠确定父级领域时，只能选择候选中已有的 nodeType=parent 节点，并选择证据支持的最深层父节点。\n"
+            "4. 文档证据不足以支持任一候选时，architectureId 必须输出 null，不得猜测。\n"
+            "5. architectureId 有值时必须是 JSON 数字，不能是字符串。\n"
+            "6. 只输出严格 JSON 对象，唯一键为 architectureId；不要输出 Markdown、概率、解释、候选列表或思考过程。\n"
+        )
     return (
         "你是文档领域分类器。请仅依据文档内容和下方有限候选确定所属领域。\n"
         "【请求上下文】\n"
         f"fileName: {request_params.get('fileName', '')}\n"
         f"originalFileName: {request_params.get('originalFileName', '')}\n"
+        f"{context_text}"
         "【分类规则】\n"
-        "1. 只能选择下方模型候选中的数字 id，不得输出候选外 ID、分类名称或默认值。\n"
-        "2. 文档证据足以支持叶子候选时，优先选择 nodeType=leaf 的最具体候选。\n"
-        "3. 叶子证据不足但能够可靠确定父级领域时，只能选择候选中已有的 nodeType=parent 节点，并选择证据支持的最深层父节点。\n"
-        "4. 文档证据不足以支持任一候选时，architectureId 必须输出 null，不得猜测。\n"
-        "5. architectureId 有值时必须是 JSON 数字，不能是字符串。\n"
-        "6. 只输出严格 JSON 对象，唯一键为 architectureId；不要输出 Markdown、概率、解释、候选列表或思考过程。\n"
+        f"{classification_rules}"
         "【输出结构】\n"
         '{"architectureId": null}\n'
         "【模型候选】\n"

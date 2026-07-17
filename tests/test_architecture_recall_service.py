@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import FrozenInstanceError
+from unittest.mock import patch
 
 from app.services.core.architecture_tree import build_architecture_tree_index
+from app.services.llm_service import architecture_recall_service as recall_module
 from app.services.llm_service.architecture_recall_service import (
     BM25_LIMIT,
     DATA_STANDARD_KINDS,
@@ -13,6 +15,7 @@ from app.services.llm_service.architecture_recall_service import (
     MAX_FINAL_CANDIDATES,
     MAX_HEADINGS,
     MAX_IDENTIFIERS,
+    MAX_PARENT_CANDIDATES,
     MAX_REMARK_CHARS,
     RRF_K,
     ArchitecturePromptBudgetError,
@@ -182,6 +185,105 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
 
         self.assertTrue(set(range(11, 18)).issubset(decision.final_candidate_ids))
 
+    def test_scope_guard_keeps_body_identifier_lexical_but_not_strongly_protected(self):
+        signals = build_document_architecture_signals(
+            body="Fleetlist\nCVN-78 Gerald R. Ford\n其他同级舰艇",
+        )
+        with patch.object(
+            recall_module,
+            "_tree_rank",
+            wraps=recall_module._tree_rank,
+        ) as tree_rank:
+            decision = recall_architecture_candidates(
+                self.index,
+                signals,
+                strong_evidence_only=True,
+            )
+
+        self.assertEqual(decision.direct_exact_ids, ())
+        self.assertEqual(_channel(decision, "rule"), ())
+        self.assertEqual(decision.protected_reasons, ())
+        self.assertEqual(tree_rank.call_args.args[2], set())
+        self.assertTrue(set(range(11, 18)) & set(_channel(decision, "lexical")))
+
+    def test_scope_guard_conflict_disables_both_identity_exact_matches(self):
+        signals = build_document_architecture_signals(
+            filename="technical-upload.pdf",
+            original_filename="CVN-78 class.pdf",
+            title="CVN-68 class",
+            body="Fleetlist CVN-78 CVN-68",
+        )
+        with patch.object(
+            recall_module,
+            "_tree_rank",
+            wraps=recall_module._tree_rank,
+        ) as tree_rank:
+            decision = recall_architecture_candidates(
+                self.index,
+                signals,
+                strong_evidence_only=True,
+                strong_identity_enabled=False,
+            )
+
+        self.assertEqual(decision.direct_exact_ids, ())
+        self.assertEqual(decision.protected_reasons, ())
+        self.assertEqual(_channel(decision, "rule"), ())
+        self.assertEqual(tree_rank.call_args.args[2], set())
+        self.assertTrue(
+            _channel(decision, "lexical") or _channel(decision, "tree")
+        )
+
+    def test_scope_guard_prefers_original_filename_over_technical_filename(self):
+        index = build_architecture_tree_index(
+            [
+                {"id": 1, "name": "装备根"},
+                {"id": 2, "name": "DDG-1000", "parentId": 1},
+                {"id": 3, "name": "CVN-78", "parentId": 1},
+            ]
+        )
+        signals = build_document_architecture_signals(
+            filename="technical-DDG-1000.pdf",
+            original_filename="source-CVN-78.pdf",
+        )
+        decision = recall_architecture_candidates(
+            index,
+            signals,
+            strong_evidence_only=True,
+        )
+
+        self.assertEqual(signals.strong_identifiers, ("cvn-78",))
+        self.assertIn(3, decision.direct_exact_ids)
+        self.assertNotIn(2, decision.direct_exact_ids)
+        self.assertIn(2, _channel(decision, "lexical"))
+
+    def test_legacy_mode_keeps_body_identifier_exact_and_family_expansion(self):
+        signals = build_document_architecture_signals(
+            body="Fleetlist\nCVN-78 Gerald R. Ford",
+        )
+        implicit_legacy = recall_architecture_candidates(self.index, signals)
+        explicit_legacy = recall_architecture_candidates(
+            self.index,
+            signals,
+            strong_evidence_only=False,
+        )
+
+        self.assertEqual(
+            implicit_legacy.direct_exact_ids,
+            explicit_legacy.direct_exact_ids,
+        )
+        self.assertEqual(
+            implicit_legacy.final_candidate_ids,
+            explicit_legacy.final_candidate_ids,
+        )
+        self.assertIn(10, explicit_legacy.direct_exact_ids)
+        self.assertEqual(
+            set(_channel(explicit_legacy, "rule")),
+            set(range(11, 18)),
+        )
+        protected = dict(explicit_legacy.protected_reasons)
+        self.assertEqual(protected[10], ("exact:10",))
+        self.assertTrue(set(range(11, 18)).issubset(protected))
+
     def test_small_root_diversity_adds_one_leaf_from_each_direct_branch(self):
         index = build_architecture_tree_index(
             [
@@ -262,6 +364,80 @@ class ArchitectureRecallCandidateContractTests(unittest.TestCase):
         self.assertNotIn(1, parent_ids)
         self.assertNotIn(5, parent_ids)
         self.assertNotIn(100, parent_ids)
+
+    def test_preferred_parent_bypasses_depth_gate_and_takes_first_parent_slot(self):
+        nodes: list[dict[str, object]] = [
+            {"id": 1, "name": "根"},
+            {"id": 2, "name": "空中装备", "parentId": 1},
+            {"id": 3, "name": "普通容器", "parentId": 1},
+            {"id": 20, "name": "空中普通叶", "parentId": 2},
+        ]
+        for offset in range(20):
+            parent_id = 100 + offset * 10
+            nodes.extend(
+                [
+                    {"id": parent_id, "name": "共同父", "parentId": 3},
+                    {
+                        "id": parent_id + 1,
+                        "name": f"候选甲{offset}",
+                        "parentId": parent_id,
+                    },
+                    {
+                        "id": parent_id + 2,
+                        "name": f"候选乙{offset}",
+                        "parentId": parent_id,
+                    },
+                ]
+            )
+        index = build_architecture_tree_index(nodes)
+        signals = build_document_architecture_signals(title="共同父")
+
+        without_preference = recall_architecture_candidates(
+            index,
+            signals,
+            strong_evidence_only=True,
+        )
+        self.assertNotIn(2, without_preference.final_candidate_ids)
+
+        decision = recall_architecture_candidates(
+            index,
+            signals,
+            strong_evidence_only=True,
+            preferred_parent_reasons={2: ("jane_high_level_branch",)},
+        )
+        parent_candidates = [
+            candidate
+            for candidate in decision.candidates
+            if candidate.node_type == "parent"
+        ]
+
+        self.assertEqual(len(parent_candidates), MAX_PARENT_CANDIDATES)
+        self.assertEqual(parent_candidates[0].id, 2)
+        self.assertEqual(
+            parent_candidates[0].protected_reasons,
+            ("jane_high_level_branch",),
+        )
+        self.assertEqual(
+            dict(decision.protected_reasons)[2],
+            ("jane_high_level_branch",),
+        )
+        self.assertLessEqual(len(decision.candidates), MAX_FINAL_CANDIDATES)
+
+    def test_preferred_equipment_parent_adds_all_seven_detail_leaves(self):
+        index = build_architecture_tree_index(_full_feature_tree())
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(body="unmatched prose token"),
+            strong_evidence_only=True,
+            preferred_parent_reasons={10: ("jane_branch_guard",)},
+        )
+
+        self.assertTrue(set(range(11, 18)).issubset(decision.final_candidate_ids))
+        self.assertIn(10, decision.final_candidate_ids)
+        self.assertEqual(
+            dict(decision.protected_reasons)[10],
+            ("jane_branch_guard",),
+        )
 
     def test_empty_and_unmatched_signals_fail_without_tree_fallback(self):
         index = build_architecture_tree_index([{"id": 1, "name": "唯一领域"}])

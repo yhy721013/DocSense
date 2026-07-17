@@ -66,6 +66,36 @@ class AnalysisPromptSplitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不能为空"):
             build_architecture_classification_prompt({}, [])
 
+    def test_scope_rules_are_only_enabled_with_explicit_context(self):
+        candidates = [
+            {
+                "id": 100,
+                "pathName": "装备目标/水面装备/测试舰级",
+                "nodeType": "parent",
+            }
+        ]
+        legacy_prompt = build_architecture_classification_prompt({}, candidates)
+        scope_prompt = build_architecture_classification_prompt(
+            {},
+            candidates,
+            classification_context={
+                "title": "Test (DDG 51 Flight III) class",
+                "primaryIdentifier": "ddg51",
+                "qualifier": "Flight III",
+                "scopeKind": "flight",
+                "matchedScopeParentId": 100,
+            },
+        )
+
+        self.assertIn("证据足以支持叶子候选时", legacy_prompt)
+        self.assertNotIn("Fleetlist", legacy_prompt)
+        self.assertNotIn("serverExtractedClassificationContext", legacy_prompt)
+        self.assertIn("Fleetlist", scope_prompt)
+        self.assertIn("Flight、Block、批次限定词", scope_prompt)
+        self.assertIn("dominantDetailKind=technical_specifications", scope_prompt)
+        self.assertIn("Contents 中的普通章节", scope_prompt)
+        self.assertIn("serverExtractedClassificationContext", scope_prompt)
+
     def test_candidate_projection_supports_dto_paths_and_truncates_remark(self):
         long_remark = "甲" * 512 + "不得进入提示词"
         candidates = [

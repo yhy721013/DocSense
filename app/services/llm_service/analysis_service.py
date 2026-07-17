@@ -7,9 +7,10 @@ import math
 import re
 import time
 import unicodedata
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import fitz
 
@@ -31,7 +32,12 @@ from app.ports import (
     build_document_idempotency_key,
     normalize_rag_prompt,
 )
-from app.services.core.config import load_ocr_config
+from app.services.core.config import (
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    ANALYSIS_FILENAME_CONSTRAINT_MODES,
+    load_ocr_config,
+)
 from app.services.core.architecture_tree import (
     ArchitectureNodeProfile,
     ArchitectureTreeIndex,
@@ -1287,6 +1293,15 @@ def _normalize_analysis_classification_mode(value: Any) -> str:
     return mode
 
 
+def _normalize_analysis_filename_constraint_mode(value: Any) -> str:
+    mode = _as_text(value) or ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    if mode not in ANALYSIS_FILENAME_CONSTRAINT_MODES:
+        raise ValueError(
+            "analysis_filename_constraint_mode 必须是 legacy 或 scope_guard"
+        )
+    return mode
+
+
 def _extract_recall_headings(original_text: str) -> tuple[str, ...]:
     """从正文提取最多 64 条短标题信号，不把长正文行重复塞入召回查询。"""
     headings: list[str] = []
@@ -1310,15 +1325,16 @@ def _extract_recall_headings(original_text: str) -> tuple[str, ...]:
 
 
 def _build_analysis_architecture_signals(
-        *,
-        file_name: str,
-        original_name: str,
-        original_text: str,
+    *,
+    file_name: str,
+    original_name: str,
+    original_text: str,
+    title_override: str = "",
 ) -> DocumentArchitectureSignals:
     return build_document_architecture_signals(
         filename=file_name,
         original_filename=original_name,
-        title=_extract_title(original_text),
+        title=title_override or _extract_title(original_text),
         headings=_extract_recall_headings(original_text),
         body=original_text,
     )
@@ -1451,11 +1467,76 @@ _STRONG_GJB_FILENAME_RE = re.compile(
     r"(?<![A-Za-z0-9])GJB(?:\s*[/_-]\s*Z)?\s*[- ]?\s*\d+[A-Za-z]?",
     re.IGNORECASE,
 )
+_JANE_COPYRIGHT_RE = re.compile(
+    r"©\s*\d{4}\s+Jane[’']s\s+Group\s+UK\s+Limited",
+    re.IGNORECASE,
+)
+_JANE_PAGE_ONE_RE = re.compile(
+    r"(?im)^\s*Page\s+1\s+of\s+(?P<total_pages>\d+)\s*$",
+)
+_JANE_METADATA_RE = re.compile(
+    r"(?im)^\s*(?:Date\s+Posted|Publication)\s*:",
+)
+_SCOPE_QUALIFIER_RE = re.compile(
+    r"\b(?P<kind>Flight|Block|Batch)\s*"
+    r"(?P<value>(?:"
+    r"[0-9]+[A-Z]?(?:\s*(?:[/_-]\s*)?[IVXLCDM]+[A-Z]?)?"
+    r"|[IVXLCDM]+[A-Z]?(?:\s*[/_-]\s*[IVXLCDM]+[A-Z]?)?"
+    r"))(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_JANE_CLASS_RE = re.compile(r"(?<![A-Za-z])class(?![A-Za-z])", re.IGNORECASE)
+_JANE_AIRCRAFT_TOTALS_RE = re.compile(
+    r"(?im)^\s*Aircraft\s+totals\s*$",
+)
 
 
-def _strong_filename_identifiers(*values: Any) -> set[str]:
-    """提取文件名中的数字型强标识，忽略正文、短词和纯年份。"""
-    identifiers: set[str] = set()
+@dataclass(frozen=True, slots=True)
+class _JaneClassificationProfile:
+    active: bool = False
+    title: str = ""
+    identity_filename: str = ""
+    filename_identifiers: tuple[str, ...] = ()
+    title_identifiers: tuple[str, ...] = ()
+    primary_identifier: str = ""
+    qualifier: str = ""
+    scope_kind: str = ""
+    high_level_branch_hint: str = ""
+    dominant_detail_kind: str = ""
+    identity_confirmed: bool = False
+    identity_conflict: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchitectureScopeResolution:
+    matched_scope_parent_id: int | None = None
+    matched_branch_parent_id: int | None = None
+    clustered_parent_ids: tuple[int, ...] = ()
+    protected_parent_reasons: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    reason_code: str = "no_constraint_insufficient_evidence"
+    tree_gap: bool = False
+
+    @property
+    def preferred_parent_reasons(self) -> dict[int, tuple[str, ...]]:
+        return dict(self.protected_parent_reasons)
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchitectureConstraintDecision:
+    pre_architecture_id: int
+    post_architecture_id: int
+    reason_code: str
+    matched_scope_parent_id: int | None
+    tree_gap: bool
+
+
+def _ordered_strong_identifiers(
+    *values: Any,
+    limit: int = 128,
+) -> tuple[str, ...]:
+    """按文本出现顺序提取数字型标识，过滤日期和版式限定词。"""
+
+    identifiers: list[str] = []
     for value in values:
         normalized = unicodedata.normalize("NFKC", _as_text(value)).casefold()
         for match in _STRONG_FILENAME_IDENTIFIER_RE.finditer(normalized):
@@ -1470,8 +1551,180 @@ def _strong_filename_identifiers(*values: Any) -> set[str]:
                 continue
             if letters in _FILENAME_DATE_IDENTIFIER_PREFIXES:
                 continue
-            identifiers.add(compact)
-    return identifiers
+            if letters in {"flight", "block", "batch", "page", "figure"}:
+                continue
+            if compact not in identifiers:
+                identifiers.append(compact)
+            if len(identifiers) >= limit:
+                return tuple(identifiers)
+    return tuple(identifiers)
+
+
+def _strong_filename_identifiers(*values: Any) -> set[str]:
+    """提取文件名中的数字型强标识，忽略正文、短词和纯年份。"""
+
+    return set(_ordered_strong_identifiers(*values))
+
+
+def _identifier_prefix(identifier: str) -> str:
+    match = re.match(r"[a-z]+", identifier.casefold())
+    return match.group(0) if match else ""
+
+
+def _extract_scope_qualifier(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", _as_text(value))
+    match = _SCOPE_QUALIFIER_RE.search(normalized)
+    if not match:
+        return ""
+    kind = match.group("kind").casefold()
+    kind_label = {
+        "flight": "Flight",
+        "block": "Block",
+        "batch": "Batch",
+    }[kind]
+    qualifier_value = re.sub(
+        r"\s+",
+        " ",
+        match.group("value").upper().strip(),
+    )
+    return f"{kind_label} {qualifier_value}"
+
+
+def _normalize_scope_qualifier(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", _as_text(value)).casefold()
+    return re.sub(r"[^a-z0-9]+", "", normalized)
+
+
+def _extract_jane_title(original_text: str) -> tuple[bool, str]:
+    """只在可靠 Jane's 首页版式中抽取版权声明之后的真实标题。"""
+
+    if not original_text or not _JANE_COPYRIGHT_RE.search(original_text):
+        return False, ""
+    page_match = _JANE_PAGE_ONE_RE.search(original_text)
+    if page_match is None:
+        return False, ""
+    metadata_match = _JANE_METADATA_RE.search(original_text, page_match.end())
+    if metadata_match is None:
+        return False, ""
+    title_lines = [
+        line.strip()
+        for line in original_text[page_match.end():metadata_match.start()].splitlines()
+        if line.strip()
+    ]
+    title = re.sub(r"\s+", " ", " ".join(title_lines)).strip()[:512]
+    return bool(title), title
+
+
+def _jane_dominant_detail_kind(original_text: str) -> str:
+    """识别整份简氏资料是否由单一明细章节主导，避免把普通目录章节误当全文作用域。"""
+
+    page_match = _JANE_PAGE_ONE_RE.search(original_text)
+    if page_match is None:
+        return ""
+    try:
+        total_pages = int(page_match.group("total_pages"))
+    except (TypeError, ValueError):
+        return ""
+    # 只对极短资料做这一强判断。长篇综合资料即使包含 Specifications，也只能
+    # 由分类模型结合全文决定，不能把普通目录章节提升为全文作用域。
+    if total_pages > 3:
+        return ""
+    metadata_match = _JANE_METADATA_RE.search(original_text, page_match.end())
+    if metadata_match is None:
+        return ""
+    first_page_end = re.search(
+        r"(?im)^\s*Page\s+2\s+of\s+\d+\s*$",
+        original_text[metadata_match.end():],
+    )
+    first_page_body = original_text[
+        metadata_match.end():
+        (
+            metadata_match.end() + first_page_end.start()
+            if first_page_end is not None
+            else len(original_text)
+        )
+    ]
+    lines = [
+        line.strip().casefold()
+        for line in first_page_body.splitlines()
+        if line.strip()
+    ]
+    try:
+        specifications_index = lines.index("specifications")
+    except ValueError:
+        return ""
+    if "contents" in lines[:specifications_index]:
+        return ""
+    return "technical_specifications"
+
+
+def _build_jane_classification_profile(
+    *,
+    file_name: str,
+    original_name: str,
+    original_text: str,
+) -> _JaneClassificationProfile:
+    active, title = _extract_jane_title(original_text)
+    identity_filename = _as_text(original_name) or _as_text(file_name)
+    if not active:
+        return _JaneClassificationProfile(identity_filename=identity_filename)
+
+    filename_identifiers = _ordered_strong_identifiers(identity_filename)
+    title_identifiers = _ordered_strong_identifiers(title)
+    shared_identifiers = [
+        identifier
+        for identifier in title_identifiers
+        if identifier in set(filename_identifiers)
+    ]
+    filename_qualifier = _extract_scope_qualifier(identity_filename)
+    title_qualifier = _extract_scope_qualifier(title)
+    identifier_conflict = bool(
+        filename_identifiers
+        and title_identifiers
+        and not shared_identifiers
+    )
+    qualifier_conflict = bool(
+        filename_qualifier
+        and title_qualifier
+        and _normalize_scope_qualifier(filename_qualifier)
+        != _normalize_scope_qualifier(title_qualifier)
+    )
+    identity_conflict = identifier_conflict or qualifier_conflict
+    primary_identifier = shared_identifiers[0] if shared_identifiers else ""
+    qualifier = title_qualifier or filename_qualifier
+    qualifier_kind = qualifier.partition(" ")[0].casefold()
+    if qualifier_kind == "flight":
+        scope_kind = "flight"
+    elif qualifier_kind in {"block", "batch"}:
+        scope_kind = "block"
+    elif _JANE_CLASS_RE.search(title):
+        scope_kind = "class"
+    else:
+        scope_kind = "single_model"
+    high_level_branch_hint = (
+        "air_equipment"
+        if _JANE_AIRCRAFT_TOTALS_RE.search(_opening_text(original_text))
+        else ""
+    )
+    dominant_detail_kind = (
+        _jane_dominant_detail_kind(original_text)
+        if scope_kind == "single_model"
+        else ""
+    )
+    return _JaneClassificationProfile(
+        active=True,
+        title=title,
+        identity_filename=identity_filename,
+        filename_identifiers=filename_identifiers,
+        title_identifiers=title_identifiers,
+        primary_identifier=primary_identifier,
+        qualifier=qualifier,
+        scope_kind=scope_kind,
+        high_level_branch_hint=high_level_branch_hint,
+        dominant_detail_kind=dominant_detail_kind,
+        identity_confirmed=bool(primary_identifier) and not identity_conflict,
+        identity_conflict=identity_conflict,
+    )
 
 
 def _has_strong_gjb_filename_identity(*values: Any) -> bool:
@@ -1497,8 +1750,8 @@ def _equipment_detail_kind(node_name: str, parent_name: str) -> str:
 
 
 def _has_seven_equipment_detail_leaves(
-        node: ArchitectureNodeProfile,
-        tree_index: ArchitectureTreeIndex,
+    node: ArchitectureNodeProfile,
+    tree_index: ArchitectureTreeIndex,
 ) -> bool:
     detail_kinds = {
         _equipment_detail_kind(tree_index.require(child_id).name, node.name)
@@ -1506,6 +1759,252 @@ def _has_seven_equipment_detail_leaves(
         if tree_index.require(child_id).is_leaf
     }
     return _EQUIPMENT_DETAIL_KINDS.issubset(detail_kinds)
+
+
+def _equipment_entities_by_identifier(
+    tree_index: ArchitectureTreeIndex,
+) -> dict[str, tuple[int, ...]]:
+    values: dict[str, list[int]] = {}
+    for node in tree_index.nodes:
+        if node.is_leaf or not _has_seven_equipment_detail_leaves(node, tree_index):
+            continue
+        for identifier in _ordered_strong_identifiers(node.name, limit=8):
+            values.setdefault(identifier, []).append(node.id)
+    return {
+        identifier: tuple(dict.fromkeys(node_ids))
+        for identifier, node_ids in values.items()
+    }
+
+
+def _scope_parent_clusters(
+    profile: _JaneClassificationProfile,
+    original_text: str,
+    tree_index: ArchitectureTreeIndex,
+    entities_by_identifier: Mapping[str, Sequence[int]],
+) -> tuple[tuple[int, tuple[int, ...]], ...]:
+    primary_prefix = _identifier_prefix(profile.primary_identifier)
+    if not primary_prefix:
+        return ()
+
+    parent_members: dict[int, list[int]] = {}
+    body_identifiers = _ordered_strong_identifiers(
+        original_text[:20_000],
+        limit=256,
+    )
+    for identifier in body_identifiers:
+        if _identifier_prefix(identifier) != primary_prefix:
+            continue
+        for entity_id in entities_by_identifier.get(identifier, ()):
+            entity = tree_index.require(entity_id)
+            parent_id = entity.parent_id
+            if parent_id not in tree_index.nodes_by_id:
+                continue
+            members = parent_members.setdefault(parent_id, [])
+            if entity_id not in members:
+                members.append(entity_id)
+
+    clusters = [
+        (parent_id, tuple(member_ids))
+        for parent_id, member_ids in parent_members.items()
+        if len(member_ids) >= 2
+    ]
+    clusters.sort(key=lambda item: tree_index.require(item[0]).ordinal)
+    return tuple(clusters)
+
+
+def _parent_matches_scope_qualifier(
+    parent: ArchitectureNodeProfile,
+    qualifier: str,
+) -> bool:
+    normalized_qualifier = _normalize_scope_qualifier(qualifier)
+    for prefix in ("flight", "block", "batch"):
+        if normalized_qualifier.startswith(prefix):
+            normalized_qualifier = normalized_qualifier[len(prefix):]
+            break
+    if not normalized_qualifier:
+        return False
+    normalized_parent = re.sub(
+        r"[^a-z0-9\u3400-\u4dbf\u4e00-\u9fff]+",
+        "",
+        unicodedata.normalize("NFKC", parent.name).casefold(),
+    )
+    return normalized_qualifier in normalized_parent
+
+
+def _parent_declares_scope_qualifier(
+    parent: ArchitectureNodeProfile,
+) -> bool:
+    normalized = unicodedata.normalize("NFKC", parent.name).casefold()
+    return bool(
+        re.search(r"(?:flight|block)\s*[0-9ivxlcdm]", normalized)
+        or re.search(r"[ivxlcdm]+[a-z]?\s*型", normalized)
+        or re.search(
+            r"第[一二三四五六七八九十百0-9]+\s*批次",
+            normalized,
+        )
+    )
+
+
+def _unique_air_equipment_parent_id(
+    tree_index: ArchitectureTreeIndex,
+) -> int | None:
+    matches = [
+        node.id
+        for node in tree_index.nodes
+        if (
+            not node.is_leaf
+            and node.parent_id is not None
+            and unicodedata.normalize("NFKC", node.name).strip() == "空中装备"
+        )
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_jane_architecture_scope(
+    profile: _JaneClassificationProfile,
+    *,
+    original_text: str,
+    tree_index: ArchitectureTreeIndex,
+) -> _ArchitectureScopeResolution:
+    if not profile.active:
+        return _ArchitectureScopeResolution()
+    if profile.identity_conflict:
+        return _ArchitectureScopeResolution(reason_code="no_constraint_conflict")
+    if not profile.identity_confirmed:
+        return _ArchitectureScopeResolution()
+
+    entities_by_identifier = _equipment_entities_by_identifier(tree_index)
+    primary_entity_ids = tuple(
+        dict.fromkeys(
+            entities_by_identifier.get(profile.primary_identifier, ())
+        )
+    )
+    if profile.scope_kind in {"class", "flight", "block"}:
+        clusters = _scope_parent_clusters(
+            profile,
+            original_text,
+            tree_index,
+            entities_by_identifier,
+        )
+        clustered_parent_ids = tuple(parent_id for parent_id, _members in clusters)
+        if not clustered_parent_ids:
+            return _ArchitectureScopeResolution()
+
+        qualifier_matches = tuple(
+            parent_id
+            for parent_id in clustered_parent_ids
+            if _parent_matches_scope_qualifier(
+                tree_index.require(parent_id),
+                profile.qualifier,
+            )
+        )
+        primary_parent_ids = tuple(
+            dict.fromkeys(
+                tree_index.require(entity_id).parent_id
+                for entity_id in primary_entity_ids
+                if tree_index.require(entity_id).parent_id
+                in tree_index.nodes_by_id
+            )
+        )
+        selected_parent_id: int | None = None
+        tree_gap = False
+        reason_code = "jane_scope_parent"
+        if len(qualifier_matches) == 1:
+            selected_parent_id = qualifier_matches[0]
+        elif (
+            len(clustered_parent_ids) == 1
+            and profile.scope_kind in {"flight", "block"}
+            and not _parent_declares_scope_qualifier(
+                tree_index.require(clustered_parent_ids[0])
+            )
+        ):
+            # 部分树只建总类节点而未把 Jane's Flight 0/Block 限定写进节点名。
+            # 仅当父节点本身没有声明批次时才允许降级；若父节点已声明了
+            # 不匹配的 Flight/Block/批次，即使主型号挂在该父下也不能选中。
+            selected_parent_id = clustered_parent_ids[0]
+        elif (
+            len(clustered_parent_ids) == 1
+            and profile.scope_kind == "class"
+        ):
+            selected_parent_id = clustered_parent_ids[0]
+        elif profile.scope_kind == "class":
+            lead_matches = tuple(
+                parent_id
+                for parent_id in primary_parent_ids
+                if parent_id in clustered_parent_ids
+            )
+            if len(lead_matches) == 1:
+                selected_parent_id = lead_matches[0]
+                tree_gap = True
+                reason_code = "jane_tree_gap_lead_parent"
+
+        if selected_parent_id is None:
+            return _ArchitectureScopeResolution(
+                clustered_parent_ids=clustered_parent_ids,
+            )
+        return _ArchitectureScopeResolution(
+            matched_scope_parent_id=selected_parent_id,
+            matched_branch_parent_id=selected_parent_id,
+            clustered_parent_ids=clustered_parent_ids,
+            protected_parent_reasons=(
+                (selected_parent_id, (reason_code,)),
+            ),
+            reason_code=reason_code,
+            tree_gap=tree_gap,
+        )
+
+    if len(primary_entity_ids) == 1:
+        branch_parent_id = primary_entity_ids[0]
+        return _ArchitectureScopeResolution(
+            matched_scope_parent_id=branch_parent_id,
+            matched_branch_parent_id=branch_parent_id,
+            protected_parent_reasons=(
+                (branch_parent_id, ("jane_branch_guard",)),
+            ),
+            reason_code="jane_branch_guard",
+        )
+
+    if (
+        not primary_entity_ids
+        and profile.high_level_branch_hint == "air_equipment"
+    ):
+        air_parent_id = _unique_air_equipment_parent_id(tree_index)
+        if air_parent_id is not None:
+            return _ArchitectureScopeResolution(
+                matched_scope_parent_id=air_parent_id,
+                matched_branch_parent_id=air_parent_id,
+                protected_parent_reasons=(
+                    (air_parent_id, ("jane_high_level_branch",)),
+                ),
+                reason_code="jane_high_level_branch",
+            )
+    return _ArchitectureScopeResolution()
+
+
+def _jane_classification_prompt_context(
+    profile: _JaneClassificationProfile,
+    resolution: _ArchitectureScopeResolution,
+) -> dict[str, Any]:
+    if not profile.active:
+        return {}
+    context: dict[str, Any] = {
+        "title": profile.title,
+        "primaryIdentifier": profile.primary_identifier,
+        "qualifier": profile.qualifier,
+        "scopeKind": profile.scope_kind,
+        "highLevelBranchHint": profile.high_level_branch_hint,
+        # 只有领域树已确认到具体装备实体时才把全文明细作用域交给模型。
+        # MH-60R 这类仅能确认高层分支的树缺口场景不得据此猜测具体机型叶子。
+        "dominantDetailKind": (
+            profile.dominant_detail_kind
+            if resolution.reason_code == "jane_branch_guard"
+            else ""
+        ),
+    }
+    if profile.scope_kind in {"class", "flight", "block"}:
+        context["matchedScopeParentId"] = resolution.matched_scope_parent_id
+        context["treeGap"] = resolution.tree_gap
+    return context
 
 
 def _unique_visible_equipment_identifier_parent(
@@ -1549,16 +2048,36 @@ def _unique_visible_equipment_identifier_parent(
     return unique_ids[0]
 
 
-def _apply_topk_deterministic_architecture_constraints(
-        architecture_id: int,
-        *,
-        file_name: str,
-        original_name: str,
-        visible_ids: set[int],
-        tree_index: ArchitectureTreeIndex,
-        architecture_list: Iterable[Dict[str, Any]],
-) -> int:
+def _architecture_id_is_in_branch(
+    architecture_id: int,
+    branch_parent_id: int,
+    tree_index: ArchitectureTreeIndex,
+) -> bool:
+    return (
+        architecture_id == branch_parent_id
+        or branch_parent_id in tree_index.ancestors_by_id[architecture_id]
+    )
+
+
+def _decide_topk_deterministic_architecture_constraint(
+    architecture_id: int,
+    *,
+    file_name: str,
+    original_name: str,
+    visible_ids: set[int],
+    tree_index: ArchitectureTreeIndex,
+    architecture_list: Iterable[Dict[str, Any]],
+    filename_constraint_mode: str = ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    jane_profile: _JaneClassificationProfile | None = None,
+    scope_resolution: _ArchitectureScopeResolution | None = None,
+) -> _ArchitectureConstraintDecision:
     """应用高置信文件信号约束，防止模型越过明确的数据标准或装备分支。"""
+
+    filename_constraint_mode = _normalize_analysis_filename_constraint_mode(
+        filename_constraint_mode
+    )
+    profile = jane_profile or _JaneClassificationProfile()
+    resolution = scope_resolution or _ArchitectureScopeResolution()
     if _has_strong_gjb_filename_identity(file_name, original_name):
         visible_standard_ids = tuple(
             node_id
@@ -1578,12 +2097,92 @@ def _apply_topk_deterministic_architecture_constraints(
                     architecture_id,
                     constrained_id,
                 )
-            return _validate_topk_architecture_id(
+            validated_id = _validate_topk_architecture_id(
                 constrained_id,
                 visible_ids=visible_ids,
                 tree_index=tree_index,
                 architecture_list=architecture_list,
             )
+            return _ArchitectureConstraintDecision(
+                pre_architecture_id=architecture_id,
+                post_architecture_id=validated_id,
+                reason_code="",
+                matched_scope_parent_id=None,
+                tree_gap=False,
+            )
+
+    use_scope_guard = (
+        filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        and profile.active
+    )
+    if use_scope_guard:
+        if profile.identity_conflict:
+            return _ArchitectureConstraintDecision(
+                architecture_id,
+                architecture_id,
+                "no_constraint_conflict",
+                None,
+                False,
+            )
+        if not profile.identity_confirmed:
+            return _ArchitectureConstraintDecision(
+                architecture_id,
+                architecture_id,
+                "no_constraint_insufficient_evidence",
+                None,
+                False,
+            )
+
+        matched_parent_id = resolution.matched_branch_parent_id
+        if matched_parent_id is None or matched_parent_id not in visible_ids:
+            return _ArchitectureConstraintDecision(
+                architecture_id,
+                architecture_id,
+                "no_constraint_insufficient_evidence",
+                resolution.matched_scope_parent_id,
+                resolution.tree_gap,
+            )
+
+        if profile.scope_kind in {"class", "flight", "block"}:
+            constrained_id = matched_parent_id
+            reason_code = (
+                "jane_tree_gap_lead_parent"
+                if resolution.tree_gap
+                else (
+                    "jane_scope_parent"
+                    if _architecture_id_is_in_branch(
+                        architecture_id,
+                        matched_parent_id,
+                        tree_index,
+                    )
+                    else "jane_branch_guard"
+                )
+            )
+        elif _architecture_id_is_in_branch(
+            architecture_id,
+            matched_parent_id,
+            tree_index,
+        ):
+            constrained_id = architecture_id
+            reason_code = resolution.reason_code
+        else:
+            constrained_id = matched_parent_id
+            reason_code = resolution.reason_code
+
+        validated_id = _validate_topk_architecture_id(
+            constrained_id,
+            visible_ids=visible_ids,
+            tree_index=tree_index,
+            architecture_list=architecture_list,
+        )
+        return _ArchitectureConstraintDecision(
+            pre_architecture_id=architecture_id,
+            post_architecture_id=validated_id,
+            reason_code=reason_code,
+            matched_scope_parent_id=resolution.matched_scope_parent_id,
+            tree_gap=resolution.tree_gap,
+        )
 
     matched_parent_id = _unique_visible_equipment_identifier_parent(
         file_name=file_name,
@@ -1593,18 +2192,26 @@ def _apply_topk_deterministic_architecture_constraints(
         architecture_list=architecture_list,
     )
     if matched_parent_id is None:
-        return architecture_id
-
-    allowed_branch_ids = {
-        node_id
-        for node_id in visible_ids
-        if (
-            node_id == matched_parent_id
-            or matched_parent_id in tree_index.ancestors_by_id[node_id]
+        return _ArchitectureConstraintDecision(
+            architecture_id,
+            architecture_id,
+            "no_constraint_insufficient_evidence",
+            None,
+            False,
         )
-    }
-    if architecture_id in allowed_branch_ids:
-        return architecture_id
+
+    if _architecture_id_is_in_branch(
+        architecture_id,
+        matched_parent_id,
+        tree_index,
+    ):
+        return _ArchitectureConstraintDecision(
+            architecture_id,
+            architecture_id,
+            "legacy_identifier_parent",
+            matched_parent_id,
+            False,
+        )
 
     logger.info(
         "文件名强标识约束覆盖越支分类: original_architecture_id=%s "
@@ -1612,11 +2219,77 @@ def _apply_topk_deterministic_architecture_constraints(
         architecture_id,
         matched_parent_id,
     )
-    return _validate_topk_architecture_id(
+    validated_id = _validate_topk_architecture_id(
         matched_parent_id,
         visible_ids=visible_ids,
         tree_index=tree_index,
         architecture_list=architecture_list,
+    )
+    return _ArchitectureConstraintDecision(
+        pre_architecture_id=architecture_id,
+        post_architecture_id=validated_id,
+        reason_code="legacy_identifier_parent",
+        matched_scope_parent_id=matched_parent_id,
+        tree_gap=False,
+    )
+
+
+def _apply_topk_deterministic_architecture_constraints(
+    architecture_id: int,
+    *,
+    file_name: str,
+    original_name: str,
+    visible_ids: set[int],
+    tree_index: ArchitectureTreeIndex,
+    architecture_list: Iterable[Dict[str, Any]],
+    filename_constraint_mode: str = ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    jane_profile: _JaneClassificationProfile | None = None,
+    scope_resolution: _ArchitectureScopeResolution | None = None,
+) -> int:
+    """兼容旧内部调用，只返回确定性约束后的 ID。"""
+
+    return _decide_topk_deterministic_architecture_constraint(
+        architecture_id,
+        file_name=file_name,
+        original_name=original_name,
+        visible_ids=visible_ids,
+        tree_index=tree_index,
+        architecture_list=architecture_list,
+        filename_constraint_mode=filename_constraint_mode,
+        jane_profile=jane_profile,
+        scope_resolution=scope_resolution,
+    ).post_architecture_id
+
+
+def _log_architecture_constraint_decision(
+    *,
+    execution_id: str,
+    file_name: str,
+    filename_constraint_mode: str,
+    profile: _JaneClassificationProfile,
+    decision: _ArchitectureConstraintDecision,
+) -> None:
+    # GJB 分支沿用既有专用日志；方案未定义新的 GJB 原因码，避免写入空值或
+    # 擅自扩展固定枚举。
+    if not decision.reason_code:
+        return
+    payload = {
+        "executionId": execution_id,
+        "fileName": file_name,
+        "constraintMode": filename_constraint_mode,
+        "scopeKind": profile.scope_kind,
+        "extractedTitle": profile.title,
+        "primaryIdentifier": profile.primary_identifier,
+        "qualifier": profile.qualifier,
+        "matchedScopeParentId": decision.matched_scope_parent_id,
+        "preConstraintArchitectureId": decision.pre_architecture_id,
+        "postConstraintArchitectureId": decision.post_architecture_id,
+        "constraintReasonCode": decision.reason_code,
+        "treeGap": decision.tree_gap,
+    }
+    logger.info(
+        "analysis_architecture_constraint=%s",
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
     )
 
 
@@ -2029,6 +2702,9 @@ def _execute_file_analysis_task(
         document_rag_factory: DocumentRagFactory,
         knowledge_index_factory: KnowledgeIndexFactory,
         analysis_classification_mode: str = "topk_two_stage",
+        analysis_filename_constraint_mode: str = (
+            ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+        ),
 ) -> None:
     """按审计硬前置契约执行单文件分析和永久知识库转交。
 
@@ -2042,6 +2718,9 @@ def _execute_file_analysis_task(
         raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
     classification_mode = _normalize_analysis_classification_mode(
         analysis_classification_mode
+    )
+    filename_constraint_mode = _normalize_analysis_filename_constraint_mode(
+        analysis_filename_constraint_mode
     )
     # 三种运行模式都必须先持久化模型可见候选，审计故障时禁止创建远端 Session。
     # legacy 仍发送完整小树，但同样受全局 128 候选与 32K Prompt 硬门禁约束。
@@ -2074,6 +2753,9 @@ def _execute_file_analysis_task(
     visible_candidates: tuple[Dict[str, Any], ...] = ()
     visible_ids: set[int] = set()
     resolved_direct_architecture_id: int | None = None
+    jane_profile = _JaneClassificationProfile()
+    scope_resolution = _ArchitectureScopeResolution()
+    constraint_decision: _ArchitectureConstraintDecision | None = None
 
     def persist_initial_recall_audit(fields: Dict[str, Any]) -> None:
         task_service.upsert_architecture_recall_decision(
@@ -2180,10 +2862,21 @@ def _execute_file_analysis_task(
 
     ranges = build_effective_analysis_ranges(params)
     architecture_list = ranges["architectureList"]
+    jane_profile = _build_jane_classification_profile(
+        file_name=file_name,
+        original_name=original_name,
+        original_text=original_text,
+    )
+    scope_guard_active = (
+        filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        and jane_profile.active
+    )
     signals = _build_analysis_architecture_signals(
         file_name=file_name,
         original_name=original_name,
         original_text=original_text,
+        title_override=jane_profile.title if scope_guard_active else "",
     )
     signal_digest = _architecture_signal_digest(signals)
     index_started_at = time.perf_counter()
@@ -2207,6 +2900,13 @@ def _execute_file_analysis_task(
             fields=fields,
         )
         return
+
+    if scope_guard_active:
+        scope_resolution = _resolve_jane_architecture_scope(
+            jane_profile,
+            original_text=original_text,
+            tree_index=tree_index,
+        )
 
     try:
         if classification_mode == "legacy":
@@ -2249,6 +2949,17 @@ def _execute_file_analysis_task(
                     signals,
                     prompt_char_limit=2_000_000,
                     prompt_overhead_chars=0,
+                    strong_evidence_only=scope_guard_active,
+                    strong_identity_enabled=(
+                        jane_profile.identity_confirmed
+                        if scope_guard_active
+                        else True
+                    ),
+                    preferred_parent_reasons=(
+                        scope_resolution.preferred_parent_reasons
+                        if scope_guard_active
+                        else None
+                    ),
                 )
                 visible_candidates = recall_decision.prompt_candidates
                 visible_ids = set(recall_decision.final_candidate_ids)
@@ -2283,17 +2994,44 @@ def _execute_file_analysis_task(
                     build_architecture_classification_prompt(
                         params,
                         visible_candidates,
+                        classification_context=(
+                            _jane_classification_prompt_context(
+                                jane_profile,
+                                scope_resolution,
+                            )
+                            if scope_guard_active
+                            else None
+                        ),
                     )
                 )
             else:
                 limited_params = dict(params)
                 limited_params["architectureList"] = list(visible_candidates)
+                scope_contract = ""
+                if scope_guard_active:
+                    scope_contract = (
+                        "\n【简氏作用域分类补充规则】\n"
+                        "按全文主要对象和覆盖粒度分类；class 文档的首舰号只标识舰级，"
+                        "Fleetlist 成员不能单独决定最终分类；Flight、Block、批次限定词"
+                        "优先于基础型号；只有全文主要描述明细类别时才选择明细叶子。\n"
+                        "服务端首页画像："
+                        + json.dumps(
+                            _jane_classification_prompt_context(
+                                jane_profile,
+                                scope_resolution,
+                            ),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
                 analysis_prompt = normalize_rag_prompt(
                     build_file_analysis_prompt(limited_params)
                     + "\n【topk_single 受限候选补充合同】\n"
                     + "下方 JSON 是本次完整且唯一可选的模型候选，nodeType 必须保留语义。"
                     + "证据足以支持 leaf 时优先叶子；叶子证据不足但能可靠确定 parent 时，"
                     + "允许返回候选中最深的 parent。此规则替代上文只允许叶子的旧规则。\n"
+                    + scope_contract
                     + json.dumps(
                         list(visible_candidates),
                         ensure_ascii=False,
@@ -2567,14 +3305,20 @@ def _execute_file_analysis_task(
 
                 if architecture_id is None:
                     raise ArchitectureContractError("无法确定领域分类")
-                architecture_id = _apply_topk_deterministic_architecture_constraints(
-                    architecture_id,
-                    file_name=file_name,
-                    original_name=original_name,
-                    visible_ids=visible_ids,
-                    tree_index=tree_index,
-                    architecture_list=architecture_list,
+                constraint_decision = (
+                    _decide_topk_deterministic_architecture_constraint(
+                        architecture_id,
+                        file_name=file_name,
+                        original_name=original_name,
+                        visible_ids=visible_ids,
+                        tree_index=tree_index,
+                        architecture_list=architecture_list,
+                        filename_constraint_mode=filename_constraint_mode,
+                        jane_profile=jane_profile,
+                        scope_resolution=scope_resolution,
+                    )
                 )
+                architecture_id = constraint_decision.post_architecture_id
                 selected_node = tree_index.require(architecture_id)
                 include_standard_fields = _is_architecture_in_standard_range(
                     architecture_id,
@@ -2787,13 +3531,27 @@ def _execute_file_analysis_task(
                                 )
                             )
 
-            architecture_id = _apply_topk_deterministic_architecture_constraints(
-                architecture_id,
+            if constraint_decision is None:
+                constraint_decision = (
+                    _decide_topk_deterministic_architecture_constraint(
+                        architecture_id,
+                        file_name=file_name,
+                        original_name=original_name,
+                        visible_ids=visible_ids,
+                        tree_index=tree_index,
+                        architecture_list=architecture_list,
+                        filename_constraint_mode=filename_constraint_mode,
+                        jane_profile=jane_profile,
+                        scope_resolution=scope_resolution,
+                    )
+                )
+            architecture_id = constraint_decision.post_architecture_id
+            _log_architecture_constraint_decision(
+                execution_id=execution_id,
                 file_name=file_name,
-                original_name=original_name,
-                visible_ids=visible_ids,
-                tree_index=tree_index,
-                architecture_list=architecture_list,
+                filename_constraint_mode=filename_constraint_mode,
+                profile=jane_profile,
+                decision=constraint_decision,
             )
             if len(session.trace.attempts) > MAX_ANALYSIS_MODEL_CALLS:
                 raise AnalysisContractError("文件分析实际模型调用超过 4 次")
@@ -3222,6 +3980,9 @@ def run_file_analysis_task(
         document_rag_factory: DocumentRagFactory,
         knowledge_index_factory: KnowledgeIndexFactory,
         analysis_classification_mode: str = "topk_two_stage",
+        analysis_filename_constraint_mode: str = (
+            ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+        ),
 ) -> None:
     """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
 
@@ -3240,6 +4001,7 @@ def run_file_analysis_task(
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
             analysis_classification_mode=analysis_classification_mode,
+            analysis_filename_constraint_mode=analysis_filename_constraint_mode,
         )
     except Exception as exc:
         params_list = request_payload.get("params", [])
@@ -3335,6 +4097,9 @@ def run_file_analysis_batch_task(
         document_rag_factory: DocumentRagFactory,
         knowledge_index_factory: KnowledgeIndexFactory,
         analysis_classification_mode: str = "topk_two_stage",
+        analysis_filename_constraint_mode: str = (
+            ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+        ),
 ) -> None:
     """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
@@ -3363,4 +4128,5 @@ def run_file_analysis_batch_task(
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
             analysis_classification_mode=analysis_classification_mode,
+            analysis_filename_constraint_mode=analysis_filename_constraint_mode,
         )

@@ -118,6 +118,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
             knowledge_factory: FakeKnowledgeIndexFactory | None = None,
             recall_side_effect=None,
             mode: str = "topk_two_stage",
+            filename_constraint_mode: str = "legacy",
     ):
         file_name = request["params"][0]["fileName"]
         local_file = Path(tmp, file_name)
@@ -166,6 +167,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 document_rag_factory=rag_factory,
                 knowledge_index_factory=knowledge_factory,
                 analysis_classification_mode=mode,
+                analysis_filename_constraint_mode=filename_constraint_mode,
             )
         return (
             task_service,
@@ -250,6 +252,45 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertNotIn("模型候选", interaction["prompt"])
         # 完整树仍用于 storage，基础数据叶子归并到装备父节点 10。
         self.assertIn(10, knowledge.ports[0]._collections_by_architecture)
+
+    def test_two_stage_constraint_decision_is_computed_once_and_reused(self):
+        with workspace_tempdir() as tmp:
+            file_name = "constraint-once.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":11}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            with patch(
+                "app.services.llm_service.analysis_service."
+                "_decide_topk_deterministic_architecture_constraint",
+                wraps=getattr(
+                    analysis_service,
+                    "_decide_topk_deterministic_architecture_constraint",
+                ),
+            ) as decide_constraint:
+                _service, task, recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=(
+                        lambda index, *_args, **_kwargs: self._decision(index)
+                    ),
+                )
+
+        self.assertEqual(decide_constraint.call_count, 1)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 11)
+        self.assertEqual(recall["returned_architecture_id"], 11)
 
     def test_full_tree_root_outside_visible_candidates_is_repaired_with_identical_candidates(self):
         with workspace_tempdir() as tmp:
