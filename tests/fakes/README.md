@@ -1,4 +1,4 @@
-# 文件对话测试替身目录说明
+# 测试替身目录说明
 
 本目录保存离线测试使用的端口替身。替身模拟供应商无关协议，而不是复制 AnythingLLM 的 HTTP 细节；这样应用服务、路由和状态机测试无需启动任何后台服务。
 
@@ -11,6 +11,7 @@
 | `knowledge_index.py` | 知识索引端口替身。 |
 | `rag.py` | RAG 端口替身。 |
 | `tasks.py` | Task Read、同步 Callback Recovery 原型、批量原子 Callback Recovery Command、Progress Snapshot/Subscription 可编程替身。 |
+| `report.py` | Report Task Command、Progress Publisher、File、Artifact、RAG、Interaction Audit、Callback、Resource Store 和 Dispatcher 严格 Fake；共享全局调用记录，支持逐步骤/任务事实写入故障、CAS、Artifact 身份与类别错误注入。 |
 
 ## 文件对话替身工作流程
 
@@ -27,3 +28,5 @@
 - 任务替身必须按 TaskId 保存历史执行、按业务引用保存最新投影；故障注入和调用记录必须显式，不能自动吞掉端口契约错误。
 - 可靠命令替身必须在锁保护下先于局部副本计算整批结果，全部成功后才提交活动命令
   状态；串行或并发重复 TaskId 均复用同一 recovery request ID，事务故障不得留下部分状态。
+- 报告替身不得访问真实文件或“自动完成”Application 应负责的补偿；跨 TaskId、trace、
+  Artifact 和 Receipt 身份错误必须原样返回，让应用层门禁测试能够确定性失败。

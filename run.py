@@ -33,7 +33,16 @@ def main() -> None:
         port,
         debug,
     )
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    # 报告 Dispatcher 当前明确是单实例进程内 Worker。Werkzeug debug reloader 会先在
+    # 监控父进程创建应用，再启动子进程，从而同时产生两个 Dispatcher。保留 debug
+    # 错误页和日志，但关闭自动重载；代码变更后由开发者显式重启进程。
+    app.run(
+        host=host,
+        port=port,
+        debug=debug,
+        threaded=True,
+        use_reloader=False,
+    )
 
 
 if __name__ == "__main__":

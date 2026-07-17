@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,6 +43,14 @@ class ProgressHubEvent:
 EventSubscriber = Callable[[ProgressHubEvent], None]
 
 
+@dataclass
+class _PublicationLockEntry:
+    """一把按业务键复用并在无人使用时回收的发布锁。"""
+
+    lock: RLock
+    user_count: int = 0
+
+
 class LLMProgressHub:
     """线程安全的单实例 Progress Hub，并兼容旧调用接口。
 
@@ -63,6 +72,10 @@ class LLMProgressHub:
             List[EventSubscriber],
         ] = defaultdict(list)
         self._latest: Dict[Tuple[str, str], ProgressHubEvent] = {}
+        self._publication_locks: Dict[
+            Tuple[str, str],
+            _PublicationLockEntry,
+        ] = {}
 
     def subscribe(
         self,
@@ -175,7 +188,9 @@ class LLMProgressHub:
         payload: Dict[str, Any],
         *,
         task_id: str = "",
-    ) -> None:
+        allow_task_handoff: bool = True,
+        publication_guard: Callable[[], bool] | None = None,
+    ) -> bool:
         """更新 latest 后在锁外通知全部订阅者。
 
         ``task_id`` 是内部可选参数，不进入公开消息。任务受理入口会传入真实
@@ -185,33 +200,85 @@ class LLMProgressHub:
 
         if not isinstance(payload, dict):
             raise TypeError("payload 必须是 dict")
+        if not isinstance(allow_task_handoff, bool):
+            raise TypeError("allow_task_handoff 必须是 bool")
+        if publication_guard is not None and not callable(publication_guard):
+            raise TypeError("publication_guard 必须可调用或为 None")
         key = (business_type, business_key)
         normalized_payload = deepcopy(normalize_progress_payload(deepcopy(payload)))
         requested_task_id = str(task_id or "").strip()
 
-        with self._lock:
-            previous = self._latest.get(key)
-            effective_task_id = (
-                requested_task_id
-                or (previous.task_id if previous is not None else "")
-                or self._legacy_task_id(business_type, business_key)
+        # 持久化 Guard 可能在未来通过 MySQL 或网络 Repository 查询，不能占用全局 Hub
+        # 状态锁。按业务键发布锁仍保证同一键的 Guard 与 latest 更新串行；不同键则可以
+        # 并发执行。发布锁在最后一个使用者退出后回收，不随历史业务键无限增长。
+        with self._publication_lock(key):
+            with self._lock:
+                previous = self._latest.get(key)
+            if (
+                previous is not None
+                and requested_task_id
+                and previous.task_id != requested_task_id
+                and not allow_task_handoff
+            ):
+                blocked_by_task_id = previous.task_id
+                blocked_reason = "task_handoff_forbidden"
+            else:
+                blocked_by_task_id = ""
+                blocked_reason = ""
+
+            if not blocked_reason and publication_guard is not None:
+                guard_result = publication_guard()
+                if not isinstance(guard_result, bool):
+                    raise TypeError("publication_guard 必须返回 bool")
+                if not guard_result:
+                    blocked_reason = "persistent_owner_changed"
+                    blocked_by_task_id = previous.task_id if previous else ""
+
+            with self._lock:
+                if blocked_reason:
+                    event = None
+                    legacy_subscribers = ()
+                    event_subscribers = ()
+                else:
+                    # 同一键的所有 publish 都持有 publication lock，因此 Guard 期间
+                    # previous 不会被另一个发布者改变；这里只短暂持有全局状态锁提交内存
+                    # 快照和复制订阅者，不执行任何数据库或回调 I/O。
+                    effective_task_id = (
+                        requested_task_id
+                        or (previous.task_id if previous is not None else "")
+                        or self._legacy_task_id(business_type, business_key)
+                    )
+                    sequence_no = (
+                        previous.sequence_no + 1
+                        if previous is not None
+                        and previous.task_id == effective_task_id
+                        else 1
+                    )
+                    event = ProgressHubEvent(
+                        business_type=business_type,
+                        business_key=business_key,
+                        task_id=effective_task_id,
+                        sequence_no=sequence_no,
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                        payload=normalized_payload,
+                    )
+                    self._latest[key] = event
+                    legacy_subscribers = tuple(self._subscribers.get(key, ()))
+                    event_subscribers = tuple(
+                        self._event_subscribers.get(key, ())
+                    )
+
+        if event is None:
+            logger.warning(
+                "拒绝过期 Progress 覆盖较新任务: business_type=%s business_key=%s "
+                "expected_task_id=%s current_task_id=%s reason=%s",
+                business_type,
+                business_key,
+                requested_task_id,
+                blocked_by_task_id or "-",
+                blocked_reason,
             )
-            sequence_no = (
-                previous.sequence_no + 1
-                if previous is not None and previous.task_id == effective_task_id
-                else 1
-            )
-            event = ProgressHubEvent(
-                business_type=business_type,
-                business_key=business_key,
-                task_id=effective_task_id,
-                sequence_no=sequence_no,
-                updated_at=datetime.now(timezone.utc).isoformat(),
-                payload=normalized_payload,
-            )
-            self._latest[key] = event
-            legacy_subscribers = tuple(self._subscribers.get(key, ()))
-            event_subscribers = tuple(self._event_subscribers.get(key, ()))
+            return False
 
         logger.debug(
             "发布 Progress 内存事件: business_type=%s business_key=%s "
@@ -226,6 +293,27 @@ class LLMProgressHub:
             self._invoke_legacy_subscriber(callback, event, replay=False)
         for callback in event_subscribers:
             self._invoke_event_subscriber(callback, event, replay=False)
+        return True
+
+    @contextmanager
+    def _publication_lock(self, key: Tuple[str, str]):
+        """取得按键发布锁，并在无等待者/持有者时删除索引项。"""
+
+        with self._lock:
+            entry = self._publication_locks.get(key)
+            if entry is None:
+                entry = _PublicationLockEntry(RLock())
+                self._publication_locks[key] = entry
+            entry.user_count += 1
+        entry.lock.acquire()
+        try:
+            yield
+        finally:
+            entry.lock.release()
+            with self._lock:
+                entry.user_count -= 1
+                if entry.user_count == 0:
+                    self._publication_locks.pop(key, None)
 
     @classmethod
     def _legacy_task_id(cls, business_type: str, business_key: str) -> str:

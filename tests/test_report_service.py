@@ -71,7 +71,7 @@ class LLMReportServiceTests(unittest.TestCase):
         mock_download,
         mock_normalize,
         mock_prepare,
-        _mock_rag,
+        mock_rag,
         _mock_extract,
         _mock_callback,
     ):
@@ -116,6 +116,12 @@ class LLMReportServiceTests(unittest.TestCase):
 
         mock_normalize.assert_called_once_with(str(sample))
         mock_prepare.assert_called_once_with(str(normalized))
+        rag_arguments = mock_rag.call_args.kwargs
+        self.assertEqual("report-132", rag_arguments["thread_name"])
+        self.assertRegex(
+            rag_arguments["workspace_name"],
+            r"^llm-report-132-\d+$",
+        )
 
     @patch("app.services.llm_service.report_service.post_callback_payload", return_value=True)
     @patch("app.services.llm_service.report_service.extract_text_from_word", return_value="模板大纲文本")
@@ -220,7 +226,79 @@ class LLMReportServiceTests(unittest.TestCase):
             self.assertEqual(task["status"], "1")
             self.assertEqual(task["callback_status"], "success")
             self.assertEqual(task["result_payload"]["msg"], "生成成功")
-            self.assertEqual(events[-1]["data"]["progress"], 1.0)
+            self.assertEqual(
+                [0.15, 0.25, 0.35, 1.0],
+                [event["data"]["progress"] for event in events],
+            )
+
+    @patch("app.services.llm_service.report_service.post_callback_payload", return_value=True)
+    @patch("app.services.llm_service.report_service.extract_text_from_word", return_value="模板大纲文本")
+    @patch("app.services.llm_service.report_service.run_anythingllm_rag", return_value=None)
+    @patch("app.services.llm_service.report_service.prepare_upload_files")
+    @patch("app.services.llm_service.report_service.normalize_file_for_llm", side_effect=lambda path: path)
+    @patch("app.services.llm_service.report_service.download_to_temp_file")
+    def test_run_report_task_keeps_empty_rag_result_success_and_logs_quality_signal(
+        self,
+        mock_download,
+        _mock_normalize,
+        mock_prepare,
+        _mock_rag,
+        _mock_extract,
+        mock_callback,
+    ):
+        """空模型结果仍成功，但必须留下不进入公开载荷的结构化质量信号。"""
+
+        with workspace_tempdir() as tmp:
+            sample = Path(tmp) / "sample.txt"
+            sample.write_text("sample", encoding="utf-8")
+            mock_download.return_value = str(sample)
+            mock_prepare.return_value = [str(sample)]
+            request_payload = {
+                "businessType": "report",
+                "params": [
+                    {
+                        "reportId": 132,
+                        "filePathList": ["http://127.0.0.1:8000/sample.txt"],
+                        "templateDesc": "模板",
+                        "templateOutline": "http://127.0.0.1:8000/template.docx",
+                        "requirement": "要求",
+                    }
+                ],
+            }
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_service.create_report_task(132, request_payload)
+
+            from app.services.llm_service.report_service import run_report_task
+
+            with self.assertLogs(
+                "app.services.llm_service.report_service",
+                level="WARNING",
+            ) as captured:
+                run_report_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="http://127.0.0.1:9000/llm/callback",
+                    callback_timeout=5,
+                )
+
+            task = task_service.get_task("report", "132")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual("1", task["status"])
+        self.assertEqual("生成成功", task["result_payload"]["msg"])
+        self.assertEqual(
+            '<div class="report-content"><pre></pre></div>',
+            task["result_payload"]["data"]["details"],
+        )
+        self.assertTrue(
+            any("empty_rag_result=true" in message for message in captured.output)
+        )
+        callback_payload = mock_callback.call_args.args[1]
+        self.assertEqual("1", callback_payload["data"]["status"])
+        self.assertNotIn("empty_rag_result", callback_payload)
 
     @patch("app.services.llm_service.report_service.post_callback_payload", return_value=True)
     @patch("app.services.llm_service.report_service.extract_text_from_word", return_value="Word模板中的大纲")

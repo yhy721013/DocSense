@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -22,13 +24,34 @@ from app.ports import (
     KnowledgeIndexFactory,
     KnowledgeIndexPort,
 )
-from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
+from app.services.core.config import (
+    AnythingLLMConfig,
+    LLMIntegrationConfig,
+    ReportInfrastructureConfig,
+    ReportInfrastructureConfigurationError,
+    load_report_infrastructure_config,
+)
 from app.container import (
     APPLICATION_SERVICES_EXTENSION,
     ApplicationServices,
     UploadTaskLimiter,
 )
-from app.modules.tasks.adapters import InMemoryProgressAdapter, LegacyTaskReadAdapter
+from app.modules.report.adapters import (
+    AnythingLLMReportClientFactory,
+    ReportTaskCommandCodec,
+    SQLiteReportCallbackAdapter,
+    SQLiteReportCallbackRecoverySource,
+)
+from app.modules.report.application import (
+    RecoverReportCallbackSynchronously,
+    SubmitReportTask,
+)
+from app.modules.tasks.adapters import (
+    InMemoryProgressAdapter,
+    LegacyTaskCommandAdapter,
+    LegacyTaskReadAdapter,
+    LatestTaskProgressPublisherAdapter,
+)
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.services.chat import (
     ChatAbortService,
@@ -53,6 +76,8 @@ from tests.fakes import (
     FakeChatConversationFactory,
     FakeDocumentRagFactory,
     FakeKnowledgeIndexFactory,
+    FakeReportDispatcherPort,
+    InvocationRecorder,
 )
 
 
@@ -136,6 +161,38 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
             with factory.create():
                 self.fail("Transport 构造失败后不应进入任务作用域")
 
+    def test_report_cleanup_timeout_is_finite_without_changing_generation(self) -> None:
+        """生成可继续无限等待，但清理 DELETE 必须使用批准的 60 秒有限超时。"""
+
+        generation_config = replace(self._config(), timeout=None)
+        cleanup_config = replace(generation_config, timeout=60.0)
+        generation_transport = MagicMock(spec=AnythingLLMTransport)
+        cleanup_transport = MagicMock(spec=AnythingLLMTransport)
+        transport_factory = Mock(
+            side_effect=(generation_transport, cleanup_transport),
+        )
+        generation_factory = AnythingLLMReportClientFactory(
+            generation_config,
+            transport_factory=transport_factory,
+        )
+        cleanup_factory = AnythingLLMReportClientFactory(
+            cleanup_config,
+            transport_factory=transport_factory,
+        )
+
+        with generation_factory.create():
+            pass
+        with cleanup_factory.create():
+            pass
+
+        self.assertIsNone(transport_factory.call_args_list[0].kwargs["timeout"])
+        self.assertEqual(
+            60.0,
+            transport_factory.call_args_list[1].kwargs["timeout"],
+        )
+        generation_transport.close.assert_called_once_with()
+        cleanup_transport.close.assert_called_once_with()
+
 
 class AnythingLLMKnowledgeIndexFactoryTests(unittest.TestCase):
     """验证永久知识库 Factory 同样保持惰性和任务级 Transport 生命周期。"""
@@ -212,6 +269,74 @@ class UploadTaskLimiterTests(unittest.TestCase):
         self.assertEqual("完成", limiter.run(lambda: "完成"))
 
 
+class ReportInfrastructureConfigTests(unittest.TestCase):
+    """验证清理 HTTP 超时与接管租约的必要安全关系。"""
+
+    def test_safe_defaults_keep_cleanup_finite_and_generation_independent(self) -> None:
+        config = ReportInfrastructureConfig.single_instance()
+
+        self.assertEqual(60.0, config.cleanup_http_timeout_seconds)
+        self.assertEqual(90.0, config.cleanup_lease_seconds)
+        self.assertEqual(30.0, config.dispatch_failure_retry_seconds)
+        self.assertEqual(512 * 1024 * 1024, config.max_download_bytes)
+        self.assertGreater(
+            config.cleanup_lease_seconds,
+            config.cleanup_http_timeout_seconds,
+        )
+
+    def test_cleanup_lease_must_strictly_exceed_http_timeout(self) -> None:
+        for lease_seconds in (60.0, 59.9):
+            with self.subTest(lease_seconds=lease_seconds):
+                with self.assertRaisesRegex(
+                    ReportInfrastructureConfigurationError,
+                    "必须严格大于",
+                ):
+                    ReportInfrastructureConfig(
+                        cleanup_http_timeout_seconds=60.0,
+                        cleanup_lease_seconds=lease_seconds,
+                    )
+
+    def test_non_finite_cleanup_timeout_is_rejected(self) -> None:
+        with self.assertRaises(ReportInfrastructureConfigurationError):
+            ReportInfrastructureConfig(
+                cleanup_http_timeout_seconds=float("inf"),
+            )
+
+    def test_environment_loader_is_strict_and_preserves_approved_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DOCSENSE_REPORT_CLEANUP_HTTP_TIMEOUT_SECONDS": "60",
+                "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS": "90",
+                "DOCSENSE_REPORT_ACCEPTED_BATCH_SIZE": "50",
+                "DOCSENSE_REPORT_DISPATCH_FAILURE_RETRY_SECONDS": "30",
+                "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES": "1048576",
+            },
+        ):
+            config = load_report_infrastructure_config()
+
+        self.assertEqual(60.0, config.cleanup_http_timeout_seconds)
+        self.assertEqual(90.0, config.cleanup_lease_seconds)
+        self.assertEqual(50, config.accepted_batch_size)
+        self.assertEqual(30.0, config.dispatch_failure_retry_seconds)
+        self.assertEqual(1048576, config.max_download_bytes)
+
+        with patch.dict(
+            os.environ,
+            {"DOCSENSE_REPORT_RESOURCE_SWEEP_LIMIT": "unbounded"},
+        ):
+            with self.assertRaises(ReportInfrastructureConfigurationError):
+                load_report_infrastructure_config()
+
+        for invalid in ("0", str(10 * 1024**4 + 1), "1.5"):
+            with self.subTest(max_download_bytes=invalid), patch.dict(
+                os.environ,
+                {"DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES": invalid},
+            ):
+                with self.assertRaises(ReportInfrastructureConfigurationError):
+                    load_report_infrastructure_config()
+
+
 class ApplicationContainerRouteTests(unittest.TestCase):
     """验证 Flask 应用可以注入完全离线容器并把 Factory 传给后台任务。"""
 
@@ -257,6 +382,28 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             progress_subscriptions=progress_adapter,
             task_reader=LegacyTaskReadAdapter(task_service),
         )
+        report_task_commands = LegacyTaskCommandAdapter(
+            task_service,
+            ReportTaskCommandCodec(),
+        )
+        report_dispatcher = FakeReportDispatcherPort(InvocationRecorder())
+        report_submit = SubmitReportTask(
+            task_commands=report_task_commands,
+            progress_publisher=LatestTaskProgressPublisherAdapter(
+                task_commands=report_task_commands,
+                delegate=progress_adapter,
+            ),
+            dispatcher=report_dispatcher,
+        )
+        report_callback_recovery = RecoverReportCallbackSynchronously(
+            source=SQLiteReportCallbackRecoverySource(task_service),
+            callbacks=SQLiteReportCallbackAdapter(
+                task_service,
+                callback_url="",
+                callback_timeout=5.0,
+                lease_seconds=30.0,
+            ),
+        )
         self.services = ApplicationServices(
             document_rag_factory=self.document_rag_factory,
             knowledge_index_factory=self.knowledge_index_factory,
@@ -290,6 +437,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             progress_hub=progress_hub,
             progress_subscription_service=progress_subscription_service,
             upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
+            report_submit=report_submit,
+            report_callback_recovery=report_callback_recovery,
+            report_dispatcher=report_dispatcher,
             llm_config=LLMIntegrationConfig(
                 callback_url=None,
                 callback_timeout=5.0,
@@ -302,6 +452,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 api_key="test-key",
                 timeout=5.0,
                 storage_root=None,
+            ),
+            report_infrastructure_config=(
+                ReportInfrastructureConfig.single_instance()
             ),
         )
 
@@ -328,6 +481,31 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_delete, ChatDeleteService)
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
+        self.assertEqual(0, self.services.report_dispatcher.start_count)
+
+    def test_production_owned_container_starts_once_and_registers_close(self) -> None:
+        """仅无参应用工厂拥有后台线程，显式注入测试保持手动生命周期。"""
+
+        with (
+            patch("app.create_application_services", return_value=self.services),
+            patch("app.atexit.register") as register,
+        ):
+            app = create_app()
+
+        self.assertIs(
+            self.services,
+            app.extensions[APPLICATION_SERVICES_EXTENSION],
+        )
+        self.assertEqual(1, self.services.report_dispatcher.start_count)
+        register.assert_called_once_with(self.services.close)
+        self.services.close()
+
+    def test_run_entrypoint_disables_debug_reloader_for_single_worker(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "run.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("use_reloader=False", source)
 
     def test_application_container_source_does_not_construct_transport(self) -> None:
         """应用级容器不得持有或直接创建带网络 Session 的任务级对象。"""

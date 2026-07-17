@@ -348,7 +348,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertEqual(attempts[0]["query_mode"], "query")
             self.assertEqual(attempts[0]["source_marker_status"], "matched")
             self.assertEqual([item["sequence_no"] for item in events], [1, 2])
-            self.assertEqual(interactions[0]["audit_schema_version"], 2)
+            self.assertEqual(interactions[0]["audit_schema_version"], 3)
 
     def test_atomic_audit_uses_same_canonical_prompt_as_rag_attempt(self):
         """首尾换行和 CRLF 不得再次制造主审计与实际模型调用摘要不一致。"""

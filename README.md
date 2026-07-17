@@ -23,9 +23,10 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
-| 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
+| 接口层 | `app/blueprints/`、`app/adapters/web/`、`app/presenters/` | HTTP/WS/SSE 入参解析、框架映射、协议流式与响应展示、本地调试入口 | `llm.py` `report_requests.py` `report_submission.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排，以及文件对话应用服务与本地持久化/锁实现 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` `chat/persistence/` |
+| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；报告和统一任务边界已迁入，其他业务按阶段继续迁移 | `report/` `tasks/` |
+| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 尚未完成统一分层的文件解析、谱系提取、任务兼容存储、翻译编排，以及文件对话应用服务与本地持久化/锁实现 | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
@@ -34,25 +35,26 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> llm_service/chat application`：大部分后台长流程已下沉至服务层；`/llm/reassign` 的同步编排及部分文件对话协议桥接仍位于蓝图中。
+1. `blueprints -> web adapter/application/presenter`：报告路由已经是 Parser → Submit → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，`/llm/reassign` 的同步编排及部分文件对话协议桥接仍位于蓝图中。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
-4. `integrations.anythingllm -> ports`：Gateway 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，legacy report/weaponry 链路不经过该 Factory。
+4. `integrations.anythingllm/report adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，legacy weaponry 链路仍待迁移。
 5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
 6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
-7. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
+7. `check-task -> report application / legacy task service`：报告类型通过
+   `RecoverReportCallbackSynchronously` 与正常报告 Worker 共用 execution 级 Callback Guard；
+   file/weaponry 暂走兼容 Task Service。三类业务均保留甲方规定的请求内同步恢复副作用。
 
 ### 2.3 analysis/report/weaponry 请求到回调的链路
 
 ```text
 Client Request
   -> app/blueprints/llm.py
-    -> LLMTaskService 创建/更新任务
-    -> 后台线程执行 llm_service 任务
-      -> ports/integrations 或迁移期 utils 下载、预处理并调用 AnythingLLM
-      -> core.progress_hub 推送 WS 进度
-      -> 组装业务结果并写入任务库
-      -> utils.callback_client 回调业务系统
+    -> report：Parser -> SubmitReportTask -> SQLite accepted -> Event 唤醒
+       -> 单报告执行 Worker -> RunReportTask(task_id) -> Report Ports/Adapters
+       -> 两条独立维护线程执行资源恢复和队列诊断
+    -> analysis/weaponry：当前仍由遗留 Service/后台线程执行
+    -> 写入任务/进度事实并按各业务 Callback Guard/兼容链回调
 ```
 
 ## 3. 当前目录（关键部分）
@@ -61,6 +63,9 @@ Client Request
 app/
   __init__.py                       # Flask App 工厂，安装依赖容器并注册蓝图
   container.py                      # 应用装配根、ApplicationServices 与 analysis/report 任务限制器
+  modules/
+    tasks/                          # 统一任务 Domain/Application/Ports/兼容 Adapter
+    report/                         # 报告 Domain/Application/Ports/生产形态 Adapter
   ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
   integrations/
     anythingllm/                    # Transport、策略、原子 Client、Gateway 与任务级 Factory
@@ -77,7 +82,7 @@ app/
       prompts.py                    # 统一 Prompt 构建
     llm_service/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
-      report_service.py             # 报告生成主流程
+      report_service.py             # 报告遗留兼容实现；当前公开路由不再调用
       weaponry_service.py           # 知识谱系字段提取主流程
       task_service.py               # 任务状态、结果、回调状态持久化
       translation_service.py        # 翻译服务编排层
@@ -141,7 +146,11 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
 - `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
-`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。`skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过 check-task 自动补发。
+`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。
+`skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过
+check-task 自动补发。报告类型每次实际外发前还会原子复核 latest execution 并取得 Callback
+Guard 租约：同一 execution 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
+HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 
 ## 5. 接口行为说明（按当前代码核对）
 
@@ -191,7 +200,9 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - `filePathList` 支持多文件，统一汇总后生成 HTML 报告。
    - `mhtml/mht` 文件会先归一化再参与报告生成。
    - `templateOutline` 表示 Word 模板文件下载地址；服务端会下载 `.docx` 模板并提取其中的文字内容作为报告大纲要求，再进入原有报告生成流程。
-   - 当前仍使用 legacy RAG 链路：若底层返回 `None`，服务会把空内容包装为 HTML 并仍按 `status=1` 落库/回调，因此验收必须检查报告正文，不能只看任务状态；该链路当前也未清理临时 Workspace/Thread 或显式关闭 AnythingLLM Client。
+   - 当前公开路由已使用 `SubmitReportTask`/`RunReportTask(task_id)` 和任务级 Report RAG、
+     Audit、Callback、Artifact、Resource Adapter。RAG 空内容继续按已确认兼容契约生成空 HTML
+     并成功回调，但会记录内部可观测标记；临时 RAG 资源和本地产物均进入持久恢复闭环。
 
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
@@ -277,6 +288,9 @@ python -m pip install -r requirements.txt
 其他常用配置：
 
 - `CALLBACK_URL`（可选；不配置则不主动回调外部系统，并将已完成任务标记为 `callback_status=skipped`。`.env.example` 中的“必须填写”注释与当前代码不一致，以此处及代码行为为准）
+- `DOCSENSE_REPORT_*`：报告单实例 Dispatcher 的扫描批量、故障冷却、资源恢复、停机和
+  cleanup 超时/租约配置；这些都是后端内部容量参数，不属于公开接口。默认值及约束见
+  `.env.example`，其中清理租约必须严格大于清理 HTTP 超时。
 
 在 macOS 上复制 `.env.example` 后，必须将其中启用的 Windows 路径 `DOCSENSE_RUNTIME_DIR=C:/DocSenseRuntime` 改为 macOS 绝对路径，或注释/删除该行以使用仓库根目录 `.runtime`；其他平台相关路径也应按实际环境调整。
 
@@ -367,6 +381,13 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
 
 为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
+
+报告 Dispatcher 当前同样只允许 `single_instance`，但会额外取得
+`${DOCSENSE_RUNTIME_DIR}/locks/report-dispatcher.lock` 的操作系统文件锁；第二个进程在公开
+应用创建完成前拒绝启动。当前模式禁止 preload/fork，`run.py` 已关闭 Werkzeug reloader。
+报告执行固定为一条重型 Worker，资源恢复与队列诊断各有一条固定维护线程；accepted 积压
+只保存在 SQLite，`Event` 不保存任务列表。领取前毒任务和坏资源记录使用持久冷却让出扫描
+首页，但不对正常积压设置数量上限。该实现仍不是 RabbitMQ 可靠队列，也不支持多实例。
 
 旧的组件级变量仍可作为兼容覆盖项，一旦配置就会优先于统一根目录。若希望全部内容位于同一目录，应删除这些覆盖项：
 

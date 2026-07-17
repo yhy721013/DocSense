@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "frozenAt": "2026-07-15",
-  "updatedAt": "2026-07-16",
+  "updatedAt": "2026-07-17",
   "authority": "docs/接口文档",
   "contractState": "target-approved",
   "reportIdInputPolicy": {
@@ -10,11 +10,84 @@
       "string"
     ],
     "stringFormat": "optional_sign_and_decimal_digits_after_trim",
-    "businessRange": "no_application_level_min_or_max",
+    "businessRange": "absolute_value_less_than_10_power_128",
+    "maxDecimalDigits": 128,
+    "digitCountIncludesLeadingZeros": true,
+    "digitCountExcludesOptionalSign": true,
     "canonicalization": "same_integer_value_is_same_business_key",
     "invalidHttpStatus": 400,
     "invalidProgressBehavior": "error_message_and_keep_connection",
     "serverOutputType": "json_number"
+  },
+  "reportGenerationBaseline": {
+    "current": {
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "activeDuplicate": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        },
+        "behavior": "reject_without_new_execution_or_wakeup"
+      },
+      "dispatch": "persistent_backlog_and_bounded_wakeup",
+      "taskStorage": "append_only_execution_and_latest_projection",
+      "progressValues": [
+        0.0,
+        0.15,
+        0.25,
+        0.35,
+        1.0
+      ],
+      "resultWriteIdentity": "expected_task_id",
+      "ragClientLifecycle": "task_scoped_transport_with_explicit_close",
+      "ragResourceCleanup": "audited_recoverable_idempotent_cleanup",
+      "mhtmlNormalizationFailure": "continue_with_original_downloaded_file",
+      "wordTemplateWithoutText": "task_failure_without_rag_call",
+      "emptyRagResult": {
+        "status": "1",
+        "details": "<div class=\"report-content\"><pre></pre></div>",
+        "message": "生成成功"
+      },
+      "paramsPolicy": {
+        "container": "non_empty_array",
+        "nonObjectElements": "reject_entire_request_http_400",
+        "topLevelNonObject": "reject_http_400",
+        "filePathListElementTypes": "non_empty_strings_or_reject_http_400",
+        "filePathListElementErrorTemplate": "filePathList中第{index}项不是有效字符串",
+        "templateDescAndRequirement": "legacy_compatible_string_conversion"
+      },
+      "validationErrors": {
+        "requestBody": "请求体必须是JSON对象",
+        "businessType": "businessType必须为report",
+        "params": "params不能为空",
+        "paramsElement": "params元素必须是对象",
+        "reportId": "reportId不能为空",
+        "reportIdType": "reportId必须是整数或整数字符串",
+        "reportIdLength": "reportId不能超过128位十进制数字",
+        "filePathList": "filePathList不能为空",
+        "templateOutline": "templateOutline不能为空"
+      },
+      "implementationWave": "1C-3_to_1C-6"
+    },
+    "target": {
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "activeDuplicate": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        }
+      },
+      "dispatch": "persistent_backlog_and_bounded_wakeup",
+      "taskStorage": "append_only_execution_and_latest_projection",
+      "resultWriteIdentity": "expected_task_id",
+      "implementationWave": "1C-3_to_1C-6"
+    }
   },
   "taskSubmissions": [
     {
@@ -42,7 +115,7 @@
           "error": "任务正在处理中"
         }
       },
-      "implementationStatus": "pending",
+      "implementationStatus": "implemented",
       "implementationWave": "1C"
     },
     {
@@ -167,6 +240,24 @@
       },
       "msg": "生成失败"
     },
+    "reportSuccess": {
+      "businessType": "report",
+      "data": {
+        "reportId": 132,
+        "status": "1",
+        "details": "<div>报告内容</div>"
+      },
+      "msg": "生成成功"
+    },
+    "reportEmptySuccess": {
+      "businessType": "report",
+      "data": {
+        "reportId": 132,
+        "status": "1",
+        "details": "<div class=\"report-content\"><pre></pre></div>"
+      },
+      "msg": "生成成功"
+    },
     "weaponryFailure": {
       "businessType": "weaponry",
       "data": {
@@ -202,11 +293,10 @@
   ],
   "currentImplementationDifferences": [
     {
-      "scope": "task submission success responses",
-      "current": "JSON task snapshot",
+      "scope": "analysis and weaponry submission success responses",
+      "current": "JSON task snapshot; report is already empty in 1C-6",
       "target": "empty body",
       "scheduledWaves": [
-        "1C",
         "1D",
         "1F"
       ]

@@ -213,6 +213,37 @@ class DocumentRagPortContractTests(unittest.TestCase):
                 source_marker_status="matched",
             )
 
+    def test_success_attempt_can_explicitly_audit_empty_response(self) -> None:
+        """空字符串是已返回的成功结果，不能与尚未产生响应的 None 混淆。"""
+
+        attempt = RagAttempt(
+            operation="analyse",
+            attempt=1,
+            prompt_kind=RagPromptKind.ANALYSIS,
+            raw_response="",
+            sources=(),
+            failure_stage=None,
+            error_message=None,
+        )
+
+        self.assertEqual("", attempt.raw_response)
+        with self.assertRaisesRegex(ValueError, "明确包含 raw_response"):
+            RagAttempt(
+                operation="analyse",
+                attempt=1,
+                prompt_kind=RagPromptKind.ANALYSIS,
+                raw_response=None,
+                sources=(),
+                failure_stage=None,
+                error_message=None,
+            )
+
+    def test_report_generation_is_a_first_class_prompt_kind(self) -> None:
+        self.assertEqual(
+            "report_generation",
+            RagPromptKind.REPORT_GENERATION.value,
+        )
+
     def test_analyse_can_only_be_called_once(self) -> None:
         """重复 analyse 会隐式重复文档准备，因此必须在端口边界被拒绝。"""
         session = FakeDocumentRagPort().open_isolated_session(

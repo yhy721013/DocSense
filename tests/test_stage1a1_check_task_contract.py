@@ -253,6 +253,21 @@ class CheckTaskCurrentRouteContractTests(unittest.TestCase):
                     response.get_json(),
                 )
 
+    def test_report_id_rejects_more_than_128_digits_with_400(self) -> None:
+        response = self.client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "report",
+                "params": [{"reportId": "9" * 129}],
+            },
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(
+            {"error": "reportId不能超过128位十进制数字"},
+            response.get_json(),
+        )
+
     def test_batch_all_existing_preserves_request_order(self) -> None:
         """批量存在项必须按 params 顺序返回，不能按数据库顺序重排。"""
 

@@ -9,7 +9,7 @@
 | 文档层级 | L3 跨阶段内部契约预设计 |
 | 文档状态 | 阶段 1A 的 Task/Progress 最小契约、1B-1 check-task 可靠命令边界与 **1B-2 Progress 当前运行路径迁移**已于 2026-07-16 落地；后续状态、共享存储、可靠队列和跨实例通知待对应门禁处理 |
 | 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；已确认三类受理成功与 check-task 成功为空响应体、report 活动任务 409、check-task/Progress 严格 `params` 元素校验，以及 Progress 显式 action 错误后保持连接且无 ack；参数集合、错误字段结构、回调和 chat 契约不变 |
-| check-task 队列决策 | 2026-07-16 已确认直接采用可靠队列异步恢复，不实施同步/并行过渡；目标 HTTP 200 表示 recovery request + Outbox 已在 MySQL 事务中可靠登记或复用，不等待 callback Worker 完成。接口文档措辞在生产切换前另行确认 |
+| check-task 队列决策 | **2026-07-17 修订**：甲方规定保留请求内同步恢复；可靠命令、Outbox 与 callback Worker 作为后台兜底，不替换同步入口。两种触发源必须共用 expected TaskId、latest-wins、lease/fencing 和同一 Callback Guard |
 
 本文只定义阶段 1 开始拆分业务时必须稳定的最小任务、查询、回调恢复和进度契约。完整 MySQL DDL、租约、fencing、Outbox 和 RabbitMQ 消息实现在后续阶段另行设计。
 
@@ -64,14 +64,14 @@
 3. 未配置 Callback URL 时，终态 `pending` 会转为 `skipped`。
 4. 补发后重新读取任务，形成内部恢复结果并记录日志/审计。
 5. 单项缺失返回 404；批量缺失在对应元素返回 `exists=false`。
-6. 当前代码会序列化任务状态与 `callbackReplayed`；最终目标在总计划阶段 6 直接切可靠
-   异步恢复并返回 HTTP 200 空响应体，单项缺失 404 和参数错误 400 保持。波次 1B 不切
-   check-task 生产路由。
+6. 当前代码会序列化任务状态与 `callbackReplayed`；已批准目标成功体仍为空，单项缺失
+   404 和参数错误 400 保持。报告类型当前已在请求内调用同步恢复应用服务，file/weaponry
+   在各自业务波次收口。
 
-因此最终目标服务命名为 `RequestCallbackRecoveryService`，内部组合 Task Read 与
-Callback Recovery Command；不得把命令登记藏进只读 Repository，也不得在 Web 请求内
-执行 Callback Delivery。阶段 1A 的 `CheckTaskStatusService` 是已完成的同步原型证据。
-阶段 1B-1 已实现该服务的框架无关命令登记边界，但尚未装配生产。
+同步目标由业务级 `RecoverXxxCallbackSynchronously` 组合 Recovery Source 与 Callback
+Guard Port；Web 只调用用例，不直接执行 HTTP。阶段 1B-1 的
+`RequestCallbackRecoveryService` 和可靠命令边界继续保留，后续作为后台 Outbox 兜底的
+触发模型，而不是取代同步入口。
 
 ### 1.5 当前与目标 Progress 行为
 
@@ -244,18 +244,18 @@ class CallbackDeliveryPort(Protocol):
     def deliver(self, recovery_request_id: str) -> CallbackDeliveryResult: ...
 ```
 
-Command Port 只允许在 MySQL 事务内创建或复用活动 recovery request 并写 Outbox，禁止
-执行外部 HTTP。Delivery Port 只由 callback Worker 调用，负责按 recovery request ID
-读取事实、执行 latest-wins、外发和条件持久化；二者都必须独立于 Task Read。
+这里的 Command Port 专用于后台兜底：只允许在 MySQL 事务内创建或复用 recovery request
+并写 Outbox，禁止执行外部 HTTP。同步 check-task 不经该队列等待，而是调用业务恢复用例；
+同步用例与 Worker 最终都必须进入同一个 Delivery/Guard Port 执行 latest-wins、外发和
+条件持久化，二者都不得把发送权藏进 Task Read。
 
 阶段 1B-1 已固定批量原子签名：输入只含 expected TaskId、业务引用、固定触发源、Schema
 版本和追踪信息；recovery request ID 由持久化 Adapter 在事务内生成/复用，并通过
 `created/already_active` 结果返回。端口必须返回等长同序 tuple，事务失败不得部分提交。
 
-Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须分开建模。后者只
-新增/复用一条 `trigger=check_task` 的恢复命令；同一 TaskId 同时最多一条活动命令，
-避免重复 HTTP 请求在 Worker 消费前放大。每次真正投递仍必须形成独立 delivery attempt
-和审计记录，并遵守 D0-06 保守重试策略。
+Callback Worker 的自动恢复与 `/llm/check-task` 的显式同步恢复必须分开记录触发来源，
+但不能分开实现发送权。两者都先竞争同一 TaskId/业务键 Guard；未取得 lease 时不得发起
+HTTP。每次真正投递形成独立 delivery attempt 和审计记录，并遵守 D0-06 保守重试策略。
 
 ### 4.5 RequestCallbackRecoveryService
 
@@ -264,15 +264,16 @@ Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须
 - 保留 params 顺序。
 - 任一 params 元素不是对象时整次请求失败，不过滤后部分处理。
 - 单项和批量的缺失语义不同。
-- 每项记录 recovery command 是 created、already_active、not_needed 还是 stale；不声称
-  callback 已在本次请求中完成。
+- 每项记录同步恢复内部结果（acquired/busy/not_needed/stale/outcome_unknown），但不把
+  这些内部分类扩张成新的公开响应字段。
 - 不直接生成 Flask Response。
-- 除已批准的 reportId 入站“JSON 整数或十进制整数字符串、无业务范围限制”外，不改变
-  reportId 的既有输出类型，也不改变 architectureId 的公开类型。
+- 除已批准的 reportId 入站“JSON 整数或十进制整数字符串、数字部分最多 128 位”外，
+  不改变 reportId 的既有输出类型，也不改变 architectureId 的公开类型。正负号不计入、
+  前导零计入该字符上限；内部业务键仍按整数值规范化。
 
-全部数据库操作成功提交后，Presenter 才可返回 HTTP 200 空响应体。RabbitMQ 暂时不可用
-但 Outbox 已提交时仍是可靠登记成功；MySQL/Outbox 未提交时禁止成功。阶段 1A 已实现的
-同步 `CheckTaskStatusService` 作为历史原型保留到命令服务测试替代完成，但不得装配生产。
+同步恢复用例完成本次尝试后，Presenter 才按既有契约返回 HTTP 200；RabbitMQ 是否可用
+不改变同步调用职责。后台 Outbox 负责无请求场景的持续恢复，并在消费时再次竞争同一
+Guard。报告类型已装配该同步模式。
 
 ---
 
@@ -299,8 +300,8 @@ Callback Worker 的自动重试与 `/llm/check-task` 触发的显式恢复必须
   最多等待当前 callback timeout；结果未知或等待到期仍被占用时，新提交返回对应接口
   既有 409 并冻结该键，直至内部人工核查解除。
 - 非 2xx 响应记录为失败并进入死信/人工处理，不自动重试。
-- `/llm/check-task` 保留显式补发触发行为，但请求只可靠登记/复用恢复命令；Worker 投递
-  记录 `trigger=check_task`，且不会再被后台自动重试链重复放大。
+- `/llm/check-task` 保留显式同步补发；投递记录 `trigger=check_task`。后台 Worker 使用
+  独立 trigger，所有重复请求/消息都由同一 Guard 抑制，不能形成双发送。
 - `delivery_outcome_unknown` 不是新的公开 callback 状态；对外继续兼容映射为 `failed`，业务任务状态保持独立。
 
 ---
@@ -417,9 +418,9 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 | TASK-05 | 回调超时后能否自动重试 | **已决策**：请求发送后的超时不自动重试，标记内部 `delivery_outcome_unknown`；仅明确未送达错误有限重试，check-task 显式补发除外 |
 | TASK-06 | Progress 连接有界缓冲实现 | **1B-2 已接入**：每连接唯一缓冲、初始快照屏障、按 key 合并、慢连接隔离、丢弃计数和路由线程单写入已进入当前运行路径；容量值仍在阶段 7/8 结合 50 连接压测调优 |
 | TASK-07 | 显式 Progress action/ack 是否保留 | **已实现**：无甲方或生产前端需求证据；1B-2 已删除显式动作处理，只保留无 action 订阅与连接关闭清理；收到 action 时返回 error 消息、保持连接且无 ack |
-| TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **Progress 已实现、check-task 待阶段 6**：不兼容过滤；任一非对象元素使整次 HTTP 请求或 WebSocket 消息报参数错误，不做部分处理 |
+| TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **已实现**：不兼容过滤；任一非对象元素使整次 HTTP 请求或 WebSocket 消息报参数错误，不做部分处理 |
 | TASK-09 | 旧终态执行恢复回调期间，同一业务键已提交新执行时是否继续发送旧回调 | **完整语义已确认（2026-07-16）**：采用 latest-wins，判定旧执行回调过期并跳过。`fileName` 是前端唯一逻辑任务键；同名文件的不同 `execution_id` 只是该逻辑任务的不同执行代次。实现必须在外发前于同业务键串行化边界内复核最新 TaskId；不匹配时禁止网络调用，并持久化 stale/skipped 审计原因。旧 callback 已先取得发送权时，新提交最多等待当前 callback timeout；若进入 `delivery_outcome_unknown` 或等待到期仍被占用，新提交返回既有 409 并冻结同键，直至内部人工解除。冻结 Callback 载荷下仍无法撤回已发请求，因此不自动重试 |
-| TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **已确认（2026-07-16）**：直接采用 MySQL Outbox + RabbitMQ + callback Worker；不实现同步 Adapter、有界同步并行、本地线程/内存队列或总超时过渡方案。阶段 1B-1 命令边界已完成，阶段 4～5 建基础设施，阶段 6 一次性切换生产路由 |
+| TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **最终修订（2026-07-17）**：甲方要求永久保留请求内同步恢复。当前按请求顺序处理，每个实际发送都由共享 Guard 授权；不增加无界同步并行、本地线程或内存队列。阶段 4～5 建设可靠队列后台兜底，阶段 6 不删除同步入口 |
 
 ---
 
@@ -442,15 +443,15 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 - [x] 每连接 Registry 拥有唯一有界缓冲和全部令牌；初始发送失败、断连及释放失败均有补偿/重试测试，任务线程不执行 `ws.send`。
 - [x] 当前路由、旧发布方和类型化 Adapter 共用一个权威 Hub；没有把单实例内存通知误写为 Redis、可靠队列或跨实例能力。
 
-### 10.3 阶段 2～6 后置门禁（不得由 1B Fake 冒充）
+### 10.3 阶段 2～6 后置门禁（不得由 1B Fake 或 1C 单机实现冒充）
 
 - [ ] TaskType、输入快照和 Dispatch 信封随对应任务波次形成完整框架无关类型。
-- [ ] 生产 Task Read Repository 不执行网络 I/O，MySQL recovery request + Outbox 使用同一
-  事务，事务提交失败时 `/llm/check-task` 不返回成功。
-- [ ] callback Worker 独立执行恢复；Web 请求内不发送 callback；RabbitMQ、ACK/DLQ 和
-  delivery attempt 审计通过故障注入。
-- [ ] `/llm/check-task` 仅在 recovery request + Outbox 事务提交后返回 HTTP 200 空响应体，
-  不等待外部回调；任一非对象 params 元素整次 400，其他 400/404 不变。
+- [ ] 生产 Task Read Repository 不执行网络 I/O；MySQL 中的 Callback Guard/Delivery 与
+  后台 Outbox 使用一致的 expected TaskId 和事务边界。
+- [ ] callback Worker 独立执行后台恢复；同步 Web 用例与 Worker 共用 Guard；RabbitMQ、
+  ACK/DLQ、重复触发竞争和 delivery attempt 审计通过故障注入。
+- [ ] `/llm/check-task` 保持请求内同步尝试和 HTTP 200 契约；任一非对象 params 元素整次
+  400，其他 400/404 不变。RabbitMQ 故障不应切换到第二套发送实现。
 - [ ] 所有任务写入携带 task ID；TASK-09 latest-wins 已在 Worker Guard、提交端串行化和
   expected TaskId 条件持久化中实现。
 - [ ] `delivery_outcome_unknown` 后同业务键新执行按已确认的等待/409/人工解除策略进入

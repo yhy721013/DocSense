@@ -10,6 +10,7 @@
 | `chat_stream.py` | 格式化单个 SSE 事件，并包装流迭代器的关闭逻辑，确保资源释放回调在正常结束、异常和客户端断开后均可执行。 |
 | `task_status.py` | 将 `RequestCallbackRecoveryResult` 映射为 HTTP 状态、零字节成功体或既有 JSON 错误体；不创建 Flask/FastAPI Response。 |
 | `task_progress.py` | 将类型化当前项/快照映射为既有 Progress WebSocket 数据消息或 `error` 消息，并负责严格 JSON 序列化；不持有连接。 |
+| `report_submission.py` | 将报告提交结果映射为严格 HTTP 202 零字节体、既有 400/409 单字段 JSON；隐藏 TaskId 和内部通知结果，不创建 Flask/FastAPI Response。 |
 
 ## 工作流程
 
@@ -25,6 +26,10 @@ check-task Presenter 当前只作为阶段 1B-1 内部契约存在：单项/批�
 Progress Presenter 已在阶段 1B-2 接入当前 WebSocket 路由，只输出既有
 `businessType/data`、缺失项 `exists=false` 或 `type/message` 错误结构。内部 TaskId、
 sequence、订阅令牌和连接 ID 均不会进入公开消息。
+
+Report Submission Presenter 已在阶段 1C-6 接入当前 Flask 报告路由：成功严格输出 202
+零字节体且移除 Content-Type，活动任务、callback sending/outcome unknown 均输出既有
+409 `{"error":"任务正在处理中"}`。没有新增、删除或泄漏任何接口参数。
 
 ## 维护规则
 

@@ -8,9 +8,8 @@
 from __future__ import annotations
 
 import logging
-import threading
-from dataclasses import dataclass, field
-from typing import Any, Callable, ParamSpec, TypeVar
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from flask import current_app
 
@@ -20,9 +19,35 @@ from app.integrations.anythingllm.factory import (
 )
 from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.policies import document_rag_workspace_settings
+from app.modules.report.adapters import (
+    AnythingLLMReportClientFactory,
+    AnythingLLMReportRagAdapter,
+    FileProcessSingletonGuard,
+    LegacyReportFileAdapter,
+    LocalReportArtifactAdapter,
+    LocalReportTaskDispatcher,
+    ReportTaskCommandCodec,
+    SQLiteReportCallbackAdapter,
+    SQLiteReportCallbackRecoverySource,
+    SQLiteReportInteractionAuditAdapter,
+    SQLiteReportResourceStoreAdapter,
+)
+from app.modules.report.application import (
+    ReportResourceRecoveryService,
+    RecoverReportCallbackSynchronously,
+    RunReportTask,
+    SubmitReportTask,
+)
+from app.modules.report.ports import (
+    ReportTaskDispatcherLifecyclePort,
+    ReportTaskDispatcherPort,
+)
 from app.modules.tasks.adapters import (
     InMemoryProgressAdapter,
+    LegacyTaskCommandAdapter,
     LegacyTaskReadAdapter,
+    LatestTaskProgressPublisherAdapter,
+    UploadTaskLimiter,
 )
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.ports import (
@@ -50,64 +75,25 @@ from app.services.core.config import (
     AnythingLLMConfig,
     ChatInfrastructureConfig,
     LLMIntegrationConfig,
+    ReportInfrastructureConfig,
     load_anythingllm_config,
     load_chat_infrastructure_config,
     load_llm_integration_config,
+    load_report_infrastructure_config,
 )
 from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
-from app.services.core.settings import CHAT_DB_PATH, KNOWLEDGE_BASE_DB_PATH
+from app.services.core.settings import (
+    CHAT_DB_PATH,
+    KNOWLEDGE_BASE_DB_PATH,
+    RUNTIME_DIR,
+)
 from app.services.llm_service.task_service import LLMTaskService
 
 
 logger = logging.getLogger(__name__)
 
 APPLICATION_SERVICES_EXTENSION = "docsense_services"
-
-_P = ParamSpec("_P")
-_R = TypeVar("_R")
-
-
-class UploadTaskLimiter:
-    """限制上传类后台任务并发数的应用级线程安全组件。
-
-    当前 analysis 与 report 仍共享 AnythingLLM Document Processor，因此阶段 6 保持原有
-    单并发行为。待两条链路都迁移到新集成层后，该限制器可以下沉到对应 Factory，而无需
-    再修改 Blueprint 的业务校验逻辑。
-    """
-
-    def __init__(self, max_concurrency: int = 1) -> None:
-        """创建有界并发入口，并拒绝会导致任务永久阻塞的非正配置。"""
-        if not isinstance(max_concurrency, int) or max_concurrency < 1:
-            raise ValueError("max_concurrency 必须是正整数")
-        self._max_concurrency = max_concurrency
-        self._semaphore = threading.BoundedSemaphore(max_concurrency)
-
-    @property
-    def max_concurrency(self) -> int:
-        """返回允许同时执行的上传类任务数量。"""
-        return self._max_concurrency
-
-    def run(
-        self,
-        function: Callable[_P, _R],
-        *args: _P.args,
-        **kwargs: _P.kwargs,
-    ) -> _R:
-        """在并发许可内执行函数，并在所有退出路径上归还许可。"""
-        if not callable(function):
-            raise TypeError("function 必须可调用")
-        logger.debug(
-            "等待上传任务并发许可: max_concurrency=%d",
-            self._max_concurrency,
-        )
-        with self._semaphore:
-            logger.debug(
-                "获得上传任务并发许可: max_concurrency=%d",
-                self._max_concurrency,
-            )
-            return function(*args, **kwargs)
-
 
 @dataclass(frozen=True)
 class ApplicationServices:
@@ -135,8 +121,12 @@ class ApplicationServices:
     progress_hub: LLMProgressHub
     progress_subscription_service: ProgressSubscriptionService
     upload_task_limiter: UploadTaskLimiter
+    report_submit: SubmitReportTask
+    report_callback_recovery: RecoverReportCallbackSynchronously
+    report_dispatcher: ReportTaskDispatcherLifecyclePort
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
+    report_infrastructure_config: ReportInfrastructureConfig
     chat_infrastructure_config: ChatInfrastructureConfig = field(
         default_factory=ChatInfrastructureConfig.single_instance
     )
@@ -161,8 +151,12 @@ class ApplicationServices:
             "progress_hub": self.progress_hub,
             "progress_subscription_service": self.progress_subscription_service,
             "upload_task_limiter": self.upload_task_limiter,
+            "report_submit": self.report_submit,
+            "report_callback_recovery": self.report_callback_recovery,
+            "report_dispatcher": self.report_dispatcher,
             "llm_config": self.llm_config,
             "anythingllm_config": self.anythingllm_config,
+            "report_infrastructure_config": self.report_infrastructure_config,
             "chat_infrastructure_config": self.chat_infrastructure_config,
         }
         missing = [name for name, value in required_dependencies.items() if value is None]
@@ -207,11 +201,41 @@ class ApplicationServices:
             raise TypeError(
                 "progress_subscription_service 必须是 ProgressSubscriptionService"
             )
+        if not isinstance(self.report_submit, SubmitReportTask):
+            raise TypeError("report_submit 必须是 SubmitReportTask")
+        if not isinstance(
+            self.report_callback_recovery,
+            RecoverReportCallbackSynchronously,
+        ):
+            raise TypeError(
+                "report_callback_recovery 必须是 RecoverReportCallbackSynchronously"
+            )
+        if not isinstance(self.report_dispatcher, ReportTaskDispatcherPort):
+            raise TypeError("report_dispatcher 必须实现 ReportTaskDispatcherPort")
+        if not isinstance(
+            self.report_dispatcher,
+            ReportTaskDispatcherLifecyclePort,
+        ):
+            raise TypeError(
+                "report_dispatcher 必须实现显式 start/stop/close 生命周期"
+            )
+        if self.report_submit.dispatcher is not self.report_dispatcher:
+            raise ValueError(
+                "report_submit 与 ApplicationServices 必须共享同一 Dispatcher 实例"
+            )
+        if not isinstance(
+            self.report_infrastructure_config,
+            ReportInfrastructureConfig,
+        ):
+            raise TypeError(
+                "report_infrastructure_config 必须是 ReportInfrastructureConfig"
+            )
         if not isinstance(self.chat_infrastructure_config, ChatInfrastructureConfig):
             raise TypeError(
                 "chat_infrastructure_config must be ChatInfrastructureConfig"
             )
         self._validate_chat_infrastructure_capabilities()
+        self._validate_report_infrastructure_capabilities()
 
     def _validate_chat_infrastructure_capabilities(self) -> None:
         """按部署模式验证已装配适配器的真实能力，禁止错误模式静默启动。
@@ -256,6 +280,49 @@ class ApplicationServices:
             len(capabilities),
         )
 
+    def _validate_report_infrastructure_capabilities(self) -> None:
+        """在公开路由可用前校验报告受理与 Worker 的单实例能力。"""
+
+        if self.report_infrastructure_config.runtime_mode != "single_instance":
+            raise RuntimeError("unsupported report infrastructure runtime mode")
+        if (
+            isinstance(self.report_dispatcher, LocalReportTaskDispatcher)
+            and not self.report_dispatcher.has_process_guard
+        ):
+            raise RuntimeError(
+                "生产 LocalReportTaskDispatcher 必须装配跨进程单实例锁"
+            )
+        logger.info(
+            "报告基础设施能力校验通过: runtime_mode=%s dispatcher_type=%s "
+            "cleanup_http_timeout_seconds=%.3f cleanup_lease_seconds=%.3f",
+            self.report_infrastructure_config.runtime_mode,
+            type(self.report_dispatcher).__name__,
+            self.report_infrastructure_config.cleanup_http_timeout_seconds,
+            self.report_infrastructure_config.cleanup_lease_seconds,
+        )
+
+    def start_background_services(self) -> None:
+        """显式启动容器拥有的报告后台能力。
+
+        当前报告 Dispatcher 包含一条重型任务执行线程，以及彼此隔离的资源恢复、队列
+        诊断维护线程。这里所说的“单 Worker”只约束报告业务执行并发，不代表维护工作
+        继续与模型调用串在同一线程中。
+        """
+
+        logger.info("开始启动 DocSense 后台服务")
+        self.report_dispatcher.start()
+        logger.info("DocSense 后台服务启动完成")
+
+    def stop_background_services(self, *, timeout_seconds: float | None = None) -> bool:
+        """停止领取新报告并有限等待当前任务；不重置 running execution。"""
+
+        return self.report_dispatcher.stop(timeout_seconds=timeout_seconds)
+
+    def close(self) -> None:
+        """幂等关闭容器拥有的后台生命周期。"""
+
+        self.report_dispatcher.close()
+
 
 def create_application_services() -> ApplicationServices:
     """根据环境配置创建生产应用容器，不创建 AnythingLLM 网络 Session。"""
@@ -263,9 +330,11 @@ def create_application_services() -> ApplicationServices:
     # 先校验部署模式，再读取任何外部集成配置或创建数据库文件。这样错误地把
     # SQLite 单实例模式配置成集群时，会在应用启动的最早阶段 fail fast。
     chat_infrastructure_config = load_chat_infrastructure_config()
+    report_infrastructure_config = load_report_infrastructure_config()
     logger.info(
-        "已读取文件对话基础设施配置: runtime_mode=%s",
+        "已读取单实例基础设施配置: chat_runtime_mode=%s report_runtime_mode=%s",
         chat_infrastructure_config.runtime_mode,
+        report_infrastructure_config.runtime_mode,
     )
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
@@ -302,6 +371,90 @@ def create_application_services() -> ApplicationServices:
         progress_snapshots=progress_adapter,
         progress_subscriptions=progress_adapter,
         task_reader=LegacyTaskReadAdapter(task_service),
+    )
+    upload_task_limiter = UploadTaskLimiter(max_concurrency=1)
+
+    # Report 组合根只共享无网络 Session 的工厂、线程安全 Port 和 SQLite Service。
+    # 生成与清理使用两个独立 Client Factory：前者保留 ANYTHINGLLM_TIMEOUT 的既有
+    # 语义，后者强制有限 60 秒 HTTP 超时，确保 90 秒清理租约具备可判定边界。
+    report_task_commands = LegacyTaskCommandAdapter(
+        task_service,
+        ReportTaskCommandCodec(),
+    )
+    report_progress_publisher = LatestTaskProgressPublisherAdapter(
+        task_commands=report_task_commands,
+        delegate=progress_adapter,
+    )
+    report_artifacts = LocalReportArtifactAdapter(RUNTIME_DIR / "tasks")
+    report_files = LegacyReportFileAdapter(
+        report_artifacts,
+        download_timeout=llm_config.download_timeout,
+        max_download_bytes=report_infrastructure_config.max_download_bytes,
+    )
+    report_rag = AnythingLLMReportRagAdapter(
+        AnythingLLMReportClientFactory(anythingllm_config),
+        artifact_path_resolver=report_artifacts.resolve_path,
+    )
+    report_cleanup_rag = AnythingLLMReportRagAdapter(
+        AnythingLLMReportClientFactory(
+            replace(
+                anythingllm_config,
+                timeout=(
+                    report_infrastructure_config.cleanup_http_timeout_seconds
+                ),
+            )
+        ),
+        artifact_path_resolver=report_artifacts.resolve_path,
+    )
+    report_audit = SQLiteReportInteractionAuditAdapter(task_service)
+    report_resources = ReportResourceRecoveryService(
+        store=SQLiteReportResourceStoreAdapter(task_service),
+        artifacts=report_artifacts,
+        rag=report_cleanup_rag,
+        audit=report_audit,
+        external_attempt_timeout_seconds=(
+            report_infrastructure_config.cleanup_lease_seconds
+        ),
+        sweep_retry_delay_seconds=(
+            report_infrastructure_config.resource_sweep_interval_seconds
+        ),
+    )
+    report_callbacks = SQLiteReportCallbackAdapter(
+        task_service,
+        callback_url=llm_config.callback_url or "",
+        callback_timeout=llm_config.callback_timeout,
+        lease_seconds=max(30.0, llm_config.callback_timeout + 5.0),
+    )
+    report_runner = RunReportTask(
+        task_commands=report_task_commands,
+        progress_publisher=report_progress_publisher,
+        files=report_files,
+        artifacts=report_artifacts,
+        rag=report_rag,
+        audit=report_audit,
+        callbacks=report_callbacks,
+        resources=report_resources,
+    )
+    report_callback_recovery = RecoverReportCallbackSynchronously(
+        source=SQLiteReportCallbackRecoverySource(task_service),
+        callbacks=report_callbacks,
+    )
+    report_dispatcher = LocalReportTaskDispatcher(
+        task_commands=report_task_commands,
+        queue_inspector=report_task_commands,
+        resources=report_resources,
+        callbacks=report_callbacks,
+        execute=report_runner.execute,
+        config=report_infrastructure_config,
+        execution_limiter=upload_task_limiter,
+        process_guard=FileProcessSingletonGuard(
+            RUNTIME_DIR / "locks" / "report-dispatcher.lock"
+        ),
+    )
+    report_submit = SubmitReportTask(
+        task_commands=report_task_commands,
+        progress_publisher=report_progress_publisher,
+        dispatcher=report_dispatcher,
     )
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
@@ -343,17 +496,22 @@ def create_application_services() -> ApplicationServices:
         chat_cleanup_executor=chat_cleanup_executor,
         progress_hub=progress_hub,
         progress_subscription_service=progress_subscription_service,
-        upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
+        upload_task_limiter=upload_task_limiter,
+        report_submit=report_submit,
+        report_callback_recovery=report_callback_recovery,
+        report_dispatcher=report_dispatcher,
         llm_config=llm_config,
         anythingllm_config=anythingllm_config,
+        report_infrastructure_config=report_infrastructure_config,
         chat_infrastructure_config=chat_infrastructure_config,
     )
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "
-        "upload_max_concurrency=%d chat_runtime_mode=%s",
+        "upload_max_concurrency=%d chat_runtime_mode=%s report_runtime_mode=%s",
         services.knowledge_index_factory is not None,
         services.upload_task_limiter.max_concurrency,
         services.chat_infrastructure_config.runtime_mode,
+        services.report_infrastructure_config.runtime_mode,
     )
     return services
 

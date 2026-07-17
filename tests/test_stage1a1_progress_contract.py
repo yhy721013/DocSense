@@ -232,6 +232,35 @@ class ProgressRouteContractTests(unittest.TestCase):
             type(websocket.sent_messages[1]["data"]["reportId"]),
         )
 
+    def test_overlong_report_id_returns_error_and_keeps_connection(self) -> None:
+        self.task_service.create_report_task(
+            132,
+            {"businessType": "report", "params": [{"reportId": 132}]},
+        )
+        overlong = json.dumps(
+            {
+                "businessType": "report",
+                "params": [{"reportId": "9" * 129}],
+            }
+        )
+        valid = json.dumps(
+            {
+                "businessType": "report",
+                "params": [{"reportId": 132}],
+            }
+        )
+
+        websocket = self._run_websocket(overlong, valid)
+
+        self.assertEqual(
+            {
+                "type": "error",
+                "message": "reportId不能超过128位十进制数字",
+            },
+            websocket.sent_messages[0],
+        )
+        self.assertEqual("report", websocket.sent_messages[1]["businessType"])
+
     def test_mixed_params_rejects_entire_message_without_partial_subscription(self) -> None:
         websocket, _, errors = self._start_websocket()
         websocket.push(

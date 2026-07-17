@@ -13,16 +13,23 @@ from flask_sock import Sock
 
 from app.adapters.web import ReportIdValidationError, normalize_report_id
 from app.adapters.web.flask import (
+    ReportRequestValidationError,
     ProgressConnectionRegistry,
     ProgressRequestValidationError,
+    parse_report_request,
     parse_progress_subscription,
 )
 from app.container import ApplicationServices, get_application_services
+from app.modules.report.domain import ReportId, ReportTaskConflictError
 from app.modules.tasks.application import ProgressSubscriptionRollbackError
 from app.presenters.chat_stream import (
     finalize_chat_run_stream,
 )
 from app.presenters.task_progress import ProgressWebSocketPresenter
+from app.presenters.report_submission import (
+    ReportSubmissionHttpPresentation,
+    ReportSubmissionResponsePresenter,
+)
 from app.services.chat import (
     ChatDeleteBusyError,
     ChatDeleteCleanupError,
@@ -47,7 +54,6 @@ from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
     run_file_analysis_task,
 )
-from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.weaponry_service import (
     WeaponrySelectedDocumentAmbiguityError,
     WeaponrySelectedDocumentError,
@@ -70,6 +76,25 @@ _PROGRESS_RELEASE_ATTEMPTS = 3
 def _services() -> ApplicationServices:
     """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
     return get_application_services()
+
+
+def _report_http_response(
+    presentation: ReportSubmissionHttpPresentation,
+) -> Response:
+    """把框架无关报告展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, ReportSubmissionHttpPresentation):
+        raise TypeError("presentation 必须是 ReportSubmissionHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    if presentation.content_type is None:
+        # 202 成功体严格为零字节，也不暗示存在可解析的 JSON/文本实体。
+        response.headers.pop("Content-Type", None)
+    else:
+        response.headers["Content-Type"] = presentation.content_type
+    return response
 
 
 def _read_json_chat_id(
@@ -261,89 +286,59 @@ def llm_analysis():
 @llm_bp.post("/llm/generate-report")
 def llm_generate_report():
     services = _services()
-    task_service = services.task_service
-    progress_hub = services.progress_hub
-    llm_config = services.llm_config
-    payload = request.get_json(silent=True) or {}
-    logger.info("收到报告生成请求: payload_keys=%s", list(payload.keys()))
-    if payload.get("businessType") != "report":
-        logger.warning(
-            "报告生成请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为report"}), 400
-
-    params = _get_first_param(payload)
-    if params is None:
-        logger.warning("报告生成请求被拒绝: params为空或格式无效")
-        return jsonify({"error": "params不能为空"}), 400
-    report_id = params.get("reportId")
-    if report_id is None:
-        logger.warning("报告生成请求被拒绝: reportId为空")
-        return jsonify({"error": "reportId不能为空"}), 400
-    try:
-        normalized_report_id = normalize_report_id(report_id)
-    except ReportIdValidationError as exc:
-        logger.warning(
-            "报告生成请求被拒绝: reportId格式无效 report_id_type=%s",
-            type(report_id).__name__,
-        )
-        return jsonify({"error": str(exc)}), 400
-
-    # 进入任务服务和后台执行器前统一保存为整数。这样整数字符串不会在任务库、
-    # Progress Hub 与后续回调中形成不同业务键；该规范化只改变内部表示，不增删接口字段。
-    params["reportId"] = normalized_report_id.value
-    file_path_list = params.get("filePathList")
-    if not isinstance(file_path_list, list) or not file_path_list:
-        logger.warning(
-            "报告生成请求被拒绝: filePathList无效 reportId=%s file_path_list_type=%s file_count=%s",
-            report_id,
-            type(file_path_list).__name__,
-            len(file_path_list) if isinstance(file_path_list, list) else "n/a",
-        )
-        return jsonify({"error": "filePathList不能为空"}), 400
-    template_outline = params.get("templateOutline")
-    if not isinstance(template_outline, str) or not template_outline.strip():
-        logger.warning("报告生成请求被拒绝: templateOutline为空 reportId=%s", report_id)
-        return jsonify({"error": "templateOutline不能为空"}), 400
-
-    task = task_service.create_report_task(
-        report_id=normalized_report_id.value,
-        request_payload=payload,
-    )
-    progress_hub.publish(
-        "report",
-        normalized_report_id.business_key,
-        {
-            "businessType": "report",
-            "data": {
-                "reportId": normalized_report_id.value,
-                "progress": 0.0,
-            },
-        },
-        task_id=task["execution_id"],
-    )
-
-    _report_kwargs = {
-        "task_service": task_service,
-        "progress_hub": progress_hub,
-        "request_payload": payload,
-        "download_root": llm_config.download_dir,
-        "callback_url": llm_config.callback_url or "",
-        "callback_timeout": llm_config.callback_timeout,
-    }
-    worker = threading.Thread(
-        target=services.upload_task_limiter.run,
-        args=(run_report_task,),
-        kwargs=_report_kwargs,
-        daemon=True,
-    )
-    worker.start()
+    presenter = ReportSubmissionResponsePresenter()
+    raw_payload = request.get_json(silent=True)
     logger.info(
-        "已启动后台报告生成线程: report_id=%s",
-        normalized_report_id.business_key,
+        "收到报告生成请求: payload_type=%s",
+        type(raw_payload).__name__,
     )
-    return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
+    try:
+        parsed_request = parse_report_request(raw_payload)
+    except ReportRequestValidationError as exc:
+        # 公开错误体只包含已确认的 error 字段；日志记录类型和原因即可定位问题，不能输出
+        # 文件 URL、模板内容或完整请求，避免调试日志泄漏业务数据。
+        logger.warning(
+            "报告生成请求被拒绝: payload_type=%s validation_error=%s",
+            type(raw_payload).__name__,
+            str(exc),
+        )
+        return _report_http_response(presenter.present_bad_request(str(exc)))
+
+    normalized_report_id = parsed_request.report_id
+    trace_id = uuid4().hex
+    logger.info(
+        "报告生成请求参数校验通过: report_id=%s file_count=%s trace_id=%s",
+        normalized_report_id.business_key,
+        len(parsed_request.params["filePathList"]),
+        trace_id,
+    )
+    submission = parsed_request.to_submission(trace_id=trace_id)
+    try:
+        result = services.report_submit.execute(submission)
+    except ReportTaskConflictError:
+        logger.info(
+            "报告生成请求因活动任务或回调Guard被拒绝: report_id=%s trace_id=%s",
+            normalized_report_id.business_key,
+            trace_id,
+        )
+        return _report_http_response(presenter.present_conflict())
+    except Exception:
+        # 受理事务失败不能伪装成 202。异常交给 Flask 统一 500 边界，同时日志只记录
+        # reportId/trace，不输出 URL、模板文本或完整请求。
+        logger.exception(
+            "报告生成受理失败: report_id=%s trace_id=%s",
+            normalized_report_id.business_key,
+            trace_id,
+        )
+        raise
+
+    logger.info(
+        "报告生成请求已可靠受理: report_id=%s task_id=%s trace_id=%s",
+        normalized_report_id.business_key,
+        result.task_id,
+        trace_id,
+    )
+    return _report_http_response(presenter.present_success(result))
 
 
 @llm_bp.post("/llm/weaponry")
@@ -583,12 +578,20 @@ def llm_check_task():
             items.append({response_key: response_value, "exists": False, "message": "任务不存在"})
             continue
 
-        replayed = task_service.replay_callback_if_needed(
-            business_type,
-            normalized_key,
-            callback_url=llm_config.callback_url or "",
-            timeout=llm_config.callback_timeout,
-        )
+        if business_type == "report":
+            # 甲方规定 check-task 必须在本次请求内触发报告回调恢复。报告链路不能再走
+            # 遗留直发方法，而是与正常 Worker 共用 execution 级 latest-wins、Guard 和
+            # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
+            replayed = services.report_callback_recovery.execute(
+                ReportId.from_public_value(normalized_report_id.value)
+            )
+        else:
+            replayed = task_service.replay_callback_if_needed(
+                business_type,
+                normalized_key,
+                callback_url=llm_config.callback_url or "",
+                timeout=llm_config.callback_timeout,
+            )
         task = task_service.get_task(business_type, normalized_key)
         assert task is not None
 

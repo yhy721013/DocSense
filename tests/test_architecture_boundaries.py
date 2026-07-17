@@ -7,6 +7,7 @@ SQLite、连接 AnythingLLM 或启动 ``run.py``。除扫描当前仓库外，�
 
 from __future__ import annotations
 
+import ast
 import tempfile
 import textwrap
 import unittest
@@ -28,6 +29,7 @@ from tests.architecture.import_rules import (
 ROOT = Path(__file__).resolve().parents[1]
 MODULES_ROOT = ROOT / "app" / "modules"
 TASKS_ROOT = MODULES_ROOT / "tasks"
+REPORT_ROOT = MODULES_ROOT / "report"
 PRESENTERS_ROOT = ROOT / "app" / "presenters"
 
 
@@ -61,8 +63,8 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             + describe_violations(violations, project_root=ROOT),
         )
 
-    def test_stage1a2_package_skeleton_is_complete(self) -> None:
-        """骨架必须具备包标识和职责文档，不能只创建无说明空目录。"""
+    def test_module_package_skeletons_are_complete(self) -> None:
+        """已建立的模块分层必须具备包标识和职责文档，不能留下无说明空目录。"""
 
         required_directories = (
             MODULES_ROOT,
@@ -71,6 +73,10 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             TASKS_ROOT / "application",
             TASKS_ROOT / "ports",
             TASKS_ROOT / "adapters",
+            REPORT_ROOT,
+            REPORT_ROOT / "domain",
+            REPORT_ROOT / "application",
+            REPORT_ROOT / "ports",
             ROOT / "app" / "adapters",
             ROOT / "app" / "adapters" / "web",
             ROOT / "app" / "adapters" / "web" / "flask",
@@ -94,6 +100,47 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
 
     def test_presenters_do_not_read_database_or_anythingllm_client(self) -> None:
         self.assert_rule_clean((PRESENTERS_ROOT,), PRESENTER_RULE)
+
+    def test_route_tests_do_not_construct_uninjected_production_applications(self) -> None:
+        """只有显式生命周期用例可以调用无参 create_app，其他测试必须注入离线容器。"""
+
+        allowed = {
+            (
+                "test_dependency_container.py",
+                "test_production_owned_container_starts_once_and_registers_close",
+            )
+        }
+        violations: list[str] = []
+        for source_path in sorted((ROOT / "tests").glob("test_*.py")):
+            # 仓库少量历史测试仍带 UTF-8 BOM；AST 门禁应兼容读取，而不是要求本轮
+            # 顺带机械改写无关文件编码。
+            source = source_path.read_text(encoding="utf-8-sig")
+            tree = ast.parse(source, filename=str(source_path))
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for child in ast.walk(node):
+                    if not isinstance(child, ast.Call):
+                        continue
+                    if not isinstance(child.func, ast.Name):
+                        continue
+                    if child.func.id != "create_app":
+                        continue
+                    has_services = any(
+                        keyword.arg == "services" for keyword in child.keywords
+                    )
+                    if has_services:
+                        continue
+                    identity = (source_path.name, node.name)
+                    if identity not in allowed:
+                        violations.append(
+                            f"{source_path.name}:{child.lineno} {node.name}"
+                        )
+        self.assertEqual(
+            [],
+            violations,
+            "路由测试禁止无参 create_app()，请注入完全离线 ApplicationServices",
+        )
 
 
 class ArchitectureRuleSelfTests(unittest.TestCase):
@@ -167,6 +214,29 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
             },
             self._targets(violations),
         )
+
+    def test_report_layers_can_only_reuse_tasks_public_control_plane(self) -> None:
+        """Report 可使用 TaskId/Port，但不能穿透到通用任务具体 Adapter。"""
+
+        allowed_ports = self._scan_source(
+            "app/modules/report/ports/dispatcher.py",
+            "from app.modules.tasks.domain import TaskId\n",
+            PORTS_RULE,
+        )
+        allowed_application = self._scan_source(
+            "app/modules/report/application/run_report.py",
+            "from app.modules.tasks.ports import TaskCommandPort\n",
+            APPLICATION_RULE,
+        )
+        rejected = self._scan_source(
+            "app/modules/report/application/run_report.py",
+            "from app.modules.tasks.adapters import LegacyTaskReadAdapter\n",
+            APPLICATION_RULE,
+        )
+
+        self.assertEqual((), allowed_ports)
+        self.assertEqual((), allowed_application)
+        self.assertIn("app.modules.tasks.adapters", self._targets(rejected))
 
     def test_tasks_rule_rejects_chat_persistence_and_any_foreign_business_layer(self) -> None:
         violations = self._scan_source(

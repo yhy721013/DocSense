@@ -18,7 +18,7 @@
 - report、analysis、weaponry 等业务模块通过任务应用入口或端口协作，不允许 tasks 导入这些模块的 Adapter。
 - 内部 `task_id`、attempt、租约、队列名和事件序号均不得进入现有公开响应。
 
-## 当前实施状态（阶段 1B-2）
+## 当前实施状态（阶段 1C-6）
 
 阶段 1A～1B-1 已建立并通过 Fake Port 验证以下框架无关契约：
 
@@ -36,11 +36,42 @@
 7. `adapters/in_memory_progress.py`：围绕唯一 `LLMProgressHub` 实现线程安全的快照与订阅
    Port，Hub 锁外通知并隔离订阅者异常。
 
+阶段 1C-2 为首个通用任务写入消费者（report）增加：
+
+8. `TaskExecutionSnapshot[TInput]`：一次执行身份、状态与不可变业务输入的泛型快照；
+9. `ports/task_commands.py`：原子受理分类、按 TaskId 读取/领取、expected TaskId 进度与
+   终态条件写、latest 检查和 accepted 扫描；
+10. `ProgressPublisherPort`：只发布已经完成条件持久化的类型化通知，不携带公开 JSON；
+    `GuardedProgressPublisherPort` 又把持久化 latest owner 复核与内存 latest 写入放进同一
+    业务键原子发布临界区，并把慢持久化查询移出全局 Hub 锁，封闭旧 accepted 的预检查
+    竞态且不阻塞其他业务键；
+11. 严格 report Fake：按 TaskId 保存历史执行、按业务键保存 latest，并支持各步骤返回
+    stale、异常和非法端口结果，生产 tasks 包不依赖 report 类型。
+
+阶段 1C-3 进一步增加：
+
+12. `adapters/legacy_task_commands.py`：以业务 Codec 隔离 report 输入/结果，在独立 SQLite
+    连接的短事务内实现追加 execution、原子受理/领取、latest、accepted 扫描和 expected
+    TaskId 进度/终态双表条件写；tasks 包仍不导入 report；
+13. `LLMTaskService` 的增量 `llm_task_executions`/`callback_delivery_guards` Schema 和兼容
+    事务方法；旧 `llm_tasks` 继续作为最新公开投影，file/weaponry 的 check-task 路径不迁移；
+    report 后续通过业务模块应用服务复用这些 execution/Guard 事实。
+
+阶段 1C-6 进一步增加 `TaskQueueInspectionPort/TaskQueueSnapshot`、可中断执行许可和跨进程
+单实例运行端口。报告 Dispatcher 可读取 accepted/running/终态数量、最老时间和有界
+running TaskId 样本，但不得在诊断中修改状态；`TaskCommandPort` 还可对仍为 accepted 的
+领取前故障设置持久冷却。`LegacyTaskCommandAdapter` 已作为报告组合根的任务事实与诊断
+Adapter 使用。
+
 当前 `/llm/progress` 已通过 Container 装配上述应用服务和兼容 Adapter；旧发布方与新
 订阅路径共享同一个 Hub，不存在双份 latest。WebSocket 对象仍只存在于 Flask Adapter，
 任务应用层和发布线程不持有连接。
 
-当前仍没有 MySQL/Outbox、RabbitMQ/Worker、Redis 跨实例通知或 check-task 新路由绑定。
-`app/presenters/task_status.py` 已冻结未来 200 零字节成功体与既有 400/404 映射，但
-check-task Blueprint 继续使用旧同步实现，仅在阶段 3～6 的共享事务、Outbox、队列和
-Worker 全部就绪后直接切换。
+当前仍没有 MySQL/Outbox、RabbitMQ/Worker 或 Redis 跨实例通知。
+SQLite Task Command Adapter 已装配当前开发分支的 `/llm/generate-report` 组合根，并支撑
+公开 202/409 与本地持久积压，但只能证明单实例内部原子语义，不能作为可靠任务队列或
+多实例一致性已经实现、部署或通过生产容量验收的证据。
+`/llm/check-task` 继续按甲方规定保留请求内同步恢复：report 类型现已绑定 report 模块的
+`RecoverReportCallbackSynchronously`，并与正常 Worker 竞争同一个 execution 级 Callback
+Guard；file/weaponry 暂走旧同步兼容实现。阶段 3～6 只增加 MySQL/Outbox/RabbitMQ 后台
+兜底，不替换同步入口，也不得建立绕过 Guard 的并行发送链。

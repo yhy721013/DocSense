@@ -6,10 +6,15 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
-from app.modules.tasks.adapters import InMemoryProgressAdapter
+from app.modules.tasks.adapters import (
+    InMemoryProgressAdapter,
+    LatestTaskProgressPublisherAdapter,
+)
 from app.modules.tasks.application import ProgressDeliveryBuffer
-from app.modules.tasks.domain import ProgressKey
+from app.modules.tasks.domain import ProgressKey, TaskBusinessRef, TaskId
+from app.modules.tasks.ports import ProgressPublication, TaskCommandPort
 from app.services.core.progress_hub import LLMProgressHub
 
 
@@ -239,6 +244,60 @@ class InMemoryProgressAdapterConcurrencyTests(unittest.TestCase):
         self.assertLess(elapsed, 0.5)
         self.assertEqual(0.4, hub.get_latest("file", "other.pdf")["data"]["progress"])
 
+    def test_slow_persistent_guard_does_not_block_an_unrelated_key(self) -> None:
+        """未来 Repository 变慢时，只能串行同一业务键，不能冻结全部 Progress。"""
+
+        hub = LLMProgressHub()
+        adapter = InMemoryProgressAdapter(hub)
+        guard_entered = threading.Event()
+        release_guard = threading.Event()
+        guarded_key = ProgressKey("file", "guarded.pdf")
+        other_key = ProgressKey("file", "other-guard.pdf")
+
+        def slow_guard() -> bool:
+            guard_entered.set()
+            if not release_guard.wait(timeout=5):
+                raise TimeoutError("测试未释放持久化 Guard")
+            return True
+
+        worker = threading.Thread(
+            target=adapter.publish_guarded,
+            args=(
+                ProgressPublication(
+                    key=guarded_key,
+                    expected_task_id=TaskId("guarded-task"),
+                    progress=0.1,
+                    message="",
+                    internal_state="accepted",
+                ),
+            ),
+            kwargs={"is_current": slow_guard},
+            daemon=True,
+        )
+        worker.start()
+        self.assertTrue(guard_entered.wait(timeout=2))
+
+        started = time.monotonic()
+        adapter.publish(
+            ProgressPublication(
+                key=other_key,
+                expected_task_id=TaskId("other-task"),
+                progress=0.2,
+                message="",
+                internal_state="accepted",
+            )
+        )
+        elapsed = time.monotonic() - started
+        release_guard.set()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertLess(elapsed, 0.5)
+        latest = adapter.get_latest(other_key)
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(0.2, latest.progress)
+
     def test_legacy_subscribers_receive_isolated_payload_copies(self) -> None:
         hub = LLMProgressHub()
         observed = []
@@ -275,6 +334,143 @@ class InMemoryProgressAdapterConcurrencyTests(unittest.TestCase):
         self.assertEqual("task-old", old.task_id.value)
         self.assertEqual(1, new.sequence_no)
         self.assertEqual("task-new", new.task_id.value)
+
+    def test_typed_publisher_rejects_old_task_after_new_acceptance(self) -> None:
+        """旧执行的迟到终态不得覆盖新任务已经发布的 accepted 快照。"""
+
+        hub = LLMProgressHub()
+        adapter = InMemoryProgressAdapter(hub)
+        key = ProgressKey("report", "132")
+
+        adapter.publish(
+            ProgressPublication(
+                key=key,
+                expected_task_id=TaskId("task-old"),
+                progress=0.5,
+                message="正在生成",
+                internal_state="accepted",
+            )
+        )
+        adapter.publish(
+            ProgressPublication(
+                key=key,
+                expected_task_id=TaskId("task-new"),
+                progress=0.0,
+                message="",
+                internal_state="accepted",
+            )
+        )
+        with self.assertLogs(
+            "app.modules.tasks.adapters.in_memory_progress",
+            level="WARNING",
+        ):
+            adapter.publish(
+                ProgressPublication(
+                    key=key,
+                    expected_task_id=TaskId("task-old"),
+                    progress=1.0,
+                    message="迟到完成",
+                    internal_state="succeeded",
+                )
+            )
+
+        latest = adapter.get_latest(key)
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(TaskId("task-new"), latest.task_id)
+        self.assertEqual(0.0, latest.progress)
+        self.assertEqual("accepted", latest.internal_state)
+
+        adapter.publish(
+            ProgressPublication(
+                key=key,
+                expected_task_id=TaskId("task-new"),
+                progress=0.35,
+                message="新任务运行中",
+                internal_state="running",
+            )
+        )
+        updated = adapter.get_latest(key)
+        self.assertEqual(0.35, updated.progress)
+        self.assertEqual("running", updated.internal_state)
+
+    def test_persistent_latest_guard_blocks_delayed_old_accepted_publication(self) -> None:
+        """即使旧 accepted 在线程调度后迟到，也必须先服从 SQLite latest owner。"""
+
+        hub = LLMProgressHub()
+        delegate = InMemoryProgressAdapter(hub)
+        commands = MagicMock(spec=TaskCommandPort)
+        commands.is_latest.side_effect = lambda task_id, _ref: (
+            task_id == TaskId("task-new")
+        )
+        publisher = LatestTaskProgressPublisherAdapter(
+            task_commands=commands,
+            delegate=delegate,
+        )
+        key = ProgressKey("report", "132")
+
+        with self.assertLogs(
+            "app.modules.tasks.adapters.latest_progress",
+            level="WARNING",
+        ):
+            publisher.publish(
+                ProgressPublication(
+                    key=key,
+                    expected_task_id=TaskId("task-old"),
+                    progress=0.0,
+                    message="",
+                    internal_state="accepted",
+                )
+            )
+        self.assertIsNone(delegate.get_latest(key))
+
+        publisher.publish(
+            ProgressPublication(
+                key=key,
+                expected_task_id=TaskId("task-new"),
+                progress=0.0,
+                message="",
+                internal_state="accepted",
+            )
+        )
+        latest = delegate.get_latest(key)
+        self.assertEqual(TaskId("task-new"), latest.task_id)
+
+    def test_persistent_latest_guard_runs_inside_atomic_hub_publication(self) -> None:
+        """Guard 拒绝时 Hub 必须保持为空，不能先写旧 accepted 再做补偿。"""
+
+        hub = LLMProgressHub()
+        delegate = InMemoryProgressAdapter(hub)
+        commands = MagicMock(spec=TaskCommandPort)
+        commands.is_latest.return_value = False
+        publisher = LatestTaskProgressPublisherAdapter(
+            task_commands=commands,
+            delegate=delegate,
+        )
+        key = ProgressKey("report", "132")
+
+        with self.assertLogs(
+            "app.services.core.progress_hub",
+            level="WARNING",
+        ) as captured:
+            publisher.publish(
+                ProgressPublication(
+                    key=key,
+                    expected_task_id=TaskId("task-old"),
+                    progress=0.0,
+                    message="",
+                    internal_state="accepted",
+                )
+            )
+
+        self.assertIsNone(delegate.get_latest(key))
+        commands.is_latest.assert_called_once_with(
+            TaskId("task-old"),
+            TaskBusinessRef("report", "132"),
+        )
+        self.assertTrue(
+            any("persistent_owner_changed" in item for item in captured.output)
+        )
 
 
 if __name__ == "__main__":

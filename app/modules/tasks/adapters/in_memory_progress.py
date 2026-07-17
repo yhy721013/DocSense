@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.modules.tasks.domain import ProgressKey, ProgressSnapshot, TaskId
 from app.modules.tasks.ports import (
+    ProgressPublication,
     ProgressSubscriber,
     ProgressSubscription,
 )
@@ -57,6 +58,81 @@ class InMemoryProgressAdapter:
             key.business_key,
         )
         return self._to_snapshot(event, expected_key=key) if event is not None else None
+
+    def publish(self, publication: ProgressPublication) -> None:
+        """把类型化更新写入唯一 Hub，并拒绝旧 TaskId 覆盖较新快照。
+
+        ``message`` 与 ``state`` 只存放在 Hub 的内部载荷中，公开 WebSocket Presenter
+        仍只输出既有 ``businessType/data`` 字段。``accepted`` 是唯一允许切换 TaskId 的
+        状态；后续 running/terminal 更新若发现 Hub 已属于新任务，会被原子跳过。
+        """
+
+        self._publish(publication, publication_guard=None)
+
+    def publish_guarded(
+        self,
+        publication: ProgressPublication,
+        *,
+        is_current: Callable[[], bool],
+    ) -> bool:
+        """在 Hub 同键原子发布区内复核持久化 owner，返回是否真正写入投影。"""
+
+        if not callable(is_current):
+            raise TypeError("is_current 必须可调用")
+        return self._publish(publication, publication_guard=is_current)
+
+    def _publish(
+        self,
+        publication: ProgressPublication,
+        *,
+        publication_guard: Callable[[], bool] | None,
+    ) -> bool:
+        """完成类型化载荷映射；可选 Guard 由 Hub 在同键发布锁内调用。"""
+
+        if not isinstance(publication, ProgressPublication):
+            raise TypeError("publication 必须是 ProgressPublication")
+        key = publication.key
+        if key.business_type == "file":
+            identity_field = "fileName"
+            public_identity: object = key.business_key
+        elif key.business_type == "report":
+            identity_field = "reportId"
+            try:
+                public_identity = int(key.business_key)
+            except ValueError as exc:
+                raise ValueError("report Progress business_key 必须是整数文本") from exc
+        elif key.business_type == "weaponry":
+            identity_field = "architectureId"
+            public_identity = key.business_key
+        else:
+            raise ValueError("不支持的 Progress business_type")
+
+        published = self._hub.publish(
+            key.business_type,
+            key.business_key,
+            {
+                "businessType": key.business_type,
+                "data": {
+                    identity_field: public_identity,
+                    "progress": publication.progress,
+                },
+                "message": publication.message,
+                "state": publication.internal_state,
+            },
+            task_id=publication.expected_task_id.value,
+            allow_task_handoff=publication.internal_state == "accepted",
+            publication_guard=publication_guard,
+        )
+        if not published:
+            logger.warning(
+                "旧执行 Progress 已跳过: business_type=%s business_key=%s task_id=%s "
+                "internal_state=%s",
+                key.business_type,
+                key.business_key,
+                publication.expected_task_id,
+                publication.internal_state,
+            )
+        return published
 
     def subscribe(
         self,

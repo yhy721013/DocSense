@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from math import isfinite
+from typing import Generic, TypeVar
 
 
 CALLBACK_PENDING = "pending"
@@ -27,6 +28,7 @@ CALLBACK_STATUSES = frozenset(
 )
 
 _PROGRESS_QUANT = Decimal("0.0001")
+TTaskInput = TypeVar("TTaskInput")
 
 
 def _required_text(value: object, *, name: str) -> str:
@@ -178,6 +180,71 @@ class TaskSnapshot:
 
 
 @dataclass(frozen=True)
+class TaskExecutionSnapshot(Generic[TTaskInput]):
+    """携带不可变输入的一次任务执行事实。
+
+    ``TaskSnapshot`` 面向既有查询和 Progress 回退，只描述公开投影；本类型则面向
+    Worker/Application，保证执行器能够仅凭 ``TaskId`` 恢复受理时输入。泛型输入由
+    各业务模块定义，tasks 模块不导入 report/analysis 等业务类型，从而保持控制面
+    对业务实现的单向依赖。
+    """
+
+    task_id: TaskId
+    task_type: str
+    business_ref: TaskBusinessRef
+    execution_state: str
+    public_status: str
+    progress: float
+    message: str
+    input_snapshot: TTaskInput
+    accepted_at: str
+    trace_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        if not isinstance(self.business_ref, TaskBusinessRef):
+            raise TypeError("business_ref 必须是 TaskBusinessRef")
+        object.__setattr__(
+            self,
+            "task_type",
+            _required_text(self.task_type, name="task_type"),
+        )
+        object.__setattr__(
+            self,
+            "execution_state",
+            _required_text(self.execution_state, name="execution_state"),
+        )
+        object.__setattr__(
+            self,
+            "public_status",
+            _required_text(self.public_status, name="public_status"),
+        )
+        object.__setattr__(
+            self,
+            "progress",
+            _normalized_progress(self.progress, name="progress"),
+        )
+        object.__setattr__(
+            self,
+            "message",
+            _optional_text(self.message, name="message"),
+        )
+        if self.input_snapshot is None:
+            raise ValueError("input_snapshot 不能为空")
+        object.__setattr__(
+            self,
+            "accepted_at",
+            _required_text(self.accepted_at, name="accepted_at"),
+        )
+        object.__setattr__(
+            self,
+            "trace_id",
+            _required_text(self.trace_id, name="trace_id"),
+        )
+
+
+@dataclass(frozen=True)
 class TaskLookupItem:
     """一项已解析的 check-task 查询。
 
@@ -308,6 +375,7 @@ __all__ = [
     "ProgressSnapshot",
     "ProgressSubscriptionRequest",
     "TaskBusinessRef",
+    "TaskExecutionSnapshot",
     "TaskId",
     "TaskLookupItem",
     "TaskSnapshot",

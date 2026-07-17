@@ -17,7 +17,21 @@ from pathlib import Path
 from typing import Iterable
 
 from app.container import ApplicationServices, UploadTaskLimiter
-from app.modules.tasks.adapters import InMemoryProgressAdapter, LegacyTaskReadAdapter
+from app.modules.report.adapters import (
+    ReportTaskCommandCodec,
+    SQLiteReportCallbackAdapter,
+    SQLiteReportCallbackRecoverySource,
+)
+from app.modules.report.application import (
+    RecoverReportCallbackSynchronously,
+    SubmitReportTask,
+)
+from app.modules.tasks.adapters import (
+    InMemoryProgressAdapter,
+    LegacyTaskCommandAdapter,
+    LegacyTaskReadAdapter,
+    LatestTaskProgressPublisherAdapter,
+)
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.services.chat import (
     ChatAbortService,
@@ -33,7 +47,11 @@ from app.services.chat import (
     InlineChatRunDispatcher,
     SynchronousChatRunExecutor,
 )
-from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
+from app.services.core.config import (
+    AnythingLLMConfig,
+    LLMIntegrationConfig,
+    ReportInfrastructureConfig,
+)
 from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
@@ -41,6 +59,8 @@ from tests.fakes import (
     FakeChatConversationFactory,
     FakeDocumentRagFactory,
     FakeKnowledgeIndexFactory,
+    FakeReportDispatcherPort,
+    InvocationRecorder,
 )
 
 
@@ -52,6 +72,7 @@ def build_offline_application_services(
     *,
     chat_stream_contents: Iterable[str] = ("第一段", "第二段"),
     max_upload_concurrency: int = 1,
+    callback_url: str | None = None,
 ) -> ApplicationServices:
     """组装不访问网络的完整测试依赖容器。
 
@@ -89,6 +110,29 @@ def build_offline_application_services(
         progress_snapshots=progress_adapter,
         progress_subscriptions=progress_adapter,
         task_reader=LegacyTaskReadAdapter(task_service),
+    )
+    report_task_commands = LegacyTaskCommandAdapter(
+        task_service,
+        ReportTaskCommandCodec(),
+    )
+    report_dispatcher = FakeReportDispatcherPort(InvocationRecorder())
+    report_submit = SubmitReportTask(
+        task_commands=report_task_commands,
+        progress_publisher=LatestTaskProgressPublisherAdapter(
+            task_commands=report_task_commands,
+            delegate=progress_adapter,
+        ),
+        dispatcher=report_dispatcher,
+    )
+    report_callback_adapter = SQLiteReportCallbackAdapter(
+        task_service,
+        callback_url=callback_url or "",
+        callback_timeout=5.0,
+        lease_seconds=30.0,
+    )
+    report_callback_recovery = RecoverReportCallbackSynchronously(
+        source=SQLiteReportCallbackRecoverySource(task_service),
+        callbacks=report_callback_adapter,
     )
     knowledge_service = DatabaseService(db_path=str(knowledge_db_path))
     chat_store = ChatStore(db_path=str(chat_db_path))
@@ -150,8 +194,11 @@ def build_offline_application_services(
         upload_task_limiter=UploadTaskLimiter(
             max_concurrency=max_upload_concurrency,
         ),
+        report_submit=report_submit,
+        report_callback_recovery=report_callback_recovery,
+        report_dispatcher=report_dispatcher,
         llm_config=LLMIntegrationConfig(
-            callback_url=None,
+            callback_url=callback_url,
             callback_timeout=5.0,
             task_db_path=str(task_db_path),
             download_timeout=5.0,
@@ -163,6 +210,7 @@ def build_offline_application_services(
             timeout=5.0,
             storage_root=None,
         ),
+        report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
     )
 
     logger.debug("离线应用依赖组装完成: runtime_directory=%s", root)

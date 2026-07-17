@@ -19,6 +19,7 @@ class LLMRouteValidationTests(unittest.TestCase):
             offline_services,
             kb_service=self.kb_service,
         )
+        self.services = services
         # 路由测试必须显式注入离线容器。禁止调用无参 ``create_app()``，否则会
         # 读取生产配置并初始化共享运行目录，既拖慢测试，也破坏阶段 0 的隔离基线。
         self.app = create_app(services=services)
@@ -116,7 +117,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
 
     @patch("app.blueprints.llm.threading.Thread")
-    def test_generate_report_starts_background_task_for_valid_request(self, mock_thread):
+    def test_generate_report_persists_and_wakes_without_route_thread(self, mock_thread):
         response = self.client.post(
             "/llm/generate-report",
             json={
@@ -130,11 +131,13 @@ class LLMRouteValidationTests(unittest.TestCase):
                 ],
             },
         )
-        self.assertEqual(response.status_code, 202)
-        mock_thread.assert_called_once()
 
-    @patch("app.blueprints.llm.threading.Thread")
-    def test_generate_report_normalizes_unbounded_integer_string_id(self, mock_thread):
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(b"", response.get_data())
+        mock_thread.assert_not_called()
+        self.assertEqual(1, len(self.services.report_dispatcher.task_ids))
+
+    def test_generate_report_normalizes_large_integer_string_id(self):
         report_id = 10**80 + 132
 
         response = self.client.post(
@@ -157,10 +160,38 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertIsNotNone(latest)
         assert latest is not None
         self.assertEqual(report_id, latest["data"]["reportId"])
-        worker_payload = mock_thread.call_args.kwargs["kwargs"]["request_payload"]
-        normalized_value = worker_payload["params"][0]["reportId"]
+        public_task = self.task_service.get_task("report", str(report_id))
+        execution = self.task_service.get_task_execution(
+            public_task["execution_id"]
+        )
+        normalized_value = execution["input_payload"]["public_report_id"]
         self.assertEqual(report_id, normalized_value)
         self.assertIs(int, type(normalized_value))
+
+    def test_generate_report_rejects_more_than_128_report_id_digits(self):
+        response = self.client.post(
+            "/llm/generate-report",
+            json={
+                "businessType": "report",
+                "params": [
+                    {
+                        "reportId": "9" * 129,
+                        "filePathList": [
+                            "http://127.0.0.1:8000/sample.txt"
+                        ],
+                        "templateOutline": (
+                            "http://127.0.0.1:8000/template.docx"
+                        ),
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(
+            {"error": "reportId不能超过128位十进制数字"},
+            response.get_json(),
+        )
 
     def test_generate_report_rejects_non_integer_report_id(self):
         for invalid in (True, 132.0, "132.0", "not-an-integer"):

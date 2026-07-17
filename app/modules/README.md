@@ -13,7 +13,8 @@ Web/Worker Adapter
 ```
 
 - `domain/` 只表达稳定业务概念和规则，不依赖 Web 框架、队列、数据库或网络客户端。
-- `application/` 编排用例，只依赖本模块的领域类型和抽象端口。
+- `application/` 编排用例，只依赖本模块的领域类型/抽象端口；业务模块可依赖 tasks 的
+  公共 `TaskId` 与控制面 Port，但不得依赖 tasks Adapter。
 - `ports/` 描述应用层所需能力，不包含具体 SQL、HTTP 路径或供应商对象。
 - `adapters/` 实现端口并隔离遗留服务、数据库、队列和外部系统。
 - 模块之间通过明确的应用入口、事件或共享端口协作，不直接导入对方 Adapter，也不跨模块写表。
@@ -22,7 +23,8 @@ Web/Worker Adapter
 
 | 模块 | 职责 | 当前状态 |
 | --- | --- | --- |
-| `tasks/` | 通用任务身份、状态读取、回调恢复与进度边界 | 阶段 1A 已建立框架无关 DTO、Port、应用服务和架构门禁；尚未接管生产调用链 |
+| `tasks/` | 通用任务身份、状态读取、写入命令、回调恢复与进度边界 | 1A/1B 已接管 Progress 并建立可靠恢复命令；1C 增加 SQLite Task Command/Queue Inspection、原子 latest Progress Guard，并将共享审计 Schema 只增不删升级为 v3 |
+| `report/` | 报告输入、HTML 结果、回调载荷及报告执行用例 | 阶段 1C 已关闭：契约、Domain/Application/Ports、SQLite 任务事实、任务级 I/O/RAG/Audit、Callback/资源恢复、一条执行 Worker与两条隔离维护线程、毒任务冷却、跨进程单实例门禁、组合根、当前 Flask 薄路由及最终扩大回归均已完成；尚未部署生产或接入可靠队列 |
 
 ## 维护规则
 

@@ -49,6 +49,7 @@ class RagPromptKind(str, Enum):
     JSON_REPAIR = "json_repair"
     ARCHITECTURE_REPAIR = "architecture_repair"
     FOLLOW_UP = "follow_up"
+    REPORT_GENERATION = "report_generation"
 
 
 def validate_rag_prompt_kind(value: RagPromptKind) -> RagPromptKind:
@@ -138,6 +139,7 @@ class RagAttempt:
     missing_marker_count: int = 0
     mismatched_marker_count: int = 0
     source_marker_status: str = ""
+    call_id: str = ""
 
     def __post_init__(self) -> None:
         """冻结来源集合并校验审计记录的最小结构。"""
@@ -182,8 +184,10 @@ class RagAttempt:
             raise ValueError("失败的 RagAttempt 必须包含 error_message")
         if not normalized_failure_stage and normalized_error:
             raise ValueError("成功的 RagAttempt 不得包含 error_message")
-        if not normalized_failure_stage and not str(self.raw_response or "").strip():
-            raise ValueError("成功的 RagAttempt 必须包含 raw_response")
+        # 报告生成契约允许模型成功返回空字符串。``None`` 仍表示上游尚未产生响应，空串
+        # 则是需要审计的真实成功结果，二者不能用 ``or ''`` 混为一谈。
+        if not normalized_failure_stage and self.raw_response is None:
+            raise ValueError("成功的 RagAttempt 必须明确包含 raw_response")
         object.__setattr__(self, "failure_stage", normalized_failure_stage)
         object.__setattr__(self, "error_message", normalized_error)
         object.__setattr__(self, "sources", tuple(self.sources))
@@ -234,6 +238,9 @@ class RagAttempt:
         object.__setattr__(self, "source_count", source_count)
         object.__setattr__(self, "verified_source_count", verified_count)
         object.__setattr__(self, "source_marker_status", marker_status)
+        if not isinstance(self.call_id, str):
+            raise TypeError("RagAttempt.call_id 必须是 str")
+        object.__setattr__(self, "call_id", self.call_id.strip())
 
 
 @dataclass(frozen=True)
@@ -304,6 +311,7 @@ class RagExecutionTrace:
     failure_stage: Optional[str]
     error_message: Optional[str]
     lifecycle_events: tuple[RagLifecycleEvent, ...] = ()
+    trace_id: str = ""
 
     def __post_init__(self) -> None:
         """冻结模型调用和生命周期序列，并保证上下文名称可用于审计关联。"""
@@ -330,6 +338,9 @@ class RagExecutionTrace:
             raise ValueError("成功的 RagExecutionTrace 不得包含 error_message")
         object.__setattr__(self, "failure_stage", normalized_failure_stage)
         object.__setattr__(self, "error_message", normalized_error)
+        if not isinstance(self.trace_id, str):
+            raise TypeError("RagExecutionTrace.trace_id 必须是 str")
+        object.__setattr__(self, "trace_id", self.trace_id.strip())
         sequence_numbers = tuple(
             event.sequence_no for event in self.lifecycle_events
         )

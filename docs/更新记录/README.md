@@ -17,9 +17,20 @@
 | `260715-阶段1A-1接口契约基线执行记录.md` | check-task/Progress 当前与目标契约分层、离线测试结果，以及已确认的严格 params/action 错误连接策略。 |
 | `260715-阶段1A-2模块骨架与架构边界执行记录.md` | tasks/Flask Adapter 包骨架、AST 导入门禁、规则自证、完整回归结果与 1A-3 后续边界。 |
 | `260716-阶段1A-3内部任务契约执行记录.md` | 不可变 Task/Progress DTO、三类 Port、两个应用服务、Fake 契约测试、波次 1A 门禁与完整回归。 |
-| `260716-阶段0与1A审查修正记录.md` | WebSocket/SQLite 基线工具修正、回调持久化一致性、连接有界缓冲、正向架构白名单、latest-wins TASK-09，以及 check-task 直接采用可靠队列异步恢复的 TASK-10 决策。 |
+| `260716-阶段0与1A审查修正记录.md` | WebSocket/SQLite 基线工具修正、回调持久化一致性、连接有界缓冲、正向架构白名单、latest-wins TASK-09，以及当时的 TASK-10 异步方案；该方案已被 2026-07-17 的甲方同步保留口径取代。 |
 | `260716-阶段1B-1可靠恢复命令边界执行记录.md` | check-task 共享请求 DTO、批量原子可靠命令 Port/Application、空响应 Presenter、活动命令复用、Fake 故障测试和未切生产边界。 |
 | `260716-阶段1B-2Progress控制面迁移执行记录.md` | `/llm/progress` 无 action 契约切换、类型化应用服务、线程安全 Hub/Adapter、连接级有界缓冲与单写入；并记录全面审查后的同任务 sequence 水位、reportId 统一入站规范化、Barrier 50 线程纠偏与扩大回归。 |
+| `260716-阶段1C-0与1C-1报告契约及领域层执行记录.md` | report 当前/目标双基线、不可变 Domain/DTO、HTML/回调/名称纯规则、三项已确认严格 HTTP 400 入站校验、遗留兼容转发、完整离线验证及尚未切换生产执行链的边界。 |
+| `260716-阶段1C-2报告应用端口与严格Fake执行记录.md` | Task Command/Progress 与 Report File/Artifact/RAG/Audit/Callback/Dispatcher Port、Submit/Run 无框架 Application、严格 Fake、故障矩阵、完整回归和生产未切换边界。 |
+| `260716-阶段1C-3SQLite任务事实与原子受理执行记录.md` | 追加式 execution、Callback Guard 表、SQLite 原子受理/领取/expected TaskId 条件写、report Codec、50 线程 Barrier、事务回滚和生产路由未切换边界。 |
+| `260716-阶段1C全面审查修复与并发补强执行记录.md` | 1C-0～1C-3 全面审查后的 128 位 reportId、可选文本兼容、完整 RAG trace、结果投影隔离、stale 收敛、Callback Guard latest/fencing/HTTP 分类、226 项回归和生产未切换边界。 |
+| `260716-阶段1C-4报告生产IO与审计Adapter执行记录.md` | 任务级 Artifact、执行时文件处理、多文档 AnythingLLM RAG、审计 Schema v3、原子审计门禁、组合故障注入、扩大回归和生产未切换边界。 |
+| `260716-阶段1C-5Callback Guard与资源恢复闭环执行记录.md` | Callback Guard 人工解除追加审计、精确 HTTP outcome、终态权威 Artifact 所有权、CAS cleanup/quarantine 恢复、并发/崩溃故障测试、825 项安全回归和生产未切换边界。 |
+| `260716-阶段1C第二轮全面审查风险修复执行记录.md` | 1C-0～1C-5 第二轮审查后的发送前权威复核、即时 409、Artifact 完整性、AnythingLLM 未知副作用隔离、逐事件清理恢复、有界扫描、836 项安全回归及后续硬门禁。 |
+| `260717-阶段1C-6Dispatcher组合根与路由切换执行记录.md` | SQLite accepted 持久积压、Event 常量空间唤醒的报告执行 Worker、启动/周期资源恢复、60/90 秒清理边界、组合根生命周期、报告 202/409 薄路由切换、Progress 原子 latest Guard 及生产未部署边界。 |
+| `260717-阶段1C-6全面审查风险修复执行记录.md` | 1C-6 全面审查后的真实关闭语义、许可等待停机取消、稳定 FIFO、毒任务/坏资源冷却、隔离维护线程、按键 Progress 锁、跨进程单实例门禁、测试离线隔离和 871 项安全回归。 |
+| `260717-阶段1C-7阶段关闭验收执行记录.md` | 阶段 1C 最终契约/并发/故障/架构验收、遗留 Report Worker 三类引用证据、永久 AST 隔离门禁、358 项定向及 872 项安全回归，以及阶段 2～6 输入清单。 |
+| `260717-阶段1C全面审查问题修复与同步回调加固执行记录.md` | 阶段关闭后全面审查修复：同步 check-task 与主链共用 Callback Guard、过期扫描、严格 2xx、下载/审计/资源/Dispatcher 补强、验证结果及生产边界。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 

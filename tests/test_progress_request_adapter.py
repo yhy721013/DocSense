@@ -35,7 +35,7 @@ class ProgressRequestAdapterTests(unittest.TestCase):
             ("00132", "132"),
             (" +00132 ", "132"),
             ("-000132", "-132"),
-            ("9" * 100, "9" * 100),
+            ("9" * 128, "9" * 128),
         )
 
         for value, expected in values_and_expected:
@@ -64,6 +64,18 @@ class ProgressRequestAdapterTests(unittest.TestCase):
                             "params": [{"reportId": invalid}],
                         }
                     )
+
+    def test_report_rejects_more_than_128_decimal_digits(self) -> None:
+        with self.assertRaisesRegex(
+            ProgressRequestValidationError,
+            "reportId不能超过128位十进制数字",
+        ):
+            parse_progress_subscription(
+                {
+                    "businessType": "report",
+                    "params": [{"reportId": "9" * 129}],
+                }
+            )
 
     def test_weaponry_keeps_legacy_internal_key_conversion(self) -> None:
         weaponry = parse_progress_subscription(

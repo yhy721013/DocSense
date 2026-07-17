@@ -7,7 +7,21 @@ import unittest
 
 from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
-from app.modules.tasks.adapters import InMemoryProgressAdapter, LegacyTaskReadAdapter
+from app.modules.report.adapters import (
+    ReportTaskCommandCodec,
+    SQLiteReportCallbackAdapter,
+    SQLiteReportCallbackRecoverySource,
+)
+from app.modules.report.application import (
+    RecoverReportCallbackSynchronously,
+    SubmitReportTask,
+)
+from app.modules.tasks.adapters import (
+    InMemoryProgressAdapter,
+    LegacyTaskCommandAdapter,
+    LegacyTaskReadAdapter,
+    LatestTaskProgressPublisherAdapter,
+)
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.services.chat import (
     ChatAbortService,
@@ -25,7 +39,11 @@ from app.services.chat import (
     MESSAGE_COMMITTED,
     RUN_FAILED,
 )
-from app.services.core.config import AnythingLLMConfig, LLMIntegrationConfig
+from app.services.core.config import (
+    AnythingLLMConfig,
+    LLMIntegrationConfig,
+    ReportInfrastructureConfig,
+)
 from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
@@ -33,6 +51,8 @@ from tests.fakes import (
     FakeChatConversationFactory,
     FakeDocumentRagFactory,
     FakeKnowledgeIndexFactory,
+    FakeReportDispatcherPort,
+    InvocationRecorder,
 )
 
 
@@ -70,6 +90,28 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         progress_subscriptions=progress_adapter,
         task_reader=LegacyTaskReadAdapter(task_service),
     )
+    report_task_commands = LegacyTaskCommandAdapter(
+        task_service,
+        ReportTaskCommandCodec(),
+    )
+    report_dispatcher = FakeReportDispatcherPort(InvocationRecorder())
+    report_submit = SubmitReportTask(
+        task_commands=report_task_commands,
+        progress_publisher=LatestTaskProgressPublisherAdapter(
+            task_commands=report_task_commands,
+            delegate=progress_adapter,
+        ),
+        dispatcher=report_dispatcher,
+    )
+    report_callback_recovery = RecoverReportCallbackSynchronously(
+        source=SQLiteReportCallbackRecoverySource(task_service),
+        callbacks=SQLiteReportCallbackAdapter(
+            task_service,
+            callback_url="",
+            callback_timeout=5.0,
+            lease_seconds=30.0,
+        ),
+    )
     return ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
@@ -103,6 +145,9 @@ def _build_test_services(tmp: str) -> ApplicationServices:
         progress_hub=progress_hub,
         progress_subscription_service=progress_subscription_service,
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
+        report_submit=report_submit,
+        report_callback_recovery=report_callback_recovery,
+        report_dispatcher=report_dispatcher,
         llm_config=LLMIntegrationConfig(
             callback_url=None,
             callback_timeout=5.0,
@@ -116,6 +161,7 @@ def _build_test_services(tmp: str) -> ApplicationServices:
             timeout=5.0,
             storage_root=None,
         ),
+        report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
     )
 
 

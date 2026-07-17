@@ -7,6 +7,21 @@
 - Adapter 不负责 HTTP/WebSocket 参数解析或公开响应拼装；这些职责属于 Web Adapter 与 Presenter。
 - 阶段 1B-2 已加入 `LegacyTaskReadAdapter` 与 `InMemoryProgressAdapter`：前者只读现有
   Task Service，后者围绕生产容器中的同一个 Hub 实现线程安全快照/订阅并在锁外通知。
+- 阶段 1C-3 已加入通用 `LegacyTaskCommandAdapter`：通过业务 Codec 持久化不可变输入和
+  结果，在独立 SQLite 连接的短 `BEGIN IMMEDIATE` 事务中完成原子受理、领取、expected
+  TaskId 进度/终态条件写、accepted 扫描和队列只读汇总。Adapter 不持有线程、内存任务
+  队列或外部 I/O。
+- 阶段 1C-6 已加入 `LatestTaskProgressPublisherAdapter`：通过
+  `GuardedProgressPublisherPort` 在 Hub 同业务键发布锁内复核 SQLite latest owner，再原子
+  更新内存 latest；Guard 运行在全局状态锁外，不同业务键不会因一个慢查询互相阻塞，旧
+  任务通知也不会在“先查数据库、后写 Hub”的间隙覆盖新任务。
+- `UploadTaskLimiter` 实现共享重型资源许可。迁移期 analysis 可继续使用同步 `run`；报告
+  Dispatcher 使用可中断获取，使停机时尚未获得许可的 accepted 任务不会在停止后启动。
+- 业务 Codec 由各业务模块 Adapter 提供；tasks Adapter 不得为了序列化输入而反向导入
+  report/analysis/weaponry。当前首个 Codec 位于 `report/adapters/task_codec.py`。
 - 当前 Progress Adapter 仅具备单实例内存语义，不提供跨进程通知、持久化或重放；阶段
-  7 由 MySQL 事实与 Redis 唤醒实现替换。check-task 不建设遗留同步恢复 Adapter，未来
-  直接加入 MySQL/Outbox 实现。
+  7 由 MySQL 事实与 Redis 唤醒实现替换。报告当前使用本地单执行 Worker Dispatcher 消费
+  SQLite accepted 事实，但该 Dispatcher 属于 report Adapter，不是 tasks 可靠队列实现。
+  check-task 按甲方要求保留请求内同步恢复：report 业务模块已装配共享 Callback Guard 的
+  专用 Adapter/Application，file/weaponry 暂走兼容实现；未来 MySQL/Outbox 只增加后台
+  可靠兜底，不替换同步入口。

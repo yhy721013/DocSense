@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import atexit
+
 from flask import Flask
 
 from app.blueprints.debug import debug_bp
@@ -31,13 +33,19 @@ def create_app(*, services: ApplicationServices | None = None) -> Flask:
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
     )
-    resolved_services = (
-        services if services is not None else create_application_services()
-    )
+    owns_services = services is None
+    resolved_services = services if services is not None else create_application_services()
     app.extensions[APPLICATION_SERVICES_EXTENSION] = resolved_services
     sock.init_app(app)
 
     app.register_blueprint(llm_bp)
     app.register_blueprint(debug_bp)
+
+    if owns_services:
+        # 显式注入的离线测试默认不启动任何后台线程；只有应用工厂自行创建的生产容器
+        # 才拥有 Dispatcher 生命周期。启动失败必须让应用创建失败，不能在没有恢复扫描
+        # 的情况下继续对外返回 202。
+        resolved_services.start_background_services()
+        atexit.register(resolved_services.close)
 
     return app

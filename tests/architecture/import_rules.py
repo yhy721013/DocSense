@@ -71,7 +71,16 @@ _DYNAMIC_IMPORT_PREFIX = "<dynamic-import>"
 # 采用正向白名单：新增依赖必须明确进入对应集合，而不是等发现某个新客户端库后
 # 再补黑名单。这样 httpx/redis/pika/minio/boto3 等替代库不能绕过分层门禁。
 _DOMAIN_STDLIB_ROOTS = frozenset(
-    {"__future__", "dataclasses", "decimal", "enum", "math", "typing"}
+    {
+        "__future__",
+        "dataclasses",
+        "decimal",
+        "enum",
+        "hashlib",
+        "html",
+        "math",
+        "typing",
+    }
 )
 _PORTS_STDLIB_ROOTS = frozenset(
     {"__future__", "dataclasses", "enum", "typing"}
@@ -81,11 +90,13 @@ _APPLICATION_STDLIB_ROOTS = frozenset(
         "__future__",
         "collections",
         "dataclasses",
+        "datetime",
         "enum",
         "logging",
         "threading",
         "time",
         "typing",
+        "uuid",
     }
 )
 _PRESENTER_STDLIB_ROOTS = frozenset(
@@ -353,13 +364,18 @@ def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
 def _ports_matcher(reference: ImportReference) -> RuleMatch | None:
     context = _module_context(reference.source)
     module_name = context[0] if context is not None else ""
+    allowed_internal = [
+        f"app.modules.{module_name}.domain",
+        f"app.modules.{module_name}.ports",
+    ]
+    if module_name != "tasks":
+        # TaskId/TaskBusinessRef 是跨业务 Port 可以复用的稳定控制面值对象；这里只放行
+        # tasks domain，不放行 tasks application/adapters 或其他业务模块。
+        allowed_internal.append("app.modules.tasks.domain")
     return _first_positive_allowlist_violation(
         reference,
         allowed_stdlib_roots=_PORTS_STDLIB_ROOTS,
-        allowed_internal_prefixes=(
-            f"app.modules.{module_name}.domain",
-            f"app.modules.{module_name}.ports",
-        ),
+        allowed_internal_prefixes=tuple(allowed_internal),
         reason="端口只能依赖批准的标准库、本模块领域类型和其他抽象端口",
     )
 
@@ -367,14 +383,21 @@ def _ports_matcher(reference: ImportReference) -> RuleMatch | None:
 def _application_matcher(reference: ImportReference) -> RuleMatch | None:
     context = _module_context(reference.source)
     module_name = context[0] if context is not None else ""
+    allowed_internal = [
+        f"app.modules.{module_name}.domain",
+        f"app.modules.{module_name}.ports",
+        f"app.modules.{module_name}.application",
+    ]
+    if module_name != "tasks":
+        # 各业务 Application 可以使用通用 TaskId、TaskCommand 和 Progress Port，
+        # 但不能反向接触 tasks 的 Application/Adapter 实现。
+        allowed_internal.extend(
+            ("app.modules.tasks.domain", "app.modules.tasks.ports")
+        )
     return _first_positive_allowlist_violation(
         reference,
         allowed_stdlib_roots=_APPLICATION_STDLIB_ROOTS,
-        allowed_internal_prefixes=(
-            f"app.modules.{module_name}.domain",
-            f"app.modules.{module_name}.ports",
-            f"app.modules.{module_name}.application",
-        ),
+        allowed_internal_prefixes=tuple(allowed_internal),
         reason="应用层只能依赖批准的标准库、本模块领域类型、端口和应用组件",
     )
 
