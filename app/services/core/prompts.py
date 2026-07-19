@@ -73,6 +73,45 @@ _CANDIDATE_FIELD_ALIASES = {
     "nodeType": ("node_type",),
 }
 
+DATA_STANDARD_CANDIDATE_REMARKS = {
+    "建模与仿真": (
+        "标准主体涉及模型、仿真、HLA、VV&A、仿真互操作或模型数据。"
+    ),
+    "军用软件": (
+        "标准主体涉及军用软件研制、测试、质量保证、生命周期、编码或软件文档。"
+    ),
+    "目标特性": (
+        "标准主体涉及目标的雷达、红外、声学、散射、特征表征或特性数据。"
+    ),
+    "术语与定义": (
+        "标准标题和范围的主体是术语、词汇、定义或概念体系；普通标准中的固定章节不算。"
+    ),
+    "通用要求": (
+        "质量管理、通用技术、通用管理或综合要求，以及不属于其他五个专门主题的标准。"
+    ),
+    "元数据": (
+        "标准主体涉及元数据、数据元素、数据字典、模式、目录、编码或交换描述。"
+    ),
+}
+
+
+def _normalize_data_standard_kind(value: Any) -> str:
+    text = str(value or "").strip()
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1].strip()
+    if text.endswith("标准"):
+        text = text[:-2].strip()
+    return text
+
+
+def data_standard_candidate_remark(value: Any) -> str:
+    """返回数据标准六类的服务端语义卡片，不依赖调用方是否填写 remark。"""
+
+    return DATA_STANDARD_CANDIDATE_REMARKS.get(
+        _normalize_data_standard_kind(value),
+        "",
+    )
+
 
 def _candidate_field(item: Any, field: str) -> Any:
     """兼容协议字典和使用 snake_case/语义路径命名的不可变 DTO。"""
@@ -191,6 +230,65 @@ def build_architecture_classification_prompt(
         "【输出结构】\n"
         '{"architectureId": null}\n'
         "【模型候选】\n"
+        f"{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}\n"
+    )
+
+
+def build_data_standard_classification_prompt(
+    request_params: Mapping[str, Any],
+    architecture_candidates: Iterable[Any],
+    *,
+    standard_context: Mapping[str, Any],
+) -> str:
+    """构造已确认标准正文的六类叶节点专用分类 Prompt。"""
+
+    candidates = _project_architecture_candidates(architecture_candidates)
+    if not candidates:
+        raise ValueError("architecture_candidates 不能为空")
+    for candidate in candidates:
+        guidance = data_standard_candidate_remark(candidate.get("pathName"))
+        if not guidance:
+            raise ValueError(
+                "数据标准专用分类只允许六类已知叶节点"
+            )
+        if not str(candidate.get("remark") or "").strip():
+            candidate["remark"] = guidance
+
+    context_payload = {
+        key: standard_context[key]
+        for key in (
+            "standardNumber",
+            "standardTitle",
+            "documentKind",
+            "evidenceSources",
+        )
+        if key in standard_context
+        and standard_context[key] not in (None, "", (), [])
+    }
+    return (
+        "你是数据标准正文分类器。服务端已经通过文件名、首页和标准结构确认该文档是标准正文；"
+        "你的任务只是在下方数据标准叶节点中判断主题。\n"
+        "【请求上下文】\n"
+        f"fileName: {request_params.get('fileName', '')}\n"
+        f"originalFileName: {request_params.get('originalFileName', '')}\n"
+        "serverExtractedStandardContext: "
+        f"{json.dumps(context_payload, ensure_ascii=False, separators=(',', ':'))}\n"
+        "【分类规则】\n"
+        "1. 只能选择下方候选中的数字 id，不得返回数据标准父节点、候选外 ID 或分类名称。\n"
+        "2. 优先依据 standardTitle、标准范围和全文主要对象判断，不得由起草单位、"
+        "引用标准或局部章节决定分类。\n"
+        "3. 建模与仿真、军用软件、目标特性、术语与定义、元数据都需要标题或范围提供"
+        "对应专门主题证据。\n"
+        "4. “范围”“规范性引用文件”“术语和定义”等目录项是多数标准的固定章节；"
+        "仅出现这些章节不能归为“术语与定义”。\n"
+        "5. 已确认是标准正文，但不属于上述五个专门主题时，选择候选中的“通用要求”；"
+        "如果候选中不存在“通用要求”且其他类别也无充分证据，则输出 null。\n"
+        "6. architectureId 有值时必须是 JSON 数字，不能是字符串。\n"
+        "7. 只输出严格 JSON 对象，唯一键为 architectureId；不要输出解释、概率、"
+        "Markdown 或思考过程。\n"
+        "【输出结构】\n"
+        '{"architectureId": null}\n'
+        "【数据标准叶节点候选】\n"
         f"{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}\n"
     )
 

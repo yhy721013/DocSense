@@ -177,6 +177,55 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
         self.assertTrue(set(range(101, 107)).issubset(decision.final_candidate_ids))
         self.assertNotIn(100, decision.final_candidate_ids)
 
+    def test_data_standard_scope_filters_body_generic_exact_and_enriches_candidates(self):
+        index = build_architecture_tree_index(
+            [
+                *_full_feature_tree(),
+                {"id": 200, "name": "基地目标"},
+                {"id": 201, "name": "海军", "parentId": 200},
+                {"id": 202, "name": "海军基地甲", "parentId": 201},
+                {"id": 203, "name": "海军基地乙", "parentId": 201},
+            ]
+        )
+        scope_ids = tuple(range(101, 107))
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(
+                filename="GJB 9001C-2017.pdf",
+                title="质量管理体系要求",
+                body=(
+                    "本标准起草单位包括海军装备研究院和海军驻地代表局。"
+                    "正文规定质量管理体系要求。"
+                ),
+            ),
+            candidate_scope_ids=scope_ids,
+            candidate_scope_reason="data-standard-scope",
+            candidate_remark_overrides={
+                105: "质量管理及其他综合性标准要求。",
+            },
+        )
+
+        self.assertEqual(set(decision.final_candidate_ids), set(scope_ids))
+        self.assertNotIn(201, decision.direct_exact_ids)
+        self.assertNotIn(202, decision.final_candidate_ids)
+        self.assertEqual(_channel(decision, "scope"), scope_ids)
+        general = next(item for item in decision.candidates if item.id == 105)
+        self.assertEqual(general.remark, "质量管理及其他综合性标准要求。")
+        self.assertIn("data-standard-scope", general.protected_reasons)
+
+    def test_candidate_scope_rejects_parent_nodes(self):
+        with self.assertRaisesRegex(
+            ArchitectureRecallError,
+            "只能包含叶子节点",
+        ):
+            recall_architecture_candidates(
+                self.index,
+                build_document_architecture_signals(
+                    filename="GJB 9001C-2017.pdf"
+                ),
+                candidate_scope_ids=(100,),
+            )
+
     def test_equipment_rule_completes_all_seven_detail_categories(self):
         decision = recall_architecture_candidates(
             self.index,

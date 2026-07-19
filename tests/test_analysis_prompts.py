@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.services.core.prompts import (
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
+    build_data_standard_classification_prompt,
     build_file_analysis_prompt,
     build_file_extraction_prompt,
 )
@@ -65,6 +66,54 @@ class AnalysisPromptSplitTests(unittest.TestCase):
     def test_classification_prompt_rejects_empty_candidates(self):
         with self.assertRaisesRegex(ValueError, "不能为空"):
             build_architecture_classification_prompt({}, [])
+
+    def test_data_standard_prompt_injects_semantic_cards_and_general_fallback_rule(self):
+        prompt = build_data_standard_classification_prompt(
+            {
+                "fileName": "storage.pdf",
+                "originalFileName": "GJB 9001C-2017.pdf",
+            },
+            [
+                {
+                    "id": 101,
+                    "pathName": "数据标准/术语与定义",
+                    "nodeType": "leaf",
+                },
+                {
+                    "id": 102,
+                    "pathName": "数据标准/通用要求标准",
+                    "nodeType": "leaf",
+                },
+            ],
+            standard_context={
+                "standardNumber": "GJB 9001C-2017",
+                "standardTitle": "质量管理体系要求",
+                "documentKind": "standard_body",
+                "evidenceSources": ["originalFileName", "coverIdentifier"],
+            },
+        )
+
+        candidate_json = prompt.split("【数据标准叶节点候选】\n", 1)[1].strip()
+        candidates = json.loads(candidate_json)
+        self.assertTrue(all(item.get("remark") for item in candidates))
+        self.assertIn("质量管理体系要求", prompt)
+        self.assertIn("固定章节", prompt)
+        self.assertIn("选择候选中的“通用要求”", prompt)
+        self.assertIn("普通标准中的固定章节不算", candidates[0]["remark"])
+
+    def test_data_standard_prompt_rejects_unknown_leaf(self):
+        with self.assertRaisesRegex(ValueError, "只允许六类"):
+            build_data_standard_classification_prompt(
+                {},
+                [
+                    {
+                        "id": 999,
+                        "pathName": "数据标准/未知类别",
+                        "nodeType": "leaf",
+                    }
+                ],
+                standard_context={},
+            )
 
     def test_scope_rules_are_only_enabled_with_explicit_context(self):
         candidates = [

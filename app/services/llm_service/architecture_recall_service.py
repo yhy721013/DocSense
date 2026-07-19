@@ -991,6 +991,49 @@ def _projection_chars(candidates: Sequence[ArchitectureRecallCandidate]) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
+def _normalize_candidate_scope_ids(
+    index: ArchitectureTreeIndex,
+    values: Sequence[int] | None,
+) -> tuple[int, ...] | None:
+    if values is None:
+        return None
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError("candidate_scope_ids 必须是数字 ID 序列")
+    normalized: list[int] = []
+    for node_id in values:
+        if isinstance(node_id, bool) or not isinstance(node_id, int):
+            raise TypeError("candidate_scope_ids 必须只包含数字 ID")
+        node = index.require(node_id)
+        if not node.is_leaf:
+            raise ArchitectureRecallError(
+                f"candidate_scope_ids 只能包含叶子节点: {node_id}"
+            )
+        if node_id not in normalized:
+            normalized.append(node_id)
+    if not normalized:
+        raise ArchitectureRecallError("candidate_scope_ids 不能为空")
+    return tuple(normalized)
+
+
+def _normalize_candidate_remark_overrides(
+    index: ArchitectureTreeIndex,
+    values: Mapping[int, str] | None,
+) -> dict[int, str]:
+    if values is None:
+        return {}
+    if not isinstance(values, Mapping):
+        raise TypeError("candidate_remark_overrides 必须是 Mapping")
+    normalized: dict[int, str] = {}
+    for node_id, value in values.items():
+        if isinstance(node_id, bool) or not isinstance(node_id, int):
+            raise TypeError("candidate_remark_overrides 的键必须是数字 ID")
+        index.require(node_id)
+        remark = _as_text(value)
+        if remark:
+            normalized[node_id] = remark[:MAX_REMARK_CHARS]
+    return normalized
+
+
 class ArchitectureRecallService:
     """在完整领域树上执行确定性的本地多通道 Top-K 召回。"""
 
@@ -1024,6 +1067,9 @@ class ArchitectureRecallService:
         strong_evidence_only: bool = False,
         strong_identity_enabled: bool = True,
         preferred_parent_reasons: Mapping[int, Sequence[str]] | None = None,
+        candidate_scope_ids: Sequence[int] | None = None,
+        candidate_scope_reason: str = "",
+        candidate_remark_overrides: Mapping[int, str] | None = None,
     ) -> ArchitectureRecallDecision:
         started_at = time.perf_counter()
         if not isinstance(signals, DocumentArchitectureSignals):
@@ -1038,6 +1084,21 @@ class ArchitectureRecallService:
         preferred_parents = _normalize_preferred_parent_reasons(
             self._index,
             preferred_parent_reasons,
+        )
+        scoped_ids = _normalize_candidate_scope_ids(
+            self._index,
+            candidate_scope_ids,
+        )
+        scoped_id_set = set(scoped_ids or ())
+        if scoped_ids is not None and any(
+            node_id not in scoped_id_set for node_id in preferred_parents
+        ):
+            raise ArchitectureRecallError(
+                "受保护父节点不属于 candidate_scope_ids"
+            )
+        remark_overrides = _normalize_candidate_remark_overrides(
+            self._index,
+            candidate_remark_overrides,
         )
         query_tokens = _tokenize(signals.query_text)
         strong_identifiers = (
@@ -1097,6 +1158,47 @@ class ArchitectureRecallService:
                 )
             )
 
+        if scoped_ids is not None:
+            direct_exact_ids = tuple(
+                node_id for node_id in direct_exact_ids if node_id in scoped_id_set
+            )
+            exact_leaf_ids = tuple(
+                node_id for node_id in exact_leaf_ids if node_id in scoped_id_set
+            )
+            lexical_ids = tuple(
+                node_id for node_id in lexical_ids if node_id in scoped_id_set
+            )
+            tree_ids = tuple(
+                node_id for node_id in tree_ids if node_id in scoped_id_set
+            )
+            direct_tree_ids = tuple(
+                node_id for node_id in direct_tree_ids if node_id in scoped_id_set
+            )
+            rule_ids = tuple(
+                dict.fromkeys(
+                    (
+                        *(
+                            node_id
+                            for node_id in rule_ids
+                            if node_id in scoped_id_set
+                        ),
+                        *scoped_ids,
+                    )
+                )
+            )
+            protected = {
+                node_id: reasons
+                for node_id, reasons in protected.items()
+                if node_id in scoped_id_set
+            }
+            scope_reason = _as_text(candidate_scope_reason) or "candidate-scope"
+            for node_id in scoped_ids:
+                protected[node_id] = tuple(
+                    dict.fromkeys(
+                        (*protected.get(node_id, ()), scope_reason)
+                    )
+                )
+
         if not any(
             (exact_leaf_ids, lexical_ids, tree_ids, rule_ids, preferred_parents)
         ):
@@ -1108,6 +1210,8 @@ class ArchitectureRecallService:
             "tree": tree_ids,
             "rule": rule_ids,
         }
+        if scoped_ids is not None:
+            channel_ids["scope"] = scoped_ids
         rank_maps = {channel: _rank_lookup(ids) for channel, ids in channel_ids.items()}
         rrf = _rrf_scores(lexical_ids, tree_ids, rule_ids)
         fused_ids = _ordered_fused_leaves(
@@ -1129,6 +1233,10 @@ class ArchitectureRecallService:
             strong_evidence_only=strong_evidence_only,
             preferred_parent_ids=tuple(preferred_parents),
         )
+        if scoped_ids is not None:
+            leaf_ids = tuple(
+                node_id for node_id in leaf_ids if node_id in scoped_id_set
+            )
         ordinary_parent_ids = _eligible_parent_ids(
             self._index,
             fused_ids,
@@ -1143,6 +1251,10 @@ class ArchitectureRecallService:
             MAX_PARENT_CANDIDATES,
         )
         parent_ids = parent_ids[:MAX_PARENT_CANDIDATES]
+        if scoped_ids is not None:
+            parent_ids = [
+                node_id for node_id in parent_ids if node_id in scoped_id_set
+            ]
         final_ids = (*leaf_ids, *parent_ids)
         if len(final_ids) > MAX_FINAL_CANDIDATES:
             raise ArchitectureRecallError("领域候选数量超过 128 个")
@@ -1160,7 +1272,10 @@ class ArchitectureRecallService:
                     architecture_id=node.id,
                     path_name=node.semantic_path,
                     node_type="leaf" if node.is_leaf else "parent",
-                    remark=node.remark[:MAX_REMARK_CHARS],
+                    remark=remark_overrides.get(
+                        node.id,
+                        node.remark[:MAX_REMARK_CHARS],
+                    ),
                     rank=rank,
                     rrf_score=rrf.get(node_id, 0.0),
                     channel_ranks=candidate_channel_ranks,
@@ -1222,6 +1337,9 @@ def recall_architecture_candidates(
     strong_evidence_only: bool = False,
     strong_identity_enabled: bool = True,
     preferred_parent_reasons: Mapping[int, Sequence[str]] | None = None,
+    candidate_scope_ids: Sequence[int] | None = None,
+    candidate_scope_reason: str = "",
+    candidate_remark_overrides: Mapping[int, str] | None = None,
 ) -> ArchitectureRecallDecision:
     """便于主链按请求索引执行一次召回的无状态入口。"""
 
@@ -1234,4 +1352,7 @@ def recall_architecture_candidates(
         strong_evidence_only=strong_evidence_only,
         strong_identity_enabled=strong_identity_enabled,
         preferred_parent_reasons=preferred_parent_reasons,
+        candidate_scope_ids=candidate_scope_ids,
+        candidate_scope_reason=candidate_scope_reason,
+        candidate_remark_overrides=candidate_remark_overrides,
     )

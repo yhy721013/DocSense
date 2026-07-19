@@ -232,7 +232,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["architectureId"], 1)
 
-    def test_map_analysis_result_routes_gjb_content_to_ordered_data_standard_leaf(self):
+    def test_map_analysis_result_routes_gjb_content_to_general_requirement_leaf(self):
         request_params = {
             "fileName": "sample.txt",
             "originalFileName": "GJB 9001C-2017.pdf",
@@ -269,6 +269,14 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     "pathName": "数据标准/建模与仿真标准",
                     "remark": "建模与仿真相关标准。",
                 },
+                {
+                    "id": 205,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/205",
+                    "pathName": "数据标准/通用要求标准",
+                    "remark": "质量管理及综合性标准要求。",
+                },
             ],
         }
 
@@ -278,8 +286,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             original_text="本文档为 GJB 9001C-2017 质量管理体系要求，属于国家军用标准。",
         )
 
-        # GJB 兜底必须跳过“数据标准”父节点，并保留前端候选原始顺序。
-        self.assertEqual(result["architectureId"], 203)
+        # GJB 兜底必须跳过父节点并定向选择“通用要求”，不再依赖请求顺序。
+        self.assertEqual(result["architectureId"], 205)
 
     def test_resolve_architecture_keeps_normal_parent_but_rejects_data_standard_parent(self):
         """普通父节点可用，数据标准父节点必须转入叶子兜底路径。"""
@@ -289,6 +297,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 {"id": 212, "name": "普通子节点", "parentId": 211},
                 {"id": 213, "name": "数据标准", "parentId": None},
                 {"id": 214, "name": "军用软件标准", "parentId": 213},
+                {"id": 215, "name": "通用要求标准", "parentId": 213},
             ]
         }
 
@@ -296,7 +305,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             _resolve_analysis_architecture_id({"architectureId": 211}, request_params),
             211,
         )
-        self.assertEqual(_first_data_standard_leaf_id(request_params["architectureList"]), 214)
+        self.assertEqual(_first_data_standard_leaf_id(request_params["architectureList"]), 215)
         with self.assertRaises(DataStandardParentContractError):
             _resolve_analysis_architecture_id({"architectureId": 213}, request_params)
 
@@ -1131,8 +1140,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(task["result_payload"]["data"]["architectureId"], 9071)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
-    def test_stage9_invalid_model_architecture_uses_ordered_gjb_leaf_before_repair(self):
-        """数字字符串不合法时，应先按 GJB 正文命中首个数据标准叶子。"""
+    def test_stage9_invalid_model_architecture_uses_general_gjb_leaf_before_repair(self):
+        """数字字符串不合法时，应按 GJB 正文定向命中“通用要求”。"""
         with workspace_tempdir() as tmp:
             file_name = "gjb-fallback.txt"
             Path(tmp, file_name).write_text("本文件为 GJB 9001C-2017 国家军用标准。", encoding="utf-8")
@@ -1152,6 +1161,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                         "name": "建模与仿真标准",
                         "parentId": 9082,
                         "pathName": "数据标准/建模与仿真标准",
+                    },
+                    {
+                        "id": 9085,
+                        "name": "通用要求标准",
+                        "parentId": 9082,
+                        "pathName": "数据标准/通用要求标准",
                     },
                 ],
             )
@@ -1179,11 +1194,11 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             attempts = task_service.get_llm_interaction_attempts(interaction["id"])
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9083)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9085)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
-    def test_stage9_data_standard_parent_falls_back_to_ordered_leaf_without_gjb_text(self):
-        """数据标准父节点即使没有 GJB 关键词，也必须按顺序兜底到叶子。"""
+    def test_stage9_data_standard_parent_falls_back_to_general_leaf_without_gjb_text(self):
+        """数据标准父节点即使没有 GJB 关键词，也必须定向兜底到通用要求。"""
         with workspace_tempdir() as tmp:
             file_name = "data-standard-parent.txt"
             Path(tmp, file_name).write_text("数据标准父节点分类测试", encoding="utf-8")
@@ -1203,6 +1218,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                         "name": "建模与仿真标准",
                         "parentId": 9092,
                         "pathName": "数据标准/建模与仿真标准",
+                    },
+                    {
+                        "id": 9095,
+                        "name": "通用要求标准",
+                        "parentId": 9092,
+                        "pathName": "数据标准/通用要求标准",
                     },
                 ],
             )
@@ -1230,7 +1251,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             attempts = task_service.get_llm_interaction_attempts(interaction["id"])
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9093)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9095)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
     def test_stage9_repair_cannot_store_data_standard_parent(self):

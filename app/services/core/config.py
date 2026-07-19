@@ -67,9 +67,18 @@ ANALYSIS_FILENAME_CONSTRAINT_MODES = frozenset(
     }
 )
 
+ANALYSIS_DATA_STANDARD_MODE_LEGACY = "legacy"
+ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD = "scope_guard"
+ANALYSIS_DATA_STANDARD_MODES = frozenset(
+    {
+        ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+        ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    }
+)
+
 
 class AnalysisClassificationConfigurationError(RuntimeError):
-    """领域分类运行模式、文件名约束模式或固定合同上限非法时抛出。"""
+    """领域分类、文件名约束、数据标准模式或固定合同上限非法时抛出。"""
 
 
 @dataclass(frozen=True)
@@ -80,6 +89,7 @@ class AnalysisClassificationConfig:
     filename_constraint_mode: str = (
         ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
     )
+    data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
     model_candidate_limit: int = 128
     classification_prompt_char_limit: int = 32_000
     base_leaf_limit: int = 64
@@ -144,6 +154,23 @@ class AnalysisClassificationConfig:
             self,
             "filename_constraint_mode",
             filename_constraint_mode,
+        )
+
+        if not isinstance(self.data_standard_mode, str):
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE 必须是字符串"
+            )
+        data_standard_mode = self.data_standard_mode.strip().lower()
+        if data_standard_mode not in ANALYSIS_DATA_STANDARD_MODES:
+            allowed = ", ".join(sorted(ANALYSIS_DATA_STANDARD_MODES))
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE 配置非法："
+                f"{self.data_standard_mode!r}；仅支持 {allowed}"
+            )
+        object.__setattr__(
+            self,
+            "data_standard_mode",
+            data_standard_mode,
         )
 
     @classmethod
@@ -270,16 +297,24 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
 
 
 def load_analysis_classification_config() -> AnalysisClassificationConfig:
-    """读取并严格校验领域分类运行模式和文件名约束模式。
+    """读取并严格校验领域分类、文件名约束和数据标准模式。
 
-    仅在环境变量缺失时分别使用 ``topk_two_stage`` 和 ``scope_guard``；
-    显式空值或未知值都必须拒绝，避免误配时静默切换分类链路。
+    环境变量缺失时三个模式分别使用 ``topk_two_stage``、``scope_guard`` 和
+    ``scope_guard``；数据标准门禁可显式设置为 ``legacy`` 独立回滚。显式空值或
+    未知值都必须拒绝，避免误配时静默切换分类链路。
     """
     raw_mode = os.getenv("DOCSENSE_ANALYSIS_CLASSIFICATION_MODE")
     raw_filename_constraint_mode = os.getenv(
         "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE"
     )
-    if raw_mode is None and raw_filename_constraint_mode is None:
+    raw_data_standard_mode = os.getenv(
+        "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE"
+    )
+    if (
+        raw_mode is None
+        and raw_filename_constraint_mode is None
+        and raw_data_standard_mode is None
+    ):
         return AnalysisClassificationConfig.topk_two_stage()
     return AnalysisClassificationConfig(
         mode=(
@@ -291,6 +326,11 @@ def load_analysis_classification_config() -> AnalysisClassificationConfig:
             ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
             if raw_filename_constraint_mode is None
             else raw_filename_constraint_mode
+        ),
+        data_standard_mode=(
+            ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+            if raw_data_standard_mode is None
+            else raw_data_standard_mode
         ),
     )
 

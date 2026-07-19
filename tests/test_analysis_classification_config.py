@@ -9,6 +9,8 @@ from app.services.core.config import (
     ANALYSIS_CLASSIFICATION_MODE_LEGACY,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+    ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+    ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     AnalysisClassificationConfig,
@@ -21,17 +23,23 @@ from app.container import create_application_services
 class AnalysisClassificationConfigTests(unittest.TestCase):
     ENV_NAME = "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE"
     CONSTRAINT_ENV_NAME = "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE"
+    DATA_STANDARD_ENV_NAME = "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE"
 
     def test_missing_environment_uses_topk_two_stage_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop(self.ENV_NAME, None)
             os.environ.pop(self.CONSTRAINT_ENV_NAME, None)
+            os.environ.pop(self.DATA_STANDARD_ENV_NAME, None)
             config = load_analysis_classification_config()
 
         self.assertEqual(ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE, config.mode)
         self.assertEqual(
             ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
             config.filename_constraint_mode,
+        )
+        self.assertEqual(
+            ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+            config.data_standard_mode,
         )
         self.assertEqual(128, config.model_candidate_limit)
         self.assertEqual(32_000, config.classification_prompt_char_limit)
@@ -83,6 +91,7 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
             {
                 self.ENV_NAME: "  TOPK_TWO_STAGE  ",
                 self.CONSTRAINT_ENV_NAME: "  SCOPE_GUARD  ",
+                self.DATA_STANDARD_ENV_NAME: "  SCOPE_GUARD  ",
             },
             clear=False,
         ):
@@ -93,6 +102,32 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
             ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
             config.filename_constraint_mode,
         )
+        self.assertEqual(
+            ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+            config.data_standard_mode,
+        )
+
+    def test_all_supported_data_standard_modes_are_loaded(self) -> None:
+        for mode in (
+            ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+            ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+        ):
+            with self.subTest(mode=mode):
+                with patch.dict(
+                    os.environ,
+                    {
+                        self.DATA_STANDARD_ENV_NAME: mode,
+                        self.ENV_NAME: ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+                        self.CONSTRAINT_ENV_NAME: (
+                            ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+                        ),
+                    },
+                    clear=False,
+                ):
+                    self.assertEqual(
+                        mode,
+                        load_analysis_classification_config().data_standard_mode,
+                    )
 
     def test_explicit_blank_and_unknown_modes_are_rejected(self) -> None:
         for raw_mode in ("", "   ", "topk", "two_stage", "none"):
@@ -126,6 +161,25 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
                     with self.assertRaises(AnalysisClassificationConfigurationError):
                         load_analysis_classification_config()
 
+    def test_explicit_blank_and_unknown_data_standard_modes_are_rejected(
+        self,
+    ) -> None:
+        for raw_mode in ("", "   ", "guard", "topk_two_stage", "none"):
+            with self.subTest(raw_mode=raw_mode):
+                with patch.dict(
+                    os.environ,
+                    {
+                        self.ENV_NAME: ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+                        self.CONSTRAINT_ENV_NAME: (
+                            ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+                        ),
+                        self.DATA_STANDARD_ENV_NAME: raw_mode,
+                    },
+                    clear=False,
+                ):
+                    with self.assertRaises(AnalysisClassificationConfigurationError):
+                        load_analysis_classification_config()
+
     def test_config_is_immutable(self) -> None:
         config = AnalysisClassificationConfig.topk_two_stage()
 
@@ -134,6 +188,10 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             config.filename_constraint_mode = (  # type: ignore[misc]
                 ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+            )
+        with self.assertRaises(FrozenInstanceError):
+            config.data_standard_mode = (  # type: ignore[misc]
+                ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
             )
 
     def test_limits_must_be_positive_integers_and_reject_bool(self) -> None:
@@ -213,6 +271,28 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
             {
                 self.ENV_NAME: ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
                 self.CONSTRAINT_ENV_NAME: "unsupported",
+            },
+            clear=False,
+        ):
+            with patch(
+                "app.container.load_anythingllm_config"
+            ) as load_anythingllm:
+                with self.assertRaises(AnalysisClassificationConfigurationError):
+                    create_application_services()
+
+        load_anythingllm.assert_not_called()
+
+    def test_invalid_data_standard_mode_fails_during_container_startup(
+        self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                self.ENV_NAME: ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+                self.CONSTRAINT_ENV_NAME: (
+                    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+                ),
+                self.DATA_STANDARD_ENV_NAME: "unsupported",
             },
             clear=False,
         ):

@@ -652,8 +652,25 @@ class JaneScopeResolutionTests(unittest.TestCase):
                 self.assertEqual(decision.post_architecture_id, radar_detail)
                 self.assertEqual(decision.reason_code, expected_reason)
 
-    def test_gjb_constraint_is_identical_in_legacy_and_scope_guard(self) -> None:
+    def test_confirmed_gjb_constraint_is_identical_across_filename_modes(
+        self,
+    ) -> None:
         radar_detail = self.details[91][0]
+        standard_profile = (
+            analysis_service._build_data_standard_classification_profile(
+                file_name="GJB9001C-2026.pdf",
+                original_name="GJB9001C-2026.pdf",
+                original_text="\n".join(
+                    (
+                        "中华人民共和国国家军用标准",
+                        "GJB 9001C-2026",
+                        "质量管理体系要求",
+                        "1 范围",
+                        "2 规范性引用文件",
+                    )
+                ),
+            )
+        )
         results = []
         for mode in ("legacy", "scope_guard"):
             decision = analysis_service._decide_topk_deterministic_architecture_constraint(
@@ -664,6 +681,7 @@ class JaneScopeResolutionTests(unittest.TestCase):
                 tree_index=self.index,
                 architecture_list=self.tree,
                 filename_constraint_mode=mode,
+                data_standard_profile=standard_profile,
             )
             results.append(decision.post_architecture_id)
 
@@ -729,6 +747,21 @@ class JaneConstraintAuditLogTests(unittest.TestCase):
             original_name="JFS_3567-JFS_-17-Jul-2024.pdf",
             original_text=_jane_text("America class (LHA-6)"),
         )
+        standard_profile = (
+            analysis_service._build_data_standard_classification_profile(
+                file_name="technical-upload.pdf",
+                original_name="GJB 9001C-2017.pdf",
+                original_text="\n".join(
+                    (
+                        "中华人民共和国国家军用标准",
+                        "GJB 9001C-2017",
+                        "质量管理体系要求",
+                        "1 范围",
+                        "2 规范性引用文件",
+                    )
+                ),
+            )
+        )
         decision = analysis_service._ArchitectureConstraintDecision(
             pre_architecture_id=91,
             post_architecture_id=91,
@@ -744,9 +777,16 @@ class JaneConstraintAuditLogTests(unittest.TestCase):
                 filename_constraint_mode="scope_guard",
                 profile=profile,
                 decision=decision,
+                data_standard_mode="scope_guard",
+                data_standard_profile=standard_profile,
             )
 
         payload = json.loads(log_info.call_args.args[1])
+        self.assertEqual(payload["dataStandardMode"], "scope_guard")
+        self.assertEqual(payload["standardNumber"], "GJB 9001C-2017")
+        self.assertEqual(payload["standardTitle"], "质量管理体系要求")
+        self.assertTrue(payload["standardIdentityConfirmed"])
+        self.assertIn("coverIdentifier", payload["standardEvidenceSources"])
         self.assertEqual(payload["filenameIdentityKind"], "catalog")
         self.assertTrue(payload["filenameIdentifiers"])
         self.assertEqual(payload["trustedFilenameIdentifiers"], [])

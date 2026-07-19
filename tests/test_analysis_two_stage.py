@@ -35,6 +35,41 @@ class AnalysisTwoStageTests(unittest.TestCase):
         ]
 
     @staticmethod
+    def _data_standard_tree(*, include_general: bool = True) -> list[dict]:
+        nodes = [
+            {"id": 100, "name": "数据标准", "parentId": None},
+            {"id": 101, "name": "建模与仿真", "parentId": 100},
+            {"id": 102, "name": "军用软件", "parentId": 100},
+            {"id": 103, "name": "目标特性", "parentId": 100},
+            {"id": 104, "name": "术语与定义", "parentId": 100},
+            {"id": 106, "name": "元数据", "parentId": 100},
+            {"id": 600, "name": "基地目标", "parentId": None},
+            {"id": 654, "name": "海军", "parentId": 600},
+            {"id": 655, "name": "海军基地", "parentId": 654},
+        ]
+        if include_general:
+            nodes.insert(
+                5,
+                {"id": 105, "name": "通用要求标准", "parentId": 100},
+            )
+        return nodes
+
+    @staticmethod
+    def _gjb_body() -> str:
+        return "\n".join(
+            (
+                "中华人民共和国国家军用标准",
+                "FL 0106 GJB 9001C-2017",
+                "质量管理体系要求",
+                "2017-05-18 发布 2017-07-01 实施",
+                "1 范围",
+                "2 规范性引用文件",
+                "3 术语和定义",
+                "本标准起草单位包括海军装备研究院和海军驻地代表局。",
+            )
+        )
+
+    @staticmethod
     def _request(file_name: str, tree: list[dict]) -> dict:
         return {
             "businessType": "file",
@@ -119,6 +154,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
             recall_side_effect=None,
             mode: str = "topk_two_stage",
             filename_constraint_mode: str = "legacy",
+            data_standard_mode: str = "legacy",
     ):
         file_name = request["params"][0]["fileName"]
         local_file = Path(tmp, file_name)
@@ -168,6 +204,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 knowledge_index_factory=knowledge_factory,
                 analysis_classification_mode=mode,
                 analysis_filename_constraint_mode=filename_constraint_mode,
+                analysis_data_standard_mode=data_standard_mode,
             )
         return (
             task_service,
@@ -351,7 +388,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(task["result_payload"]["data"]["architectureId"], 10)
         self.assertEqual(recall["returned_rank"], 3)
 
-    def test_gjb_null_classification_falls_back_to_first_visible_standard_leaf(self):
+    def test_gjb_null_classification_falls_back_to_general_requirement_leaf(self):
         tree = [
             {"id": 100, "name": "数据标准", "parentId": None},
             {"id": 107, "name": "其他标准", "parentId": 100},
@@ -385,12 +422,292 @@ class AnalysisTwoStageTests(unittest.TestCase):
             )
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 101)
-        self.assertEqual(recall["returned_architecture_id"], 101)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 105)
+        self.assertEqual(recall["returned_architecture_id"], 105)
         self.assertEqual(
             [attempt.prompt_kind for attempt in rag_factory.ports[0].sessions[0].trace.attempts],
             [RagPromptKind.ARCHITECTURE_CLASSIFICATION, RagPromptKind.ANALYSIS_EXTRACTION],
         )
+
+    def test_data_standard_profile_requires_cover_confirmation_not_body_reference(self):
+        confirmed = analysis_service._build_data_standard_classification_profile(
+            file_name="technical-upload.txt",
+            original_name="GJB 9001C-2017.pdf",
+            original_text=self._gjb_body(),
+        )
+        reference_only = (
+            analysis_service._build_data_standard_classification_profile(
+                file_name="radar.txt",
+                original_name="radar-equipment-overview.pdf",
+                original_text=(
+                    "雷达装备性能资料\n"
+                    "该装备设计参考 GJB 9001C-2017，但本文不是标准正文。"
+                ),
+            )
+        )
+        same_name_reference_only = (
+            analysis_service._build_data_standard_classification_profile(
+                file_name="storage.txt",
+                original_name="GJB 9001C-2017.pdf",
+                original_text=(
+                    "项目质量管理实施报告\n"
+                    "本项目参考 GJB 9001C-2017 编制，但本文不是标准正文。"
+                ),
+            )
+        )
+
+        self.assertTrue(confirmed.identity_confirmed)
+        self.assertEqual(confirmed.document_kind, "standard_body")
+        self.assertEqual(confirmed.standard_number, "GJB 9001C-2017")
+        self.assertEqual(confirmed.title, "质量管理体系要求")
+        self.assertFalse(reference_only.identity_confirmed)
+        self.assertEqual(reference_only.document_kind, "reference_only")
+        self.assertFalse(same_name_reference_only.identity_confirmed)
+        self.assertEqual(
+            same_name_reference_only.document_kind,
+            "reference_only",
+        )
+
+    def test_scope_guard_limits_gjb_candidates_to_six_standard_leaves(self):
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(file_name, self._data_standard_tree())
+            Path(tmp, file_name).write_text(self._gjb_body(), encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":105}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            with patch(
+                "app.services.llm_service.analysis_service."
+                "build_data_standard_classification_prompt",
+                wraps=analysis_service.build_data_standard_classification_prompt,
+            ) as standard_prompt:
+                task_service, task, recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    data_standard_mode="scope_guard",
+                )
+            interaction = task_service.get_llm_interactions(
+                "file",
+                file_name,
+            )[0]
+            attempts = task_service.get_llm_interaction_attempts(
+                interaction["id"]
+            )
+
+        visible_ids = {
+            item["id"] for item in recall["final_candidates"]
+        }
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 105)
+        self.assertEqual(visible_ids, set(range(101, 107)))
+        self.assertNotIn(654, visible_ids)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            ["architecture_classification", "analysis_extraction"],
+        )
+        standard_prompt.assert_called_once()
+        prompt_candidates = standard_prompt.call_args.args[1]
+        prompt_context = standard_prompt.call_args.kwargs["standard_context"]
+        self.assertEqual(
+            {item["id"] for item in prompt_candidates},
+            set(range(101, 107)),
+        )
+        self.assertEqual(
+            prompt_context["standardTitle"],
+            "质量管理体系要求",
+        )
+
+    def test_scope_guard_keeps_topk_single_rollback_inside_six_standard_leaves(
+        self,
+    ):
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(file_name, self._data_standard_tree())
+            Path(tmp, file_name).write_text(self._gjb_body(), encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(
+                            file_name,
+                            architecture_id=105,
+                        ),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            task_service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                mode="topk_single",
+                data_standard_mode="scope_guard",
+            )
+            interaction = task_service.get_llm_interactions(
+                "file",
+                file_name,
+            )[0]
+            attempts = task_service.get_llm_interaction_attempts(
+                interaction["id"]
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 105)
+        self.assertEqual(
+            {item["id"] for item in recall["final_candidates"]},
+            set(range(101, 107)),
+        )
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            ["analysis"],
+        )
+        self.assertIn("数据标准作用域分类补充规则", interaction["prompt"])
+
+    def test_scope_guard_repairs_then_falls_back_to_general_requirement(self):
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(file_name, self._data_standard_tree())
+            Path(tmp, file_name).write_text(self._gjb_body(), encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":null}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":null}',
+                        sources=(self.SOURCE,),
+                    ),
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    ),
+                ],
+            )
+            task_service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                data_standard_mode="scope_guard",
+            )
+            interaction = task_service.get_llm_interactions(
+                "file",
+                file_name,
+            )[0]
+            attempts = task_service.get_llm_interaction_attempts(
+                interaction["id"]
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 105)
+        self.assertEqual(recall["returned_architecture_id"], 105)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [
+                "architecture_classification",
+                "architecture_repair",
+                "analysis_extraction",
+            ],
+        )
+
+    def test_scope_guard_uses_general_requirement_when_classification_budget_is_exhausted(
+        self,
+    ):
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(file_name, self._data_standard_tree())
+            Path(tmp, file_name).write_text(self._gjb_body(), encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=None,
+                        failure_stage="response",
+                        error_message="首次分类暂态失败",
+                    ),
+                    FakeRagOutcome(
+                        text='{"architectureId":null}',
+                        sources=(self.SOURCE,),
+                    ),
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    ),
+                ],
+            )
+            task_service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                data_standard_mode="scope_guard",
+            )
+            interaction = task_service.get_llm_interactions(
+                "file",
+                file_name,
+            )[0]
+            attempts = task_service.get_llm_interaction_attempts(
+                interaction["id"]
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 105)
+        self.assertEqual(recall["returned_architecture_id"], 105)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            [
+                "architecture_classification",
+                "architecture_classification",
+                "analysis_extraction",
+            ],
+        )
+
+    def test_scope_guard_without_general_requirement_fails_closed(self):
+        with workspace_tempdir() as tmp:
+            file_name = "GJB 9001C-2017.txt"
+            request = self._request(
+                file_name,
+                self._data_standard_tree(include_general=False),
+            )
+            Path(tmp, file_name).write_text(self._gjb_body(), encoding="utf-8")
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":null}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":null}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                data_standard_mode="scope_guard",
+            )
+
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(task["result_payload"]["data"]["status"], "3")
+        self.assertIsNone(recall["returned_architecture_id"])
+        self.assertEqual(recall["failure_stage"], "architecture_contract")
 
     def test_repairs_share_phase_budgets_and_total_model_calls_are_four(self):
         with workspace_tempdir() as tmp:
@@ -815,8 +1132,8 @@ class AnalysisTwoStageTests(unittest.TestCase):
             )
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 101)
-        self.assertEqual(recall["returned_architecture_id"], 101)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 105)
+        self.assertEqual(recall["returned_architecture_id"], 105)
 
     def test_strong_gjb_filename_keeps_model_selected_visible_standard_leaf(self):
         tree = [
@@ -925,9 +1242,10 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 654)
-        self.assertEqual(recall["returned_architecture_id"], 654)
+        self.assertEqual(task["status"], "3")
+        self.assertEqual(task["result_payload"]["data"]["status"], "3")
+        self.assertIsNone(recall["returned_architecture_id"])
+        self.assertEqual(recall["failure_stage"], "architecture_contract")
 
     @staticmethod
     def _two_equipment_tree() -> list[dict]:

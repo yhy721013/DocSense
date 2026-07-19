@@ -33,6 +33,9 @@ from app.ports import (
     normalize_rag_prompt,
 )
 from app.services.core.config import (
+    ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+    ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    ANALYSIS_DATA_STANDARD_MODES,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     ANALYSIS_FILENAME_CONSTRAINT_MODES,
@@ -54,9 +57,11 @@ from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
+    build_data_standard_classification_prompt,
     build_file_analysis_prompt,
     build_file_extraction_prompt,
     build_json_repair_prompt,
+    data_standard_candidate_remark,
 )
 from app.services.llm_service.architecture_recall_service import (
     ArchitecturePromptBudgetError,
@@ -279,8 +284,8 @@ def _ordered_data_standard_leaf_ids(
 ) -> list[int]:
     """按请求顺序返回数据标准分支中的叶子节点 ID。
 
-    普通领域仍允许返回父节点；此函数只服务于数据标准的特殊规则。若多个数据标准叶子
-    均可选或无法区分，调用方按列表顺序取第一个，而不在服务端引入证据唯一性判断。
+    普通领域仍允许返回父节点；此函数只服务于数据标准的特殊规则。返回顺序仅用于
+    构造稳定候选，不能再作为无法判定时的语义兜底依据。
     """
     nodes, parent_ids = _architecture_candidate_topology(architecture_list)
     standard_ids = _data_standard_candidate_ids(nodes)
@@ -301,12 +306,35 @@ def _ordered_data_standard_leaf_ids(
     return leaf_ids
 
 
+def _general_data_standard_leaf_id(
+        architecture_list: Iterable[Dict[str, Any]],
+) -> int | None:
+    """返回数据标准分支中语义明确的“通用要求”叶子。
+
+    同时兼容节点名“通用要求标准”；不得因请求顺序变化而落到其他专业叶子。
+    """
+
+    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
+    standard_ids = _data_standard_candidate_ids(nodes)
+    for item_id, item in nodes:
+        leaf_name = _as_text(item.get("name"))
+        if leaf_name.endswith("标准"):
+            leaf_name = leaf_name[:-2].strip()
+        if (
+                item_id in standard_ids
+                and item_id not in parent_ids
+                and leaf_name == "通用要求"
+        ):
+            return item_id
+    return None
+
+
 def _first_data_standard_leaf_id(
         architecture_list: Iterable[Dict[str, Any]],
 ) -> int | None:
-    """返回按请求顺序可命中的第一个数据标准叶子节点。"""
-    leaf_ids = _ordered_data_standard_leaf_ids(architecture_list)
-    return leaf_ids[0] if leaf_ids else None
+    """兼容旧内部导入；现在定向返回“通用要求”，不再返回首叶。"""
+
+    return _general_data_standard_leaf_id(architecture_list)
 
 
 def _is_data_standard_parent_id(
@@ -323,10 +351,10 @@ def _match_data_standard_architecture_id(
         architecture_list: Iterable[Dict[str, Any]],
         *context_values: Any,
 ) -> int | None:
-    """命中 GJB 线索后，按候选顺序选择数据标准分支的第一个叶子节点。"""
+    """命中 GJB 线索后，定向选择数据标准分支的“通用要求”叶子。"""
     if not _contains_gjb_standard_reference(*context_values):
         return None
-    return _first_data_standard_leaf_id(architecture_list)
+    return _general_data_standard_leaf_id(architecture_list)
 
 
 def _architecture_id_set(items: Iterable[Dict[str, Any]]) -> set[int]:
@@ -1302,6 +1330,15 @@ def _normalize_analysis_filename_constraint_mode(value: Any) -> str:
     return mode
 
 
+def _normalize_analysis_data_standard_mode(value: Any) -> str:
+    mode = _as_text(value) or ANALYSIS_DATA_STANDARD_MODE_LEGACY
+    if mode not in ANALYSIS_DATA_STANDARD_MODES:
+        raise ValueError(
+            "analysis_data_standard_mode 必须是 legacy 或 scope_guard"
+        )
+    return mode
+
+
 def _extract_recall_headings(original_text: str) -> tuple[str, ...]:
     """从正文提取最多 64 条短标题信号，不把长正文行重复塞入召回查询。"""
     headings: list[str] = []
@@ -1338,6 +1375,25 @@ def _build_analysis_architecture_signals(
         headings=_extract_recall_headings(original_text),
         body=original_text,
     )
+
+
+def _data_standard_candidate_scope(
+    *,
+    tree_index: ArchitectureTreeIndex,
+    architecture_list: Iterable[Dict[str, Any]],
+) -> tuple[tuple[int, ...], dict[int, str]]:
+    scope_ids = tuple(_ordered_data_standard_leaf_ids(architecture_list))
+    remark_overrides = {
+        node_id: remark
+        for node_id in scope_ids
+        for remark in (
+            data_standard_candidate_remark(
+                tree_index.require(node_id).semantic_path
+            ),
+        )
+        if remark
+    }
+    return scope_ids, remark_overrides
 
 
 def _architecture_signal_digest(signals: DocumentArchitectureSignals) -> str:
@@ -1432,10 +1488,8 @@ def _visible_data_standard_fallback_id(
 ) -> int | None:
     if not force and not _contains_gjb_standard_reference(*context_values):
         return None
-    for node_id in _ordered_data_standard_leaf_ids(architecture_list):
-        if node_id in visible_ids:
-            return node_id
-    return None
+    node_id = _general_data_standard_leaf_id(architecture_list)
+    return node_id if node_id in visible_ids else None
 
 
 _STRONG_FILENAME_IDENTIFIER_RE = re.compile(
@@ -1466,6 +1520,23 @@ _EQUIPMENT_DETAIL_KINDS = frozenset(
 _STRONG_GJB_FILENAME_RE = re.compile(
     r"(?<![A-Za-z0-9])GJB(?:\s*[/_-]\s*Z)?\s*[- ]?\s*\d+[A-Za-z]?",
     re.IGNORECASE,
+)
+_GJB_STANDARD_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?P<prefix>GJB(?:\s*[/_-]?\s*Z)?)"
+    r"\s*[- ]?\s*(?P<number>\d{1,8}[A-Za-z]?)"
+    r"(?:\s*-\s*(?P<year>\d{4}))?",
+    re.IGNORECASE,
+)
+_STANDARD_COMMENTARY_TITLE_RE = re.compile(
+    r"(?:标准解读|标准释义|宣贯材料|培训材料|实施说明|编制说明|"
+    r"审核报告|检测报告|检验报告|符合性(?:评价|报告))"
+)
+_STANDARD_STRUCTURE_MARKERS = (
+    "范围",
+    "规范性引用文件",
+    "术语和定义",
+    "术语与定义",
 )
 _JANE_COPYRIGHT_RE = re.compile(
     r"©\s*\d{4}\s+Jane[’']s\s+Group\s+UK\s+Limited",
@@ -1502,6 +1573,191 @@ _OPAQUE_IDENTITY_FILENAME_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _DataStandardClassificationProfile:
+    active: bool = False
+    standard_number: str = ""
+    title: str = ""
+    document_kind: str = "unknown"
+    filename_identifiers: tuple[str, ...] = ()
+    cover_identifiers: tuple[str, ...] = ()
+    evidence_sources: tuple[str, ...] = ()
+    identity_confirmed: bool = False
+    identity_conflict: bool = False
+
+
+def _normalized_gjb_source_text(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", _as_text(value))
+    return re.sub(r"[\-‐‑‒–—―－﹣]+", "-", normalized)
+
+
+def _extract_gjb_standard_identifiers(
+    *values: Any,
+) -> tuple[tuple[str, str], ...]:
+    """返回 ``(identity_key, display_number)``，用于文件名与首页双源核验。"""
+
+    result: list[tuple[str, str]] = []
+    for value in values:
+        normalized = _normalized_gjb_source_text(value)
+        for match in _GJB_STANDARD_NUMBER_RE.finditer(normalized):
+            prefix = re.sub(
+                r"[\s/_-]+",
+                "",
+                match.group("prefix"),
+            ).upper()
+            number = match.group("number").upper()
+            year = match.group("year") or ""
+            identity_key = f"{prefix}{number}{year}"
+            display_prefix = "GJB/Z" if prefix == "GJBZ" else "GJB"
+            display = f"{display_prefix} {number}"
+            if year:
+                display += f"-{year}"
+            item = (identity_key, display)
+            if item not in result:
+                result.append(item)
+    return tuple(result)
+
+
+def _extract_data_standard_title(original_text: str) -> str:
+    """从标准封面前部提取正式标题，不改动其他文档共用的通用标题解析。"""
+
+    opening = _opening_text(original_text, max_chars=8_000, max_lines=160)
+    if not opening:
+        return ""
+    for raw_line in opening.splitlines():
+        normalized_line = _normalized_gjb_source_text(raw_line)
+        line_without_number = _GJB_STANDARD_NUMBER_RE.sub(
+            "",
+            normalized_line,
+        )
+        candidate = re.sub(r"\s+", " ", line_without_number).strip(" -")
+        if not candidate or not re.search(r"[\u4e00-\u9fff]", candidate):
+            continue
+        if candidate.startswith("FL ") or candidate.startswith("代替"):
+            continue
+        if candidate in {"中华人民共和国国家军用标准", "国家军用标准", "国军标"}:
+            continue
+        if any(
+            marker in candidate
+            for marker in (
+                "发布",
+                "实施",
+                "颁布",
+                "批准",
+                "目次",
+                "目录",
+            )
+        ):
+            continue
+        if re.match(r"^(?:第?[一二三四五六七八九十百0-9]+[章节篇部.]|\d+\s)", candidate):
+            continue
+        if len(candidate) <= 120:
+            return candidate[:120]
+    return ""
+
+
+def _build_data_standard_classification_profile(
+    *,
+    file_name: str,
+    original_name: str,
+    original_text: str,
+) -> _DataStandardClassificationProfile:
+    identity_filename = _as_text(original_name) or _as_text(file_name)
+    filename_items = _extract_gjb_standard_identifiers(identity_filename)
+    opening = _opening_text(original_text, max_chars=8_000, max_lines=160)
+    cover_items = _extract_gjb_standard_identifiers(opening)
+    filename_keys = {item[0] for item in filename_items}
+    cover_keys = {item[0] for item in cover_items}
+    shared_keys = filename_keys & cover_keys
+    identity_conflict = bool(
+        filename_keys
+        and cover_keys
+        and not shared_keys
+    )
+    title = _extract_data_standard_title(original_text)
+    header_present = (
+        "国家军用标准" in opening
+        or "国军标" in opening
+    )
+    structure_markers = tuple(
+        marker
+        for marker in _STANDARD_STRUCTURE_MARKERS
+        if marker in opening
+    )
+    commentary = bool(
+        _STANDARD_COMMENTARY_TITLE_RE.search(
+            "\n".join((title, opening[:1_000]))
+        )
+    )
+    # 同号可能只是正文引用，任意中文首行也不能充当标准封面证据。宁可保持旧链路，
+    # 也只在军用标准页眉或至少两个标准结构章节存在时启用受限候选。
+    cover_evidence = bool(
+        header_present
+        or len(structure_markers) >= 2
+    )
+    identity_confirmed = bool(
+        not identity_conflict
+        and not commentary
+        and (
+            (shared_keys and cover_evidence)
+            or (
+                cover_keys
+                and header_present
+                and (title or len(structure_markers) >= 2)
+            )
+        )
+    )
+    evidence_sources: list[str] = []
+    if filename_items:
+        evidence_sources.append("originalFileName")
+    if cover_items:
+        evidence_sources.append("coverIdentifier")
+    if header_present:
+        evidence_sources.append("coverStandardHeader")
+    if title:
+        evidence_sources.append("coverTitle")
+    if len(structure_markers) >= 2:
+        evidence_sources.append("standardStructure")
+
+    display_number = ""
+    for key, display in cover_items:
+        if not shared_keys or key in shared_keys:
+            display_number = display
+            break
+    if not display_number and filename_items:
+        display_number = filename_items[0][1]
+    if commentary:
+        document_kind = "commentary"
+    elif identity_confirmed:
+        document_kind = "standard_body"
+    elif filename_items or cover_items:
+        document_kind = "reference_only"
+    else:
+        document_kind = "unknown"
+    return _DataStandardClassificationProfile(
+        active=bool(filename_items or cover_items),
+        standard_number=display_number,
+        title=title,
+        document_kind=document_kind,
+        filename_identifiers=tuple(item[1] for item in filename_items),
+        cover_identifiers=tuple(item[1] for item in cover_items),
+        evidence_sources=tuple(evidence_sources),
+        identity_confirmed=identity_confirmed,
+        identity_conflict=identity_conflict,
+    )
+
+
+def _data_standard_prompt_context(
+    profile: _DataStandardClassificationProfile,
+) -> dict[str, Any]:
+    return {
+        "standardNumber": profile.standard_number,
+        "standardTitle": profile.title,
+        "documentKind": profile.document_kind,
+        "evidenceSources": list(profile.evidence_sources),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2142,6 +2398,8 @@ def _decide_topk_deterministic_architecture_constraint(
     tree_index: ArchitectureTreeIndex,
     architecture_list: Iterable[Dict[str, Any]],
     filename_constraint_mode: str = ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    data_standard_profile: _DataStandardClassificationProfile | None = None,
     jane_profile: _JaneClassificationProfile | None = None,
     scope_resolution: _ArchitectureScopeResolution | None = None,
 ) -> _ArchitectureConstraintDecision:
@@ -2150,40 +2408,63 @@ def _decide_topk_deterministic_architecture_constraint(
     filename_constraint_mode = _normalize_analysis_filename_constraint_mode(
         filename_constraint_mode
     )
+    data_standard_mode = _normalize_analysis_data_standard_mode(
+        data_standard_mode
+    )
+    standard_profile = (
+        data_standard_profile
+        or _DataStandardClassificationProfile()
+    )
     profile = jane_profile or _JaneClassificationProfile()
     resolution = scope_resolution or _ArchitectureScopeResolution()
-    if _has_strong_gjb_filename_identity(file_name, original_name):
+    use_data_standard_scope_guard = (
+        data_standard_mode == ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+    )
+    has_confirmed_standard_identity = (
+        standard_profile.identity_confirmed
+        and standard_profile.document_kind == "standard_body"
+    )
+    use_gjb_constraint = (
+        has_confirmed_standard_identity
+        if use_data_standard_scope_guard
+        else _has_strong_gjb_filename_identity(file_name, original_name)
+    )
+    if use_gjb_constraint:
         visible_standard_ids = tuple(
             node_id
             for node_id in _ordered_data_standard_leaf_ids(architecture_list)
             if node_id in visible_ids
         )
-        if visible_standard_ids:
-            constrained_id = (
-                architecture_id
-                if architecture_id in visible_standard_ids
-                else visible_standard_ids[0]
-            )
-            if constrained_id != architecture_id:
-                logger.info(
-                    "GJB 文件身份约束覆盖普通分类: "
-                    "original_architecture_id=%s fallback_standard_leaf_id=%s",
-                    architecture_id,
-                    constrained_id,
+        if architecture_id in visible_standard_ids:
+            constrained_id = architecture_id
+            reason_code = "data_standard_model_leaf"
+        else:
+            general_id = _general_data_standard_leaf_id(architecture_list)
+            if general_id is None or general_id not in visible_ids:
+                raise ArchitectureContractError(
+                    "已确认标准正文，但模型无法确定专业类别且候选中不存在通用要求叶节点"
                 )
-            validated_id = _validate_topk_architecture_id(
+            constrained_id = general_id
+            reason_code = "data_standard_general_fallback"
+            logger.info(
+                "GJB 文件身份约束覆盖普通分类: "
+                "original_architecture_id=%s fallback_general_requirement_id=%s",
+                architecture_id,
                 constrained_id,
-                visible_ids=visible_ids,
-                tree_index=tree_index,
-                architecture_list=architecture_list,
             )
-            return _ArchitectureConstraintDecision(
-                pre_architecture_id=architecture_id,
-                post_architecture_id=validated_id,
-                reason_code="",
-                matched_scope_parent_id=None,
-                tree_gap=False,
-            )
+        validated_id = _validate_topk_architecture_id(
+            constrained_id,
+            visible_ids=visible_ids,
+            tree_index=tree_index,
+            architecture_list=architecture_list,
+        )
+        return _ArchitectureConstraintDecision(
+            pre_architecture_id=architecture_id,
+            post_architecture_id=validated_id,
+            reason_code=reason_code,
+            matched_scope_parent_id=None,
+            tree_gap=False,
+        )
 
     use_scope_guard = (
         filename_constraint_mode
@@ -2317,6 +2598,8 @@ def _apply_topk_deterministic_architecture_constraints(
     tree_index: ArchitectureTreeIndex,
     architecture_list: Iterable[Dict[str, Any]],
     filename_constraint_mode: str = ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    data_standard_profile: _DataStandardClassificationProfile | None = None,
     jane_profile: _JaneClassificationProfile | None = None,
     scope_resolution: _ArchitectureScopeResolution | None = None,
 ) -> int:
@@ -2330,6 +2613,8 @@ def _apply_topk_deterministic_architecture_constraints(
         tree_index=tree_index,
         architecture_list=architecture_list,
         filename_constraint_mode=filename_constraint_mode,
+        data_standard_mode=data_standard_mode,
+        data_standard_profile=data_standard_profile,
         jane_profile=jane_profile,
         scope_resolution=scope_resolution,
     ).post_architecture_id
@@ -2342,15 +2627,26 @@ def _log_architecture_constraint_decision(
     filename_constraint_mode: str,
     profile: _JaneClassificationProfile,
     decision: _ArchitectureConstraintDecision,
+    data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    data_standard_profile: _DataStandardClassificationProfile | None = None,
 ) -> None:
-    # GJB 分支沿用既有专用日志；方案未定义新的 GJB 原因码，避免写入空值或
-    # 擅自扩展固定枚举。
     if not decision.reason_code:
         return
+    standard_profile = (
+        data_standard_profile
+        or _DataStandardClassificationProfile()
+    )
     payload = {
         "executionId": execution_id,
         "fileName": file_name,
         "constraintMode": filename_constraint_mode,
+        "dataStandardMode": data_standard_mode,
+        "standardNumber": standard_profile.standard_number,
+        "standardTitle": standard_profile.title,
+        "standardDocumentKind": standard_profile.document_kind,
+        "standardIdentityConfirmed": standard_profile.identity_confirmed,
+        "standardIdentityConflict": standard_profile.identity_conflict,
+        "standardEvidenceSources": list(standard_profile.evidence_sources),
         "scopeKind": profile.scope_kind,
         "extractedTitle": profile.title,
         "primaryIdentifier": profile.primary_identifier,
@@ -2788,6 +3084,7 @@ def _execute_file_analysis_task(
         analysis_filename_constraint_mode: str = (
             ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
         ),
+        analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
 ) -> None:
     """按审计硬前置契约执行单文件分析和永久知识库转交。
 
@@ -2804,6 +3101,9 @@ def _execute_file_analysis_task(
     )
     filename_constraint_mode = _normalize_analysis_filename_constraint_mode(
         analysis_filename_constraint_mode
+    )
+    data_standard_mode = _normalize_analysis_data_standard_mode(
+        analysis_data_standard_mode
     )
     # 三种运行模式都必须先持久化模型可见候选，审计故障时禁止创建远端 Session。
     # legacy 仍发送完整小树，但同样受全局 128 候选与 32K Prompt 硬门禁约束。
@@ -2836,9 +3136,14 @@ def _execute_file_analysis_task(
     visible_candidates: tuple[Dict[str, Any], ...] = ()
     visible_ids: set[int] = set()
     resolved_direct_architecture_id: int | None = None
+    data_standard_profile = _DataStandardClassificationProfile()
+    data_standard_scope_guard_active = False
+    data_standard_scope_ids: tuple[int, ...] = ()
+    data_standard_remark_overrides: dict[int, str] = {}
     jane_profile = _JaneClassificationProfile()
     scope_resolution = _ArchitectureScopeResolution()
     constraint_decision: _ArchitectureConstraintDecision | None = None
+    data_standard_general_fallback_applied = False
 
     def persist_initial_recall_audit(fields: Dict[str, Any]) -> None:
         task_service.upsert_architecture_recall_decision(
@@ -2945,6 +3250,17 @@ def _execute_file_analysis_task(
 
     ranges = build_effective_analysis_ranges(params)
     architecture_list = ranges["architectureList"]
+    data_standard_profile = _build_data_standard_classification_profile(
+        file_name=file_name,
+        original_name=original_name,
+        original_text=original_text,
+    )
+    data_standard_scope_guard_active = (
+        data_standard_mode == ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+        and classification_mode != "legacy"
+        and data_standard_profile.identity_confirmed
+        and data_standard_profile.document_kind == "standard_body"
+    )
     jane_profile = _build_jane_classification_profile(
         file_name=file_name,
         original_name=original_name,
@@ -2954,6 +3270,7 @@ def _execute_file_analysis_task(
         filename_constraint_mode
         == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
         and jane_profile.active
+        and not data_standard_scope_guard_active
     )
     recall_file_name, recall_original_name = _jane_recall_filename_signals(
         file_name=file_name,
@@ -2965,7 +3282,13 @@ def _execute_file_analysis_task(
         file_name=recall_file_name,
         original_name=recall_original_name,
         original_text=original_text,
-        title_override=jane_profile.title if scope_guard_active else "",
+        title_override=(
+            data_standard_profile.title
+            if data_standard_scope_guard_active
+            else jane_profile.title
+            if scope_guard_active
+            else ""
+        ),
     )
     signal_digest = _architecture_signal_digest(signals)
     index_started_at = time.perf_counter()
@@ -2998,6 +3321,18 @@ def _execute_file_analysis_task(
         )
 
     try:
+        if data_standard_scope_guard_active:
+            (
+                data_standard_scope_ids,
+                data_standard_remark_overrides,
+            ) = _data_standard_candidate_scope(
+                tree_index=tree_index,
+                architecture_list=architecture_list,
+            )
+            if not data_standard_scope_ids:
+                raise ArchitectureRecallError(
+                    "已确认标准正文，但 architectureList 中没有可用的数据标准叶节点"
+                )
         if classification_mode == "legacy":
             analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
             if (
@@ -3038,7 +3373,10 @@ def _execute_file_analysis_task(
                     signals,
                     prompt_char_limit=2_000_000,
                     prompt_overhead_chars=0,
-                    strong_evidence_only=scope_guard_active,
+                    strong_evidence_only=(
+                        scope_guard_active
+                        or data_standard_scope_guard_active
+                    ),
                     strong_identity_enabled=(
                         jane_profile.recall_identity_enabled
                         if scope_guard_active
@@ -3047,6 +3385,21 @@ def _execute_file_analysis_task(
                     preferred_parent_reasons=(
                         scope_resolution.preferred_parent_reasons
                         if scope_guard_active
+                        else None
+                    ),
+                    candidate_scope_ids=(
+                        data_standard_scope_ids
+                        if data_standard_scope_guard_active
+                        else None
+                    ),
+                    candidate_scope_reason=(
+                        "data-standard-scope"
+                        if data_standard_scope_guard_active
+                        else ""
+                    ),
+                    candidate_remark_overrides=(
+                        data_standard_remark_overrides
+                        if data_standard_scope_guard_active
                         else None
                     ),
                 )
@@ -3080,24 +3433,50 @@ def _execute_file_analysis_task(
                 )
             elif classification_mode == "topk_two_stage":
                 analysis_prompt = normalize_rag_prompt(
-                    build_architecture_classification_prompt(
-                        params,
-                        visible_candidates,
-                        classification_context=(
-                            _jane_classification_prompt_context(
-                                jane_profile,
-                                scope_resolution,
-                            )
-                            if scope_guard_active
-                            else None
-                        ),
+                    (
+                        build_data_standard_classification_prompt(
+                            params,
+                            visible_candidates,
+                            standard_context=_data_standard_prompt_context(
+                                data_standard_profile
+                            ),
+                        )
+                        if data_standard_scope_guard_active
+                        else build_architecture_classification_prompt(
+                            params,
+                            visible_candidates,
+                            classification_context=(
+                                _jane_classification_prompt_context(
+                                    jane_profile,
+                                    scope_resolution,
+                                )
+                                if scope_guard_active
+                                else None
+                            ),
+                        )
                     )
                 )
             else:
                 limited_params = dict(params)
                 limited_params["architectureList"] = list(visible_candidates)
                 scope_contract = ""
-                if scope_guard_active:
+                if data_standard_scope_guard_active:
+                    scope_contract = (
+                        "\n【数据标准作用域分类补充规则】\n"
+                        "服务端已确认该文件是标准正文；只能在下方数据标准叶节点中分类。"
+                        "专业类别必须由标准标题或范围支持；普通目录中的“术语和定义”不能"
+                        "单独决定分类。不属于五个专业主题时选择“通用要求”。\n"
+                        "服务端标准画像："
+                        + json.dumps(
+                            _data_standard_prompt_context(
+                                data_standard_profile
+                            ),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                elif scope_guard_active:
                     scope_contract = (
                         "\n【简氏作用域分类补充规则】\n"
                         "按全文主要对象和覆盖粒度分类；class 文档的首舰号只标识舰级，"
@@ -3353,11 +3732,15 @@ def _execute_file_analysis_task(
                         contract_error,
                         DataStandardParentContractError,
                     )
-                    architecture_id = _visible_data_standard_fallback_id(
-                        visible_ids=visible_ids,
-                        architecture_list=architecture_list,
-                        force=force_standard,
-                        context_values=(original_text, original_name),
+                    architecture_id = (
+                        None
+                        if data_standard_scope_guard_active
+                        else _visible_data_standard_fallback_id(
+                            visible_ids=visible_ids,
+                            architecture_list=architecture_list,
+                            force=force_standard,
+                            context_values=(original_text, original_name),
+                        )
                     )
                     if architecture_id is None:
                         attempts_used = _phase_attempt_count(
@@ -3365,32 +3748,72 @@ def _execute_file_analysis_task(
                             classification_started,
                         )
                         if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
-                            raise ArchitectureContractError(
-                                "分类阶段实际模型调用预算已耗尽，无法 repair"
-                            ) from contract_error
-                        final_prompt = _normalize_bounded_analysis_prompt(
-                            build_architecture_repair_prompt(
-                                parsed_classification or {"architectureId": None},
-                                visible_candidates,
-                                str(contract_error),
+                            if not data_standard_scope_guard_active:
+                                raise ArchitectureContractError(
+                                    "分类阶段实际模型调用预算已耗尽，无法 repair"
+                                ) from contract_error
+                            architecture_id = (
+                                _visible_data_standard_fallback_id(
+                                    visible_ids=visible_ids,
+                                    architecture_list=architecture_list,
+                                    force=True,
+                                    context_values=(
+                                        original_text,
+                                        original_name,
+                                    ),
+                                )
                             )
-                        )
-                        repaired_result = session.ask(
-                            final_prompt,
-                            prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
-                            require_sources=True,
-                            max_attempts=(
-                                MAX_ANALYSIS_PHASE_CALLS - attempts_used
-                            ),
-                        )
-                        _repaired, architecture_id = (
-                            _parse_topk_classification_result(
-                                repaired_result.text,
-                                visible_ids=visible_ids,
-                                tree_index=tree_index,
-                                architecture_list=architecture_list,
+                            if architecture_id is None:
+                                raise ArchitectureContractError(
+                                    "标准正文分类预算耗尽，且候选中不存在通用要求叶节点"
+                                ) from contract_error
+                            data_standard_general_fallback_applied = True
+                        if architecture_id is None:
+                            final_prompt = _normalize_bounded_analysis_prompt(
+                                build_architecture_repair_prompt(
+                                    parsed_classification
+                                    or {"architectureId": None},
+                                    visible_candidates,
+                                    str(contract_error),
+                                )
                             )
-                        )
+                            repaired_result = session.ask(
+                                final_prompt,
+                                prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                                require_sources=True,
+                                max_attempts=(
+                                    MAX_ANALYSIS_PHASE_CALLS - attempts_used
+                                ),
+                            )
+                            try:
+                                _repaired, architecture_id = (
+                                    _parse_topk_classification_result(
+                                        repaired_result.text,
+                                        visible_ids=visible_ids,
+                                        tree_index=tree_index,
+                                        architecture_list=architecture_list,
+                                    )
+                                )
+                            except ArchitectureContractError as repair_error:
+                                architecture_id = (
+                                    _visible_data_standard_fallback_id(
+                                        visible_ids=visible_ids,
+                                        architecture_list=architecture_list,
+                                        force=True,
+                                        context_values=(
+                                            original_text,
+                                            original_name,
+                                        ),
+                                    )
+                                    if data_standard_scope_guard_active
+                                    else None
+                                )
+                                if architecture_id is None:
+                                    raise ArchitectureContractError(
+                                        "标准正文分类 repair 后仍无法确定类别，且候选中"
+                                        "不存在通用要求叶节点"
+                                    ) from repair_error
+                                data_standard_general_fallback_applied = True
 
                 if architecture_id is None:
                     raise ArchitectureContractError("无法确定领域分类")
@@ -3403,10 +3826,20 @@ def _execute_file_analysis_task(
                         tree_index=tree_index,
                         architecture_list=architecture_list,
                         filename_constraint_mode=filename_constraint_mode,
+                        data_standard_mode=data_standard_mode,
+                        data_standard_profile=data_standard_profile,
                         jane_profile=jane_profile,
                         scope_resolution=scope_resolution,
                     )
                 )
+                if data_standard_general_fallback_applied:
+                    constraint_decision = _ArchitectureConstraintDecision(
+                        pre_architecture_id=architecture_id,
+                        post_architecture_id=architecture_id,
+                        reason_code="data_standard_general_fallback",
+                        matched_scope_parent_id=None,
+                        tree_gap=False,
+                    )
                 architecture_id = constraint_decision.post_architecture_id
                 selected_node = tree_index.require(architecture_id)
                 include_standard_fields = _is_architecture_in_standard_range(
@@ -3561,7 +3994,7 @@ def _execute_file_analysis_task(
                     )
                     if classification_mode == "legacy":
                         architecture_id = (
-                            _first_data_standard_leaf_id(architecture_list)
+                            _general_data_standard_leaf_id(architecture_list)
                             if force_standard
                             else _match_gjb_architecture_candidate(
                                 parsed_result,
@@ -3571,11 +4004,18 @@ def _execute_file_analysis_task(
                             )
                         )
                     else:
-                        architecture_id = _visible_data_standard_fallback_id(
-                            visible_ids=visible_ids,
-                            architecture_list=architecture_list,
-                            force=force_standard,
-                            context_values=(original_text, original_name),
+                        architecture_id = (
+                            None
+                            if data_standard_scope_guard_active
+                            else _visible_data_standard_fallback_id(
+                                visible_ids=visible_ids,
+                                architecture_list=architecture_list,
+                                force=force_standard,
+                                context_values=(
+                                    original_text,
+                                    original_name,
+                                ),
+                            )
                         )
                     if architecture_id is None:
                         attempts_used = _phase_attempt_count(
@@ -3583,42 +4023,86 @@ def _execute_file_analysis_task(
                             combined_started,
                         )
                         if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
-                            raise ArchitectureContractError(
-                                "combined 阶段实际模型调用预算已耗尽，无法 architecture repair"
-                            ) from contract_error
-                        final_prompt = _normalize_bounded_analysis_prompt(
-                            build_architecture_repair_prompt(
-                                parsed_result,
-                                visible_candidates,
-                                str(contract_error),
+                            if not data_standard_scope_guard_active:
+                                raise ArchitectureContractError(
+                                    "combined 阶段实际模型调用预算已耗尽，无法 "
+                                    "architecture repair"
+                                ) from contract_error
+                            architecture_id = (
+                                _visible_data_standard_fallback_id(
+                                    visible_ids=visible_ids,
+                                    architecture_list=architecture_list,
+                                    force=True,
+                                    context_values=(
+                                        original_text,
+                                        original_name,
+                                    ),
+                                )
                             )
-                        )
-                        repaired_result = session.ask(
-                            final_prompt,
-                            prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
-                            require_sources=True,
-                            max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
-                        )
-                        if classification_mode == "legacy":
-                            architecture_id = _validate_architecture_repair_result(
-                                repaired_result.text,
-                                params,
+                            if architecture_id is None:
+                                raise ArchitectureContractError(
+                                    "标准正文分类预算耗尽，且候选中不存在通用要求叶节点"
+                                ) from contract_error
+                            data_standard_general_fallback_applied = True
+                        if architecture_id is None:
+                            final_prompt = _normalize_bounded_analysis_prompt(
+                                build_architecture_repair_prompt(
+                                    parsed_result,
+                                    visible_candidates,
+                                    str(contract_error),
+                                )
                             )
-                            architecture_id = _validate_topk_architecture_id(
-                                architecture_id,
-                                visible_ids=visible_ids,
-                                tree_index=tree_index,
-                                architecture_list=architecture_list,
+                            repaired_result = session.ask(
+                                final_prompt,
+                                prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                                require_sources=True,
+                                max_attempts=(
+                                    MAX_ANALYSIS_PHASE_CALLS - attempts_used
+                                ),
                             )
-                        else:
-                            _repaired, architecture_id = (
-                                _parse_topk_classification_result(
-                                    repaired_result.text,
+                            if classification_mode == "legacy":
+                                architecture_id = (
+                                    _validate_architecture_repair_result(
+                                        repaired_result.text,
+                                        params,
+                                    )
+                                )
+                                architecture_id = _validate_topk_architecture_id(
+                                    architecture_id,
                                     visible_ids=visible_ids,
                                     tree_index=tree_index,
                                     architecture_list=architecture_list,
                                 )
-                            )
+                            else:
+                                try:
+                                    _repaired, architecture_id = (
+                                        _parse_topk_classification_result(
+                                            repaired_result.text,
+                                            visible_ids=visible_ids,
+                                            tree_index=tree_index,
+                                            architecture_list=architecture_list,
+                                        )
+                                    )
+                                except ArchitectureContractError as repair_error:
+                                    architecture_id = (
+                                        _visible_data_standard_fallback_id(
+                                            visible_ids=visible_ids,
+                                            architecture_list=architecture_list,
+                                            force=True,
+                                            context_values=(
+                                                original_text,
+                                                original_name,
+                                            ),
+                                        )
+                                        if data_standard_scope_guard_active
+                                        else None
+                                    )
+                                    if architecture_id is None:
+                                        raise ArchitectureContractError(
+                                            "标准正文分类 repair 后仍无法确定类别，且候选中"
+                                            "不存在通用要求叶节点"
+                                        ) from repair_error
+                                    data_standard_general_fallback_applied = True
 
             if constraint_decision is None:
                 constraint_decision = (
@@ -3630,9 +4114,19 @@ def _execute_file_analysis_task(
                         tree_index=tree_index,
                         architecture_list=architecture_list,
                         filename_constraint_mode=filename_constraint_mode,
+                        data_standard_mode=data_standard_mode,
+                        data_standard_profile=data_standard_profile,
                         jane_profile=jane_profile,
                         scope_resolution=scope_resolution,
                     )
+                )
+            if data_standard_general_fallback_applied:
+                constraint_decision = _ArchitectureConstraintDecision(
+                    pre_architecture_id=architecture_id,
+                    post_architecture_id=architecture_id,
+                    reason_code="data_standard_general_fallback",
+                    matched_scope_parent_id=None,
+                    tree_gap=False,
                 )
             architecture_id = constraint_decision.post_architecture_id
             _log_architecture_constraint_decision(
@@ -3641,6 +4135,8 @@ def _execute_file_analysis_task(
                 filename_constraint_mode=filename_constraint_mode,
                 profile=jane_profile,
                 decision=constraint_decision,
+                data_standard_mode=data_standard_mode,
+                data_standard_profile=data_standard_profile,
             )
             if len(session.trace.attempts) > MAX_ANALYSIS_MODEL_CALLS:
                 raise AnalysisContractError("文件分析实际模型调用超过 4 次")
@@ -4072,6 +4568,7 @@ def run_file_analysis_task(
         analysis_filename_constraint_mode: str = (
             ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
         ),
+        analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
 ) -> None:
     """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
 
@@ -4091,6 +4588,7 @@ def run_file_analysis_task(
             knowledge_index_factory=knowledge_index_factory,
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
+            analysis_data_standard_mode=analysis_data_standard_mode,
         )
     except Exception as exc:
         params_list = request_payload.get("params", [])
@@ -4189,6 +4687,7 @@ def run_file_analysis_batch_task(
         analysis_filename_constraint_mode: str = (
             ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
         ),
+        analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
 ) -> None:
     """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
@@ -4218,4 +4717,5 @@ def run_file_analysis_batch_task(
             knowledge_index_factory=knowledge_index_factory,
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
+            analysis_data_standard_mode=analysis_data_standard_mode,
         )
