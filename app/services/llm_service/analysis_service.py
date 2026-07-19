@@ -1489,6 +1489,19 @@ _JANE_CLASS_RE = re.compile(r"(?<![A-Za-z])class(?![A-Za-z])", re.IGNORECASE)
 _JANE_AIRCRAFT_TOTALS_RE = re.compile(
     r"(?im)^\s*Aircraft\s+totals\s*$",
 )
+_JANE_CATALOG_FILENAME_RE = re.compile(
+    r"^(?:jfs|jaem|jawa|jumv)(?=[a-z0-9_-]*\d)[a-z0-9_-]+$",
+    re.IGNORECASE,
+)
+_OPAQUE_IDENTITY_FILENAME_RE = re.compile(
+    r"^(?:"
+    r"[0-9a-f]{8,64}"
+    r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|(?:upload|hash|temporary|temp)[_-][a-z0-9_-]{6,}"
+    r"|technical[_-]upload(?:[_-][a-z0-9_-]+)?"
+    r")$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1496,15 +1509,36 @@ class _JaneClassificationProfile:
     active: bool = False
     title: str = ""
     identity_filename: str = ""
+    filename_identity_kind: str = "absent"
     filename_identifiers: tuple[str, ...] = ()
+    trusted_filename_identifiers: tuple[str, ...] = ()
     title_identifiers: tuple[str, ...] = ()
     primary_identifier: str = ""
     qualifier: str = ""
     scope_kind: str = ""
     high_level_branch_hint: str = ""
     dominant_detail_kind: str = ""
+    recall_identity_enabled: bool = False
     identity_confirmed: bool = False
     identity_conflict: bool = False
+
+
+def _jane_recall_filename_signals(
+    *,
+    file_name: str,
+    original_name: str,
+    profile: _JaneClassificationProfile,
+    scope_guard_active: bool,
+) -> tuple[str, str]:
+    """返回可进入召回的业务文件名和原文件名。"""
+
+    if not scope_guard_active:
+        return file_name, original_name
+    if profile.filename_identity_kind in {"catalog", "opaque"}:
+        return "", ""
+    if original_name:
+        return "", original_name
+    return file_name, ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1564,6 +1598,23 @@ def _strong_filename_identifiers(*values: Any) -> set[str]:
     """提取文件名中的数字型强标识，忽略正文、短词和纯年份。"""
 
     return set(_ordered_strong_identifiers(*values))
+
+
+def _jane_filename_identity_kind(value: Any) -> str:
+    """区分描述性文件名与不能代表装备身份的出版/上传技术名。"""
+
+    normalized = unicodedata.normalize("NFKC", _as_text(value)).casefold()
+    basename = re.split(r"[/\\]", normalized)[-1].strip()
+    if not basename:
+        return "absent"
+    stem = re.sub(r"\.[a-z0-9]{1,12}$", "", basename).strip()
+    if not stem:
+        return "absent"
+    if _JANE_CATALOG_FILENAME_RE.fullmatch(stem):
+        return "catalog"
+    if _OPAQUE_IDENTITY_FILENAME_RE.fullmatch(stem):
+        return "opaque"
+    return "descriptive"
 
 
 def _identifier_prefix(identifier: str) -> str:
@@ -1666,20 +1717,33 @@ def _build_jane_classification_profile(
 ) -> _JaneClassificationProfile:
     active, title = _extract_jane_title(original_text)
     identity_filename = _as_text(original_name) or _as_text(file_name)
+    filename_identity_kind = _jane_filename_identity_kind(identity_filename)
     if not active:
-        return _JaneClassificationProfile(identity_filename=identity_filename)
+        return _JaneClassificationProfile(
+            identity_filename=identity_filename,
+            filename_identity_kind=filename_identity_kind,
+        )
 
     filename_identifiers = _ordered_strong_identifiers(identity_filename)
+    trusted_filename_identifiers = (
+        filename_identifiers
+        if filename_identity_kind == "descriptive"
+        else ()
+    )
     title_identifiers = _ordered_strong_identifiers(title)
     shared_identifiers = [
         identifier
         for identifier in title_identifiers
-        if identifier in set(filename_identifiers)
+        if identifier in set(trusted_filename_identifiers)
     ]
-    filename_qualifier = _extract_scope_qualifier(identity_filename)
+    filename_qualifier = (
+        _extract_scope_qualifier(identity_filename)
+        if filename_identity_kind == "descriptive"
+        else ""
+    )
     title_qualifier = _extract_scope_qualifier(title)
     identifier_conflict = bool(
-        filename_identifiers
+        trusted_filename_identifiers
         and title_identifiers
         and not shared_identifiers
     )
@@ -1690,7 +1754,14 @@ def _build_jane_classification_profile(
         != _normalize_scope_qualifier(title_qualifier)
     )
     identity_conflict = identifier_conflict or qualifier_conflict
-    primary_identifier = shared_identifiers[0] if shared_identifiers else ""
+    if shared_identifiers:
+        primary_identifier = shared_identifiers[0]
+    elif title_identifiers and not trusted_filename_identifiers:
+        # 可靠 Jane's 首页标题可以保护召回候选；没有可信文件名独立佐证时，
+        # 仍不得据此开启最终确定性覆盖。
+        primary_identifier = title_identifiers[0]
+    else:
+        primary_identifier = ""
     qualifier = title_qualifier or filename_qualifier
     qualifier_kind = qualifier.partition(" ")[0].casefold()
     if qualifier_kind == "flight":
@@ -1715,14 +1786,17 @@ def _build_jane_classification_profile(
         active=True,
         title=title,
         identity_filename=identity_filename,
+        filename_identity_kind=filename_identity_kind,
         filename_identifiers=filename_identifiers,
+        trusted_filename_identifiers=trusted_filename_identifiers,
         title_identifiers=title_identifiers,
         primary_identifier=primary_identifier,
         qualifier=qualifier,
         scope_kind=scope_kind,
         high_level_branch_hint=high_level_branch_hint,
         dominant_detail_kind=dominant_detail_kind,
-        identity_confirmed=bool(primary_identifier) and not identity_conflict,
+        recall_identity_enabled=bool(primary_identifier) and not identity_conflict,
+        identity_confirmed=bool(shared_identifiers) and not identity_conflict,
         identity_conflict=identity_conflict,
     )
 
@@ -1870,7 +1944,7 @@ def _resolve_jane_architecture_scope(
         return _ArchitectureScopeResolution()
     if profile.identity_conflict:
         return _ArchitectureScopeResolution(reason_code="no_constraint_conflict")
-    if not profile.identity_confirmed:
+    if not profile.recall_identity_enabled:
         return _ArchitectureScopeResolution()
 
     entities_by_identifier = _equipment_entities_by_identifier(tree_index)
@@ -2130,8 +2204,8 @@ def _decide_topk_deterministic_architecture_constraint(
                 architecture_id,
                 architecture_id,
                 "no_constraint_insufficient_evidence",
-                None,
-                False,
+                resolution.matched_scope_parent_id,
+                resolution.tree_gap,
             )
 
         matched_parent_id = resolution.matched_branch_parent_id
@@ -2280,6 +2354,15 @@ def _log_architecture_constraint_decision(
         "scopeKind": profile.scope_kind,
         "extractedTitle": profile.title,
         "primaryIdentifier": profile.primary_identifier,
+        "filenameIdentityKind": profile.filename_identity_kind,
+        "filenameIdentifiers": list(profile.filename_identifiers),
+        "trustedFilenameIdentifiers": list(
+            profile.trusted_filename_identifiers
+        ),
+        "titleIdentifiers": list(profile.title_identifiers),
+        "recallIdentityEnabled": profile.recall_identity_enabled,
+        "identityConfirmed": profile.identity_confirmed,
+        "identityConflict": profile.identity_conflict,
         "qualifier": profile.qualifier,
         "matchedScopeParentId": decision.matched_scope_parent_id,
         "preConstraintArchitectureId": decision.pre_architecture_id,
@@ -2872,9 +2955,15 @@ def _execute_file_analysis_task(
         == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
         and jane_profile.active
     )
-    signals = _build_analysis_architecture_signals(
+    recall_file_name, recall_original_name = _jane_recall_filename_signals(
         file_name=file_name,
         original_name=original_name,
+        profile=jane_profile,
+        scope_guard_active=scope_guard_active,
+    )
+    signals = _build_analysis_architecture_signals(
+        file_name=recall_file_name,
+        original_name=recall_original_name,
         original_text=original_text,
         title_override=jane_profile.title if scope_guard_active else "",
     )
@@ -2951,7 +3040,7 @@ def _execute_file_analysis_task(
                     prompt_overhead_chars=0,
                     strong_evidence_only=scope_guard_active,
                     strong_identity_enabled=(
-                        jane_profile.identity_confirmed
+                        jane_profile.recall_identity_enabled
                         if scope_guard_active
                         else True
                     ),

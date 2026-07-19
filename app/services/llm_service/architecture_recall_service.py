@@ -70,6 +70,17 @@ _GJB_RE = re.compile(
     r"(?<![a-z0-9])(?:gjb|国军标|国家军用标准)(?![a-z])",
     re.IGNORECASE,
 )
+_JANE_UUV_TITLE_ALIAS_RE = re.compile(
+    r"(?<![a-z0-9])(?:xluuv|uuv)s?(?![a-z0-9])",
+    re.IGNORECASE,
+)
+_JANE_UUV_TYPE_DESCRIPTION_RE = re.compile(
+    r"(?<![a-z])(?:unmanned|uncrewed)[\s-]+"
+    r"(?:underwater|undersea)[\s-]+vehicles?(?![a-z])",
+    re.IGNORECASE,
+)
+_JANE_UUV_CANONICAL_NAME = "无人潜航器"
+_JANE_TITLE_TYPE_ALIAS_REASON = "jane_title_type_alias"
 
 
 class ArchitectureRecallError(ValueError):
@@ -722,6 +733,36 @@ def _rule_rank(
     return tuple(ranked)
 
 
+def _jane_title_type_alias_rule_ids(
+    index: ArchitectureTreeIndex,
+    signals: DocumentArchitectureSignals,
+    *,
+    strong_evidence_only: bool,
+) -> tuple[int, ...]:
+    """用可信 Jane's 标题和完整类型描述补入极窄的无人潜航器候选。"""
+
+    if not strong_evidence_only:
+        return ()
+    title = _normalize_text(signals.title)
+    body_excerpt = _normalize_text(signals.body_excerpt)
+    if (
+        not _JANE_UUV_TITLE_ALIAS_RE.search(title)
+        or not _JANE_UUV_TYPE_DESCRIPTION_RE.search(body_excerpt)
+    ):
+        return ()
+
+    matches = tuple(
+        node.id
+        for node in index.nodes
+        if (
+            node.is_leaf
+            and node.parent_id is not None
+            and _normalize_text(node.name) == _JANE_UUV_CANONICAL_NAME
+        )
+    )
+    return matches if len(matches) == 1 else ()
+
+
 def _rank_lookup(node_ids: Sequence[int]) -> dict[int, int]:
     return {node_id: rank for rank, node_id in enumerate(node_ids, start=1)}
 
@@ -1040,6 +1081,21 @@ class ArchitectureRecallService:
             strong_evidence_only=strong_evidence_only,
             strong_identity_enabled=strong_identity_enabled,
         )
+        title_type_alias_ids = _jane_title_type_alias_rule_ids(
+            self._index,
+            signals,
+            strong_evidence_only=strong_evidence_only,
+        )
+        rule_ids = tuple(dict.fromkeys((*rule_ids, *title_type_alias_ids)))
+        for node_id in title_type_alias_ids:
+            protected[node_id] = tuple(
+                dict.fromkeys(
+                    (
+                        *protected.get(node_id, ()),
+                        _JANE_TITLE_TYPE_ALIAS_REASON,
+                    )
+                )
+            )
 
         if not any(
             (exact_leaf_ids, lexical_ids, tree_ids, rule_ids, preferred_parents)
