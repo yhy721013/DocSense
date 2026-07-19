@@ -256,6 +256,117 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
         self.assertNotIn(2, decision.direct_exact_ids)
         self.assertIn(2, _channel(decision, "lexical"))
 
+    def test_scope_guard_protects_unique_uuv_type_from_trusted_title_and_body(self):
+        index = build_architecture_tree_index(
+            [
+                {"id": 1, "name": "装备目标"},
+                {"id": 2, "name": "水下装备", "parentId": 1},
+                {"id": 3, "name": "无人潜航器", "parentId": 2},
+                {"id": 4, "name": "常规潜艇", "parentId": 2},
+            ]
+        )
+
+        for title, description in (
+            (
+                "Echo Voyager/Orca XLUUV",
+                "Type: Extra-large unmanned underwater vehicle (XLUUV).",
+            ),
+            (
+                "Future UUV",
+                "Type: uncrewed undersea vehicle.",
+            ),
+        ):
+            with self.subTest(title=title):
+                decision = recall_architecture_candidates(
+                    index,
+                    build_document_architecture_signals(
+                        title=title,
+                        body=description,
+                    ),
+                    strong_evidence_only=True,
+                    strong_identity_enabled=False,
+                )
+
+                self.assertEqual(_channel(decision, "rule"), (3,))
+                self.assertIn(3, decision.final_candidate_ids)
+                self.assertEqual(
+                    dict(decision.protected_reasons)[3],
+                    ("jane_title_type_alias",),
+                )
+                candidate = next(
+                    candidate
+                    for candidate in decision.candidates
+                    if candidate.id == 3
+                )
+                self.assertEqual(
+                    candidate.protected_reasons,
+                    ("jane_title_type_alias",),
+                )
+                self.assertLessEqual(
+                    len(decision.candidates),
+                    MAX_FINAL_CANDIDATES,
+                )
+                self.assertLessEqual(decision.prompt_chars, 32_000)
+
+    def test_uuv_type_alias_requires_scope_guard_title_body_and_unique_leaf(self):
+        base_nodes = [
+            {"id": 1, "name": "装备目标"},
+            {"id": 2, "name": "水下装备", "parentId": 1},
+            {"id": 3, "name": "无人潜航器", "parentId": 2},
+            {"id": 4, "name": "payload", "parentId": 2},
+        ]
+        cases = (
+            {
+                "name": "legacy",
+                "nodes": base_nodes,
+                "title": "Orca XLUUV",
+                "body": "unmanned underwater vehicle payload",
+                "strong_evidence_only": False,
+            },
+            {
+                "name": "title_only",
+                "nodes": base_nodes,
+                "title": "Orca XLUUV",
+                "body": "payload",
+                "strong_evidence_only": True,
+            },
+            {
+                "name": "body_only",
+                "nodes": base_nodes,
+                "title": "Orca",
+                "body": "unmanned underwater vehicle payload",
+                "strong_evidence_only": True,
+            },
+            {
+                "name": "duplicate_canonical_leaf",
+                "nodes": [
+                    *base_nodes,
+                    {"id": 5, "name": "无人潜航器", "parentId": 2},
+                ],
+                "title": "Orca XLUUV",
+                "body": "unmanned underwater vehicle payload",
+                "strong_evidence_only": True,
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                decision = recall_architecture_candidates(
+                    build_architecture_tree_index(case["nodes"]),
+                    build_document_architecture_signals(
+                        title=case["title"],
+                        body=case["body"],
+                    ),
+                    strong_evidence_only=case["strong_evidence_only"],
+                    strong_identity_enabled=False,
+                )
+
+                self.assertNotIn(3, _channel(decision, "rule"))
+                self.assertNotIn(3, dict(decision.protected_reasons))
+                if case["name"] == "duplicate_canonical_leaf":
+                    self.assertNotIn(5, _channel(decision, "rule"))
+                    self.assertNotIn(5, dict(decision.protected_reasons))
+
     def test_legacy_mode_keeps_body_identifier_exact_and_family_expansion(self):
         signals = build_document_architecture_signals(
             body="Fleetlist\nCVN-78 Gerald R. Ford",

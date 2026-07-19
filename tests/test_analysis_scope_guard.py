@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from unittest.mock import patch
 
 from app.services.core.architecture_tree import build_architecture_tree_index
 from app.services.llm_service import analysis_service
@@ -145,7 +147,67 @@ class JaneClassificationProfileTests(unittest.TestCase):
             hash_original_profile.identity_filename,
             "upload-9f23ab44.pdf",
         )
+        self.assertEqual(hash_original_profile.filename_identity_kind, "opaque")
+        self.assertEqual(hash_original_profile.trusted_filename_identifiers, ())
+        self.assertEqual(hash_original_profile.primary_identifier, "lha6")
+        self.assertTrue(hash_original_profile.recall_identity_enabled)
         self.assertFalse(hash_original_profile.identity_confirmed)
+        self.assertFalse(hash_original_profile.identity_conflict)
+
+    def test_catalog_and_opaque_names_use_jane_title_for_recall_only(self) -> None:
+        cases = (
+            ("JFS_3526-JFS_-16-Aug-2023.pdf", "catalog"),
+            ("JAEM1026-JC4IA-25-May-2023.pdf", "catalog"),
+            ("JAWA1185-JAWA-09-Jul-2024.pdf", "catalog"),
+            ("JUMV0235-JUMV-07-Jun-2024.pdf", "catalog"),
+            ("upload-9f23ab44.pdf", "opaque"),
+            ("9f23ab44f18c.pdf", "opaque"),
+        )
+        for original_name, expected_kind in cases:
+            with self.subTest(original_name=original_name):
+                profile = analysis_service._build_jane_classification_profile(
+                    file_name="technical-upload.pdf",
+                    original_name=original_name,
+                    original_text=_jane_text("America class (LHA-6)"),
+                )
+
+                self.assertEqual(
+                    profile.filename_identity_kind,
+                    expected_kind,
+                )
+                self.assertEqual(profile.trusted_filename_identifiers, ())
+                self.assertEqual(profile.title_identifiers, ("lha6",))
+                self.assertEqual(profile.primary_identifier, "lha6")
+                self.assertTrue(profile.recall_identity_enabled)
+                self.assertFalse(profile.identity_confirmed)
+                self.assertFalse(profile.identity_conflict)
+
+    def test_scope_guard_removes_technical_names_from_recall_signals(self) -> None:
+        catalog_name = "JFS_3526-JFS_-16-Aug-2023.pdf"
+        profile = analysis_service._build_jane_classification_profile(
+            file_name="equipment-models-20260719-01.pdf",
+            original_name=catalog_name,
+            original_text=_jane_text("Nimitz (CVN 68) class (CVNM)"),
+        )
+        file_signal, original_signal = (
+            analysis_service._jane_recall_filename_signals(
+                file_name="equipment-models-20260719-01.pdf",
+                original_name=catalog_name,
+                profile=profile,
+                scope_guard_active=True,
+            )
+        )
+        signals = analysis_service._build_analysis_architecture_signals(
+            file_name=file_signal,
+            original_name=original_signal,
+            original_text=_jane_text("Nimitz (CVN 68) class (CVNM)"),
+            title_override=profile.title,
+        )
+
+        self.assertEqual((file_signal, original_signal), ("", ""))
+        self.assertEqual(signals.strong_identifiers, ("cvn 68",))
+        self.assertNotIn("jfs", signals.query_text.casefold())
+        self.assertNotIn("equipment-models", signals.query_text.casefold())
 
     def test_short_specifications_document_has_dominant_detail_hint(self) -> None:
         short_specifications = _jane_text(
@@ -213,7 +275,9 @@ class JaneClassificationProfileTests(unittest.TestCase):
         )
 
         self.assertTrue(profile.active)
+        self.assertEqual(profile.filename_identity_kind, "descriptive")
         self.assertTrue(profile.identity_conflict)
+        self.assertFalse(profile.recall_identity_enabled)
         self.assertFalse(profile.identity_confirmed)
         self.assertEqual(profile.primary_identifier, "")
 
@@ -292,6 +356,51 @@ class JaneScopeResolutionTests(unittest.TestCase):
                 entities,
             ),
             ((242, (240, 241)),),
+        )
+
+    def test_catalog_filename_title_can_protect_recall_without_final_override(
+        self,
+    ) -> None:
+        text = _jane_text(
+            "America class (LHA-6)",
+            "Fleetlist",
+            "LHA-6",
+            "LHA-7",
+        )
+        profile = self._profile(
+            "JFS_3567-JFS_-17-Jul-2024.pdf",
+            text,
+        )
+        resolution = analysis_service._resolve_jane_architecture_scope(
+            profile,
+            original_text=text,
+            tree_index=self.index,
+        )
+        radar_detail = self.details[91][0]
+        decision = analysis_service._decide_topk_deterministic_architecture_constraint(
+            radar_detail,
+            file_name="technical-upload.pdf",
+            original_name="JFS_3567-JFS_-17-Jul-2024.pdf",
+            visible_ids={radar_detail, 242},
+            tree_index=self.index,
+            architecture_list=self.tree,
+            filename_constraint_mode="scope_guard",
+            jane_profile=profile,
+            scope_resolution=resolution,
+        )
+
+        self.assertTrue(profile.recall_identity_enabled)
+        self.assertFalse(profile.identity_confirmed)
+        self.assertEqual(resolution.matched_scope_parent_id, 242)
+        self.assertEqual(
+            resolution.preferred_parent_reasons,
+            {242: ("jane_scope_parent",)},
+        )
+        self.assertEqual(decision.post_architecture_id, radar_detail)
+        self.assertEqual(decision.matched_scope_parent_id, 242)
+        self.assertEqual(
+            decision.reason_code,
+            "no_constraint_insufficient_evidence",
         )
 
     def test_flight_qualifier_selects_matching_parent_cluster(self) -> None:
@@ -611,6 +720,40 @@ class JaneScopeResolutionTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, "legacy_identifier_parent")
         self.assertEqual(decision.post_architecture_id, 47)
         self.assertEqual(wrapped_id, decision.post_architecture_id)
+
+
+class JaneConstraintAuditLogTests(unittest.TestCase):
+    def test_log_records_filename_trust_and_separate_identity_gates(self) -> None:
+        profile = analysis_service._build_jane_classification_profile(
+            file_name="technical-upload.pdf",
+            original_name="JFS_3567-JFS_-17-Jul-2024.pdf",
+            original_text=_jane_text("America class (LHA-6)"),
+        )
+        decision = analysis_service._ArchitectureConstraintDecision(
+            pre_architecture_id=91,
+            post_architecture_id=91,
+            reason_code="no_constraint_insufficient_evidence",
+            matched_scope_parent_id=242,
+            tree_gap=False,
+        )
+
+        with patch.object(analysis_service.logger, "info") as log_info:
+            analysis_service._log_architecture_constraint_decision(
+                execution_id="execution-1",
+                file_name="technical-upload.pdf",
+                filename_constraint_mode="scope_guard",
+                profile=profile,
+                decision=decision,
+            )
+
+        payload = json.loads(log_info.call_args.args[1])
+        self.assertEqual(payload["filenameIdentityKind"], "catalog")
+        self.assertTrue(payload["filenameIdentifiers"])
+        self.assertEqual(payload["trustedFilenameIdentifiers"], [])
+        self.assertEqual(payload["titleIdentifiers"], ["lha6"])
+        self.assertTrue(payload["recallIdentityEnabled"])
+        self.assertFalse(payload["identityConfirmed"])
+        self.assertFalse(payload["identityConflict"])
 
 
 if __name__ == "__main__":
