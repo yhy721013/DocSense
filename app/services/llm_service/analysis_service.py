@@ -1452,8 +1452,6 @@ def _validate_topk_architecture_id(
     if node.parent_id is None:
         raise ArchitectureContractError("领域树根节点不能作为最终分类")
     if not node.is_leaf:
-        if node.depth < 2:
-            raise ArchitectureContractError("父节点深度必须至少为 2")
         if _is_data_standard_parent_id(raw_id, architecture_list):
             raise DataStandardParentContractError(
                 "architectureId 是数据标准父节点，必须兜底到其下叶子节点"
@@ -2366,7 +2364,6 @@ def _unique_visible_equipment_identifier_parent(
         if (
                 node.is_leaf
                 or node.parent_id is None
-                or node.depth < 2
                 or node.id in data_standard_parent_ids
                 or not _has_seven_equipment_detail_leaves(node, tree_index)
         ):
@@ -3418,11 +3415,10 @@ def _execute_file_analysis_task(
                 direct_node = tree_index.nodes[0]
                 visible_candidates = (_node_prompt_projection(direct_node),)
                 visible_ids = {direct_node.id}
-                resolved_direct_architecture_id = _validate_topk_architecture_id(
+                resolved_direct_architecture_id = direct_node.id
+                _validate_data_standard_leaf_requirement(
                     direct_node.id,
-                    visible_ids=visible_ids,
-                    tree_index=tree_index,
-                    architecture_list=architecture_list,
+                    architecture_list,
                 )
             else:
                 # 召回服务先以宽松估算上限返回实际候选；真实 Prompt 随后执行 32K 硬门禁。

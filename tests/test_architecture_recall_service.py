@@ -593,6 +593,29 @@ class ArchitectureRecallCandidateContractTests(unittest.TestCase):
         self.assertNotIn(5, parent_ids)
         self.assertNotIn(100, parent_ids)
 
+    def test_finite_tree_boundary_parent_is_eligible(self):
+        """外部父节点未随有限树传入时，边界非叶节点仍是合法父候选。"""
+        index = build_architecture_tree_index(
+            [
+                {"id": 10, "name": "有限边界分类", "parentId": 999},
+                {"id": 11, "name": "边界候选甲", "parentId": 10},
+                {"id": 12, "name": "边界候选乙", "parentId": 10},
+            ]
+        )
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(title="有限边界分类"),
+        )
+
+        parent_ids = {
+            candidate.id
+            for candidate in decision.candidates
+            if candidate.node_type == "parent"
+        }
+        self.assertEqual(index.require(10).depth, 1)
+        self.assertEqual(index.require(10).parent_id, 999)
+        self.assertIn(10, parent_ids)
+
     def test_preferred_parent_bypasses_depth_gate_and_takes_first_parent_slot(self):
         nodes: list[dict[str, object]] = [
             {"id": 1, "name": "根"},

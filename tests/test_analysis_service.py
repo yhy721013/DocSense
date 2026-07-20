@@ -9,12 +9,16 @@ from app.ports import (
     RagPromptKind,
     RagSource,
 )
+from app.services.core.architecture_tree import build_architecture_tree_index
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.analysis_service import (
+    ArchitectureContractError,
     DataStandardParentContractError,
     DEFAULT_ARCHITECTURE_OPTIONS,
     _first_data_standard_leaf_id,
     _resolve_analysis_architecture_id,
+    _unique_visible_equipment_identifier_parent,
+    _validate_topk_architecture_id,
     build_file_callback_payload,
     map_analysis_result,
     resolve_storage_architecture_id,
@@ -784,6 +788,83 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(resolve_storage_architecture_id(6801, missing_parent_id), 6801)
         self.assertEqual(resolve_storage_architecture_id(6801, mismatched_parent), 6801)
+
+    def test_topk_contract_accepts_finite_boundary_parent_but_rejects_true_root(self):
+        finite_tree = [
+            {"id": 10, "name": "有限边界父节点", "parentId": 999},
+            {"id": 11, "name": "边界叶甲", "parentId": 10},
+            {"id": 12, "name": "边界叶乙", "parentId": 10},
+        ]
+        finite_index = build_architecture_tree_index(finite_tree)
+
+        self.assertEqual(
+            _validate_topk_architecture_id(
+                10,
+                visible_ids={10, 11, 12},
+                tree_index=finite_index,
+                architecture_list=finite_tree,
+            ),
+            10,
+        )
+
+        true_root_tree = [
+            {"id": 20, "name": "真实根", "parentId": None},
+            {"id": 21, "name": "根下叶子", "parentId": 20},
+        ]
+        with self.assertRaisesRegex(ArchitectureContractError, "根节点"):
+            _validate_topk_architecture_id(
+                20,
+                visible_ids={20, 21},
+                tree_index=build_architecture_tree_index(true_root_tree),
+                architecture_list=true_root_tree,
+            )
+
+    def test_finite_boundary_data_standard_parent_remains_forbidden(self):
+        architecture_list = [
+            {"id": 30, "name": "数据标准", "parentId": 999},
+            {"id": 31, "name": "通用要求", "parentId": 30},
+        ]
+        with self.assertRaises(DataStandardParentContractError):
+            _validate_topk_architecture_id(
+                30,
+                visible_ids={30, 31},
+                tree_index=build_architecture_tree_index(architecture_list),
+                architecture_list=architecture_list,
+            )
+
+    def test_filename_constraint_matches_finite_boundary_equipment_parent(self):
+        detail_kinds = (
+            "基础数据",
+            "战技指标",
+            "运用数据",
+            "效能数据",
+            "模型数据",
+            "目特数据",
+            "声像数据",
+        )
+        architecture_list = [
+            {"id": 40, "name": "CVN-78", "parentId": 999},
+            *(
+                {
+                    "id": 41 + offset,
+                    "name": f"CVN-78-{kind}",
+                    "parentId": 40,
+                }
+                for offset, kind in enumerate(detail_kinds)
+            ),
+        ]
+        tree_index = build_architecture_tree_index(architecture_list)
+
+        self.assertEqual(
+            _unique_visible_equipment_identifier_parent(
+                file_name="Gerald R Ford CVN-78.pdf",
+                original_name="CVN 78 class.pdf",
+                visible_ids={node["id"] for node in architecture_list},
+                tree_index=tree_index,
+                architecture_list=architecture_list,
+            ),
+            40,
+        )
 
     @patch("app.services.llm_service.analysis_service.run_file_analysis_task")
     def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):

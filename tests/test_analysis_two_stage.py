@@ -245,6 +245,60 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(recall["returned_rank"], 1)
         self.assertEqual(len(rag_factory.ports[0].sessions[0].trace.attempts), 1)
 
+    def test_single_candidate_accepts_root_and_finite_boundary_shapes(self):
+        """唯一候选沿既有合同直返，不因本次有限树缺少父节点而被拒绝。"""
+        cases = (
+            ("none", {"parentId": None}),
+            ("zero", {"parentId": 0}),
+            ("missing", {}),
+            ("external", {"parentId": 999}),
+        )
+        for case_name, parent_fields in cases:
+            with self.subTest(case=case_name), workspace_tempdir() as tmp:
+                file_name = f"single-{case_name}.txt"
+                request = self._request(
+                    file_name,
+                    [
+                        {
+                            "id": 21,
+                            "name": "唯一候选",
+                            **parent_fields,
+                        }
+                    ],
+                )
+                rag_factory = FakeDocumentRagFactory(
+                    analyse_outcomes=[
+                        FakeRagOutcome(
+                            text=self._extraction(file_name),
+                            sources=(self.SOURCE,),
+                        )
+                    ]
+                )
+
+                task_service, task, recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                )
+                interaction = task_service.get_llm_interactions(
+                    "file",
+                    file_name,
+                )[0]
+                attempts = task_service.get_llm_interaction_attempts(
+                    interaction["id"]
+                )
+
+                self.assertEqual(task["status"], "2")
+                self.assertEqual(
+                    task["result_payload"]["data"]["architectureId"],
+                    21,
+                )
+                self.assertEqual(recall["returned_architecture_id"], 21)
+                self.assertEqual(
+                    [item["prompt_kind"] for item in attempts],
+                    ["analysis_extraction"],
+                )
+
     def test_classification_and_extraction_are_isolated_and_resolved_id_wins(self):
         with workspace_tempdir() as tmp:
             file_name = "cvn78.txt"
@@ -388,6 +442,44 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(task["status"], "2")
         self.assertEqual(task["result_payload"]["data"]["architectureId"], 10)
         self.assertEqual(recall["returned_rank"], 3)
+
+    def test_model_can_return_visible_finite_boundary_parent(self):
+        """父节点的祖先未随请求传入时，模型仍可选择该可见边界父节点。"""
+        with workspace_tempdir() as tmp:
+            file_name = "finite-boundary-parent.txt"
+            tree = [
+                {"id": 10, "name": "有限边界父节点", "parentId": 999},
+                {"id": 11, "name": "边界叶甲", "parentId": 10},
+                {"id": 12, "name": "边界叶乙", "parentId": 10},
+            ]
+            request = self._request(file_name, tree)
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":10}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (11, 12, 10),
+                ),
+            )
+
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 10)
+        self.assertEqual(recall["returned_architecture_id"], 10)
 
     def test_gjb_null_classification_falls_back_to_general_requirement_leaf(self):
         tree = [

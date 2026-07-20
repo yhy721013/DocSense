@@ -934,7 +934,13 @@ def _eligible_parent_ids(
     standard_roots = set(_data_standard_roots(index))
     eligible: list[tuple[int, int, int, float, int]] = []
     for node in index.nodes:
-        if node.is_leaf or node.depth < 2 or node.id in standard_roots:
+        # parentId 指向未随请求传入的祖先时，节点虽是当前有限树的边界根，仍不是
+        # 完整业务树的真实根；只有 parent_id=None 才禁止作为最终父候选。
+        if (
+            node.is_leaf
+            or node.parent_id is None
+            or node.id in standard_roots
+        ):
             continue
         covered = len(top16 & set(index.leaf_descendants_by_id[node.id]))
         exact_hit = node.id in direct_exact
