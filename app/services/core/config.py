@@ -7,6 +7,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()  # 加载 .env 文件到环境变量，但不覆盖已显式传入的值
 
+from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.services.core.settings import (
     LLM_DOWNLOAD_DIR,
     LLM_TASK_DB_PATH,
@@ -104,7 +105,7 @@ class ReportInfrastructureConfig:
     running_sample_limit: int = 20
     stop_timeout_seconds: float = 5.0
     cleanup_http_timeout_seconds: float = 60.0
-    cleanup_lease_seconds: float = 90.0
+    cleanup_lease_seconds: float = 130.0
     max_download_bytes: int = 512 * 1024 * 1024
 
     def __post_init__(self) -> None:
@@ -155,9 +156,13 @@ class ReportInfrastructureConfig:
                     f"{name} 必须是 1~1000 的整数"
                 )
 
-        if self.cleanup_lease_seconds <= self.cleanup_http_timeout_seconds:
+        required_lease = required_http_lease_seconds(
+            self.cleanup_http_timeout_seconds
+        )
+        if self.cleanup_lease_seconds < required_lease:
             raise ReportInfrastructureConfigurationError(
-                "cleanup_lease_seconds 必须严格大于 cleanup_http_timeout_seconds"
+                "cleanup_lease_seconds 必须覆盖连接、响应读取和安全余量，"
+                f"当前至少需要 {required_lease:.3f} 秒"
             )
         if (
             isinstance(self.max_download_bytes, bool)
@@ -356,7 +361,7 @@ def load_report_infrastructure_config() -> ReportInfrastructureConfig:
         ),
         cleanup_lease_seconds=_strict_report_float(
             "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS",
-            90.0,
+            130.0,
         ),
         max_download_bytes=_strict_report_bytes(
             "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES",

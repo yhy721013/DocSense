@@ -14,6 +14,7 @@ Gateway 将其作为授权或成功判定依据。
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -323,6 +324,8 @@ class AnythingLLMSource:
     title: Optional[str] = None
     url: Optional[str] = None
     score: Optional[float] = None
+    score_present: bool = False
+    score_valid: bool = True
     distance: Optional[float] = None
     metadata: Optional[Mapping[str, Any]] = None
 
@@ -377,12 +380,44 @@ class AnythingLLMSource:
                 break
         text = first_text(payload, "text", "pageContent", "content", "chunk")
 
-        raw_score = payload.get("score", metadata.get("score"))
-        score: Optional[float]
-        try:
-            score = float(raw_score) if raw_score is not None else None
-        except (TypeError, ValueError):
-            score = None
+        # ``dict.get`` 无法区分“字段缺失”和“字段存在但类型非法”。武器谱 Schema v2
+        # 必须把这两种事实分开：只有确实缺失/为 null 的整批结果才能进入 rank-only；
+        # 非法字符串、NaN 或 Infinity 不能被悄悄转换成缺失分数。
+        # 顶层和 metadata 都是已知的供应商 score 位置。不能使用 ``dict.get`` 的默认值
+        # 语义，因为“顶层显式 null、metadata 有分数”和“两个位置给出冲突分数”都需要
+        # 确定处理：前者采用唯一非空值，后者标为非法协议，交由整批选择门禁失败关闭。
+        raw_score_values = tuple(
+            value
+            for container in (payload, metadata)
+            if "score" in container
+            for value in (container.get("score"),)
+            if value is not None
+        )
+        score_present = bool(raw_score_values)
+        parsed_score_values: list[float] = []
+        score_valid = True
+        for raw_score in raw_score_values:
+            if isinstance(raw_score, bool):
+                # JSON bool 在 Python 中是 int 子类；若直接 float(True)，会把协议错误
+                # 静默伪装成最高相关分 1.0。
+                score_valid = False
+                continue
+            try:
+                parsed_score = float(raw_score)
+            except (TypeError, ValueError):
+                score_valid = False
+                continue
+            if not math.isfinite(parsed_score):
+                score_valid = False
+                continue
+            parsed_score_values.append(parsed_score)
+        if len(set(parsed_score_values)) > 1:
+            score_valid = False
+        score: Optional[float] = (
+            parsed_score_values[0]
+            if score_valid and parsed_score_values
+            else None
+        )
 
         raw_distance = payload.get("distance", metadata.get("distance"))
         try:
@@ -398,6 +433,8 @@ class AnythingLLMSource:
             title=title,
             url=source_url,
             score=score,
+            score_present=score_present,
+            score_valid=score_valid,
             distance=distance,
             # 冻结 DTO 不能继续持有上游可变字典，浅拷贝后使用只读映射阻止意外改写。
             metadata=MappingProxyType(dict(metadata)) if metadata else None,

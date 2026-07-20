@@ -236,6 +236,45 @@ class CheckTaskCurrentRouteContractTests(unittest.TestCase):
         self.assertEqual(report_id, value)
         self.assertIs(int, type(value))
 
+    def test_weaponry_id_uses_same_canonical_rule_as_submission_and_progress(self) -> None:
+        self.task_service.create_weaponry_task(
+            10502,
+            {
+                "businessType": "weaponry",
+                "params": {"architectureId": 10502},
+            },
+        )
+
+        response = self.client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "weaponry",
+                "params": [{"architectureId": "00010502"}],
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(10502, response.get_json()["data"]["architectureId"])
+
+    def test_weaponry_id_rejects_unapproved_forms_with_400(self) -> None:
+        for invalid in (True, 1.0, " 1 ", "+1", 0, -1, [], {}):
+            with self.subTest(invalid=invalid):
+                response = self.client.post(
+                    "/llm/check-task",
+                    json={
+                        "businessType": "weaponry",
+                        "params": [{"architectureId": invalid}],
+                    },
+                )
+
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(
+                    {
+                        "error": "architectureId必须为1到9223372036854775807之间的正整数"
+                    },
+                    response.get_json(),
+                )
+
     def test_report_id_rejects_non_integer_values_with_400(self) -> None:
         for invalid in (True, 132.0, "132.0", "not-an-integer", [], {}):
             with self.subTest(invalid=invalid):

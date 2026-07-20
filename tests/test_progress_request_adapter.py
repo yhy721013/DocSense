@@ -77,15 +77,43 @@ class ProgressRequestAdapterTests(unittest.TestCase):
                 }
             )
 
-    def test_weaponry_keeps_legacy_internal_key_conversion(self) -> None:
-        weaponry = parse_progress_subscription(
-            {
-                "businessType": "weaponry",
-                "params": [{"architectureId": 10502}],
-            }
-        )
+    def test_weaponry_integer_forms_share_the_approved_canonical_key(self) -> None:
+        for value in (10502, "10502", "00010502"):
+            with self.subTest(value=value):
+                weaponry = parse_progress_subscription(
+                    {
+                        "businessType": "weaponry",
+                        "params": [{"architectureId": value}],
+                    }
+                )
 
-        self.assertEqual("10502", weaponry.ordered_keys[0].business_key)
+                self.assertEqual("10502", weaponry.ordered_keys[0].business_key)
+
+    def test_weaponry_rejects_every_unapproved_architecture_id_form(self) -> None:
+        invalid_values = (
+            True,
+            1.0,
+            " 1 ",
+            "+1",
+            "1.0",
+            0,
+            -1,
+            [],
+            {},
+            9_223_372_036_854_775_808,
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ProgressRequestValidationError,
+                    "architectureId必须为1到9223372036854775807之间的正整数",
+                ):
+                    parse_progress_subscription(
+                        {
+                            "businessType": "weaponry",
+                            "params": [{"architectureId": invalid}],
+                        }
+                    )
 
     def test_any_explicit_action_is_rejected_even_when_empty(self) -> None:
         for action in ("subscribe", "query", "unsubscribe", "", None):

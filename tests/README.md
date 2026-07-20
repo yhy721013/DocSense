@@ -141,6 +141,119 @@ Artifact 所有权和 cleanup/quarantine 持久恢复闭环。1C-6 又证明当�
 永久 AST 门禁。上述测试不代表代码已部署生产，也不代表 RabbitMQ 可靠队列、多实例或
 阶段 10 的真实 50+ 容量验收已经完成。
 
+## 阶段 1D-0～1D-7 武器谱契约、领域、任务输入、I/O Adapter、Application 与关闭验收资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `contracts/stage1d_weaponry_contracts.json` | D01～D05、202/400/404/409、architectureId 规范化、严格字段/TABLE 错误、仅模式 2、INPUT/TABLE 回调、文档范围、术语双路径、fieldDescription 双阶段、A/B/Thread/上下文隔离、供应商能力、故障矩阵、离线 Selection 夹具及脱敏真实校准结果。 |
+| `test_stage1d_weaponry_contract_assets.py` | 原 1D-0 严格离线资产测试，并增加地面真值纠正断言；包含接口文档错误契约同步和测试侧 Evidence Selection Oracle。 |
+| `contracts/stage1d0r_retrieval_quality.json` | 1D-0R 根因审计、MHTML 去噪、专用 Query、只读/隔离复校准、临时资源清理证据和生产停止门禁。 |
+| `test_weaponry_retrieval_quality.py` | 专用 Query、无隐藏长度/最小语义词门禁、Chunk 质量门禁、score/rank 整批协议、稳定排序、来源身份、精确去重和完整 Evidence 保留纯规则测试。 |
+| `test_stage1d0r_retrieval_quality_assets.py` | 严格 JSON、校准地面真值、工具只读/脱敏/fail-fast、候选 profile 和退出门禁测试。 |
+| `test_stage1d0r_isolated_reindex.py` | 隔离重建工具的随机资源所有权、成功清理、嵌入失败补偿、路径越界、既有位置碰撞和源文件只读测试。 |
+| `test_weaponry_domain.py` | ArchitectureId 纯规范化、深冻结字段/列/文档/结果 DTO、来源映射、Evidence 完整保留、仅 Selected Evidence Prompt、INPUT/TABLE 字段说明、TABLE 强行身份/合并/来源去重/组装及可变容器隔离。 |
+| `test_weaponry_contract.py` | INPUT/TABLE/失败 Callback 黄金投影、单一文件聚合策略、模式 1 删除及遗留服务/Prompt 源码静态删除证据。 |
+| `test_weaponry_service.py` | 遗留模式 2 对新 Domain 的兼容转发、专用 Retrieval Query、实际 Prompt rows、来源原名/哈希名、术语开关，以及显式模式 1 在检索/模型副作用前拒绝。 |
+| `test_weaponry_request_adapter.py` | 1D-2 框架无关请求 Parser：D01～D03 精确错误、64 位 architectureId、URL 文件名、字段/TABLE 严格结构、未知键保留、深冻结和非标准 JSON 拒绝。 |
+| `test_weaponry_submission_presenter.py` | 1D-2 Presenter：202 零字节成功，以及只含既有 `error` 字段的 400/404/409；内部 TaskId 和运行字段不泄露。 |
+| `test_weaponry_document_scope.py` | explicit/category 文档范围、跨分类请求顺序、稳定类别排序、完整位置规范化碰撞、空类别、404/歧义/完整性、单次只读查询、旧选文表零写入和严格 Fake。 |
+| `test_weaponry_task_adapter.py` | 唯一 Schema v2 严格 Codec、v1 明确拒绝、公开投影与 Worker 输入隔离、成功结果/终态完整性、原子受理/回滚、50 同键 1/49 冲突和 50 不同键全隔离。 |
+| `test_weaponry_ports.py` | 1D-3A 稳定 call/attempt 身份、Retrieval/Extraction 类型隔离、Evidence/rows、辅助/翻译、审计计数和全部运行期 Protocol。 |
+| `test_weaponry_strict_fakes.py` | 审计/资源登记前置、A/B 来源隔离、独立来源会话、明确失败/结果未知、shared 禁止清理、cleanup lease/fencing、Callback latest、术语关闭零 I/O、Dispatcher 生命周期和 50 线程 scope/session/call/resource 隔离。 |
+| `test_weaponry_production_gate.py` | Schema v2 production attestation 的证据摘要、篡改/过期/指纹漂移、严格指纹类型、发布检查脚本、生产 fail-fast、容器 readiness 汇总和开发启动不伪装生产就绪。 |
+| `test_weaponry_readiness_verifier.py` | 隔离临时 workspace/thread、真实响应形状、score/rank、URL/入库文件强身份、Provided-Evidence 空 workspace、基线恢复与证明可回读。 |
+| `test_weaponry_operations_script.py` | 资源隔离人工处置、显式确认标志、脱敏查看和追加式审计；Callback 解除的底层 50 并发唯一写由 Report/Weaponry Guard 测试共同覆盖。 |
+| `contracts/stage1d3b_weaponry_multi_document.json` | Schema v2 最小多文档结构黄金样例；只冻结来源/rows/跨文档隔离，不声明精度指标。 |
+| `test_weaponry_production_adapters.py` | 1D-3B production profile、任务级 AnythingLLM Retrieval、Provided-Evidence Extraction、可拔除术语、Translation、SQLite Audit/Resource、Audit reserve 三态、409 unknown、终态 tracking 恢复、创建后登记补偿、同任务并发和 50 任务持久化隔离。全部通过 Fake Transport，不访问真实服务。 |
+| `contracts/stage1d4_weaponry_application.json` | 1D-4 INPUT、TABLE 和失败 Callback 完整黄金载荷，并明确公开参数未改变、生产路由未切换。 |
+| `test_weaponry_application.py` | 1D-4 原子 Submit、只按 TaskId 的 Run、字段/来源串行编排、精确“未找到”哨兵、零 Evidence、score/rank、Audit 三态防重放、单终态、Callback、清理意图先行、cleanup/quarantine、重复派发、50 个共享 Port 并发任务隔离，以及慢检索不持有 SQLite 写事务或全局任务锁；1D-5 又验证供应商容量/输入契约诊断可穿过字段降级路径但不会进入公开结果。 |
+| `test_weaponry_dispatcher.py` | 1D-5 严格基础设施配置、实际能力指纹 fail-fast、固定运行策略、通用持久扫描 Dispatcher、稳定 FIFO、常量空间唤醒、毒任务冷却、共享 limiter、跨进程锁、三条隔离维护线程、运行中只观察、stop/close/readiness/fatal、供应商容量/业务零结果/输入契约分项指标，以及不启动线程的离线组合根和容器生命周期。 |
+| `test_weaponry_stage1d7.py` | 1D-7 永久关闭门禁：生产代码不回流遗留 Worker，公开路由保持无线程薄适配，活动模式选择配置清零，固定策略兼容边界，Domain/Application 的 Terms 解耦，Query → Retrieval → Selection → Extraction 顺序，Provided-Evidence 禁止二次 RAG，以及遗留 Worker 测试引用白名单。 |
+| `test_architecture_boundaries.py` | weaponry 四层包和 README 完整性、domain/application/ports 正向导入白名单；测试通过 AST 解析，不导入生产组合根。 |
+
+1D-0 没有修改 `app/`；1D-0R 新增的生产源码尚未接管 `/llm/weaponry`。只读校准确认当前 LanceDB/native
+`MintplexLabs/multilingual-e5-small` 分数方向稳定，但强相关与自然语言负例分数区间重叠，无法
+冻结生产阈值。因此 JSON 中真实 profile 的 `minimumRelevanceScore` 必须保持 `null`；夹具
+`0.82` 明确不是生产配置。1D-0R 已纠正误标的导弹负例、分离 Retrieval Query/Extraction Prompt、
+增加 MHTML/Chunk 质量门禁。当时设计的“锚点或独立 reranker”后来已被批准的 Schema v2
+score-or-rank 稳定选择取代，不再构成当前生产门禁。
+获批的临时隔离清洗副本已真实嵌入并复校准，四次执行都恢复既有资源快照；真实
+`passage: <document_metadata>` 包装也已从证据正文中移除。但原始 MHTML 已
+不存在，当前语料只有一份业务文档，且生产入库/独立信号未完成。因此隔离结果不替代代表性
+生产精度校准；该历史事实不能证明准确率，但也不再阻止 1D-3B Adapter 实现。真实供应商协议
+与上下文边界仍在 1D-6 切流前验证。
+
+1D-1 当时只完成纯领域迁移，没有接入 production profile 或切换公开路由。遗留模式 2
+映射出的 Prompt Evidence 固定标记为 `legacy-mode2-unprofiled`，不能被解释为已通过生产
+Selection。模式 1 执行、来源组装和旧 Prompt 已删除；显式配置值 `1` 会在外部副作用前失败。
+
+1D-2 只实现并验证离线受理边界：Parser/Presenter 尚未绑定 Blueprint；Document Scope 在受理
+事务前一次性解析并冻结，Codec 解码后 Worker 不再接触原始公开请求、文档 Repository 或环境
+变量。其开发期 Schema v1 已在 1D-3B 按“无历史数据、无旧 Worker”口径直接删除。
+
+1D-3A 只完成供应商无关 Port/DTO 和严格 Fake：检索只能返回 Candidate，抽取只能接收 Selected
+Evidence；每次外部调用使用稳定 call_id 和独立 attempt，审计 reserve 必须先于调用。资源事实
+区分 owned/shared，并使用 CAS、清理 lease 和 fencing token。20 项新增测试包含 50 线程结构隔离，
+但没有创建真实 workspace/thread、调用模型或验证生产吞吐，因此不代表 1D-3B 已完成。本波次
+1D 合并定向 190 项、动态安全全仓 87 个模块/1034 项测试均通过。
+
+1D-3B 已实现唯一 Schema v2 production profile 和生产 I/O Adapter 代码。Retrieval 为每个
+execution 使用独立 Transport/workspace，完整位置/供应商 ID 映射到 `document_key`；Extraction
+为每个来源 attempt 创建空 workspace/thread，只发送已校验 Evidence/rows。SQLite Audit/Resource
+使用短事务、CAS 与 lease/fencing，资源记录缺失会在外部创建前拒绝；创建成功但登记失败会补偿，
+补偿无法确认时按 `outcome_unknown` 隔离。相关测试全部使用 Fake Transport 和临时数据库，未访问
+真实 AnythingLLM、模型或 Callback，也没有切换公开路由。末次验收中，production Adapter 与
+AnythingLLM Source 协议 33 项、weaponry 模块发现 146 项、stage1d 资产发现 40 项、架构门禁
+17 项均通过；动态排除 4 个既有环境型模块后，88 个安全模块共 1050 项测试全部通过。
+
+1D-4 已在上述边界上实现框架无关 Submit/Run Application。INPUT、TABLE 与失败 Callback 均按
+完整黄金载荷逐字段比对；零 Selected Evidence 的 Extraction/Translation 调用数为零；每个来源
+只接收当前文档最终 Selected Evidence。终态 CAS 失权、任务事实提交结果未知、Callback 投影/
+发送异常、外部创建结果未知、审计完成失败、清理中断和崩溃遗留非空资源均有确定性测试。
+严格 Task Fake 已与真实 Repository 的 active/terminal/stale 分类对齐。1D 合并定向 198 项、
+排除会启动 `run.py` 的本地脚本、依赖 `.gitignore` 本地样例的资产测试和 Windows 不支持的单个
+POSIX 权限位断言后，1086 项安全全仓回归全部通过。这里的 50 并发只证明单进程 Port/Application
+状态隔离，不代表真实模型吞吐或生产容量。
+
+2026-07-19 的 1D-4 全面审查补强后，`test_weaponry*.py` 183 项和 `test_stage1d*.py` 40 项通过；
+安全全仓动态发现 1108 项，排除相同的 13 项环境型测试后，其余 1095 项全部通过。新增用例覆盖
+超长 Query、单字/无辅助语义词、精确 INPUT 哨兵、TABLE 行保留、Audit pending/completed、
+清理意图持久化失败、终态 tracking 恢复、AnythingLLM 409 unknown 和规范化文档位置碰撞。
+
+1D-5 把 Report 已验证的单机持久扫描生命周期抽为业务无关内核，并让 Report 以薄包装继续复用；
+Weaponry 新链完成严格配置、固定策略、单执行 Worker、独立资源/Callback 维护、共享 limiter、进程锁和
+离线组合根，但生产 `ApplicationServices` 仍不构造该组合，公开路由也仍走遗留线程，留待 1D-6
+一次性切换。最终验收中，`test_weaponry*.py` 203 项、`test_stage1d*.py` 40 项，以及架构、Report
+Dispatcher 与容器组合 52 项均通过。安全全仓动态发现 1129 项，逐项排除 7 个会启动本地
+`run.py`/Shell 的测试、5 个依赖 `.gitignore` 本地样例的资产测试，以及 Windows 无法表达的 1 个
+POSIX `0640` 权限位断言后，其余 1116 项全部通过；未访问真实 AnythingLLM、模型或 Callback。
+
+1D-6 已把 Weaponry Callback Guard、同步 check-task 恢复、资源有界恢复、生产组合根和公开薄路由
+接入同一条实例链。`test_weaponry_stage1d6.py` 覆盖严格 2xx（禁止跟随 3xx）、timeout unknown、
+人工解除、stale 零网络、50 并发同步恢复唯一发送、公开投影无损重建、资源清理冷却/隔离、生产组合
+唯一性和路由静态边界；`test_routes.py` 又覆盖 50 个不同业务键全部 202，以及同一业务键恰好
+1 个 202、49 个 409。最终 `test_weaponry*.py` 215 项、`test_stage1d*.py` 40 项、Report Callback/
+Dispatcher/容器/架构关联回归 69 项均通过。全仓原始发现共 1143 项；逐项排除 7 个会启动本地
+`run.py`/Shell 的环境测试、5 个依赖 `.gitignore` 本地样例的资产测试和 Windows 无法表达的 1 个
+POSIX `0640` 权限位断言后，1130 项安全测试全部通过。当次真实 AnythingLLM 只读探测因
+`localhost:3001` 拒绝连接且四类生产指纹未配置而未完成；该历史结论已由下述关闭后审查的
+只读 8/8 结果更新，但完整 Provided-Evidence 证明仍待四类生产指纹。
+
+1D-7 在 1D-6 运行链基础上增加永久 AST/配置门禁，并形成遗留 Worker 的生产、测试、配置引用
+清单与 TermsRuleGuidance 未来删除清单。开发分支代码和离线关闭验收已经完成；当次
+`localhost:3001` 不可达，且四类生产指纹与 production attestation 未配置，因此 readiness 保持
+false。服务现已恢复但完整证明仍未生成；该事实不阻塞后续阶段代码开发，在真实供应商证明
+生成并通过机器校验前不得发布为
+production ready，也不得把离线测试解释为真实容量结论。末次验收中，8 项 1D-7 永久门禁、
+232 项 `test_weaponry*.py`、40 项 `test_stage1d*.py` 和 131 项关联回归通过；安全全仓动态发现
+1160 项，逐项排除下述 13 项环境/平台测试后，其余 1147 项全部通过，0 失败、0 错误、0 跳过。
+
+2026-07-20 的关闭后全面审查又修复真实 Source URL 身份、共享重型许可 FIFO、公信力不足的
+production attestation v1 和人工处置缺口。localhost 只读探测已确认 8 条 Candidate 全部携带
+合法 score，并能通过结构化 URL 末段与唯一冻结 `ingested_file_name` 解析为 8/8；完整临时资源
+证明仍等待四类能力指纹冻结。新增后 `test_weaponry*.py` 251 项、`test_stage1d*.py` 40 项通过；
+全仓动态发现 1181 项，排除同一 13 项后 1168 项分成两个等量批次全部通过。
+
 ## 推荐验证流程
 
 1. 先运行文件对话范围测试：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_chat*.py" -q`。
@@ -153,11 +266,23 @@ Artifact 所有权和 cleanup/quarantine 持久恢复闭环。1C-6 又证明当�
 8. 运行阶段 1B-2 Progress 迁移测试：`venv\Scripts\python.exe -B -m unittest tests.test_progress_request_adapter tests.test_task_progress_presenter tests.test_legacy_task_read_adapter tests.test_in_memory_progress_adapter tests.test_progress_connection_registry tests.test_stage1a1_progress_contract tests.test_progress_and_check_task tests.test_task_progress_application tests.test_dependency_container tests.test_architecture_boundaries -q`。
 9. 运行阶段 1C 报告测试：`venv\Scripts\python.exe -B -m unittest tests.test_report_task_adapter tests.test_report_ports tests.test_report_application tests.test_report_request_adapter tests.test_report_domain tests.test_report_contract tests.test_report_service tests.test_report_io_adapters tests.test_report_rag_adapter tests.test_report_interaction_audit_adapter tests.test_report_runtime_adapters tests.test_report_callback_guard tests.test_report_resource_recovery tests.test_report_dispatcher tests.test_report_submission_presenter tests.test_stage0_contract_assets tests.test_dependency_container tests.test_architecture_boundaries -q`。
 10. 运行共享审计与 Knowledge Gateway 回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_anythingllm_knowledge_gateway -q`。
-11. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
+11. 运行阶段 1D-0 契约资产：`venv\Scripts\python.exe -B -m unittest tests.test_stage1d_weaponry_contract_assets -q`。
+12. 运行阶段 1D-0R 检索质量资产：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_retrieval_quality tests.test_stage1d0r_retrieval_quality_assets tests.test_stage1d0r_isolated_reindex tests.test_mhtml_normalizer tests.test_anythingllm_workspaces tests.test_anythingllm_client tests.test_architecture_boundaries -q`。
+13. 运行阶段 1D-1 领域与兼容测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_domain tests.test_weaponry_contract tests.test_weaponry_retrieval_quality tests.test_stage1d0r_retrieval_quality_assets tests.test_weaponry_service tests.test_stage1d_weaponry_contract_assets tests.test_architecture_boundaries -q`。
+14. 运行阶段 1D-2 请求、文档范围与任务 Codec 测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_request_adapter tests.test_weaponry_submission_presenter tests.test_weaponry_document_scope tests.test_weaponry_task_adapter tests.test_architecture_boundaries -q`。
+15. 运行阶段 1D-3A Port 与严格 Fake：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_ports tests.test_weaponry_strict_fakes tests.test_architecture_boundaries -q`。
+16. 运行阶段 1D-3B Schema v2 与生产 Adapter 离线测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_retrieval_quality tests.test_weaponry_task_adapter tests.test_weaponry_production_adapters tests.test_anythingllm_workspaces tests.test_architecture_boundaries -q`。
+17. 运行阶段 1D-4 Application：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_application tests.test_weaponry_ports tests.test_weaponry_production_adapters tests.test_weaponry_task_adapter tests.test_architecture_boundaries -q`。
+18. 运行阶段 1D-5 Dispatcher、配置与离线组合：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_dispatcher tests.test_dependency_container tests.test_report_dispatcher tests.test_architecture_boundaries -q`。
+19. 运行阶段 1D-6 Callback、资源恢复、生产组合和公开路由：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_stage1d6 tests.test_routes tests.test_dependency_container tests.test_architecture_boundaries -q`。
+20. 运行阶段 1D-7 永久关闭门禁：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_stage1d7 -q`。
+21. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
 
 ## 执行限制
 
-- 不要使用会启动后台服务的全量测试方式替代上述定向测试；`test_local_scripts.py` 等文件可能触发 `run.py`。
+- 不要直接使用原始全量发现命令替代上述定向测试；当前原始发现会包含 7 个可能触发本地
+  `run.py`/Shell 的环境测试、5 个依赖被 `.gitignore` 排除样例的资产测试和 1 个 Windows 不支持的
+  POSIX 权限位断言。安全全仓口径必须逐项排除这 13 项并报告名称和理由，禁止笼统写成“全量通过”。
 - 新文件对话测试必须显式构造临时目录和临时数据库，不能读取开发机 `.runtime` 数据。
 - 新测试不得为了方便而放宽 `/llm/chat*` 既有请求字段或 SSE 协议断言。
 - 架构测试必须静态解析源码，不能通过 import 生产组合根来收集依赖；规则调整应与模块边界设计一起评审。

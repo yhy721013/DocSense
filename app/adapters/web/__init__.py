@@ -6,10 +6,20 @@ from .report_ids import (
     ReportIdValidationError,
     normalize_report_id,
 )
+from .weaponry_ids import (
+    ARCHITECTURE_ID_ERROR,
+    ArchitectureIdValidationError,
+    NormalizedArchitectureId,
+    normalize_architecture_id,
+)
 
 __all__ = [
+    "ARCHITECTURE_ID_ERROR",
+    "ArchitectureIdValidationError",
     "MAX_REPORT_ID_DIGITS",
+    "NormalizedArchitectureId",
     "NormalizedReportId",
     "ReportIdValidationError",
+    "normalize_architecture_id",
     "normalize_report_id",
 ]

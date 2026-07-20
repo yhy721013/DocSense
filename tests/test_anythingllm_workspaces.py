@@ -203,9 +203,121 @@ class AnythingLLMWorkspaceClientTests(unittest.TestCase):
         self.assertEqual(sources[0].document_ref, "name:示例.json")
         self.assertEqual(sources[0].text, "片段文本")
         self.assertEqual(sources[0].score, 0.85)
+        self.assertTrue(sources[0].score_present)
+        self.assertTrue(sources[0].score_valid)
         self.assertEqual(sources[0].distance, 0.15)
         self.assertEqual(sources[0].metadata["category"], "demo")
         self.assertIsNone(sources[0].id)
+
+    def test_vector_search_preserves_invalid_score_presence_for_fail_closed_adapter(self) -> None:
+        """非法分数不能被解析成与“字段缺失”相同的 rank-only 事实。"""
+
+        self.transport.post_json.return_value = {
+            "results": [
+                {
+                    "pageContent": "长度足够的候选正文内容",
+                    "metadata": {"sourceDocument": "custom-documents/demo.json"},
+                    "score": "not-a-number",
+                }
+            ]
+        }
+
+        source = self.client.vector_search("target", "查询", top_n=1)[0]
+
+        self.assertIsNone(source.score)
+        self.assertTrue(source.score_present)
+        self.assertFalse(source.score_valid)
+
+        self.transport.post_json.return_value = {
+            "results": [
+                {
+                    "pageContent": "长度足够的候选正文内容",
+                    "metadata": {"sourceDocument": "custom-documents/demo.json"},
+                    "score": True,
+                }
+            ]
+        }
+        boolean_source = self.client.vector_search("target", "查询", top_n=1)[0]
+        self.assertIsNone(boolean_source.score)
+        self.assertTrue(boolean_source.score_present)
+        self.assertFalse(boolean_source.score_valid)
+
+    def test_vector_search_rejects_conflicting_top_level_and_metadata_scores(self) -> None:
+        """两个供应商位置的冲突分数必须保留为非法协议，不能按字段优先级猜值。"""
+
+        self.transport.post_json.return_value = {
+            "results": [
+                {
+                    "pageContent": "长度足够的候选正文内容",
+                    "score": 0.91,
+                    "metadata": {
+                        "sourceDocument": "custom-documents/demo.json",
+                        "score": 0.62,
+                    },
+                }
+            ]
+        }
+
+        source = self.client.vector_search("target", "查询", top_n=1)[0]
+
+        self.assertIsNone(source.score)
+        self.assertTrue(source.score_present)
+        self.assertFalse(source.score_valid)
+
+    def test_vector_search_uses_metadata_score_when_top_level_is_null(self) -> None:
+        """顶层显式 null 不得遮蔽 metadata 中唯一、合法的供应商分数。"""
+
+        self.transport.post_json.return_value = {
+            "results": [
+                {
+                    "pageContent": "长度足够的候选正文内容",
+                    "score": None,
+                    "metadata": {
+                        "sourceDocument": "custom-documents/demo.json",
+                        "score": "0.73",
+                    },
+                }
+            ]
+        }
+
+        source = self.client.vector_search("target", "查询", top_n=1)[0]
+
+        self.assertEqual(0.73, source.score)
+        self.assertTrue(source.score_present)
+        self.assertTrue(source.score_valid)
+
+    def test_vector_search_can_explicitly_override_threshold_for_calibration(self) -> None:
+        """只读校准可请求完整分数；普通调用不应被全局改写。"""
+
+        self.transport.post_json.return_value = {"results": []}
+
+        self.client.vector_search(
+            "target",
+            "校准查询",
+            top_n=100,
+            score_threshold=0.0,
+            user_id=7,
+        )
+
+        self.transport.post_json.assert_called_once_with(
+            "workspace/target/vector-search",
+            {
+                "query": "校准查询",
+                "topN": 100,
+                "scoreThreshold": 0.0,
+            },
+            user_id=7,
+        )
+
+    def test_vector_search_rejects_invalid_calibration_threshold(self) -> None:
+        for value in (True, -0.1, 1.1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "score_threshold"):
+                    self.client.vector_search(
+                        "target",
+                        "校准查询",
+                        score_threshold=value,
+                    )
 
     def test_delete_workspace_uses_status_only_transport_contract(self) -> None:
         """工作区删除应忽略不稳定正文，只委托 Transport 校验 HTTP 状态。"""

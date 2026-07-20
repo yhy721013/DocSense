@@ -498,7 +498,7 @@ def write_outputs(
         f"- 运行目录：`{out_dir}`",
         f"- 输出前缀：`{output_prefix}`",
         f"- 完成文件数：`{len(rows)}/{len(manifest.get('files', []))}`",
-        "- weaponry 模式：建议后端以 `WEAPONRY_ANALYSE_MODE=2` 启动。",
+        "- weaponry 模式：固定 `file_aggregate_v1`，无需设置运行时模式变量。",
         "",
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",

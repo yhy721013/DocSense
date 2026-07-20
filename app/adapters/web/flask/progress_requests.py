@@ -8,6 +8,10 @@ from app.adapters.web.report_ids import (
     ReportIdValidationError,
     normalize_report_id,
 )
+from app.adapters.web.weaponry_ids import (
+    ArchitectureIdValidationError,
+    normalize_architecture_id,
+)
 from app.modules.tasks.domain import (
     ProgressKey,
     ProgressSubscriptionRequest,
@@ -66,7 +70,15 @@ def parse_progress_subscription(
             architecture_id = item.get("architectureId")
             if architecture_id is None:
                 raise ProgressRequestValidationError("architectureId不能为空")
-            business_key = str(architecture_id)
+            try:
+                normalized_architecture_id = normalize_architecture_id(
+                    architecture_id
+                )
+            except ArchitectureIdValidationError as exc:
+                # 与 reportId 一样，WebSocket 参数错误只拒绝当前消息。异常必须在适配层
+                # 收敛为稳定错误文本，不能越界关闭连接。
+                raise ProgressRequestValidationError(str(exc)) from exc
+            business_key = normalized_architecture_id.business_key
         keys.append(ProgressKey(str(business_type), business_key))
 
     return ProgressSubscriptionRequest(tuple(keys))

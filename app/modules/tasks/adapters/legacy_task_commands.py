@@ -326,6 +326,27 @@ class LegacyTaskCommandAdapter(
         if not isinstance(completion, ExpectedTaskCompletion):
             raise TypeError("completion 必须是 ExpectedTaskCompletion")
         self._ensure_business_ref(completion.business_ref)
+        # 某些业务结果（当前首先是 weaponry）必须对照受理时的不可变输入才能证明完整。
+        # Codec 可提供可选纯校验钩子；tasks Adapter 只负责读取快照并调用，不反向依赖任何
+        # 业务 DTO。execution 不存在时沿用 Repository CAS 的 ``False`` 语义。
+        completion_validator = getattr(self._codec, "validate_completion", None)
+        result_validator = getattr(self._codec, "validate_result", None)
+        if callable(completion_validator) or callable(result_validator):
+            execution = self.get_execution(completion.expected_task_id)
+            if execution is not None:
+                try:
+                    if callable(completion_validator):
+                        completion_validator(execution.input_snapshot, completion)
+                    else:
+                        result_validator(execution.input_snapshot, completion.result)
+                except (TypeError, ValueError):
+                    logger.error(
+                        "任务终态结果完整性校验失败: task_type=%s "
+                        "expected_task_id=%s",
+                        self._task_type,
+                        completion.expected_task_id.value,
+                    )
+                    raise
         encoded_result = self._codec.encode_result(completion.result)
         if not isinstance(encoded_result, EncodedTaskResult):
             raise TypeError("Codec.encode_result 必须返回 EncodedTaskResult")

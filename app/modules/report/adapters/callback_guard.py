@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import requests
 
+from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.modules.report.domain import ReportCallbackPayload
 from app.modules.report.ports import (
     DeliverReportCallback,
@@ -109,8 +110,21 @@ class SQLiteReportCallbackAdapter:
         self._callback_url = callback_url.strip()
         self._callback_timeout = float(callback_timeout)
         self._lease_seconds = float(lease_seconds)
-        if self._lease_seconds <= self._callback_timeout:
-            raise ValueError("lease_seconds 必须大于 callback_timeout")
+        required_lease = (
+            self._callback_timeout
+            if transport is not None
+            else required_http_lease_seconds(self._callback_timeout)
+        )
+        lease_too_short = (
+            self._lease_seconds <= required_lease
+            if transport is not None
+            else self._lease_seconds < required_lease
+        )
+        if lease_too_short:
+            raise ValueError(
+                "lease_seconds 必须覆盖连接、响应头读取和安全余量，"
+                f"当前至少需要 {required_lease:.3f} 秒"
+            )
         self._wait_poll_interval = float(wait_poll_interval)
         self._clock = clock
         self._monotonic = monotonic
@@ -335,6 +349,11 @@ class SQLiteReportCallbackAdapter:
                 self._callback_url,
                 json=payload,
                 timeout=self._callback_timeout,
+                # 只消费响应状态行，不把非契约响应体的下载时间算到发送权之外。
+                stream=True,
+                # 与武器谱保持同一严格回调协议：3xx 本身就是拒绝，不能跟随到
+                # 最终 2xx 后伪装成本次原始端点投递成功。
+                allow_redirects=False,
             )
         except (
             requests.exceptions.ConnectTimeout,

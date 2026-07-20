@@ -1,0 +1,364 @@
+{
+  "schemaVersion": 1,
+  "stage": "1D-0R",
+  "frozenAt": "2026-07-18",
+  "authority": "approved-retrieval-quality-repair-wave",
+  "publicInterfaceParametersChanged": false,
+  "productionRouteSwitched": false,
+  "remoteMutationPerformed": true,
+  "remoteMutationScope": "temporary-isolated-resources-only",
+  "existingAnythingLlmResourcesModified": false,
+  "diagnosis": {
+    "rootCauses": [
+      "full-extraction-prompt-was-used-as-retrieval-query",
+      "provider-score-was-treated-as-relevance-without-an-independent-signal",
+      "mhtml-navigation-and-reference-list-were-indexed-with-main-content",
+      "provider-document-metadata-was-embedded-into-every-returned-chunk",
+      "calibration-corpus-was-a-single-business-document-copied-across-workspaces",
+      "one-natural-language-negative-label-was-not-ground-truthed"
+    ],
+    "liveWorkspaceAudit": {
+      "performedAt": "2026-07-18",
+      "operation": "read-only-list-and-vector-search",
+      "workspaceCount": 3,
+      "documentCount": 3,
+      "uniqueBusinessDocumentContentCount": 1,
+      "chunksPerWorkspace": 17,
+      "candidateHashesAppearingInAllSevenQueries": 6,
+      "candidateHashesAppearingInAtLeastSixQueries": 8,
+      "representativeMultiDocumentCorpus": false
+    },
+    "groundTruthCorrection": {
+      "previousQueryId": "wrong-missile",
+      "previousLabel": "natural-language-negative",
+      "correctedLabel": "positive-present-in-document",
+      "verifiedEvidenceTerms": [
+        "RIM-7",
+        "RIM-116",
+        "missile launcher"
+      ],
+      "effectOnPreviousDecision": "raw-score-only-profile-remains-rejected-because-the-verified-agriculture-negative-still-overlaps-positive-scores"
+    },
+    "propulsionExpectedTermCorrection": {
+      "detectedBy": "first-isolated-cleaned-copy-calibration",
+      "previousExpectedTermsMissedLiteralSourceText": true,
+      "verifiedLiteralSourceTerm": "蒸汽涡轮发动机",
+      "retrievalQueryTextChanged": false,
+      "effectOnAuthoritativeCalibration": "all-five-positive-queries-have-an-expected-term-at-quality-accepted-rank-one"
+    }
+  },
+  "mhtmlCleanerAudit": {
+    "sourceKind": "existing-local-mhtml-read-only",
+    "legacyText": {
+      "chars": 14298,
+      "lines": 392,
+      "yearTokens": 68,
+      "urlTokens": 6,
+      "usniNewsOccurrences": 12,
+      "contentHash": "e562ead4926cd1f9"
+    },
+    "retrievalText": {
+      "chars": 6580,
+      "lines": 164,
+      "yearTokens": 0,
+      "urlTokens": 0,
+      "usniNewsOccurrences": 0,
+      "contentHash": "6c45cd5dc12e7e50"
+    },
+    "removedCharacterRatio": 0.539796,
+    "strategy": "mhtml-main-content-v1",
+    "productionIngestionWired": false,
+    "reasonNotWired": "an-isolated-processed-text-copy-was-calibrated-but-production-ingestion-and-source-faithful-reindex-are-not-wired"
+  },
+  "repairImplementation": {
+    "retrievalQuery": {
+      "version": "field-semantic-v2",
+      "inputShape": [
+        "fieldName",
+        "fieldDescription",
+        "optional-expanded-terms"
+      ],
+      "forbiddenContent": [
+        "answer-format-instructions",
+        "not-found-response-instructions",
+        "model-role-text",
+        "extraction-examples"
+      ],
+      "expandedPhraseAutoSplitIntoWeakTokens": false,
+      "asciiAnchorUsesWordBoundary": true
+    },
+    "chunkQuality": {
+      "stripProviderMetadataBeforeEvidenceUse": true,
+      "stripAnythingLlmPassageWrapperBeforeProviderMetadata": true,
+      "repairWhitespaceBetweenCjkCharacters": true,
+      "rejectMetadataDominatedChunk": true,
+      "rejectReferenceLikeChunk": true,
+      "neverMergeAcrossChunkBoundaries": true
+    },
+    "evidenceSelection": {
+      "strategy": "anchor-or-reranker-v1",
+      "rawProviderScoreAloneCanSelect": false,
+      "invalidProviderScoreCanBecomeZero": false,
+      "sourceIdentityMustMatchExecutionSnapshot": true,
+      "deduplicateWithinDocumentAfterStableSort": true,
+      "deduplicateAcrossDocuments": false,
+      "limitsAreUpperBounds": true
+    },
+    "internalAnythingLlmAdapter": {
+      "optionalScoreThresholdSupported": true,
+      "defaultBusinessBehaviorChanged": false,
+      "calibrationUsesScoreThreshold": 0.0,
+      "publicHttpParameterChanged": false
+    }
+  },
+  "candidateProfile": {
+    "profileId": "weaponry-relevance-evaluation-v2",
+    "status": "evaluation-only",
+    "queryVersion": "field-semantic-v2",
+    "selectionStrategy": "anchor-or-reranker-v1",
+    "providerFingerprint": "lancedb:native:MintplexLabs/multilingual-e5-small:unversioned",
+    "embeddingFingerprint": "MintplexLabs/multilingual-e5-small:unversioned",
+    "rerankerFingerprint": "none:unconfigured",
+    "minimumProviderScore": null,
+    "minimumRerankerScore": 0.8,
+    "minimumRerankerScoreCalibrated": false,
+    "minimumAnchorHits": 1,
+    "inputCandidateTopN": 8,
+    "tableCandidateTopN": 16,
+    "dedupStrategy": "normalized-exact-within-document-v1",
+    "selectedEvidenceLimits": "none-after-quality-gates",
+    "productionEligible": false
+  },
+  "diagnosticTranslationAnchorExperiment": {
+    "purpose": "test-whether-local-language-normalization-can-be-an-additional-signal",
+    "candidateCountAfterReferenceGate": 8,
+    "selectionRule": "idf-anchor-overlap-at-least-0.20-and-at-least-two-token-hits",
+    "positiveQueryCount": 7,
+    "positiveQueriesWithEvidence": 6,
+    "positiveQueryNonEmptyRate": 0.857143,
+    "verifiedNegativeQueryCount": 1,
+    "verifiedNegativeQueriesRejected": 1,
+    "verifiedNegativeRejectionRate": 1.0,
+    "missedPositiveQueryIds": [
+      "propulsion"
+    ],
+    "productionEligible": false,
+    "rejectionReason": "positive-recall-is-incomplete-and-the-live-corpus-has-only-one-unique-business-document"
+  },
+  "readOnlyRecalibrationAfterQualityGate": {
+    "performedAt": "2026-07-18",
+    "scoreThresholdSentToProvider": 0.0,
+    "qualityAcceptedCandidatesPerQuery": 8,
+    "positiveTopScores": {
+      "carrier-name": 0.8925917148590088,
+      "ship-class": 0.8757367134094238,
+      "propulsion": 0.8579298257827759,
+      "radar": 0.8685358166694641,
+      "missile-launcher": 0.8777266144752502
+    },
+    "negativeTopScores": {
+      "agriculture": 0.8461602926254272,
+      "pharmaceutical-dose": 0.8483976125717163,
+      "semiconductor-node": 0.8380504846572876
+    },
+    "minimumPositiveTopScore": 0.8579298257827759,
+    "maximumNegativeTopScore": 0.8483976125717163,
+    "provisionalQueryLevelGap": 0.0095322132110596,
+    "positiveExpectedTermFirstRankAfterQuality": {
+      "carrier-name": 1,
+      "ship-class": 1,
+      "propulsion": null,
+      "radar": 1,
+      "missile-launcher": 1
+    },
+    "groundTruthSupersededByIsolatedCalibration": true,
+    "productionEligible": false,
+    "reason": "historical-result-used-incomplete-propulsion-expected-terms-and-the-gap-remains-query-level-only-on-one-business-document"
+  },
+  "isolatedCleanedCopyCalibration": {
+    "performedAt": "2026-07-18",
+    "authorization": "user-approved-temporary-isolated-resources-without-existing-resource-mutation",
+    "operation": "isolated-temporary-cleaned-copy-reindex-and-vector-search",
+    "executionCount": 4,
+    "postMetadataFixExecutionCount": 2,
+    "authoritativeExecutionHash": "713c869c54f97d17",
+    "source": {
+      "strategy": "processed-page-content-reference-tail-v1",
+      "sourceFileHash": "ced37506a9aebb2e",
+      "originalMhtmlAvailable": false,
+      "equivalentToMhtmlMainContentV1": false
+    },
+    "baseline": {
+      "snapshotHash": "d1b3e76148958843",
+      "workspaceCount": 3,
+      "boundDocumentCount": 3
+    },
+    "cleanedCopy": {
+      "contentHash": "b448058e35d7b2ed",
+      "inputChars": 13530,
+      "inputLines": 412,
+      "outputChars": 5854,
+      "outputLines": 259,
+      "removedCharacterRatio": 0.567332,
+      "referenceStartLine": 301,
+      "removedCitationLines": 37,
+      "removedHeaderLines": 8,
+      "recoveredPageSuffixLines": 4
+    },
+    "retrieval": {
+      "scoreThresholdSentToProvider": 0.0,
+      "topN": 100,
+      "candidatesPerQuery": 8,
+      "qualityAcceptedCandidatesPerQuery": 8,
+      "referenceLikeCandidatesPerQuery": 0,
+      "crossQueryRepeatedCandidateCount": 8,
+      "positiveTopScores": {
+        "carrier-name": 0.8943440914154053,
+        "ship-class": 0.8793070912361145,
+        "propulsion": 0.8656303286552429,
+        "radar": 0.8753805160522461,
+        "missile-launcher": 0.8745784759521484
+      },
+      "negativeTopScores": {
+        "agriculture": 0.8478003740310669,
+        "pharmaceutical-dose": 0.845546305179596,
+        "semiconductor-node": 0.8436470031738281
+      },
+      "minimumPositiveTopScore": 0.8656303286552429,
+      "maximumNegativeTopScore": 0.8478003740310669,
+      "provisionalQueryLevelGap": 0.017829954624176025,
+      "positiveExpectedTermFirstRankAfterQuality": {
+        "carrier-name": 1,
+        "ship-class": 1,
+        "propulsion": 1,
+        "radar": 1,
+        "missile-launcher": 1
+      }
+    },
+    "providerMetadataNormalization": {
+      "observedVectorSearchPrefix": "passage-before-document-metadata",
+      "previousPatternMissedObservedPrefix": true,
+      "fixApplied": true,
+      "readOnlyProbeRawChars": 1109,
+      "readOnlyProbeProviderMetadataChars": 134,
+      "readOnlyProbeNormalizedContentChars": 974
+    },
+    "postFixRepeatability": {
+      "cleanedContentHashIdenticalAcrossExecutions": true,
+      "candidateContentHashSetsIdenticalForAllQueries": true,
+      "candidateOrderIdenticalForAllQueries": false,
+      "maximumTopScoreDrift": 0.0017219185829162598,
+      "interpretation": "content-identity-is-repeatable-but-provider-order-and-score-have-small-drift-so-a-boundary-adjacent-fixed-threshold-is-unsafe"
+    },
+    "cleanup": {
+      "verifiedExecutionCount": 4,
+      "workspaceDeletionVerifiedForAllExecutions": true,
+      "globalDocumentDeletionVerifiedForAllExecutions": true,
+      "baselineSnapshotRestoredForAllExecutions": true,
+      "independentPostProcessSnapshotVerified": true,
+      "temporaryWorkspacePrefixCountAfterCleanup": 0,
+      "executionTokenResidualNameCountAfterCleanup": 0
+    },
+    "productionEligible": false,
+    "reason": "the-corpus-is-one-business-document-the-gap-is-query-level-only-no-independent-reranker-is-calibrated-and-the-input-is-not-the-original-mhtml"
+  },
+  "calibrationQueries": [
+    {
+      "id": "carrier-name",
+      "label": "positive",
+      "text": "字段：舰艇名称\n语义说明：提取文章中提到的航空母舰正式舰名",
+      "expectedTerms": [
+        "尼米兹",
+        "尼米茲",
+        "Nimitz"
+      ]
+    },
+    {
+      "id": "ship-class",
+      "label": "positive",
+      "text": "字段：舰级名称\n语义说明：提取航空母舰所属舰级的正式名称",
+      "expectedTerms": [
+        "尼米兹级",
+        "尼米茲級",
+        "Nimitz class"
+      ]
+    },
+    {
+      "id": "propulsion",
+      "label": "positive",
+      "text": "字段：动力系统\n语义说明：提取主推进装置、发动机和轴系",
+      "expectedTerms": [
+        "蒸汽涡轮发动机",
+        "蒸汽轮机",
+        "蒸汽渦輪",
+        "steam turbine"
+      ]
+    },
+    {
+      "id": "radar",
+      "label": "positive",
+      "text": "字段：雷达型号\n语义说明：提取搜索、跟踪和火控雷达型号",
+      "expectedTerms": [
+        "AN/SPS-48E",
+        "AN/SPS-49",
+        "AN/SPQ-9B"
+      ]
+    },
+    {
+      "id": "missile-launcher",
+      "label": "positive",
+      "text": "字段：导弹发射装置\n语义说明：提取舰上导弹和发射装置型号",
+      "expectedTerms": [
+        "RIM-7",
+        "RIM-116",
+        "missile launcher"
+      ]
+    },
+    {
+      "id": "agriculture",
+      "label": "negative",
+      "text": "字段：农业数据\n语义说明：提取灌溉面积和粮食产量",
+      "expectedTerms": []
+    },
+    {
+      "id": "pharmaceutical-dose",
+      "label": "negative",
+      "text": "字段：药物剂量\n语义说明：提取处方药物每千克体重的给药剂量",
+      "expectedTerms": []
+    },
+    {
+      "id": "semiconductor-node",
+      "label": "negative",
+      "text": "字段：芯片制程\n语义说明：提取半导体芯片的纳米制程节点",
+      "expectedTerms": []
+    }
+  ],
+  "productionEligibility": {
+    "currentStatus": "blocked-pending-source-faithful-reindex-and-representative-calibration",
+    "requiredBeforeApproval": [
+      "reacquire-original-mhtml-or-equivalent-source-and-reindex-from-mhtml-main-content-v1-with-a-new-execution",
+      "user-approved-representative-multi-document-corpus",
+      "ground-truthed-positive-and-hard-negative-query-set",
+      "implemented-and-versioned-independent-reranker-or-equivalent-signal",
+      "repeatable-metrics-with-provider-query-cleaner-and-reranker-fingerprints"
+    ],
+    "mustNotDo": [
+      "reuse-workspace-threshold-0.25-as-business-threshold",
+      "reuse-fixture-threshold-0.82-as-production-threshold",
+      "accept-provider-score-without-an-additional-signal",
+      "treat-three-workspace-copies-as-three-independent-documents",
+      "treat-isolated-processed-text-reindex-as-mhtml-main-content-v1-equivalent",
+      "modify-existing-anythingllm-resources-without-explicit-approval"
+    ]
+  },
+  "stageExit": {
+    "diagnosisComplete": true,
+    "offlineRepairCodeComplete": true,
+    "isolatedTemporaryReindexComplete": true,
+    "existingSourceFaithfulReindexComplete": false,
+    "remoteReindexComplete": false,
+    "representativeCalibrationComplete": false,
+    "productionProfileApproved": false,
+    "stageCanClose": false
+  }
+}

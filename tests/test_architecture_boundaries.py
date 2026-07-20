@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULES_ROOT = ROOT / "app" / "modules"
 TASKS_ROOT = MODULES_ROOT / "tasks"
 REPORT_ROOT = MODULES_ROOT / "report"
+WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
 PRESENTERS_ROOT = ROOT / "app" / "presenters"
 
 
@@ -77,6 +78,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             REPORT_ROOT / "domain",
             REPORT_ROOT / "application",
             REPORT_ROOT / "ports",
+            WEAPONRY_ROOT,
+            WEAPONRY_ROOT / "domain",
+            WEAPONRY_ROOT / "application",
+            WEAPONRY_ROOT / "ports",
+            WEAPONRY_ROOT / "adapters",
             ROOT / "app" / "adapters",
             ROOT / "app" / "adapters" / "web",
             ROOT / "app" / "adapters" / "web" / "flask",
@@ -345,6 +351,11 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
                 "app/modules/tasks/application/check_status.py",
                 "from app.modules.tasks.domain import TaskSnapshot\n"
                 "from app.modules.tasks.ports import TaskReadPort\n",
+                APPLICATION_RULE,
+            ),
+            (
+                "app/modules/weaponry/application/field_execution.py",
+                "import hashlib\nimport json\n",
                 APPLICATION_RULE,
             ),
             (

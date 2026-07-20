@@ -78,8 +78,11 @@ _DOMAIN_STDLIB_ROOTS = frozenset(
         "enum",
         "hashlib",
         "html",
+        "json",
         "math",
+        "re",
         "typing",
+        "unicodedata",
     }
 )
 _PORTS_STDLIB_ROOTS = frozenset(
@@ -92,6 +95,10 @@ _APPLICATION_STDLIB_ROOTS = frozenset(
         "dataclasses",
         "datetime",
         "enum",
+        # Application 只使用稳定摘要和确定性 JSON 记录审计事实；两者均不执行
+        # 文件、网络或供应商 I/O，因此不会突破框架无关边界。
+        "hashlib",
+        "json",
         "logging",
         "threading",
         "time",

@@ -9,6 +9,14 @@ from .in_memory_progress import InMemoryProgressAdapter
 from .latest_progress import LatestTaskProgressPublisherAdapter
 from .legacy_task_read import LegacyTaskReadAdapter
 from .execution_limiter import UploadTaskLimiter
+from .process_guard import FileProcessSingletonGuard
+from .local_persistent_dispatcher import (
+    LocalPersistentDispatcherSettings,
+    LocalPersistentDispatcherSnapshot,
+    LocalPersistentMaintenanceSnapshot,
+    LocalPersistentMaintenanceTask,
+    LocalPersistentTaskDispatcher,
+)
 from .legacy_task_commands import (
     EncodedTaskResult,
     EncodedTaskSubmission,
@@ -16,15 +24,23 @@ from .legacy_task_commands import (
     LegacyTaskCommandAdapterError,
     TaskCommandCodec,
 )
+from app.modules.tasks.http_deadlines import required_http_lease_seconds
 
 __all__ = [
     "EncodedTaskResult",
     "EncodedTaskSubmission",
+    "FileProcessSingletonGuard",
     "InMemoryProgressAdapter",
+    "LocalPersistentDispatcherSettings",
+    "LocalPersistentDispatcherSnapshot",
+    "LocalPersistentMaintenanceSnapshot",
+    "LocalPersistentMaintenanceTask",
+    "LocalPersistentTaskDispatcher",
     "LegacyTaskCommandAdapter",
     "LegacyTaskCommandAdapterError",
     "LegacyTaskReadAdapter",
     "LatestTaskProgressPublisherAdapter",
     "TaskCommandCodec",
     "UploadTaskLimiter",
+    "required_http_lease_seconds",
 ]

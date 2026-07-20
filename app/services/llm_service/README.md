@@ -14,7 +14,7 @@
 | `report_service.py` | 报告生成遗留兼容实现；当前公开路由和生产组合根均不再调用，仅为黄金样例、旧测试与安全回滚观察保留。 |
 | `task_service.py` | 既有任务投影/审计/回调服务；阶段 1C-3 增量提供 SQLite execution、原子受理/领取、expected TaskId 条件写及 Guard fencing；阶段 1C-4 以幂等补列兼容审计 Schema v3；阶段 1C-5 新增 Guard 人工解除追加审计、任务资源恢复记录、终态权威 Artifact 所有权及可恢复清理扫描。报告模块已通过 tasks Adapter 使用这些单实例兼容能力，其他业务仍在后续波次迁移。 |
 | `translation_service.py` | 翻译业务服务。 |
-| `weaponry_service.py` | 装备相关业务服务。 |
+| `weaponry_service.py` | 武器谱遗留兼容实现；当前公开路由、生产组合根和新 Dispatcher 均不再调用，仅为旧黄金样例与兼容测试保留。 |
 
 ## 文件对话迁移说明
 
@@ -34,3 +34,6 @@
   DTO 和外部 I/O 塞入该服务。
 - 不得从生产路由、组合根或新业务代码重新导入 `report_service.run_report_task`。遗留文件
   只有在运行路径、测试与配置三类引用都清零后，才能按阶段 1G 的静态证据流程删除。
+- 不得从生产路由、组合根或新业务代码重新导入 `weaponry_service.run_weaponry_task`。该遗留
+  文件仍包含旧父 Thread 回退和旧资源编排，只允许兼容测试直接使用；运行、测试和配置引用
+  清零前由阶段 1G 继续保留，不能作为新链的细粒度回退。

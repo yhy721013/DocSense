@@ -18,7 +18,7 @@
 - report、analysis、weaponry 等业务模块通过任务应用入口或端口协作，不允许 tasks 导入这些模块的 Adapter。
 - 内部 `task_id`、attempt、租约、队列名和事件序号均不得进入现有公开响应。
 
-## 当前实施状态（阶段 1C-6）
+## 当前实施状态（阶段 1D-6）
 
 阶段 1A～1B-1 已建立并通过 Fake Port 验证以下框架无关契约：
 
@@ -63,6 +63,16 @@ running TaskId 样本，但不得在诊断中修改状态；`TaskCommandPort` �
 领取前故障设置持久冷却。`LegacyTaskCommandAdapter` 已作为报告组合根的任务事实与诊断
 Adapter 使用。
 
+阶段 1D-5 又把报告中已经验证的生命周期能力抽为业务无关实现：
+
+14. `adapters/local_persistent_dispatcher.py`：只扫描 Repository 中的 `accepted` 事实，使用
+    一个 `Event` 合并唤醒，不保存任务内存队列；提供单执行 Worker、任意多个隔离维护任务、
+    队列只读诊断、毒任务持久冷却、可中断共享许可、真实 stop/close/readiness/fatal 状态；
+15. `adapters/process_guard.py`：使用操作系统文件锁提供跨进程单实例所有权，Report 与
+    Weaponry 通过业务薄适配器复用；tasks 内核仍不导入任何业务模块；
+16. Report Dispatcher 已迁移为通用内核的薄包装并通过完整回归；Weaponry 1D-5 离线组合
+    使用同一内核。两者仍只是 SQLite 单实例兼容执行器，不是可靠队列或多实例执行租约。
+
 当前 `/llm/progress` 已通过 Container 装配上述应用服务和兼容 Adapter；旧发布方与新
 订阅路径共享同一个 Hub，不存在双份 latest。WebSocket 对象仍只存在于 Flask Adapter，
 任务应用层和发布线程不持有连接。
@@ -70,8 +80,11 @@ Adapter 使用。
 当前仍没有 MySQL/Outbox、RabbitMQ/Worker 或 Redis 跨实例通知。
 SQLite Task Command Adapter 已装配当前开发分支的 `/llm/generate-report` 组合根，并支撑
 公开 202/409 与本地持久积压，但只能证明单实例内部原子语义，不能作为可靠任务队列或
-多实例一致性已经实现、部署或通过生产容量验收的证据。
+多实例一致性已经实现、部署或通过生产容量验收的证据。Weaponry 已在 1D-6 将同一
+Dispatcher/组合根绑定生产容器和公开薄路由，并接入真实 Callback Guard 与资源恢复；这仍然
+只是开发分支上的 SQLite 单实例兼容链，尚未部署生产。
 `/llm/check-task` 继续按甲方规定保留请求内同步恢复：report 类型现已绑定 report 模块的
 `RecoverReportCallbackSynchronously`，并与正常 Worker 竞争同一个 execution 级 Callback
-Guard；file/weaponry 暂走旧同步兼容实现。阶段 3～6 只增加 MySQL/Outbox/RabbitMQ 后台
+Guard；weaponry 类型也已绑定本模块的同步恢复用例并与 Worker 复用同一个 Guard，file 类型
+暂走旧同步兼容实现。阶段 3～6 只增加 MySQL/Outbox/RabbitMQ 后台
 兜底，不替换同步入口，也不得建立绕过 Guard 的并行发送链。

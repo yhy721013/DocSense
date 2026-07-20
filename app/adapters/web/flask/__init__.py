@@ -10,12 +10,20 @@ from .report_requests import (
     ReportRequestValidationError,
     parse_report_request,
 )
+from .weaponry_requests import (
+    ParsedWeaponryRequest,
+    WeaponryRequestValidationError,
+    parse_weaponry_request,
+)
 
 __all__ = [
     "ProgressConnectionRegistry",
     "ProgressRequestValidationError",
     "ParsedReportRequest",
+    "ParsedWeaponryRequest",
     "ReportRequestValidationError",
+    "WeaponryRequestValidationError",
     "parse_progress_subscription",
     "parse_report_request",
+    "parse_weaponry_request",
 ]

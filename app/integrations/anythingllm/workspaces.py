@@ -8,6 +8,7 @@ Facade 明确完成。
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import quote
 
@@ -300,6 +301,7 @@ class AnythingLLMWorkspaceClient:
         query: str,
         *,
         top_n: int | None = None,
+        score_threshold: float | None = None,
         user_id: int | None = None,
     ) -> list[AnythingLLMSource]:
         """执行向量检索并把不同版本的结果字段统一为来源 DTO。"""
@@ -311,6 +313,18 @@ class AnythingLLMWorkspaceClient:
             if top_n <= 0:
                 raise ValueError("top_n 必须大于 0")
             request_payload["topN"] = top_n
+        if score_threshold is not None:
+            if (
+                isinstance(score_threshold, bool)
+                or not isinstance(score_threshold, (int, float))
+                or not math.isfinite(float(score_threshold))
+                or float(score_threshold) < 0.0
+                or float(score_threshold) > 1.0
+            ):
+                raise ValueError("score_threshold 必须是 0~1 的有限数字")
+            # 仅校准/显式调用才发送该字段；普通业务调用继续沿用 workspace 配置，避免
+            # 本次内部能力扩展暗中改变既有检索行为。
+            request_payload["scoreThreshold"] = float(score_threshold)
         path = f"workspace/{self._path_segment(workspace_slug)}/vector-search"
         body = self._transport.post_json(path, request_payload, user_id=user_id)
         payload = require_mapping(body, context="向量检索响应")
@@ -318,9 +332,10 @@ class AnythingLLMWorkspaceClient:
         sources = [AnythingLLMSource.from_payload(item) for item in results]
         logger.debug(
             "AnythingLLM 向量检索完成: query_chars=%d "
-            "top_n=%s result_count=%d",
+            "top_n=%s has_score_threshold=%s result_count=%d",
             len(normalized_query),
             top_n,
+            score_threshold is not None,
             len(sources),
         )
         return sources

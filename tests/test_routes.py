@@ -1,9 +1,21 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from app import create_app
+from app.modules.weaponry.domain import (
+    DOCUMENT_SCOPE_CATEGORY,
+    DOCUMENT_SCOPE_EXPLICIT,
+    WeaponryDocumentScope,
+    WeaponryDocumentSnapshot,
+)
+from app.modules.weaponry.ports import (
+    WeaponryDocumentScopeAmbiguityError,
+    WeaponryDocumentScopeNotFoundError,
+)
 from tests import workspace_tempdir
+from tests.fakes import FakeWeaponryDocumentScopePort
 from tests.offline_application import build_offline_application_services
 
 
@@ -15,15 +27,41 @@ class LLMRouteValidationTests(unittest.TestCase):
         offline_services = build_offline_application_services(self.tmp)
         self.task_service = offline_services.task_service
         self.progress_hub = offline_services.progress_hub
+        self.weaponry_document_scope = FakeWeaponryDocumentScopePort()
+        weaponry_services = replace(
+            offline_services.weaponry_services,
+            document_scope=self.weaponry_document_scope,
+        )
         services = replace(
             offline_services,
             kb_service=self.kb_service,
+            weaponry_services=weaponry_services,
         )
         self.services = services
         # 路由测试必须显式注入离线容器。禁止调用无参 ``create_app()``，否则会
         # 读取生产配置并初始化共享运行目录，既拖慢测试，也破坏阶段 0 的隔离基线。
         self.app = create_app(services=services)
         self.client = self.app.test_client()
+
+    @staticmethod
+    def _weaponry_document(
+        *,
+        file_name: str = "abc123.pdf",
+        original_name: str = "跨分类来源.pdf",
+        source_architecture_id: int = 99999,
+        external_document_ref: str = "custom-documents/abc123.json",
+    ) -> WeaponryDocumentSnapshot:
+        """构造受理时冻结的文档身份，避免路由测试依赖真实知识库。"""
+
+        return WeaponryDocumentSnapshot(
+            sequence_no=1,
+            document_key=f"document:{source_architecture_id}:{file_name}",
+            file_name=file_name,
+            original_name=original_name,
+            ingested_file_name=file_name,
+            source_architecture_id=source_architecture_id,
+            external_document_ref=external_document_ref,
+        )
 
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
@@ -242,20 +280,20 @@ class LLMRouteValidationTests(unittest.TestCase):
         mock_thread,
     ):
         # 选中文件来自其他分类时也应允许提交；architectureId 只描述结果归属，不再
-        # 限制非空 filePathList 的来源类别。
-        self.kb_service.list_document_records.return_value = [
-            {
-                "file_name": "abc123.pdf",
-                "original_name": "跨分类来源.pdf",
-                "ingested_file_name": "abc123.pdf",
-                "architecture_id": 99999,
-                "doc_path": "custom-documents/abc123.json",
-            }
-        ]
+        # 限制非空 filePathList 的来源类别。文档解析由 DocumentScope Port 负责，
+        # Web 路由不得重新访问 DatabaseService 或自行拼装 Worker 参数。
         original_file_paths = [
             "https://host/download/abc%31%32%33.pdf?token=secret#page=2",
             "abc123.pdf",
         ]
+        selected_document = self._weaponry_document()
+        self.weaponry_document_scope.scopes[(10502, ("abc123.pdf",))] = (
+            WeaponryDocumentScope(
+                mode=DOCUMENT_SCOPE_EXPLICIT,
+                requested_file_names=("abc123.pdf",),
+                documents=(selected_document,),
+            )
+        )
 
         response = self.client.post(
             "/llm/weaponry",
@@ -265,46 +303,43 @@ class LLMRouteValidationTests(unittest.TestCase):
                     "architectureId": 10502,
                     "filePathList": original_file_paths,
                     "weaponryTemplateFieldList": [
-                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                        {
+                            "templateClassifyId": 7001,
+                            "fieldName": "舰级名称",
+                            "fieldType": "INPUT",
+                        }
                     ],
                 },
             },
         )
 
         self.assertEqual(response.status_code, 202)
-        self.kb_service.list_document_records.assert_called_once_with()
-        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
-        self.assertEqual(len(worker_kwargs["selected_documents"]), 1)
-        selected_document = worker_kwargs["selected_documents"][0]
-        self.assertEqual(selected_document.file_name, "abc123.pdf")
-        self.assertEqual(selected_document.source_architecture_id, 99999)
-        self.assertEqual(selected_document.doc_path, "custom-documents/abc123.json")
-        self.assertEqual(selected_document.ingested_file_name, "abc123.pdf")
+        self.assertEqual(response.get_data(), b"")
+        mock_thread.assert_not_called()
+        self.kb_service.list_document_records.assert_not_called()
+        self.assertEqual(
+            self.weaponry_document_scope.calls,
+            [(10502, ("abc123.pdf",))],
+        )
         task = self.task_service.get_task("weaponry", "10502")
         self.assertEqual(task["request_payload"]["params"]["filePathList"], original_file_paths)
-        self.assertEqual(worker_kwargs["execution_id"], task["execution_id"])
-        self.assertEqual(
-            self.task_service.get_weaponry_task_document_snapshots(
-                architecture_id=10502,
-                execution_id=task["execution_id"],
-            ),
-            [
-                {
-                    "file_name": "abc123.pdf",
-                    "original_name": "跨分类来源.pdf",
-                    "ingested_file_name": "abc123.pdf",
-                    "source_architecture_id": 99999,
-                    "doc_path": "custom-documents/abc123.json",
-                    "anything_doc_id": "",
-                }
-            ],
-        )
+        execution = self.task_service.get_task_execution(task["execution_id"])
+        frozen_scope = execution["input_payload"]["document_scope"]
+        self.assertEqual(frozen_scope["mode"], DOCUMENT_SCOPE_EXPLICIT)
+        self.assertEqual(frozen_scope["requested_file_names"], ["abc123.pdf"])
+        self.assertEqual(frozen_scope["documents"][0]["file_name"], "abc123.pdf")
+        self.assertEqual(frozen_scope["documents"][0]["source_architecture_id"], 99999)
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_weaponry_empty_file_path_list_keeps_full_category_scope(
         self,
         mock_thread,
     ):
+        self.weaponry_document_scope.scopes[(10502, ())] = WeaponryDocumentScope(
+            mode=DOCUMENT_SCOPE_CATEGORY,
+            requested_file_names=(),
+            documents=(),
+        )
         response = self.client.post(
             "/llm/weaponry",
             json={
@@ -313,15 +348,21 @@ class LLMRouteValidationTests(unittest.TestCase):
                     "architectureId": 10502,
                     "filePathList": [],
                     "weaponryTemplateFieldList": [
-                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                        {
+                            "templateClassifyId": 7001,
+                            "fieldName": "舰级名称",
+                            "fieldType": "INPUT",
+                        }
                     ],
                 },
             },
         )
 
         self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_data(), b"")
+        mock_thread.assert_not_called()
         self.kb_service.list_document_records.assert_not_called()
-        self.assertEqual(mock_thread.call_args.kwargs["kwargs"]["selected_documents"], ())
+        self.assertEqual(self.weaponry_document_scope.calls, [(10502, ())])
 
     def test_weaponry_rejects_invalid_file_path_list_type(self):
         response = self.client.post(
@@ -332,7 +373,11 @@ class LLMRouteValidationTests(unittest.TestCase):
                     "architectureId": 10502,
                     "filePathList": "abc123.pdf",
                     "weaponryTemplateFieldList": [
-                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                        {
+                            "templateClassifyId": 7001,
+                            "fieldName": "舰级名称",
+                            "fieldType": "INPUT",
+                        }
                     ],
                 },
             },
@@ -341,8 +386,39 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("filePathList必须为数组", response.get_json()["error"])
 
+    def test_weaponry_route_rejects_unapproved_architecture_id_forms(self):
+        for invalid in (True, 1.0, " 1 ", "+1", 0, -1, [], {}):
+            with self.subTest(invalid=invalid):
+                response = self.client.post(
+                    "/llm/weaponry",
+                    json={
+                        "businessType": "weaponry",
+                        "params": {
+                            "architectureId": invalid,
+                            "filePathList": [],
+                            "weaponryTemplateFieldList": [
+                                {
+                                    "templateClassifyId": 7001,
+                                    "fieldName": "舰级名称",
+                                    "fieldType": "INPUT",
+                                }
+                            ],
+                        },
+                    },
+                )
+
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(
+                    {
+                        "error": "architectureId必须为1到9223372036854775807之间的正整数"
+                    },
+                    response.get_json(),
+                )
+
     def test_weaponry_rejects_unknown_selected_file(self):
-        self.kb_service.list_document_records.return_value = []
+        self.weaponry_document_scope.errors[(10502, ("missing.pdf",))] = (
+            WeaponryDocumentScopeNotFoundError("文件尚未解析")
+        )
         response = self.client.post(
             "/llm/weaponry",
             json={
@@ -351,7 +427,11 @@ class LLMRouteValidationTests(unittest.TestCase):
                     "architectureId": 10502,
                     "filePathList": ["missing.pdf"],
                     "weaponryTemplateFieldList": [
-                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                        {
+                            "templateClassifyId": 7001,
+                            "fieldName": "舰级名称",
+                            "fieldType": "INPUT",
+                        }
                     ],
                 },
             },
@@ -362,18 +442,9 @@ class LLMRouteValidationTests(unittest.TestCase):
 
     def test_weaponry_rejects_ambiguous_file_name_across_categories(self):
         """同名记录无法由既有请求字段消歧，不能随机选择任一分类。"""
-        self.kb_service.list_document_records.return_value = [
-            {
-                "file_name": "abc123.pdf",
-                "architecture_id": 99999,
-                "doc_path": "custom-documents/abc123-v1.json",
-            },
-            {
-                "file_name": "abc123.pdf",
-                "architecture_id": 88888,
-                "doc_path": "custom-documents/abc123-v2.json",
-            },
-        ]
+        self.weaponry_document_scope.errors[(10502, ("abc123.pdf",))] = (
+            WeaponryDocumentScopeAmbiguityError("文件名无法唯一确定文档")
+        )
         response = self.client.post(
             "/llm/weaponry",
             json={
@@ -382,7 +453,11 @@ class LLMRouteValidationTests(unittest.TestCase):
                     "architectureId": 10502,
                     "filePathList": ["abc123.pdf"],
                     "weaponryTemplateFieldList": [
-                        {"fieldName": "舰级名称", "fieldType": "INPUT"}
+                        {
+                            "templateClassifyId": 7001,
+                            "fieldName": "舰级名称",
+                            "fieldType": "INPUT",
+                        }
                     ],
                 },
             },
@@ -391,6 +466,100 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("无法唯一", response.get_json()["error"])
         self.assertIsNone(self.task_service.get_task("weaponry", "10502"))
+
+    def test_weaponry_fifty_distinct_submissions_persist_without_route_threads(
+        self,
+    ):
+        """50 个不同业务键只形成持久任务，Web 层不得按请求创建后台线程。"""
+
+        architecture_ids = tuple(range(11001, 11051))
+        for architecture_id in architecture_ids:
+            self.weaponry_document_scope.scopes[(architecture_id, ())] = (
+                WeaponryDocumentScope(
+                    mode=DOCUMENT_SCOPE_CATEGORY,
+                    requested_file_names=(),
+                    documents=(),
+                )
+            )
+
+        def submit(architecture_id: int):
+            with self.app.test_client() as client:
+                return client.post(
+                    "/llm/weaponry",
+                    json={
+                        "businessType": "weaponry",
+                        "params": {
+                            "architectureId": architecture_id,
+                            "filePathList": [],
+                            "weaponryTemplateFieldList": [
+                                {
+                                    "templateClassifyId": 7001,
+                                    "fieldName": "舰级名称",
+                                    "fieldType": "INPUT",
+                                }
+                            ],
+                        },
+                    },
+                )
+
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            responses = tuple(executor.map(submit, architecture_ids))
+
+        self.assertEqual({202}, {response.status_code for response in responses})
+        self.assertTrue(all(response.get_data() == b"" for response in responses))
+        for architecture_id in architecture_ids:
+            self.assertIsNotNone(
+                self.task_service.get_task("weaponry", str(architecture_id))
+            )
+
+    def test_weaponry_fifty_same_key_submissions_accept_one_and_reject_49(
+        self,
+    ):
+        """同一 architectureId 的原子受理在 HTTP 边界稳定映射为 1×202、49×409。"""
+
+        architecture_id = 11100
+        self.weaponry_document_scope.scopes[(architecture_id, ())] = (
+            WeaponryDocumentScope(
+                mode=DOCUMENT_SCOPE_CATEGORY,
+                requested_file_names=(),
+                documents=(),
+            )
+        )
+
+        def submit(_: int):
+            with self.app.test_client() as client:
+                return client.post(
+                    "/llm/weaponry",
+                    json={
+                        "businessType": "weaponry",
+                        "params": {
+                            "architectureId": architecture_id,
+                            "filePathList": [],
+                            "weaponryTemplateFieldList": [
+                                {
+                                    "templateClassifyId": 7001,
+                                    "fieldName": "舰级名称",
+                                    "fieldType": "INPUT",
+                                }
+                            ],
+                        },
+                    },
+                )
+
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            responses = tuple(executor.map(submit, range(50)))
+
+        statuses = [response.status_code for response in responses]
+        self.assertEqual(1, statuses.count(202))
+        self.assertEqual(49, statuses.count(409))
+        for response in responses:
+            if response.status_code == 202:
+                self.assertEqual(b"", response.get_data())
+            else:
+                self.assertEqual({"error": "任务正在处理中"}, response.get_json())
+        self.assertIsNotNone(
+            self.task_service.get_task("weaponry", str(architecture_id))
+        )
 
     def test_reassign_rejects_invalid_business_type(self):
         response = self.client.post("/llm/reassign", json={"businessType": "wrong", "params": {}})

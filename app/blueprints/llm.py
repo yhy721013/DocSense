@@ -3,25 +3,36 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional
-from urllib.parse import unquote, urlparse
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
-from app.adapters.web import ReportIdValidationError, normalize_report_id
+from app.adapters.web import (
+    ArchitectureIdValidationError,
+    ReportIdValidationError,
+    normalize_architecture_id,
+    normalize_report_id,
+)
 from app.adapters.web.flask import (
     ReportRequestValidationError,
     ProgressConnectionRegistry,
     ProgressRequestValidationError,
+    WeaponryRequestValidationError,
     parse_report_request,
     parse_progress_subscription,
+    parse_weaponry_request,
 )
 from app.container import ApplicationServices, get_application_services
 from app.modules.report.domain import ReportId, ReportTaskConflictError
 from app.modules.tasks.application import ProgressSubscriptionRollbackError
+from app.modules.weaponry.application import WeaponryTaskConflictError
+from app.modules.weaponry.ports import (
+    WeaponryDocumentScopeAmbiguityError,
+    WeaponryDocumentScopeError,
+    WeaponryDocumentScopeNotFoundError,
+)
 from app.presenters.chat_stream import (
     finalize_chat_run_stream,
 )
@@ -29,6 +40,10 @@ from app.presenters.task_progress import ProgressWebSocketPresenter
 from app.presenters.report_submission import (
     ReportSubmissionHttpPresentation,
     ReportSubmissionResponsePresenter,
+)
+from app.presenters.weaponry_submission import (
+    WeaponrySubmissionHttpPresentation,
+    WeaponrySubmissionResponsePresenter,
 )
 from app.services.chat import (
     ChatDeleteBusyError,
@@ -53,13 +68,6 @@ from app.services.core.settings import (
 from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
     run_file_analysis_task,
-)
-from app.services.llm_service.weaponry_service import (
-    WeaponrySelectedDocumentAmbiguityError,
-    WeaponrySelectedDocumentError,
-    WeaponrySelectedDocumentNotFoundError,
-    resolve_weaponry_selected_documents,
-    run_weaponry_task,
 )
 from app.services.utils.anythingllm_client import AnythingLLMClient
 
@@ -91,6 +99,25 @@ def _report_http_response(
     )
     if presentation.content_type is None:
         # 202 成功体严格为零字节，也不暗示存在可解析的 JSON/文本实体。
+        response.headers.pop("Content-Type", None)
+    else:
+        response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _weaponry_http_response(
+    presentation: WeaponrySubmissionHttpPresentation,
+) -> Response:
+    """把框架无关武器谱展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, WeaponrySubmissionHttpPresentation):
+        raise TypeError("presentation 必须是 WeaponrySubmissionHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    if presentation.content_type is None:
+        # 已批准的成功响应必须严格为零字节，且不能暗示 JSON 实体。
         response.headers.pop("Content-Type", None)
     else:
         response.headers["Content-Type"] = presentation.content_type
@@ -143,35 +170,6 @@ def _read_query_chat_id(
         )
         raise
     return public_chat_id, chat_id_storage_key(public_chat_id)
-
-
-def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
-    """将 weaponry filePathList 中的 URL/裸文件名归一化为哈希文件名。"""
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("filePathList必须为数组")
-
-    normalized: List[str] = []
-    seen = set()
-    for index, item in enumerate(value):
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(f"filePathList中第{index + 1}项不是有效字符串")
-
-        raw_value = item.strip()
-        parsed = urlparse(raw_value)
-        decoded_path = unquote(parsed.path or raw_value).replace("\\", "/")
-        file_name = PurePosixPath(decoded_path).name.strip()
-        if not file_name or file_name in {".", ".."}:
-            raise ValueError(f"filePathList中第{index + 1}项无法提取文件名")
-
-        key = file_name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(file_name)
-
-    return normalized
 
 
 def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -344,152 +342,86 @@ def llm_generate_report():
 @llm_bp.post("/llm/weaponry")
 def llm_weaponry():
     services = _services()
-    task_service = services.task_service
-    kb_service = services.kb_service
-    progress_hub = services.progress_hub
-    llm_config = services.llm_config
-    payload = request.get_json(silent=True) or {}
-    logger.info("收到武器装备提取请求: payload_keys=%s", list(payload.keys()))
-    if payload.get("businessType") != "weaponry":
-        logger.warning(
-            "武器装备提取请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为weaponry"}), 400
-
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        logger.warning(
-            "武器装备提取请求被拒绝: params无效 params_type=%s",
-            type(params).__name__,
-        )
-        return jsonify({"error": "params不能为空"}), 400
-
-    architecture_id = params.get("architectureId")
-    if architecture_id is None:
-        logger.warning("武器装备提取请求被拒绝: architectureId为空")
-        return jsonify({"error": "architectureId不能为空"}), 400
-
+    weaponry_services = services.weaponry_services
+    if weaponry_services is None:
+        # 生产组合根在 1D-6 后必须提供该能力。测试夹具若遗漏依赖也应明确失败，禁止
+        # 静默回退到已经删除的路由线程与遗留 Service。
+        raise RuntimeError("应用容器未装配武器谱运行链")
+    presenter = WeaponrySubmissionResponsePresenter()
+    raw_payload = request.get_json(silent=True)
+    logger.info(
+        "收到武器装备提取请求: payload_type=%s",
+        type(raw_payload).__name__,
+    )
     try:
-        selected_file_names = _normalize_weaponry_file_path_list(params.get("filePathList"))
-    except ValueError as exc:
+        parsed_request = parse_weaponry_request(raw_payload)
+    except WeaponryRequestValidationError as exc:
         logger.warning(
-            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error_type=%s",
-            architecture_id,
+            "武器装备提取请求被拒绝: validation_error=%s payload_type=%s",
+            str(exc),
+            type(raw_payload).__name__,
+        )
+        return _weaponry_http_response(presenter.present_bad_request(str(exc)))
+
+    trace_id = uuid4().hex
+    try:
+        document_scope = weaponry_services.document_scope.resolve(
+            architecture_id=parsed_request.architecture_id,
+            requested_file_names=parsed_request.selected_file_names,
+        )
+    except WeaponryDocumentScopeNotFoundError as exc:
+        logger.warning(
+            "武器装备提取请求引用未解析文档: architecture_id=%s file_count=%d",
+            parsed_request.architecture_id,
+            len(parsed_request.selected_file_names),
+        )
+        return _weaponry_http_response(presenter.present_not_found(str(exc)))
+    except (WeaponryDocumentScopeAmbiguityError, WeaponryDocumentScopeError) as exc:
+        logger.warning(
+            "武器装备提取请求文档范围不确定: architecture_id=%s file_count=%d "
+            "error_type=%s",
+            parsed_request.architecture_id,
+            len(parsed_request.selected_file_names),
             type(exc).__name__,
         )
-        return jsonify({"error": str(exc)}), 400
+        return _weaponry_http_response(presenter.present_bad_request(str(exc)))
 
-    # 非空 filePathList 可引用任意已入库分类的文档。路由受理时一次性解析为不可变
-    # 快照，后续后台线程和未来可靠任务队列都不再按当前 architectureId 重新查找，
-    # 避免同名文件或文档重分类导致任务检索范围漂移。
-    selected_documents = ()
-    if selected_file_names:
-        try:
-            selected_documents = resolve_weaponry_selected_documents(
-                kb_service,
-                selected_file_names,
-            )
-        except WeaponrySelectedDocumentNotFoundError as exc:
-            logger.warning(
-                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s error=%s",
-                architecture_id,
-                str(exc),
-            )
-            return jsonify({"error": str(exc)}), 404
-        except (
-            WeaponrySelectedDocumentAmbiguityError,
-            WeaponrySelectedDocumentError,
-        ) as exc:
-            logger.warning(
-                "武器装备提取请求被拒绝: 选中文件无法唯一解析 "
-                "architectureId=%s error_type=%s error=%s",
-                architecture_id,
-                type(exc).__name__,
-                str(exc),
-            )
-            return jsonify({"error": str(exc)}), 400
-
-    field_list = params.get("weaponryTemplateFieldList")
-    if not isinstance(field_list, list) or not field_list:
-        logger.warning(
-            "武器装备提取请求被拒绝: weaponryTemplateFieldList无效 architectureId=%s field_list_type=%s field_count=%s",
-            architecture_id,
-            type(field_list).__name__,
-            len(field_list) if isinstance(field_list, list) else "n/a",
+    policies = weaponry_services.policies
+    submission = parsed_request.to_submission(
+        document_scope=document_scope,
+        evidence_selection_policy=policies.evidence_selection,
+        execution_policy=policies.execution,
+        auxiliary_guidance_policy=policies.auxiliary_guidance,
+        trace_id=trace_id,
+    )
+    try:
+        result = weaponry_services.submit.execute(submission)
+    except WeaponryTaskConflictError:
+        logger.info(
+            "武器装备提取请求因活动任务或回调 Guard 被拒绝: "
+            "architecture_id=%s trace_id=%s",
+            parsed_request.architecture_id,
+            trace_id,
         )
-        return jsonify({"error": "weaponryTemplateFieldList不能为空"}), 400
-
-    # 校验 analyseData / analyseDataSource 必须为空
-    for field_index, field in enumerate(field_list):
-        if field.get("analyseData") or field.get("analyseDataSource"):
-            logger.warning(
-                "武器装备提取请求被拒绝: 字段解析结果未清空 architectureId=%s field_index=%s fieldName=%s",
-                architecture_id,
-                field_index,
-                field.get("fieldName"),
-            )
-            return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
-        if field.get("fieldType") == "TABLE":
-            for row_index, row in enumerate(field.get("tableFieldList") or []):
-                if isinstance(row, list):
-                    for cell_index, cell in enumerate(row):
-                        if isinstance(cell, dict) and (cell.get("analyseData") or cell.get("analyseDataSource")):
-                            logger.warning(
-                                "武器装备提取请求被拒绝: 表格单元格解析结果未清空 architectureId=%s field_index=%s fieldName=%s row_index=%s cell_index=%s cellFieldName=%s",
-                                architecture_id,
-                                field_index,
-                                field.get("fieldName"),
-                                row_index,
-                                cell_index,
-                                cell.get("fieldName"),
-                            )
-                            return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
-
-    architecture_id_str = str(architecture_id)
-    existing_task = task_service.get_task("weaponry", architecture_id_str)
-    if existing_task and existing_task["status"] in {"0", "1"}:
-        logger.warning(
-            "武器装备提取请求被拒绝: 任务正在处理中 architectureId=%s status=%s",
-            architecture_id,
-            existing_task["status"],
+        return _weaponry_http_response(presenter.present_conflict())
+    except Exception:
+        logger.exception(
+            "武器装备提取受理失败: architecture_id=%s trace_id=%s",
+            parsed_request.architecture_id,
+            trace_id,
         )
-        return jsonify({"error": "任务正在处理中"}), 409
+        raise
 
-    task = task_service.create_weaponry_task(
-        architecture_id=architecture_id,
-        request_payload=payload,
-        selected_documents=tuple(
-            document.to_task_snapshot()
-            for document in selected_documents
-        ),
+    logger.info(
+        "武器装备提取请求已可靠受理: architecture_id=%s task_id=%s "
+        "document_count=%d field_count=%d trace_id=%s",
+        parsed_request.architecture_id,
+        result.task_id.value,
+        len(document_scope.documents),
+        len(parsed_request.fields),
+        trace_id,
     )
-    progress_hub.publish(
-        "weaponry",
-        architecture_id_str,
-        {"businessType": "weaponry", "data": {"architectureId": architecture_id_str, "progress": 0.0}},
-        task_id=task["execution_id"],
-    )
-
-    worker = threading.Thread(
-        target=run_weaponry_task,
-        kwargs={
-            "task_service": task_service,
-            "kb_service": kb_service,
-            "progress_hub": progress_hub,
-            "request_payload": payload,
-            # 仅作为进程内工作线程的不可变输入；可靠队列恢复时会按 execution_id 从
-            # 任务库读取同一份内部快照。该参数不会进入对外 HTTP 契约。
-            "selected_documents": selected_documents,
-            "execution_id": task["execution_id"],
-            "callback_url": llm_config.callback_url or "",
-            "callback_timeout": llm_config.callback_timeout,
-        },
-        daemon=True,
-    )
-    worker.start()
-    logger.info("已启动后台武器装备提取线程: architectureId=%s", architecture_id)
-    return jsonify({"message": "accepted", "businessType": "weaponry", "task": task}), 202
+    return _weaponry_http_response(presenter.present_success())
 
 
 @llm_bp.post("/llm/check-task")
@@ -535,9 +467,21 @@ def llm_check_task():
                     index,
                 )
                 return jsonify({"error": "architectureId不能为空"}), 400
+            try:
+                normalized_architecture_id = normalize_architecture_id(
+                    architecture_id
+                )
+            except ArchitectureIdValidationError as exc:
+                logger.warning(
+                    "任务查询请求被拒绝: architectureId格式无效 index=%s "
+                    "architecture_id_type=%s",
+                    index,
+                    type(architecture_id).__name__,
+                )
+                return jsonify({"error": str(exc)}), 400
             response_key = "architectureId"
-            normalized_key = str(architecture_id)
-            response_value = architecture_id
+            normalized_key = normalized_architecture_id.business_key
+            response_value = normalized_architecture_id.value
         else:
             report_id = params.get("reportId")
             if report_id is None:
@@ -584,6 +528,13 @@ def llm_check_task():
             # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
             replayed = services.report_callback_recovery.execute(
                 ReportId.from_public_value(normalized_report_id.value)
+            )
+        elif business_type == "weaponry":
+            weaponry_services = services.weaponry_services
+            if weaponry_services is None:
+                raise RuntimeError("应用容器未装配武器谱运行链")
+            replayed = weaponry_services.callback_recovery.execute(
+                normalized_architecture_id.value
             )
         else:
             replayed = task_service.replay_callback_if_needed(

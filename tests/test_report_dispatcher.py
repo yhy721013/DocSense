@@ -110,7 +110,7 @@ def _config(**overrides: object) -> ReportInfrastructureConfig:
         "running_sample_limit": 5,
         "stop_timeout_seconds": 0.5,
         "cleanup_http_timeout_seconds": 1.0,
-        "cleanup_lease_seconds": 2.0,
+        "cleanup_lease_seconds": 7.0,
     }
     values.update(overrides)
     return ReportInfrastructureConfig(**values)  # type: ignore[arg-type]

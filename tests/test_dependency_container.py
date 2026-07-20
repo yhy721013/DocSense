@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -47,12 +49,20 @@ from app.modules.report.application import (
     SubmitReportTask,
 )
 from app.modules.tasks.adapters import (
+    FileProcessSingletonGuard,
     InMemoryProgressAdapter,
     LegacyTaskCommandAdapter,
     LegacyTaskReadAdapter,
     LatestTaskProgressPublisherAdapter,
 )
 from app.modules.tasks.application import ProgressSubscriptionService
+from app.modules.weaponry.adapters import (
+    WeaponryInfrastructureConfig,
+    WeaponryRuntimeCapabilities,
+)
+from app.modules.weaponry.composition import (
+    compose_weaponry_application_services,
+)
 from app.services.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
@@ -77,8 +87,70 @@ from tests.fakes import (
     FakeDocumentRagFactory,
     FakeKnowledgeIndexFactory,
     FakeReportDispatcherPort,
+    FakeAuxiliaryGuidancePort,
+    FakeEvidenceExtractionPort,
+    FakeTargetEvidenceRetrievalPort,
+    FakeWeaponryCallbackPort,
+    FakeWeaponryDocumentScopePort,
+    FakeWeaponryExternalResourceCleanupPort,
+    FakeWeaponryInteractionAuditPort,
+    FakeWeaponryProgressPublisherPort,
+    FakeWeaponryResourceStorePort,
+    FakeWeaponryTaskCommandPort,
+    FakeWeaponryTranslationPort,
     InvocationRecorder,
+    WeaponryInvocationRecorder,
 )
+
+
+class _NoopWeaponryMaintenance:
+    """1D-5 容器生命周期测试使用的显式有界维护替身。"""
+
+    def run_once(self, *, limit: int) -> object:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit 必须是正整数")
+        return {"limit": limit}
+
+
+def _weaponry_infrastructure_config() -> WeaponryInfrastructureConfig:
+    """构造不访问环境变量或外部服务的离线单实例配置。"""
+
+    return WeaponryInfrastructureConfig(
+        runtime_mode="single_instance",
+        scan_interval_seconds=0.02,
+        accepted_batch_size=10,
+        dispatch_failure_retry_seconds=1.0,
+        maintenance_interval_seconds=0.02,
+        maintenance_limit=5,
+        running_sample_limit=5,
+        stop_timeout_seconds=0.5,
+        cleanup_http_timeout_seconds=1.0,
+        cleanup_lease_seconds=7.0,
+        provider_fingerprint="container-provider-v1",
+        embedding_fingerprint="container-embedding-v1",
+        document_processing_fingerprint="container-processing-v1",
+        extraction_model_fingerprint="container-extraction-v1",
+    )
+
+
+def _weaponry_capabilities(
+    config: WeaponryInfrastructureConfig,
+) -> WeaponryRuntimeCapabilities:
+    """由离线 Fake 明确声明能力，不能从生产期望配置自动推断。"""
+
+    return WeaponryRuntimeCapabilities(
+        provider_fingerprint=config.provider_fingerprint,
+        embedding_fingerprint=config.embedding_fingerprint,
+        document_processing_fingerprint=(
+            config.document_processing_fingerprint
+        ),
+        extraction_model_fingerprint=config.extraction_model_fingerprint,
+        query_version=config.query_version,
+        score_semantics=config.score_semantics,
+        score_protocol=config.score_protocol,
+        ranking_strategy=config.ranking_strategy,
+        extraction_context_strategy=config.extraction_context_strategy,
+    )
 
 
 class AnythingLLMGatewayFactoryTests(unittest.TestCase):
@@ -268,6 +340,76 @@ class UploadTaskLimiterTests(unittest.TestCase):
 
         self.assertEqual("完成", limiter.run(lambda: "完成"))
 
+    def test_waiting_tasks_acquire_in_fifo_order(self) -> None:
+        """已等待的业务必须先于刚归还许可后重新排队的忙碌业务执行。"""
+
+        limiter = UploadTaskLimiter(max_concurrency=1)
+        self.assertTrue(
+            limiter.acquire_interruptibly(
+                lambda: False,
+                poll_interval_seconds=0.01,
+            )
+        )
+        completed: list[str] = []
+
+        def run(label: str) -> None:
+            limiter.run(lambda: completed.append(label))
+
+        threads: list[threading.Thread] = []
+        for expected_waiters, label in enumerate(
+            ("report", "weaponry", "analysis"),
+            start=1,
+        ):
+            thread = threading.Thread(target=run, args=(label,))
+            threads.append(thread)
+            thread.start()
+            deadline = time.monotonic() + 2.0
+            while limiter.waiting_count < expected_waiters:
+                if time.monotonic() >= deadline:
+                    self.fail("等待任务未在限定时间内进入 FIFO 队列")
+                time.sleep(0.005)
+
+        limiter.release()
+        for thread in threads:
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual(["report", "weaponry", "analysis"], completed)
+
+    def test_cancelled_waiter_is_removed_without_blocking_queue_head(self) -> None:
+        """停机取消必须移除 ticket，否则后续任务会被幽灵队首永久阻塞。"""
+
+        limiter = UploadTaskLimiter(max_concurrency=1)
+        self.assertTrue(
+            limiter.acquire_interruptibly(
+                lambda: False,
+                poll_interval_seconds=0.01,
+            )
+        )
+        cancel = threading.Event()
+        outcome: list[bool] = []
+        waiter = threading.Thread(
+            target=lambda: outcome.append(
+                limiter.acquire_interruptibly(
+                    cancel.is_set,
+                    poll_interval_seconds=0.01,
+                )
+            )
+        )
+        waiter.start()
+        deadline = time.monotonic() + 2.0
+        while limiter.waiting_count != 1:
+            if time.monotonic() >= deadline:
+                self.fail("取消用例未在限定时间内进入 FIFO 队列")
+            time.sleep(0.005)
+
+        cancel.set()
+        waiter.join(timeout=2.0)
+        self.assertEqual([False], outcome)
+        self.assertEqual(0, limiter.waiting_count)
+        limiter.release()
+        self.assertEqual("完成", limiter.run(lambda: "完成"))
+
 
 class ReportInfrastructureConfigTests(unittest.TestCase):
     """验证清理 HTTP 超时与接管租约的必要安全关系。"""
@@ -276,20 +418,20 @@ class ReportInfrastructureConfigTests(unittest.TestCase):
         config = ReportInfrastructureConfig.single_instance()
 
         self.assertEqual(60.0, config.cleanup_http_timeout_seconds)
-        self.assertEqual(90.0, config.cleanup_lease_seconds)
+        self.assertEqual(130.0, config.cleanup_lease_seconds)
         self.assertEqual(30.0, config.dispatch_failure_retry_seconds)
         self.assertEqual(512 * 1024 * 1024, config.max_download_bytes)
         self.assertGreater(
             config.cleanup_lease_seconds,
-            config.cleanup_http_timeout_seconds,
+            config.cleanup_http_timeout_seconds * 2,
         )
 
-    def test_cleanup_lease_must_strictly_exceed_http_timeout(self) -> None:
-        for lease_seconds in (60.0, 59.9):
+    def test_cleanup_lease_must_cover_connect_read_and_margin(self) -> None:
+        for lease_seconds in (60.0, 120.0, 124.9):
             with self.subTest(lease_seconds=lease_seconds):
                 with self.assertRaisesRegex(
                     ReportInfrastructureConfigurationError,
-                    "必须严格大于",
+                    "必须覆盖连接、响应读取和安全余量",
                 ):
                     ReportInfrastructureConfig(
                         cleanup_http_timeout_seconds=60.0,
@@ -307,7 +449,7 @@ class ReportInfrastructureConfigTests(unittest.TestCase):
             os.environ,
             {
                 "DOCSENSE_REPORT_CLEANUP_HTTP_TIMEOUT_SECONDS": "60",
-                "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS": "90",
+                "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS": "130",
                 "DOCSENSE_REPORT_ACCEPTED_BATCH_SIZE": "50",
                 "DOCSENSE_REPORT_DISPATCH_FAILURE_RETRY_SECONDS": "30",
                 "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES": "1048576",
@@ -316,7 +458,7 @@ class ReportInfrastructureConfigTests(unittest.TestCase):
             config = load_report_infrastructure_config()
 
         self.assertEqual(60.0, config.cleanup_http_timeout_seconds)
-        self.assertEqual(90.0, config.cleanup_lease_seconds)
+        self.assertEqual(130.0, config.cleanup_lease_seconds)
         self.assertEqual(50, config.accepted_batch_size)
         self.assertEqual(30.0, config.dispatch_failure_retry_seconds)
         self.assertEqual(1048576, config.max_download_bytes)
@@ -462,6 +604,36 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         """释放测试创建的临时 SQLite 目录。"""
         self._temp_directory.__exit__(None, None, None)
 
+    def _compose_weaponry_services(self):
+        """构造不启动线程、不访问真实供应商的 1D-5 Weaponry 实例链。"""
+
+        recorder = WeaponryInvocationRecorder()
+        config = _weaponry_infrastructure_config()
+        callbacks = FakeWeaponryCallbackPort(recorder)
+        return compose_weaponry_application_services(
+            task_commands=FakeWeaponryTaskCommandPort(recorder),
+            progress_publisher=FakeWeaponryProgressPublisherPort(recorder),
+            retrieval=FakeTargetEvidenceRetrievalPort(recorder),
+            extraction=FakeEvidenceExtractionPort(recorder),
+            guidance=FakeAuxiliaryGuidancePort(recorder),
+            translation=FakeWeaponryTranslationPort(recorder),
+            audit=FakeWeaponryInteractionAuditPort(recorder),
+            callbacks=callbacks,
+            callback_recovery_source=callbacks,
+            resources=FakeWeaponryResourceStorePort(recorder),
+            resource_cleaner=FakeWeaponryExternalResourceCleanupPort(recorder),
+            document_scope=FakeWeaponryDocumentScopePort(),
+            execution_limiter=self.services.upload_task_limiter,
+            process_guard=FileProcessSingletonGuard(
+                Path(self.runtime_directory)
+                / "locks"
+                / "weaponry-container.lock",
+                component_name="武器谱容器测试 Dispatcher",
+            ),
+            config=config,
+            capabilities=_weaponry_capabilities(config),
+        )
+
     def test_create_app_uses_injected_services_without_building_production(self) -> None:
         """显式注入时应用必须原样保存容器，且不得构建生产依赖。"""
         with patch("app.create_application_services") as production_builder:
@@ -482,6 +654,30 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         production_builder.assert_not_called()
         self.assertEqual(0, len(self.document_rag_factory.ports))
         self.assertEqual(0, self.services.report_dispatcher.start_count)
+
+    def test_explicit_weaponry_bundle_shares_limiter_and_container_lifecycle(self) -> None:
+        """ApplicationServices 统一启动、停止、关闭同一 Weaponry 实例链。"""
+
+        weaponry = self._compose_weaponry_services()
+        services = replace(self.services, weaponry_services=weaponry)
+
+        self.assertIs(
+            services.upload_task_limiter,
+            weaponry.execution_limiter,
+        )
+        self.assertEqual("new", weaponry.snapshot().lifecycle_state)
+        try:
+            services.start_background_services()
+            self.assertEqual("running", weaponry.snapshot().lifecycle_state)
+            self.assertEqual(1, services.report_dispatcher.start_count)
+            self.assertTrue(services.stop_background_services(timeout_seconds=0.5))
+            self.assertEqual("stopped", weaponry.snapshot().lifecycle_state)
+            self.assertEqual(1, services.report_dispatcher.stop_count)
+        finally:
+            services.close()
+
+        self.assertEqual("closed", weaponry.snapshot().lifecycle_state)
+        self.assertEqual(1, services.report_dispatcher.close_count)
 
     def test_production_owned_container_starts_once_and_registers_close(self) -> None:
         """仅无参应用工厂拥有后台线程，显式注入测试保持手动生命周期。"""

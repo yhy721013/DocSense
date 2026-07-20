@@ -27,12 +27,24 @@ from app.modules.report.application import (
     SubmitReportTask,
 )
 from app.modules.tasks.adapters import (
+    FileProcessSingletonGuard,
     InMemoryProgressAdapter,
     LegacyTaskCommandAdapter,
     LegacyTaskReadAdapter,
     LatestTaskProgressPublisherAdapter,
 )
 from app.modules.tasks.application import ProgressSubscriptionService
+from app.modules.weaponry.adapters import (
+    DatabaseServiceWeaponryDocumentScopeAdapter,
+    SQLiteWeaponryCallbackAdapter,
+    SQLiteWeaponryCallbackRecoverySource,
+    SQLiteWeaponryInteractionAuditAdapter,
+    SQLiteWeaponryResourceStoreAdapter,
+    WeaponryInfrastructureConfig,
+    WeaponryRuntimeCapabilities,
+    WeaponryTaskCommandCodec,
+)
+from app.modules.weaponry.composition import compose_weaponry_application_services
 from app.services.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
@@ -60,7 +72,13 @@ from tests.fakes import (
     FakeDocumentRagFactory,
     FakeKnowledgeIndexFactory,
     FakeReportDispatcherPort,
+    FakeAuxiliaryGuidancePort,
+    FakeEvidenceExtractionPort,
+    FakeTargetEvidenceRetrievalPort,
+    FakeWeaponryExternalResourceCleanupPort,
+    FakeWeaponryTranslationPort,
     InvocationRecorder,
+    WeaponryInvocationRecorder,
 )
 
 
@@ -159,6 +177,88 @@ def build_offline_application_services(
         execute=chat_run_executor.execute_chat_run,
     )
 
+    upload_task_limiter = UploadTaskLimiter(
+        max_concurrency=max_upload_concurrency,
+    )
+    weaponry_config = WeaponryInfrastructureConfig(
+        runtime_mode="single_instance",
+        scan_interval_seconds=0.02,
+        accepted_batch_size=50,
+        dispatch_failure_retry_seconds=1.0,
+        maintenance_interval_seconds=0.05,
+        maintenance_limit=50,
+        running_sample_limit=10,
+        stop_timeout_seconds=0.5,
+        cleanup_http_timeout_seconds=1.0,
+        cleanup_lease_seconds=7.0,
+        provider_fingerprint="offline-provider-v1",
+        embedding_fingerprint="offline-embedding-v1",
+        document_processing_fingerprint="offline-processing-v1",
+        extraction_model_fingerprint="offline-extraction-v1",
+    )
+    weaponry_capabilities = WeaponryRuntimeCapabilities(
+        provider_fingerprint=weaponry_config.provider_fingerprint,
+        embedding_fingerprint=weaponry_config.embedding_fingerprint,
+        document_processing_fingerprint=(
+            weaponry_config.document_processing_fingerprint
+        ),
+        extraction_model_fingerprint=(
+            weaponry_config.extraction_model_fingerprint
+        ),
+        query_version=weaponry_config.query_version,
+        score_semantics=weaponry_config.score_semantics,
+        score_protocol=weaponry_config.score_protocol,
+        ranking_strategy=weaponry_config.ranking_strategy,
+        extraction_context_strategy=weaponry_config.extraction_context_strategy,
+    )
+    weaponry_task_commands = LegacyTaskCommandAdapter(
+        task_service,
+        WeaponryTaskCommandCodec(),
+    )
+    weaponry_progress = LatestTaskProgressPublisherAdapter(
+        task_commands=weaponry_task_commands,
+        delegate=progress_adapter,
+    )
+    weaponry_callbacks = SQLiteWeaponryCallbackAdapter(
+        task_service,
+        callback_url=callback_url or "",
+        callback_timeout=5.0,
+        lease_seconds=30.0,
+    )
+    weaponry_resources = SQLiteWeaponryResourceStoreAdapter(
+        str(task_db_path),
+        cleanup_lease_seconds=7.0,
+        retry_delay_seconds=0.05,
+    )
+    weaponry_recorder = WeaponryInvocationRecorder()
+    weaponry_services = compose_weaponry_application_services(
+        task_commands=weaponry_task_commands,
+        progress_publisher=weaponry_progress,
+        retrieval=FakeTargetEvidenceRetrievalPort(weaponry_recorder),
+        extraction=FakeEvidenceExtractionPort(weaponry_recorder),
+        guidance=FakeAuxiliaryGuidancePort(weaponry_recorder),
+        translation=FakeWeaponryTranslationPort(weaponry_recorder),
+        audit=SQLiteWeaponryInteractionAuditAdapter(str(task_db_path)),
+        callbacks=weaponry_callbacks,
+        callback_recovery_source=SQLiteWeaponryCallbackRecoverySource(
+            task_service
+        ),
+        resources=weaponry_resources,
+        resource_cleaner=FakeWeaponryExternalResourceCleanupPort(
+            weaponry_recorder
+        ),
+        document_scope=DatabaseServiceWeaponryDocumentScopeAdapter(
+            knowledge_service
+        ),
+        execution_limiter=upload_task_limiter,
+        process_guard=FileProcessSingletonGuard(
+            root / "locks" / "offline-weaponry-dispatcher.lock",
+            component_name="离线武器谱 Dispatcher",
+        ),
+        config=weaponry_config,
+        capabilities=weaponry_capabilities,
+    )
+
     services = ApplicationServices(
         document_rag_factory=FakeDocumentRagFactory(),
         knowledge_index_factory=FakeKnowledgeIndexFactory(),
@@ -191,9 +291,7 @@ def build_offline_application_services(
         chat_cleanup_executor=chat_cleanup_executor,
         progress_hub=progress_hub,
         progress_subscription_service=progress_subscription_service,
-        upload_task_limiter=UploadTaskLimiter(
-            max_concurrency=max_upload_concurrency,
-        ),
+        upload_task_limiter=upload_task_limiter,
         report_submit=report_submit,
         report_callback_recovery=report_callback_recovery,
         report_dispatcher=report_dispatcher,
@@ -211,6 +309,7 @@ def build_offline_application_services(
             storage_root=None,
         ),
         report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
+        weaponry_services=weaponry_services,
     )
 
     logger.debug("离线应用依赖组装完成: runtime_directory=%s", root)
