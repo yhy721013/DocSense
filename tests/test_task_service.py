@@ -1,6 +1,8 @@
 import hashlib
 import sqlite3
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import patch
 
 from app.ports.rag import (
@@ -13,6 +15,9 @@ from app.services.llm_service.task_service import (
     ArchitectureRecallAuditError,
     InteractionAuditError,
     LLMTaskService,
+    TaskAlreadyProcessingError,
+    TaskExecutionConflictError,
+    TaskStateConflictError,
 )
 from tests import workspace_tempdir
 
@@ -142,6 +147,154 @@ class LLMTaskServiceTests(unittest.TestCase):
             )
             self.assertEqual(task["status"], "0")
             self.assertEqual(task["progress"], 0.0)
+
+    def test_concurrent_file_task_admission_has_single_winner(self):
+        """两个服务实例并发受理同一文件时只能有一个执行获得任务所有权。"""
+        with workspace_tempdir() as tmp:
+            db_path = f"{tmp}/tasks.sqlite3"
+            first_service = LLMTaskService(db_path=db_path)
+            second_service = LLMTaskService(db_path=db_path)
+            barrier = Barrier(2)
+
+            def submit(service: LLMTaskService, marker: str):
+                barrier.wait()
+                try:
+                    task = service.create_file_task(
+                        "same.pdf",
+                        {"businessType": "file", "marker": marker},
+                    )
+                    return ("accepted", marker, task["execution_id"])
+                except TaskAlreadyProcessingError:
+                    return ("conflict", marker, "")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = list(
+                    pool.map(
+                        lambda args: submit(*args),
+                        (
+                            (first_service, "first"),
+                            (second_service, "second"),
+                        ),
+                    )
+                )
+
+            accepted = [item for item in outcomes if item[0] == "accepted"]
+            conflicts = [item for item in outcomes if item[0] == "conflict"]
+            current = first_service.get_task("file", "same.pdf")
+
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(current["execution_id"], accepted[0][2])
+        self.assertEqual(current["request_payload"]["marker"], accepted[0][1])
+
+    def test_batch_file_task_admission_rolls_back_all_on_active_conflict(self):
+        """批次任一文件处于活动态时，其他新文件也不得留下半批任务。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            active = service.create_file_task(
+                "b.pdf",
+                {"businessType": "file", "marker": "active"},
+                status="0",
+            )
+
+            with self.assertRaises(TaskAlreadyProcessingError):
+                service.create_file_tasks_if_available(
+                    (
+                        ("a.pdf", {"businessType": "file"}, "1"),
+                        ("b.pdf", {"businessType": "file"}, "0"),
+                        ("c.pdf", {"businessType": "file"}, "0"),
+                    )
+                )
+
+            current = service.get_task("file", "b.pdf")
+            self.assertIsNone(service.get_task("file", "a.pdf"))
+            self.assertIsNone(service.get_task("file", "c.pdf"))
+            self.assertEqual(current["execution_id"], active["execution_id"])
+            self.assertEqual(current["request_payload"]["marker"], "active")
+
+    def test_stale_file_execution_cannot_write_current_task(self):
+        """旧 execution 对进度、结果和回调状态的迟到写入必须全部被 CAS 拒绝。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = service.create_file_task(
+                "rerun.pdf",
+                {"businessType": "file", "marker": "first"},
+            )
+            service.mark_business_result(
+                "file",
+                "rerun.pdf",
+                {"status": "2"},
+                status="2",
+                execution_id=first["execution_id"],
+            )
+            second = service.create_file_task(
+                "rerun.pdf",
+                {"businessType": "file", "marker": "second"},
+            )
+
+            with self.assertRaises(TaskExecutionConflictError):
+                service.update_task_progress(
+                    "file",
+                    "rerun.pdf",
+                    progress=0.9,
+                    message="stale",
+                    execution_id=first["execution_id"],
+                )
+            with self.assertRaises(TaskExecutionConflictError):
+                service.mark_business_result(
+                    "file",
+                    "rerun.pdf",
+                    {"status": "3"},
+                    status="3",
+                    execution_id=first["execution_id"],
+                )
+            with self.assertRaises(TaskExecutionConflictError):
+                service.mark_callback_success(
+                    "file",
+                    "rerun.pdf",
+                    execution_id=first["execution_id"],
+                )
+            with self.assertRaises(TaskExecutionConflictError):
+                service.mark_callback_skipped(
+                    "file",
+                    "rerun.pdf",
+                    execution_id=first["execution_id"],
+                )
+
+            current = service.get_task("file", "rerun.pdf")
+
+        self.assertEqual(current["execution_id"], second["execution_id"])
+        self.assertEqual(current["request_payload"]["marker"], "second")
+        self.assertEqual(current["status"], "1")
+        self.assertEqual(current["progress"], 0.0)
+        self.assertEqual(current["callback_status"], "pending")
+
+    def test_execution_cas_prevents_late_failure_overwriting_success(self):
+        """同一执行成功终结后，迟到的失败路径也不能覆盖既有终态。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("done.pdf", {"businessType": "file"})
+            service.mark_business_result(
+                "file",
+                "done.pdf",
+                {"status": "2"},
+                status="2",
+                execution_id=task["execution_id"],
+            )
+
+            with self.assertRaises(TaskStateConflictError):
+                service.mark_business_result(
+                    "file",
+                    "done.pdf",
+                    {"status": "3"},
+                    status="3",
+                    execution_id=task["execution_id"],
+                )
+
+            current = service.get_task("file", "done.pdf")
+
+        self.assertEqual(current["status"], "2")
+        self.assertEqual(current["result_payload"], {"status": "2"})
 
     def test_recreating_completed_task_generates_new_execution_id(self):
         """同一业务键主动重跑必须获得新执行身份，不能复用上一轮审计幂等键。"""
@@ -562,6 +715,13 @@ class LLMTaskServiceTests(unittest.TestCase):
                 returned_architecture_id=1_778_670_713_864_013,
                 returned_rank=1,
                 total_elapsed_ms=90,
+            )
+            service.mark_business_result(
+                "file",
+                "rerun.pdf",
+                {"status": "2"},
+                status="2",
+                execution_id=first["execution_id"],
             )
 
             second = service.create_file_task("rerun.pdf", {"businessType": "file"})

@@ -202,6 +202,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=rag_factory,
                 knowledge_index_factory=knowledge_factory,
+                execution_id=task["execution_id"],
                 analysis_classification_mode=mode,
                 analysis_filename_constraint_mode=filename_constraint_mode,
                 analysis_data_standard_mode=data_standard_mode,
@@ -783,7 +784,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 ]
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task(file_name, request)
+            task = task_service.create_file_task(file_name, request)
             Path(tmp, file_name).write_text("CVN-78", encoding="utf-8")
             with (
                 patch(
@@ -817,6 +818,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
                     callback_timeout=5,
                     document_rag_factory=rag_factory,
                     knowledge_index_factory=FakeKnowledgeIndexFactory(),
+                    execution_id=task["execution_id"],
                 )
             task = task_service.get_task("file", file_name)
 

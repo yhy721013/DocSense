@@ -54,6 +54,12 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 202)
         mock_thread.assert_called_once()
+        response_task = response.get_json()["task"]
+        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
+        self.assertEqual(
+            worker_kwargs["execution_id"],
+            response_task["execution_id"],
+        )
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_analysis_accepts_multiple_files_and_starts_one_batch_thread(self, mock_thread):
@@ -74,8 +80,17 @@ class LLMRouteValidationTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(len(response.get_json()["tasks"]), 2)
+        response_tasks = response.get_json()["tasks"]
+        self.assertEqual(len(response_tasks), 2)
         mock_thread.assert_called_once()
+        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
+        self.assertEqual(
+            worker_kwargs["execution_ids"],
+            {
+                task["business_key"]: task["execution_id"]
+                for task in response_tasks
+            },
+        )
 
     def test_analysis_rejects_duplicate_file_names_in_same_batch(self):
         response = self.client.post(
@@ -425,4 +440,3 @@ class LLMRouteValidationTests(unittest.TestCase):
         mock_client_instance.create_rag_workspace.assert_called_once_with("architectureId-2", user_id=1)
         self.kb_service.add_workspace.assert_called_once_with(2, "ws_created")
         mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_created", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
-

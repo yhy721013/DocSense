@@ -803,8 +803,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             }
 
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
-            task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
+            task_a = task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
+            task_b = task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
             hub = LLMProgressHub()
             transitions = []
             filename_constraint_modes = []
@@ -832,6 +832,10 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=Mock(),
                 knowledge_index_factory=Mock(),
+                execution_ids={
+                    "a.txt": task_a["execution_id"],
+                    "b.txt": task_b["execution_id"],
+                },
                 analysis_filename_constraint_mode="scope_guard",
             )
 
@@ -846,6 +850,65 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 filename_constraint_modes,
                 ["scope_guard", "scope_guard"],
             )
+
+    def test_stale_file_worker_stops_before_external_side_effects(self):
+        """旧 execution 进入 worker 时不得下载、发布进度或创建外部 Port。"""
+        with workspace_tempdir() as tmp:
+            file_name = "stale.txt"
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": file_name,
+                        "filePath": "https://example.invalid/stale.txt",
+                    }
+                ],
+            }
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = task_service.create_file_task(file_name, request_payload)
+            task_service.mark_business_result(
+                "file",
+                file_name,
+                {"status": "2"},
+                status="2",
+                execution_id=first["execution_id"],
+            )
+            second = task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory()
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service.download_to_temp_file"
+                ) as download_mock,
+                patch(
+                    "app.services.llm_service.analysis_service._publish_progress"
+                ) as publish_mock,
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_task,
+                )
+
+                run_file_analysis_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                    execution_id=first["execution_id"],
+                )
+
+            current = task_service.get_task("file", file_name)
+
+        download_mock.assert_not_called()
+        publish_mock.assert_not_called()
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge_factory.ports), 0)
+        self.assertEqual(current["execution_id"], second["execution_id"])
+        self.assertEqual(current["status"], "1")
 
     @staticmethod
     def _stage9_model_response(file_name: str, architecture_id: int | str) -> str:
@@ -897,6 +960,9 @@ class LLMAnalysisServiceTests(unittest.TestCase):
     ) -> None:
         """在文件下载、归一化和翻译边界使用纯内存替身执行阶段 9 编排。"""
         file_name = request_payload["params"][0]["fileName"]
+        task = task_service.get_task("file", file_name)
+        if task is None:
+            raise AssertionError(f"测试任务不存在: {file_name}")
         local_file = str(Path(download_root) / file_name)
         with (
             patch(
@@ -927,6 +993,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=document_rag_factory,
                 knowledge_index_factory=knowledge_index_factory,
+                execution_id=task["execution_id"],
                 analysis_classification_mode="legacy",
             )
 
@@ -1623,12 +1690,13 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 ],
             }
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            accepted_tasks = []
             for params in request_payload["params"]:
-                task_service.create_file_task(
+                accepted_tasks.append(task_service.create_file_task(
                     params["fileName"],
                     {"businessType": "file", "params": [params]},
                     status="1" if params["fileName"] == file_names[0] else "0",
-                )
+                ))
             source = RagSource(document_ref="document:batch", text="批量来源")
             rag_factory = FakeDocumentRagFactory(
                 analyse_outcomes=[
@@ -1672,6 +1740,10 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     callback_timeout=5,
                     document_rag_factory=rag_factory,
                     knowledge_index_factory=knowledge_factory,
+                    execution_ids={
+                        task["business_key"]: task["execution_id"]
+                        for task in accepted_tasks
+                    },
                     analysis_classification_mode="legacy",
                 )
 

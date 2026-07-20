@@ -40,6 +40,10 @@ from app.services.llm_service.analysis_service import (
     run_file_analysis_task,
 )
 from app.services.llm_service.report_service import run_report_task
+from app.services.llm_service.task_service import (
+    TaskAdmissionBusyError,
+    TaskAlreadyProcessingError,
+)
 from app.services.llm_service.weaponry_service import (
     WeaponrySelectedDocumentAmbiguityError,
     WeaponrySelectedDocumentError,
@@ -365,19 +369,33 @@ def llm_analysis():
             )
             return jsonify({"error": "任务正在处理中"}), 409
 
-    tasks = []
-    for index, params in enumerate(params_list):
-        file_name = params["fileName"]
-        task = task_service.create_file_task(
-            file_name=file_name.strip(),
-            request_payload={"businessType": "file", "params": [params]},
-            status="1" if index == 0 else "0",
+    submissions = [
+        (
+            params["fileName"].strip(),
+            {"businessType": "file", "params": [params]},
+            "1" if index == 0 else "0",
         )
-        tasks.append(task)
+        for index, params in enumerate(params_list)
+    ]
+    try:
+        tasks = task_service.create_file_tasks_if_available(submissions)
+    except TaskAlreadyProcessingError as exc:
+        logger.warning(
+            "文件分析请求在原子受理阶段冲突: fileName=%s status=%s",
+            exc.business_key,
+            exc.status,
+        )
+        return jsonify({"error": "任务正在处理中"}), 409
+    except TaskAdmissionBusyError:
+        logger.warning("文件分析任务库持续繁忙，暂时无法受理", exc_info=True)
+        return jsonify({"error": "任务服务繁忙，请稍后重试"}), 503
+
+    for task in tasks:
+        file_name = task["business_key"]
         progress_hub.publish(
             "file",
-            file_name.strip(),
-            {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
+            file_name,
+            {"businessType": "file", "data": {"fileName": file_name, "progress": 0.0}},
         )
 
     _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
@@ -402,6 +420,12 @@ def llm_analysis():
             services.analysis_classification_config.data_standard_mode
         ),
     }
+    if len(tasks) == 1:
+        _task_kwargs["execution_id"] = tasks[0]["execution_id"]
+    else:
+        _task_kwargs["execution_ids"] = {
+            task["business_key"]: task["execution_id"] for task in tasks
+        }
     worker = threading.Thread(
         target=services.upload_task_limiter.run,
         args=(_task_fn,),

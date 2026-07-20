@@ -54,6 +54,59 @@ _COMPLETED_TASK_STATUSES = {
 """允许进入回调终态的现有业务完成状态。"""
 
 
+class TaskAlreadyProcessingError(RuntimeError):
+    """同一文件已有未结束执行时拒绝创建新任务。"""
+
+    def __init__(self, business_key: str, status: str):
+        self.business_key = business_key
+        self.status = status
+        super().__init__(f"任务正在处理中: {business_key}")
+
+
+class TaskAdmissionBusyError(RuntimeError):
+    """任务库在受理时持续繁忙，调用方可安全稍后重试。"""
+
+
+class TaskExecutionConflictError(RuntimeError):
+    """任务写入携带的执行身份已不是当前业务键对应的执行。"""
+
+    def __init__(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+    ):
+        self.business_type = business_type
+        self.business_key = business_key
+        self.execution_id = execution_id
+        super().__init__(
+            "任务执行身份已失效: "
+            f"business_type={business_type}, business_key={business_key}, "
+            f"execution_id={execution_id}"
+        )
+
+
+class TaskStateConflictError(RuntimeError):
+    """当前执行已处于不允许本次操作的业务状态。"""
+
+    def __init__(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+        status: str,
+    ):
+        self.business_type = business_type
+        self.business_key = business_key
+        self.execution_id = execution_id
+        self.status = status
+        super().__init__(
+            "任务状态不允许当前操作: "
+            f"business_type={business_type}, business_key={business_key}, "
+            f"execution_id={execution_id}, status={status}"
+        )
+
+
 ARCHITECTURE_RECALL_FAILURE_STAGES = frozenset(
     {
         "architecture_index",
@@ -941,8 +994,154 @@ class LLMTaskService:
             )
         return task
 
-    def create_file_task(self, file_name: str, request_payload: Dict[str, Any], status: str = "1") -> Dict[str, Any]:
-        return self._upsert_task("file", file_name, request_payload, status=status)
+    def create_file_tasks_if_available(
+        self,
+        file_tasks: Sequence[tuple[str, Dict[str, Any], str]],
+    ) -> list[Dict[str, Any]]:
+        """在一个写事务内原子受理一批文件任务。
+
+        任一业务键仍处于 ``0``/``1`` 时整批回滚，避免路由层“先查后写”的竞态让两个
+        请求同时获得 202。返回值是在同一事务内读取的各执行快照，调用方必须把其中的
+        ``execution_id`` 传给后台执行器。
+        """
+        if not file_tasks:
+            raise ValueError("file_tasks不能为空")
+
+        normalized_tasks: list[tuple[str, str, str, str, str]] = []
+        seen_file_names: set[str] = set()
+        for file_name, request_payload, status in file_tasks:
+            normalized_name = str(file_name or "").strip()
+            if not normalized_name:
+                raise ValueError("file_name不能为空")
+            if normalized_name in seen_file_names:
+                raise ValueError(f"file_tasks包含重复file_name: {normalized_name}")
+            if not isinstance(request_payload, dict):
+                raise TypeError("request_payload必须是对象")
+            normalized_status = str(status)
+            if normalized_status not in {"0", "1"}:
+                raise ValueError("新文件任务status只能是0或1")
+            seen_file_names.add(normalized_name)
+            now = _utc_now_iso()
+            normalized_tasks.append(
+                (
+                    normalized_name,
+                    self._serialize(request_payload),
+                    normalized_status,
+                    uuid4().hex,
+                    now,
+                )
+            )
+
+        snapshots: list[Dict[str, Any]] = []
+        try:
+            with self._connection() as conn:
+                # 在读 active 状态前先取得写保留锁，避免两个连接都通过检查后再竞争写入。
+                # JSON 序列化和 UUID 生成已经在锁外完成，锁内只保留有界短 SQL。
+                conn.execute("BEGIN IMMEDIATE")
+                for file_name, _, _, _, _ in normalized_tasks:
+                    active = conn.execute(
+                        """
+                        SELECT status
+                        FROM llm_tasks
+                        WHERE business_type = 'file' AND business_key = ?
+                          AND status IN ('0', '1')
+                        """,
+                        (file_name,),
+                    ).fetchone()
+                    if active is not None:
+                        raise TaskAlreadyProcessingError(
+                            file_name,
+                            str(active["status"]),
+                        )
+
+                for (
+                    file_name,
+                    serialized_payload,
+                    status,
+                    execution_id,
+                    now,
+                ) in normalized_tasks:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO llm_tasks (
+                            business_type, business_key, execution_id, request_payload,
+                            status, progress, message,
+                            result_payload, callback_status, callback_attempts,
+                            last_callback_error, created_at, updated_at
+                        )
+                        VALUES ('file', ?, ?, ?, ?, 0.0, '', NULL, 'pending', 0, '', ?, ?)
+                        ON CONFLICT(business_type, business_key) DO UPDATE SET
+                            request_payload = excluded.request_payload,
+                            execution_id = excluded.execution_id,
+                            status = excluded.status,
+                            progress = excluded.progress,
+                            message = excluded.message,
+                            result_payload = excluded.result_payload,
+                            callback_status = excluded.callback_status,
+                            callback_attempts = excluded.callback_attempts,
+                            last_callback_error = excluded.last_callback_error,
+                            created_at = excluded.created_at,
+                            updated_at = excluded.updated_at
+                        WHERE llm_tasks.status NOT IN ('0', '1')
+                        """,
+                        (
+                            file_name,
+                            execution_id,
+                            serialized_payload,
+                            status,
+                            now,
+                            now,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        active = conn.execute(
+                            """
+                            SELECT status
+                            FROM llm_tasks
+                            WHERE business_type = 'file' AND business_key = ?
+                            """,
+                            (file_name,),
+                        ).fetchone()
+                        raise TaskAlreadyProcessingError(
+                            file_name,
+                            str(active["status"]) if active is not None else "",
+                        )
+                    row = conn.execute(
+                        """
+                        SELECT business_type, business_key, execution_id, request_payload,
+                               status, progress, message, result_payload, callback_status,
+                               callback_attempts, last_callback_error, created_at, updated_at
+                        FROM llm_tasks
+                        WHERE business_type = 'file' AND business_key = ?
+                        """,
+                        (file_name,),
+                    ).fetchone()
+                    if row is None or row["execution_id"] != execution_id:
+                        raise RuntimeError("文件任务写入完成后未能读取本次执行快照")
+                    snapshots.append(self._row_to_task(row))
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise TaskAdmissionBusyError("任务库繁忙，请稍后重试") from exc
+            raise
+
+        for task in snapshots:
+            logger.info(
+                "文件任务已原子受理: business_key=%s execution_id=%s status=%s",
+                task["business_key"],
+                task["execution_id"],
+                task["status"],
+            )
+        return snapshots
+
+    def create_file_task(
+        self,
+        file_name: str,
+        request_payload: Dict[str, Any],
+        status: str = "1",
+    ) -> Dict[str, Any]:
+        return self.create_file_tasks_if_available(
+            ((file_name, request_payload, status),)
+        )[0]
 
     def create_report_task(self, report_id: int, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._upsert_task("report", str(report_id), request_payload, status="0")
@@ -977,6 +1176,41 @@ class LLMTaskService:
                 (business_type, business_key),
             ).fetchone()
         return self._row_to_task(row) if row else None
+
+    def require_current_execution(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+        *,
+        allowed_statuses: Sequence[str] | None = None,
+    ) -> Dict[str, Any]:
+        """确认业务键仍绑定指定执行，并可选限制当前状态。
+
+        本方法用于外部副作用前的执行身份门禁；它本身不替代后续数据库写入的 CAS。
+        文件任务在 ``0``/``1`` 状态期间不能被原子受理入口替换，因此该门禁与受理规则
+        共同保证远端 Session、永久知识库和回调不会由已失效 worker 发起。
+        """
+        expected_execution_id = str(execution_id or "").strip()
+        if not expected_execution_id:
+            raise ValueError("execution_id不能为空")
+        task = self.get_task(business_type, business_key)
+        if task is None or task["execution_id"] != expected_execution_id:
+            raise TaskExecutionConflictError(
+                business_type,
+                business_key,
+                expected_execution_id,
+            )
+        if allowed_statuses is not None:
+            normalized_statuses = {str(status) for status in allowed_statuses}
+            if task["status"] not in normalized_statuses:
+                raise TaskStateConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                    task["status"],
+                )
+        return task
 
     def get_tasks(self, business_type: str, business_keys: list[str]) -> list[Dict[str, Any]]:
         tasks: list[Dict[str, Any]] = []
@@ -2089,12 +2323,14 @@ class LLMTaskService:
         result_payload: Dict[str, Any],
         *,
         status: str,
+        execution_id: str | None = None,
     ) -> None:
         self.mark_business_result(
             business_type,
             business_key,
             result_payload=result_payload,
             status=status,
+            execution_id=execution_id,
         )
 
     def mark_business_result(
@@ -2105,21 +2341,61 @@ class LLMTaskService:
         *,
         status: str,
         message: str = "",
+        execution_id: str | None = None,
     ) -> None:
         now = _utc_now_iso()
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        active_clause = " AND status IN ('0', '1')" if expected_execution_id else ""
+        params: list[Any] = [
+            status,
+            1.0,
+            message,
+            self._serialize(result_payload),
+            now,
+            business_type,
+            business_key,
+        ]
+        if expected_execution_id:
+            params.append(expected_execution_id)
         with self._connection() as conn:
-            conn.execute(
-                """
+            cursor = conn.execute(
+                f"""
                 UPDATE llm_tasks
                 SET status = ?, progress = ?, message = ?, result_payload = ?, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
+                {execution_clause}
+                {active_clause}
                 """,
-                (status, 1.0, message, self._serialize(result_payload), now, business_type, business_key),
+                tuple(params),
             )
+            if expected_execution_id and cursor.rowcount != 1:
+                task = conn.execute(
+                    """
+                    SELECT execution_id, status
+                    FROM llm_tasks
+                    WHERE business_type = ? AND business_key = ?
+                    """,
+                    (business_type, business_key),
+                ).fetchone()
+                if task is None or task["execution_id"] != expected_execution_id:
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
+                raise TaskStateConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                    task["status"],
+                )
         logger.info(
-            "任务业务结果已标记: business_type=%s business_key=%s status=%s",
+            "任务业务结果已标记: business_type=%s business_key=%s "
+            "execution_id=%s status=%s",
             business_type,
             business_key,
+            expected_execution_id or "-",
             status,
         )
 
@@ -2131,23 +2407,52 @@ class LLMTaskService:
         progress: float,
         message: str,
         status: Optional[str] = None,
+        execution_id: str | None = None,
     ) -> None:
         now = _utc_now_iso()
         progress = normalize_progress(progress)
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        active_clause = " AND status IN ('0', '1')" if expected_execution_id else ""
         status_sql = "status = ?, " if status is not None else ""
         params: list[Any] = []
         if status is not None:
             params.append(status)
         params.extend([progress, message, now, business_type, business_key])
+        if expected_execution_id:
+            params.append(expected_execution_id)
         with self._connection() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 f"""
                 UPDATE llm_tasks
                 SET {status_sql}progress = ?, message = ?, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
+                {execution_clause}
+                {active_clause}
                 """,
                 tuple(params),
             )
+            if expected_execution_id and cursor.rowcount != 1:
+                task = conn.execute(
+                    """
+                    SELECT execution_id, status
+                    FROM llm_tasks
+                    WHERE business_type = ? AND business_key = ?
+                    """,
+                    (business_type, business_key),
+                ).fetchone()
+                if task is None or task["execution_id"] != expected_execution_id:
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
+                raise TaskStateConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                    task["status"],
+                )
 
     def _mark_callback_result(
         self,
@@ -2156,6 +2461,7 @@ class LLMTaskService:
         *,
         callback_status: str,
         error: str,
+        execution_id: str | None = None,
     ) -> None:
         """以比较并交换方式提交一次真实回调结果。
 
@@ -2175,6 +2481,18 @@ class LLMTaskService:
             raise ValueError(f"未知 business_type: {business_type}")
         status_placeholders = ", ".join("?" for _ in completed_statuses)
         now = _utc_now_iso()
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        update_params: list[Any] = [
+            callback_status,
+            normalized_error,
+            now,
+            business_type,
+            business_key,
+            *sorted(completed_statuses),
+        ]
+        if expected_execution_id:
+            update_params.append(expected_execution_id)
         with self._connection() as conn:
             cursor = conn.execute(
                 f"""
@@ -2184,26 +2502,29 @@ class LLMTaskService:
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'failed')
                   AND status IN ({status_placeholders})
+                  {execution_clause}
                 """,
-                (
-                    callback_status,
-                    normalized_error,
-                    now,
-                    business_type,
-                    business_key,
-                    *sorted(completed_statuses),
-                ),
+                tuple(update_params),
             )
             if cursor.rowcount != 1:
                 task = conn.execute(
                     """
-                    SELECT status, callback_status FROM llm_tasks
+                    SELECT execution_id, status, callback_status FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
                     (business_type, business_key),
                 ).fetchone()
                 if task is None:
                     raise ValueError("待更新回调结果的任务不存在")
+                if (
+                    expected_execution_id
+                    and task["execution_id"] != expected_execution_id
+                ):
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
                 if task["status"] not in completed_statuses:
                     raise ValueError("任务尚未完成，不能提交回调结果")
                 raise ValueError(
@@ -2211,13 +2532,21 @@ class LLMTaskService:
                     f"{task['callback_status']} -> {callback_status}"
                 )
 
-    def mark_callback_failed(self, business_type: str, business_key: str, error: str) -> None:
+    def mark_callback_failed(
+        self,
+        business_type: str,
+        business_key: str,
+        error: str,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
         """记录一次实际失败的回调，禁止覆盖成功或无需回调终态。"""
         self._mark_callback_result(
             business_type,
             business_key,
             callback_status="failed",
             error=error,
+            execution_id=execution_id,
         )
         logger.warning(
             "外部回调失败已记录: business_type=%s business_key=%s error_chars=%d",
@@ -2226,13 +2555,20 @@ class LLMTaskService:
             len(str(error or "")),
         )
 
-    def mark_callback_success(self, business_type: str, business_key: str) -> None:
+    def mark_callback_success(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
         """记录一次实际成功的回调，成功后状态不可再次改写。"""
         self._mark_callback_result(
             business_type,
             business_key,
             callback_status="success",
             error="",
+            execution_id=execution_id,
         )
         logger.info(
             "外部回调成功已记录: business_type=%s business_key=%s",
@@ -2240,7 +2576,13 @@ class LLMTaskService:
             business_key,
         )
 
-    def mark_callback_skipped(self, business_type: str, business_key: str) -> bool:
+    def mark_callback_skipped(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        execution_id: str | None = None,
+    ) -> bool:
         """把未配置回调的任务幂等标记为 ``skipped``。
 
         只有仍处于 ``pending`` 或已经是 ``skipped`` 的任务允许执行该转换。实际回调已经
@@ -2252,8 +2594,18 @@ class LLMTaskService:
         if not completed_statuses:
             raise ValueError(f"未知 business_type: {business_type}")
         status_placeholders = ", ".join("?" for _ in completed_statuses)
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
         transition_succeeded = False
         current_status = ""
+        update_params: list[Any] = [
+            now,
+            business_type,
+            business_key,
+            *sorted(completed_statuses),
+        ]
+        if expected_execution_id:
+            update_params.append(expected_execution_id)
         with self._connection() as conn:
             cursor = conn.execute(
                 f"""
@@ -2262,19 +2614,15 @@ class LLMTaskService:
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'skipped')
                   AND status IN ({status_placeholders})
+                  {execution_clause}
                 """,
-                (
-                    now,
-                    business_type,
-                    business_key,
-                    *sorted(completed_statuses),
-                ),
+                tuple(update_params),
             )
             transition_succeeded = cursor.rowcount == 1
             if not transition_succeeded:
                 task = conn.execute(
                     """
-                    SELECT status, callback_status
+                    SELECT execution_id, status, callback_status
                     FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
@@ -2284,6 +2632,15 @@ class LLMTaskService:
                     raise ValueError(
                         "待跳过回调的任务不存在: "
                         f"business_type={business_type}, business_key={business_key}"
+                    )
+                if (
+                    expected_execution_id
+                    and task["execution_id"] != expected_execution_id
+                ):
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
                     )
                 if task["status"] not in completed_statuses:
                     raise ValueError("任务尚未完成，不能标记 callback_status=skipped")

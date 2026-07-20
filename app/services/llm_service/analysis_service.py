@@ -71,7 +71,11 @@ from app.services.llm_service.architecture_recall_service import (
     build_document_architecture_signals,
     recall_architecture_candidates,
 )
-from app.services.llm_service.task_service import LLMTaskService
+from app.services.llm_service.task_service import (
+    LLMTaskService,
+    TaskExecutionConflictError,
+    TaskStateConflictError,
+)
 from app.services.llm_service.translation_service import get_translation_service
 
 
@@ -2769,18 +2773,29 @@ def _record_lease_resources(
 
 
 def _submit_callback(
-        *,
-        task_service: LLMTaskService,
-        file_name: str,
-        original_name: str,
-        callback_url: str,
-        callback_timeout: float,
-        callback_payload: Dict[str, Any],
+    *,
+    task_service: LLMTaskService,
+    file_name: str,
+    execution_id: str,
+    original_name: str,
+    callback_url: str,
+    callback_timeout: float,
+    callback_payload: Dict[str, Any],
 ) -> None:
     """在业务终态落库后执行可选回调，并精确推进回调状态机。"""
+    task_service.require_current_execution(
+        "file",
+        file_name,
+        execution_id,
+        allowed_statuses=("2", "3"),
+    )
     if not callback_url:
         try:
-            task_service.mark_callback_skipped("file", file_name)
+            task_service.mark_callback_skipped(
+                "file",
+                file_name,
+                execution_id=execution_id,
+            )
         except Exception:
             logger.critical(
                 "未配置回调地址，但无法将任务标记为无需回调: file_name=%s",
@@ -2803,7 +2818,12 @@ def _submit_callback(
     except Exception as exc:  # 回调异常不能改写已经确定的业务成功或失败结果。
         callback_error = _safe_task_error(exc, fallback="callback failed")
         try:
-            task_service.mark_callback_failed("file", file_name, callback_error)
+            task_service.mark_callback_failed(
+                "file",
+                file_name,
+                callback_error,
+                execution_id=execution_id,
+            )
         except Exception:
             logger.critical(
                 "文件分析回调发生异常后，无法将任务标记为回调失败: file_name=%s",
@@ -2818,10 +2838,19 @@ def _submit_callback(
         return
     try:
         if succeeded:
-            task_service.mark_callback_success("file", file_name)
+            task_service.mark_callback_success(
+                "file",
+                file_name,
+                execution_id=execution_id,
+            )
             logger.info("文件分析回调提交成功: file_name=%s", file_name)
         else:
-            task_service.mark_callback_failed("file", file_name, "callback failed")
+            task_service.mark_callback_failed(
+                "file",
+                file_name,
+                "callback failed",
+                execution_id=execution_id,
+            )
             logger.warning("文件分析回调提交失败: file_name=%s", file_name)
     except Exception:
         logger.critical(
@@ -2833,15 +2862,16 @@ def _submit_callback(
 
 
 def _finalize_file_failure(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        file_name: str,
-        original_name: str,
-        stage: str,
-        error_message: str,
-        callback_url: str,
-        callback_timeout: float,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    file_name: str,
+    execution_id: str,
+    original_name: str,
+    stage: str,
+    error_message: str,
+    callback_url: str,
+    callback_timeout: float,
 ) -> None:
     """以失败语义终结任务；任务库不可写时禁止绕过状态落库发送外部回调。"""
     callback_payload = build_file_callback_payload(file_name, {}, status="3")
@@ -2852,8 +2882,18 @@ def _finalize_file_failure(
             callback_payload,
             status="3",
             message=f"解析失败（{stage}）：{error_message}",
+            execution_id=execution_id,
         )
         _publish_progress(progress_hub, file_name, 1.0)
+    except (TaskExecutionConflictError, TaskStateConflictError):
+        logger.warning(
+            "文件分析失败终结被CAS拒绝，停止进度与回调: "
+            "file_name=%s execution_id=%s stage=%s",
+            file_name,
+            execution_id,
+            stage,
+        )
+        return
     except Exception:  # SQLite 整体不可写时，回调也不能对外宣称已有可追踪的业务终态。
         logger.critical(
             "文件分析失败状态无法持久化，停止回调: file_name=%s stage=%s",
@@ -2866,6 +2906,7 @@ def _finalize_file_failure(
         _submit_callback(
             task_service=task_service,
             file_name=file_name,
+            execution_id=execution_id,
             original_name=original_name,
             callback_url=callback_url,
             callback_timeout=callback_timeout,
@@ -3071,20 +3112,21 @@ def _store_prepared_analysis_document(
 
 
 def _execute_file_analysis_task(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        request_payload: Dict[str, Any],
-        download_root: str,
-        callback_url: str,
-        callback_timeout: float,
-        document_rag_factory: DocumentRagFactory,
-        knowledge_index_factory: KnowledgeIndexFactory,
-        analysis_classification_mode: str = "topk_two_stage",
-        analysis_filename_constraint_mode: str = (
-            ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
-        ),
-        analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    request_payload: Dict[str, Any],
+    download_root: str,
+    callback_url: str,
+    callback_timeout: float,
+    document_rag_factory: DocumentRagFactory,
+    knowledge_index_factory: KnowledgeIndexFactory,
+    execution_id: str,
+    analysis_classification_mode: str = "topk_two_stage",
+    analysis_filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    ),
+    analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
 ) -> None:
     """按审计硬前置契约执行单文件分析和永久知识库转交。
 
@@ -3122,10 +3164,15 @@ def _execute_file_analysis_task(
             file_name,
         )
     file_path = _as_text(params.get("filePath"))
-    task = task_service.get_task("file", file_name)
-    if task is None:
-        raise ValueError(f"文件分析任务不存在: {file_name}")
-    execution_id = _as_text(task.get("execution_id"))
+    execution_id = _as_text(execution_id)
+    if not execution_id:
+        raise ValueError("execution_id不能为空")
+    task_service.require_current_execution(
+        "file",
+        file_name,
+        execution_id,
+        allowed_statuses=("0", "1"),
+    )
     workflow_started_at = time.perf_counter()
     analysis_prompt = ""
     original_text = ""
@@ -3189,6 +3236,7 @@ def _execute_file_analysis_task(
             task_service=task_service,
             progress_hub=progress_hub,
             file_name=file_name,
+            execution_id=execution_id,
             original_name=original_name,
             stage=stage,
             error_message=error_message,
@@ -3203,7 +3251,12 @@ def _execute_file_analysis_task(
     )
     try:
         task_service.update_task_progress(
-            "file", file_name, progress=0.15, message="正在下载文件", status="1"
+            "file",
+            file_name,
+            progress=0.15,
+            message="正在下载文件",
+            status="1",
+            execution_id=execution_id,
         )
         _publish_progress(progress_hub, file_name, 0.15)
         downloaded_path = download_to_temp_file(
@@ -3213,7 +3266,11 @@ def _execute_file_analysis_task(
             timeout=60,
         )
         task_service.update_task_progress(
-            "file", file_name, progress=0.35, message="正在执行文档解析"
+            "file",
+            file_name,
+            progress=0.35,
+            message="正在执行文档解析",
+            execution_id=execution_id,
         )
         _publish_progress(progress_hub, file_name, 0.35)
 
@@ -3240,6 +3297,7 @@ def _execute_file_analysis_task(
             task_service=task_service,
             progress_hub=progress_hub,
             file_name=file_name,
+            execution_id=execution_id,
             original_name=original_name,
             stage="preparation",
             error_message=error_message,
@@ -3628,6 +3686,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="architecture_recall",
                 error_message=error_message,
@@ -3636,6 +3695,12 @@ def _execute_file_analysis_task(
             )
             return
 
+    task_service.require_current_execution(
+        "file",
+        file_name,
+        execution_id,
+        allowed_statuses=("0", "1"),
+    )
     with document_rag_factory.create() as document_rag:
         try:
             task_service.rag_resource_leases.begin(
@@ -3676,6 +3741,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="resource_lease",
                 error_message=lease_error,
@@ -4248,6 +4314,7 @@ def _execute_file_analysis_task(
                     task_service=task_service,
                     progress_hub=progress_hub,
                     file_name=file_name,
+                    execution_id=execution_id,
                     original_name=original_name,
                     stage="audit",
                     error_message=audit_error,
@@ -4276,6 +4343,7 @@ def _execute_file_analysis_task(
                     task_service=task_service,
                     progress_hub=progress_hub,
                     file_name=file_name,
+                    execution_id=execution_id,
                     original_name=original_name,
                     stage="resource_lease",
                     error_message=lease_error,
@@ -4296,6 +4364,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage=failure_stage,
                 error_message=error_message,
@@ -4367,6 +4436,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="audit",
                 error_message=audit_error,
@@ -4386,6 +4456,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="resource_lease",
                 error_message=lease_error,
@@ -4404,6 +4475,29 @@ def _execute_file_analysis_task(
 
         retain_document = False
         knowledge_store_succeeded = False
+        try:
+            task_service.require_current_execution(
+                "file",
+                file_name,
+                execution_id,
+                allowed_statuses=("0", "1"),
+            )
+        except (TaskExecutionConflictError, TaskStateConflictError):
+            logger.warning(
+                "永久知识库写入前执行身份已失效，清理本次RAG资源: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+            _close_audited_session(
+                task_service=task_service,
+                session=session,
+                interaction_id=audit_result.interaction_id,
+                execution_id=execution_id,
+                audited_trace=successful_trace,
+                retain_document=False,
+            )
+            return
         try:
             _store_prepared_analysis_document(
                 knowledge_index_factory=knowledge_index_factory,
@@ -4429,6 +4523,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="knowledge_index",
                 error_message=knowledge_error,
@@ -4447,6 +4542,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="knowledge_index_recovery",
                 error_message=knowledge_error,
@@ -4469,6 +4565,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="knowledge_index_unknown",
                 error_message=knowledge_error,
@@ -4488,7 +4585,12 @@ def _execute_file_analysis_task(
 
         try:
             task_service.update_task_progress(
-                "file", file_name, progress=0.65, message="正在翻译文档", status="1"
+                "file",
+                file_name,
+                progress=0.65,
+                message="正在翻译文档",
+                status="1",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 0.65)
             enriched_result = enrich_with_translations(
@@ -4497,7 +4599,12 @@ def _execute_file_analysis_task(
                 params.get("enableFullTranslation", True),
             )
             task_service.update_task_progress(
-                "file", file_name, progress=0.95, message="翻译完成，准备回调", status="1"
+                "file",
+                file_name,
+                progress=0.95,
+                message="翻译完成，准备回调",
+                status="1",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 0.95)
             callback_payload = build_file_callback_payload(
@@ -4511,11 +4618,13 @@ def _execute_file_analysis_task(
                 callback_payload,
                 status="2",
                 message="解析完成",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 1.0)
             _submit_callback(
                 task_service=task_service,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 callback_url=callback_url,
                 callback_timeout=callback_timeout,
@@ -4523,6 +4632,13 @@ def _execute_file_analysis_task(
             )
             logger.info(
                 "文件分析任务完成: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+        except (TaskExecutionConflictError, TaskStateConflictError):
+            logger.warning(
+                "文件分析知识库转交后执行身份已失效，不覆盖当前任务或发送回调: "
+                "file_name=%s execution_id=%s",
                 file_name,
                 execution_id,
             )
@@ -4537,6 +4653,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="post_transfer",
                 error_message=post_transfer_error,
@@ -4555,20 +4672,21 @@ def _execute_file_analysis_task(
 
 
 def run_file_analysis_task(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        request_payload: Dict[str, Any],
-        download_root: str,
-        callback_url: str,
-        callback_timeout: float,
-        document_rag_factory: DocumentRagFactory,
-        knowledge_index_factory: KnowledgeIndexFactory,
-        analysis_classification_mode: str = "topk_two_stage",
-        analysis_filename_constraint_mode: str = (
-            ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
-        ),
-        analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    request_payload: Dict[str, Any],
+    download_root: str,
+    callback_url: str,
+    callback_timeout: float,
+    document_rag_factory: DocumentRagFactory,
+    knowledge_index_factory: KnowledgeIndexFactory,
+    execution_id: str,
+    analysis_classification_mode: str = "topk_two_stage",
+    analysis_filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    ),
+    analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
 ) -> None:
     """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
 
@@ -4586,10 +4704,17 @@ def run_file_analysis_task(
             callback_timeout=callback_timeout,
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
+            execution_id=execution_id,
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
             analysis_data_standard_mode=analysis_data_standard_mode,
         )
+    except (TaskExecutionConflictError, TaskStateConflictError):
+        logger.warning(
+            "文件分析worker执行身份已失效，停止且不写入当前任务: execution_id=%s",
+            execution_id,
+        )
+        return
     except Exception as exc:
         params_list = request_payload.get("params", [])
         params = params_list[0] if params_list and isinstance(params_list[0], dict) else {}
@@ -4605,7 +4730,20 @@ def run_file_analysis_task(
         # 决策已经写入之后。最终异常边界必须补齐该审计终态，不能把一条未终结决策
         # 永久留在库中，也不能用笼统 orchestration 隐藏稳定领域阶段。
         if file_name:
-            task = task_service.get_task("file", file_name)
+            try:
+                task = task_service.require_current_execution(
+                    "file",
+                    file_name,
+                    execution_id,
+                )
+            except TaskExecutionConflictError:
+                logger.warning(
+                    "文件分析兜底检测到执行已被替换，停止终结新任务: "
+                    "file_name=%s execution_id=%s",
+                    file_name,
+                    execution_id,
+                )
+                return
             if task and _as_text(task.get("status")) in {"2", "3"}:
                 # 正常/失败业务终态已经提交后，Factory 退出阶段仅可能剩下本地
                 # Transport 关闭等资源告警。不得覆盖终态或再发送一份相反 callback。
@@ -4618,7 +4756,6 @@ def run_file_analysis_task(
                     exc_info=True,
                 )
                 return
-            execution_id = _as_text(task.get("execution_id")) if task else ""
             if execution_id:
                 try:
                     recall_audit = task_service.get_architecture_recall_decision(
@@ -4665,6 +4802,7 @@ def run_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage=failure_stage,
                 error_message=error_message,
@@ -4674,29 +4812,38 @@ def run_file_analysis_task(
 
 
 def run_file_analysis_batch_task(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        request_payload: Dict[str, Any],
-        download_root: str,
-        callback_url: str,
-        callback_timeout: float,
-        document_rag_factory: DocumentRagFactory,
-        knowledge_index_factory: KnowledgeIndexFactory,
-        analysis_classification_mode: str = "topk_two_stage",
-        analysis_filename_constraint_mode: str = (
-            ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
-        ),
-        analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    request_payload: Dict[str, Any],
+    download_root: str,
+    callback_url: str,
+    callback_timeout: float,
+    document_rag_factory: DocumentRagFactory,
+    knowledge_index_factory: KnowledgeIndexFactory,
+    execution_ids: Mapping[str, str],
+    analysis_classification_mode: str = "topk_two_stage",
+    analysis_filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    ),
+    analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
 ) -> None:
     """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
+    for params in params_list:
+        if not isinstance(params, dict):
+            continue
+        file_name = _as_text(params.get("fileName"))
+        if file_name and not _as_text(execution_ids.get(file_name)):
+            raise ValueError(f"批量文件任务缺少execution_id: {file_name}")
+
     for index, params in enumerate(params_list):
         if not isinstance(params, dict):
             continue
         file_name = _as_text(params.get("fileName"))
         if not file_name:
             continue
+        execution_id = _as_text(execution_ids[file_name])
         if index > 0:
             task_service.update_task_progress(
                 "file",
@@ -4704,6 +4851,7 @@ def run_file_analysis_batch_task(
                 progress=0.0,
                 message="准备开始解析",
                 status="1",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 0.0)
         run_file_analysis_task(
@@ -4715,6 +4863,7 @@ def run_file_analysis_batch_task(
             callback_timeout=callback_timeout,
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
+            execution_id=execution_id,
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
             analysis_data_standard_mode=analysis_data_standard_mode,
