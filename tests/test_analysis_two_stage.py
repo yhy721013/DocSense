@@ -1481,6 +1481,48 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(recall["returned_architecture_id"], 56)
         self.assertEqual(recall["returned_rank"], 4)
 
+    def test_scope_guard_non_jane_filename_does_not_force_cross_branch_choice(self):
+        """默认保护模式下，非 Jane 文件名不能作为单一证据硬覆盖模型结果。"""
+        with workspace_tempdir() as tmp:
+            file_name = "technical-upload.txt"
+            request = self._request(file_name, self._two_equipment_tree())
+            request["params"][0]["originalFileName"] = (
+                "Nimitz (CVN 68) class overview.pdf"
+            )
+            Path(tmp, file_name).write_text(
+                "普通技术资料\n正文讨论多个平台，没有 Jane 首页标记。",
+                encoding="utf-8",
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":516}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            _service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    (561, 516, 56, 515),
+                ),
+                filename_constraint_mode="scope_guard",
+            )
+
+        self.assertEqual("2", task["status"])
+        self.assertEqual(516, task["result_payload"]["data"]["architectureId"])
+        self.assertEqual(516, recall["returned_architecture_id"])
+        self.assertEqual(2, recall["returned_rank"])
+
     def test_unique_cvn78_filename_identifier_keeps_correct_visible_descendant(self):
         with workspace_tempdir() as tmp:
             file_name = "Gerald R Ford (CVN 78) class 14-Jul-2023.txt"

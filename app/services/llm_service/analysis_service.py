@@ -2540,6 +2540,21 @@ def _decide_topk_deterministic_architecture_constraint(
             tree_gap=resolution.tree_gap,
         )
 
+    if (
+        filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+    ):
+        # scope_guard 只允许经过正文首页识别和文件名交叉确认的 Jane 作用域约束。
+        # 非 Jane 文件没有第二证据源时，文件名仍可参与召回，但不得落回 legacy
+        # 的单源硬覆盖路径；需要旧行为的部署可显式选择 legacy。
+        return _ArchitectureConstraintDecision(
+            architecture_id,
+            architecture_id,
+            "no_constraint_insufficient_evidence",
+            None,
+            False,
+        )
+
     matched_parent_id = _unique_visible_equipment_identifier_parent(
         file_name=file_name,
         original_name=original_name,

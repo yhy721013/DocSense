@@ -687,7 +687,8 @@ class JaneScopeResolutionTests(unittest.TestCase):
 
         self.assertEqual(results, [101, 101])
 
-    def test_non_jane_document_keeps_legacy_filename_constraint(self) -> None:
+    def test_non_jane_scope_guard_does_not_fall_back_to_legacy_constraint(self) -> None:
+        """非 Jane 文件仅在显式 legacy 模式下允许文件名单源硬覆盖。"""
         profile = self._profile(
             "P-8A.pdf",
             "P-8A aircraft specifications without Jane's page metadata",
@@ -712,7 +713,7 @@ class JaneScopeResolutionTests(unittest.TestCase):
             results,
             [
                 (47, "legacy_identifier_parent"),
-                (47, "legacy_identifier_parent"),
+                (radar_detail, "no_constraint_insufficient_evidence"),
             ],
         )
 
