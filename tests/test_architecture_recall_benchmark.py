@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -12,7 +14,12 @@ from app.services.llm_service.architecture_recall_service import (
     build_document_architecture_signals,
     recall_architecture_candidates,
 )
-from scripts.benchmark_architecture_recall import load_architecture_nodes
+from scripts.benchmark_architecture_recall import (
+    BenchmarkCase,
+    load_architecture_nodes,
+    parse_args,
+    run_benchmark,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +81,43 @@ class ArchitectureRecallBenchmarkTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.nodes, cls.targets = _large_synthetic_tree()
         cls.index = build_architecture_tree_index(cls.nodes)
+
+    def _run_cli(
+        self,
+        cases: list[dict],
+        *extra_args: str,
+    ) -> subprocess.CompletedProcess[str]:
+        request_payload = {
+            "businessType": "file",
+            "params": [{"architectureList": self.nodes}],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tree_path = Path(temp_dir) / "request.json"
+            cases_path = Path(temp_dir) / "cases.json"
+            tree_path.write_text(
+                json.dumps(request_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            cases_path.write_text(
+                json.dumps({"cases": cases}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--tree-json",
+                    str(tree_path),
+                    "--cases-json",
+                    str(cases_path),
+                    *extra_args,
+                ],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
 
     def test_large_tree_recall_is_stable_bounded_and_hits_top64(self) -> None:
         signals = build_document_architecture_signals(
@@ -163,13 +207,171 @@ class ArchitectureRecallBenchmarkTests(unittest.TestCase):
         self.assertEqual(result["nodeCount"], len(self.nodes))
         self.assertEqual(result["caseCount"], 2)
         self.assertEqual(result["summary"]["recallAt64"], 1.0)
+        self.assertEqual(
+            result["summary"]["finalCandidateRecall"],
+            1.0,
+        )
         self.assertLessEqual(result["summary"]["maxCandidateCount"], 128)
         self.assertLessEqual(result["summary"]["maxPromptChars"], 32_000)
         for metrics in result["cases"]:
             self.assertEqual(len(metrics["queryDigest"]), 64)
             self.assertIsNotNone(metrics["goldRank"])
             self.assertEqual(metrics["recallAt64"], 1.0)
+            self.assertEqual(metrics["finalCandidateRecall"], 1.0)
             self.assertIn("elapsedMs", metrics)
+
+    def test_parent_gold_uses_final_candidate_metric_not_base_leaf_metric(self):
+        case = BenchmarkCase(
+            name="cvn78-parent",
+            filename="Gerald R Ford CVN 78.pdf",
+            original_filename="CVN-78.pdf",
+            title="Gerald R. Ford class",
+            headings=(),
+            identifiers=(),
+            body="CVN-78 aircraft carrier",
+            gold_ids=(10_000,),
+        )
+
+        result = run_benchmark(self.nodes, (case,))
+        metrics = result["cases"][0]
+
+        self.assertEqual(metrics["recallAt64"], 0.0)
+        self.assertEqual(metrics["finalCandidateRecall"], 1.0)
+        self.assertIsNone(metrics["goldRank"])
+        self.assertIsNotNone(metrics["goldCandidateRank"])
+        self.assertEqual(result["summary"]["recallAt64"], 0.0)
+        self.assertEqual(
+            result["summary"]["finalCandidateRecall"],
+            1.0,
+        )
+
+    def test_final_candidate_gate_controls_exit_code_and_keeps_output_bounded(
+        self,
+    ):
+        body_marker = "PRIVATE-QUALITY-GATE-BODY-MUST-NOT-BE-EMITTED"
+        cases = [
+            {
+                "name": "parent-hit",
+                "filename": "Gerald R Ford CVN 78.pdf",
+                "body": f"{body_marker} CVN-78 aircraft carrier",
+                "goldIds": [10_000],
+            },
+            {
+                "name": "intentional-miss",
+                "filename": "Gerald R Ford CVN 78.pdf",
+                "body": f"{body_marker} CVN-78 aircraft carrier",
+                "goldIds": [self.targets["TYPE-0849"]],
+            },
+        ]
+
+        passing = self._run_cli(
+            cases,
+            "--min-final-candidate-recall",
+            "0.5",
+        )
+        failing = self._run_cli(
+            cases,
+            "--min-final-candidate-recall",
+            "0.75",
+        )
+
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+        passing_result = json.loads(passing.stdout)
+        self.assertTrue(passing_result["qualityGate"]["passed"])
+        self.assertEqual(
+            passing_result["summary"]["finalCandidateRecall"],
+            0.5,
+        )
+        self.assertEqual(failing.returncode, 1, failing.stderr)
+        failing_result = json.loads(failing.stdout)
+        self.assertFalse(failing_result["qualityGate"]["passed"])
+        self.assertIn("质量门禁未通过", failing.stderr)
+        for output in (
+            passing.stdout,
+            passing.stderr,
+            failing.stdout,
+            failing.stderr,
+        ):
+            self.assertNotIn(body_marker, output)
+
+    def test_optional_base_leaf_gate_can_fail_when_final_parent_gate_passes(self):
+        completed = self._run_cli(
+            [
+                {
+                    "name": "parent-only",
+                    "filename": "Gerald R Ford CVN 78.pdf",
+                    "body": "CVN-78 aircraft carrier",
+                    "goldIds": [10_000],
+                }
+            ],
+            "--min-final-candidate-recall",
+            "1",
+            "--min-base-leaf-recall-at-64",
+            "0.1",
+        )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        result = json.loads(completed.stdout)
+        checks = result["qualityGate"]["checks"]
+        self.assertTrue(checks["finalCandidateRecall"]["passed"])
+        self.assertFalse(checks["baseLeafRecallAt64"]["passed"])
+
+    def test_enabled_gate_rejects_goldless_cases_without_body_leak(self):
+        body_marker = "PRIVATE-GOLDLESS-BODY-MUST-NOT-BE-EMITTED"
+        completed = self._run_cli(
+            [
+                {
+                    "name": "goldless",
+                    "filename": "CVN-78.pdf",
+                    "body": body_marker,
+                }
+            ],
+            "--min-final-candidate-recall",
+            "1",
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("每个 case 都必须提供 gold ID", completed.stderr)
+        self.assertNotIn(body_marker, completed.stderr)
+
+    def test_report_only_mode_keeps_goldless_case_compatibility(self):
+        completed = self._run_cli(
+            [
+                {
+                    "name": "goldless-report",
+                    "filename": "CVN-78.pdf",
+                    "body": "CVN-78 aircraft carrier",
+                }
+            ]
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["summary"]["goldCaseCount"], 0)
+        self.assertIsNone(result["summary"]["recallAt64"])
+        self.assertIsNone(
+            result["summary"]["finalCandidateRecall"]
+        )
+        self.assertNotIn("qualityGate", result)
+
+    def test_gate_thresholds_reject_non_finite_and_out_of_range_values(self):
+        for raw_value in ("nan", "inf", "-0.01", "1.01", "not-a-number"):
+            with self.subTest(raw_value=raw_value):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        parse_args(
+                            [
+                                "--tree-json",
+                                "unused.json",
+                                "--min-final-candidate-recall",
+                                raw_value,
+                            ]
+                        )
+
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("0 到 1", stderr.getvalue())
 
     def test_tree_loader_accepts_direct_node_array(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

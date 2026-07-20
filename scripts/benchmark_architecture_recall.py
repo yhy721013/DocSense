@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,6 +196,9 @@ def _case_metrics(
     ]
     has_gold = bool(case.gold_ids)
     gold_ids_found_at64 = sum(rank is not None for rank in gold_ranks_at64.values())
+    gold_ids_found_in_final_candidates = sum(
+        rank is not None for rank in gold_candidate_ranks.values()
+    )
 
     return {
         "name": case.name,
@@ -208,11 +212,25 @@ def _case_metrics(
         "goldRank": min(ranks_at64) if ranks_at64 else None,
         "goldCandidateRank": min(candidate_ranks) if candidate_ranks else None,
         "goldIdsFoundAt64": gold_ids_found_at64,
+        "goldIdsFoundInFinalCandidates": (
+            gold_ids_found_in_final_candidates
+        ),
         "goldCoverageAt64": (
             gold_ids_found_at64 / len(case.gold_ids) if has_gold else None
         ),
+        "goldCoverageInFinalCandidates": (
+            gold_ids_found_in_final_candidates / len(case.gold_ids)
+            if has_gold
+            else None
+        ),
         # 多个 gold ID 可表示等价的允许答案；命中任意一个即计该 case Recall@64。
         "recallAt64": (1.0 if ranks_at64 else 0.0) if has_gold else None,
+        # 最终模型候选允许包含可靠父节点，因此发布门禁应以该集合为主指标。
+        "finalCandidateRecall": (
+            (1.0 if candidate_ranks else 0.0)
+            if has_gold
+            else None
+        ),
     }
 
 
@@ -246,8 +264,16 @@ def run_benchmark(
 
     gold_cases = [metrics for metrics in case_metrics if metrics["recallAt64"] is not None]
     hit_cases = sum(metrics["recallAt64"] == 1.0 for metrics in gold_cases)
+    final_candidate_hit_cases = sum(
+        metrics["finalCandidateRecall"] == 1.0
+        for metrics in gold_cases
+    )
     gold_id_count = sum(len(metrics["goldIds"]) for metrics in gold_cases)
     found_gold_id_count = sum(metrics["goldIdsFoundAt64"] for metrics in gold_cases)
+    found_final_candidate_gold_id_count = sum(
+        metrics["goldIdsFoundInFinalCandidates"]
+        for metrics in gold_cases
+    )
 
     return {
         "treeFingerprint": index.fingerprint,
@@ -259,10 +285,26 @@ def run_benchmark(
             "goldCaseCount": len(gold_cases),
             "hitCaseCountAt64": hit_cases,
             "recallAt64": hit_cases / len(gold_cases) if gold_cases else None,
+            "hitCaseCountInFinalCandidates": (
+                final_candidate_hit_cases
+            ),
+            "finalCandidateRecall": (
+                final_candidate_hit_cases / len(gold_cases)
+                if gold_cases
+                else None
+            ),
             "goldIdCount": gold_id_count,
             "goldIdFoundCountAt64": found_gold_id_count,
+            "goldIdFoundCountInFinalCandidates": (
+                found_final_candidate_gold_id_count
+            ),
             "goldCoverageAt64": (
                 found_gold_id_count / gold_id_count if gold_id_count else None
+            ),
+            "goldCoverageInFinalCandidates": (
+                found_final_candidate_gold_id_count / gold_id_count
+                if gold_id_count
+                else None
             ),
             "maxCandidateCount": max(
                 metrics["candidateCount"] for metrics in case_metrics
@@ -272,6 +314,61 @@ def run_benchmark(
                 sum(metrics["elapsedMs"] for metrics in case_metrics), 3
             ),
         },
+    }
+
+
+def _unit_interval(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "阈值必须是 0 到 1 之间的有限数值"
+        ) from exc
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "阈值必须是 0 到 1 之间的有限数值"
+        )
+    return value
+
+
+def evaluate_quality_gate(
+    result: Mapping[str, Any],
+    *,
+    min_final_candidate_recall: float | None,
+    min_base_leaf_recall_at64: float | None,
+) -> dict[str, Any]:
+    """按显式阈值评估有 gold 的 benchmark 结果。"""
+
+    summary = result["summary"]
+    checks: dict[str, dict[str, Any]] = {}
+    if min_final_candidate_recall is not None:
+        actual = summary["finalCandidateRecall"]
+        checks["finalCandidateRecall"] = {
+            "minimum": min_final_candidate_recall,
+            "actual": actual,
+            "passed": (
+                actual is not None
+                and actual >= min_final_candidate_recall
+            ),
+        }
+    if min_base_leaf_recall_at64 is not None:
+        actual = summary["recallAt64"]
+        checks["baseLeafRecallAt64"] = {
+            "minimum": min_base_leaf_recall_at64,
+            "actual": actual,
+            "passed": (
+                actual is not None
+                and actual >= min_base_leaf_recall_at64
+            ),
+        }
+    return {
+        "enabled": bool(checks),
+        "passed": (
+            all(check["passed"] for check in checks.values())
+            if checks
+            else None
+        ),
+        "checks": checks,
     }
 
 
@@ -300,6 +397,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--body", default="")
     parser.add_argument("--gold-id", action="append", default=[])
     parser.add_argument(
+        "--min-final-candidate-recall",
+        type=_unit_interval,
+        help=(
+            "可选发布门禁：最终模型候选的 case recall 最低值；"
+            "启用后每个 case 都必须提供 gold ID。"
+        ),
+    )
+    parser.add_argument(
+        "--min-base-leaf-recall-at-64",
+        type=_unit_interval,
+        help=(
+            "可选诊断门禁：基础叶子 Recall@64 最低值；"
+            "启用后每个 case 都必须提供 gold ID。"
+        ),
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="缩进输出 JSON，便于人工阅读。",
@@ -316,7 +429,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.cases_json
             else (_single_case_from_args(args),)
         )
+        quality_gate_enabled = (
+            args.min_final_candidate_recall is not None
+            or args.min_base_leaf_recall_at_64 is not None
+        )
+        goldless_case_count = sum(not case.gold_ids for case in cases)
+        if quality_gate_enabled and goldless_case_count:
+            raise ValueError(
+                "启用质量门禁时每个 case 都必须提供 gold ID；"
+                f"当前缺少 {goldless_case_count} 项"
+            )
         result = run_benchmark(nodes, cases)
+        quality_gate = evaluate_quality_gate(
+            result,
+            min_final_candidate_recall=(
+                args.min_final_candidate_recall
+            ),
+            min_base_leaf_recall_at64=(
+                args.min_base_leaf_recall_at_64
+            ),
+        )
+        if quality_gate["enabled"]:
+            result["qualityGate"] = quality_gate
     except (OSError, TypeError, ValueError) as exc:
         sys.stderr.write(f"benchmark 失败: {exc}\n")
         return 2
@@ -330,6 +464,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         + "\n"
     )
+    if quality_gate["enabled"] and not quality_gate["passed"]:
+        failed_checks = [
+            (
+                f"{name}={check['actual']} < "
+                f"{check['minimum']}"
+            )
+            for name, check in quality_gate["checks"].items()
+            if not check["passed"]
+        ]
+        sys.stderr.write(
+            "benchmark 质量门禁未通过: "
+            + ", ".join(failed_checks)
+            + "\n"
+        )
+        return 1
     return 0
 
 

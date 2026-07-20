@@ -462,13 +462,16 @@ zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/chec
 zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
 ```
 
-领域召回 benchmark 可直接读取包含 `params[0].architectureList` 的请求 JSON；输出只包含 tree fingerprint、query digest、候选数、Prompt 字符数和 Recall@64 等有界统计，不输出正文：
+领域召回 benchmark 可直接读取包含 `params[0].architectureList` 的请求 JSON；输出只包含 tree fingerprint、query digest、候选数、Prompt 字符数和召回指标等有界统计，不输出正文。`finalCandidateRecall` 统计模型最终可见候选，能计入合同允许的可靠父节点，是发布门禁的主指标；`recallAt64` 只统计基础叶子 Top-64，保留为诊断指标：
 
 ```bash
 .venv/bin/python scripts/benchmark_architecture_recall.py \
   --tree-json /path/to/analysis-request-with-full-tree.json \
-  --cases-json /path/to/architecture-recall-cases.json
+  --cases-json /path/to/architecture-recall-cases.json \
+  --min-final-candidate-recall 1.0
 ```
+
+启用任一阈值后，每个 case 都必须提供 `goldIds` 或 `gold_ids`。如需同时约束基础叶子诊断指标，可增加 `--min-base-leaf-recall-at-64 0.95`。退出码 `0` 表示报告生成成功且门禁通过（或未启用门禁），`1` 表示指标未达门禁，`2` 表示输入或门禁配置非法；质量失败仍会输出有界 JSON 指标，便于定位排名，但不会回显正文。
 
 三文件真实 E2E 必须直接读取验收提供的 `文件解析领域树.json` 中 `.params[0].architectureList` 的完整节点内容。当前固定验收树为 6,822 个节点；构造多文件请求时须逐项保持节点原始顺序与字段内容，不得改用默认树、合成树、截断树或二次生成的节点。外部 fixture 的本机绝对路径和原始运行产物不提交到仓库。
 
