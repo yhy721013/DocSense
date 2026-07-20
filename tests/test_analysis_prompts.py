@@ -3,6 +3,12 @@ import unittest
 from types import SimpleNamespace
 
 from app.services.core.prompts import (
+    ANALYSIS_ENUM_FIELD_MAX_ITEMS,
+    ANALYSIS_ENUM_ITEM_MAX_CHARS,
+    ANALYSIS_KEYWORD_COUNT,
+    ANALYSIS_KEYWORD_MAX_CHARS,
+    ANALYSIS_RESPONSE_MAX_CHARS,
+    ANALYSIS_SUMMARY_MAX_CHARS,
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
     build_data_standard_classification_prompt,
@@ -222,6 +228,46 @@ class AnalysisPromptSplitTests(unittest.TestCase):
         self.assertNotIn("同样不得决定扩展字段", prompt)
         self.assertNotIn('"militaryName"', prompt)
         self.assertNotIn('"approvalDept"', prompt)
+
+    def test_analysis_prompts_bound_repeat_prone_fields_to_mapper_contract(self):
+        legacy_prompt = build_file_analysis_prompt({"fileName": "legacy.pdf"})
+        extraction_prompt = build_file_extraction_prompt(
+            {"fileName": "split.pdf"},
+            resolved_architecture_id=101,
+        )
+
+        for prompt in (legacy_prompt, extraction_prompt):
+            with self.subTest(prompt_kind=prompt.splitlines()[0]):
+                self.assertIn(
+                    f"keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个互不重复的关键词",
+                    prompt,
+                )
+                self.assertIn(
+                    f"每个关键词不超过 {ANALYSIS_KEYWORD_MAX_CHARS} 个字符",
+                    prompt,
+                )
+                self.assertIn(
+                    "associatedEquipment、relatedTechnology、equipmentModel",
+                    prompt,
+                )
+                self.assertIn(
+                    f"每个字段最多 {ANALYSIS_ENUM_FIELD_MAX_ITEMS} 个互不重复的条目",
+                    prompt,
+                )
+                self.assertIn(
+                    f"每个条目不超过 {ANALYSIS_ENUM_ITEM_MAX_CHARS} 个字符",
+                    prompt,
+                )
+                self.assertIn(
+                    f"summary 不超过 {ANALYSIS_SUMMARY_MAX_CHARS} 个字符",
+                    prompt,
+                )
+                self.assertIn(
+                    f"完整 JSON 对象不超过 {ANALYSIS_RESPONSE_MAX_CHARS} 个字符",
+                    prompt,
+                )
+                self.assertIn("禁止循环枚举或按编号规律补造实体", prompt)
+                self.assertNotIn("至少 10 个关键词", prompt)
 
     def test_extraction_standard_schema_is_controlled_only_by_boolean(self):
         params_with_standard_range = {

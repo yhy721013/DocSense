@@ -669,7 +669,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
         self.assertIn("候选包含“公开”则输出“公开”", prompt)
-        self.assertIn("由至少 10 个关键词构成", prompt)
+        self.assertIn("固定输出 10 个互不重复的关键词", prompt)
+        self.assertNotIn("至少 10 个关键词", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
 

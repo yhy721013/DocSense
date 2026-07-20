@@ -11,6 +11,40 @@ MAX_REPAIR_CONTEXT_CHARS = 20_000
 审计字段上限。该限制只截断修复上下文，不修改首次回答在 RagAttempt 中保存的原始证据。
 """
 
+ANALYSIS_KEYWORD_COUNT = 10
+"""文件分析 keyword 字段必须输出的去重关键词数量。"""
+
+ANALYSIS_KEYWORD_MAX_CHARS = 30
+"""文件分析单个关键词允许的最大字符数。"""
+
+ANALYSIS_ENUM_FIELD_MAX_ITEMS = 10
+"""装备、技术和型号等枚举型字符串字段允许的最大去重项数。"""
+
+ANALYSIS_ENUM_ITEM_MAX_CHARS = 50
+"""装备、技术和型号等枚举型字符串字段单项允许的最大字符数。"""
+
+ANALYSIS_SUMMARY_MAX_CHARS = 500
+"""文件分析摘要允许的最大字符数。"""
+
+ANALYSIS_RESPONSE_MAX_CHARS = 6_000
+"""文件分析结构化 JSON 回答建议遵守的整体字符上限。"""
+
+ANALYSIS_COMPACT_OUTPUT_RULES = (
+    "【输出长度与去重硬约束】\n"
+    f"1. keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个互不重复的关键词，"
+    f"每个关键词不超过 {ANALYSIS_KEYWORD_MAX_CHARS} 个字符；不得为凑数量重复、"
+    "循环改写或连续编号补造关键词。\n"
+    "2. associatedEquipment、relatedTechnology、equipmentModel 使用英文逗号分隔；"
+    f"每个字段最多 {ANALYSIS_ENUM_FIELD_MAX_ITEMS} 个互不重复的条目，每个条目不超过 "
+    f"{ANALYSIS_ENUM_ITEM_MAX_CHARS} 个字符；只保留文档有明确证据的主体实体，禁止循环"
+    "枚举或按编号规律补造实体。\n"
+    f"3. summary 不超过 {ANALYSIS_SUMMARY_MAX_CHARS} 个字符；documentOverview 继续遵守"
+    "不超过 1000 个字符的限制。任何字段都不得重复同一词项、实体、短语或句子。\n"
+    f"4. 完整 JSON 对象不超过 {ANALYSIS_RESPONSE_MAX_CHARS} 个字符。接近上限时优先压缩"
+    "自由文本和枚举字段，但必须保留完整 JSON 结构、闭合全部引号与括号，并在对象结束后"
+    "立即停止输出。\n"
+)
+
 
 ARCHITECTURE_CLASSIFICATION_RULES = (
     "【领域分类判定规则】\n"
@@ -428,6 +462,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + ARCHITECTURE_CLASSIFICATION_RULES
         + SOURCE_SCORE_RULES
         + SOURCE_FIELD_RULES
+        + ANALYSIS_COMPACT_OUTPUT_RULES
         + "输出 JSON 必须严格匹配以下结构：\n"
         + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
         + _format_architecture_options(ranges["architectureList"])
@@ -439,7 +474,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：密级、资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + data_standard_priority
-        + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；优先依据文档开头内容判断，文档没有密级/保密说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value。keyword：文档中提到的关键信息或主题，由至少 10 个关键词构成，关键词需要涵盖文章中提到的内容，按照占比从高到低排列；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
+        + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；优先依据文档开头内容判断，文档没有密级/保密说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value。keyword：文档中提到的关键信息或主题，固定输出 10 个互不重复的关键词并按占比从高到低排列，单项长度遵守上方硬约束；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/security/format 是否都为候选 value 或空字符串；security 缺少文档开头密级说明时是否已按默认规则输出（候选包含“公开”则输出“公开”，否则输出候选第一个 value）；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
         + "2. architectureId 是否为有文档证据支持的候选叶子 id；不得使用候选外 ID 或默认值。\n"
@@ -569,6 +604,7 @@ def build_file_extraction_prompt(
         "13. fileDataItem.language 表示原始资料正文的主要语种，不是回答、摘要、翻译结果、文件名或提示词的语言。\n"
         + SOURCE_SCORE_RULES
         + SOURCE_FIELD_RULES
+        + ANALYSIS_COMPACT_OUTPUT_RULES
         + "输出 JSON 必须严格匹配以下结构：\n"
         + f"{json.dumps(schema, ensure_ascii=False, indent=2)}\n"
         + _format_options("国家候选", ranges["country"])
@@ -579,7 +615,7 @@ def build_file_extraction_prompt(
         + "【抽取优先级】请优先抽取：密级、资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + standard_priority
         + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；"
-        "keyword：由至少 10 个关键词构成并按占比从高到低排列；score：资料来源权威性评分；"
+        "keyword：固定输出 10 个互不重复的关键词并按占比从高到低排列，单项长度遵守上方硬约束；score：资料来源权威性评分；"
         "source：具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；"
         "dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         "【输出前自检清单】\n"

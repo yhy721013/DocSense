@@ -56,6 +56,8 @@ from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtm
 from app.services.utils.word_extractor import extract_text_from_word
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
+    ANALYSIS_KEYWORD_COUNT,
+    ANALYSIS_KEYWORD_MAX_CHARS,
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
     build_data_standard_classification_prompt,
@@ -142,8 +144,8 @@ SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
 DATA_STANDARD_LEAF_NAMES = frozenset(
     {"建模与仿真", "军用软件", "目标特性", "术语与定义", "通用要求", "元数据"}
 )
-MAX_KEYWORD_COUNT = 10
-MAX_KEYWORD_LENGTH = 30
+MAX_KEYWORD_COUNT = ANALYSIS_KEYWORD_COUNT
+MAX_KEYWORD_LENGTH = ANALYSIS_KEYWORD_MAX_CHARS
 DATA_STANDARD_FIELD_ALIASES = {
     "militaryName": ("militaryName", "国军标名称", "标准名称"),
     "num": ("num", "编号", "标准编号", "国军标编号", "fileNo", "文件编号"),
