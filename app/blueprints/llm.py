@@ -49,6 +49,7 @@ from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.task_service import (
     TaskAdmissionBusyError,
     TaskAlreadyProcessingError,
+    file_task_admission_block_reason,
 )
 from app.services.llm_service.weaponry_service import (
     WeaponrySelectedDocumentAmbiguityError,
@@ -467,13 +468,22 @@ def llm_analysis():
     for params in params_list:
         normalized_name = params["fileName"].strip()
         existing_task = task_service.get_task("file", normalized_name)
-        if existing_task and existing_task["status"] in {"0", "1"}:
+        block_reason = file_task_admission_block_reason(existing_task)
+        if block_reason:
+            error_message = (
+                "上一次任务回调尚未结束"
+                if block_reason == "callback_pending"
+                else "任务正在处理中"
+            )
             logger.warning(
-                "文件分析请求被拒绝: 任务正在处理中 fileName=%s status=%s",
+                "文件分析请求被拒绝: %s fileName=%s status=%s "
+                "callback_status=%s",
+                error_message,
                 normalized_name,
                 existing_task["status"],
+                existing_task["callback_status"],
             )
-            return jsonify({"error": "任务正在处理中"}), 409
+            return jsonify({"error": error_message}), 409
 
     submissions = [
         (
@@ -486,12 +496,20 @@ def llm_analysis():
     try:
         tasks = task_service.create_file_tasks_if_available(submissions)
     except TaskAlreadyProcessingError as exc:
+        error_message = (
+            "上一次任务回调尚未结束"
+            if exc.reason == "callback_pending"
+            else "任务正在处理中"
+        )
         logger.warning(
-            "文件分析请求在原子受理阶段冲突: fileName=%s status=%s",
+            "文件分析请求在原子受理阶段冲突: %s fileName=%s "
+            "status=%s callback_status=%s",
+            error_message,
             exc.business_key,
             exc.status,
+            exc.callback_status,
         )
-        return jsonify({"error": "任务正在处理中"}), 409
+        return jsonify({"error": error_message}), 409
     except TaskAdmissionBusyError:
         logger.warning("文件分析任务库持续繁忙，暂时无法受理", exc_info=True)
         return jsonify({"error": "任务服务繁忙，请稍后重试"}), 503

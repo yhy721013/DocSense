@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 from uuid import uuid4
 
@@ -53,14 +54,82 @@ _COMPLETED_TASK_STATUSES = {
 }
 """允许进入回调终态的现有业务完成状态。"""
 
+_ACTIVE_FILE_TASK_STATUSES = frozenset({"0", "1"})
+_FILE_CALLBACK_HANDOFF_STATUS = "pending"
+_MIN_CALLBACK_DELIVERY_LEASE_SECONDS = 60.0
+_MAX_CALLBACK_DELIVERY_LEASE_SECONDS = 7 * 24 * 60 * 60.0
+
+
+def _callback_delivery_lease_seconds(timeout: Any) -> float:
+    """根据 HTTP timeout 生成有余量且有硬上限的回调租约。"""
+    try:
+        normalized_timeout = float(timeout)
+    except (TypeError, ValueError):
+        normalized_timeout = 0.0
+    if not math.isfinite(normalized_timeout) or normalized_timeout < 0:
+        normalized_timeout = 0.0
+    return min(
+        _MAX_CALLBACK_DELIVERY_LEASE_SECONDS,
+        max(
+            _MIN_CALLBACK_DELIVERY_LEASE_SECONDS,
+            normalized_timeout * 4 + 60.0,
+        ),
+    )
+
+
+def file_task_admission_block_reason(
+    task: Mapping[str, Any] | None,
+    *,
+    callback_delivery_in_flight: bool = False,
+) -> str | None:
+    """返回同名文件任务暂不可重跑的稳定原因。
+
+    文件业务结果与外部回调状态分两次提交。终态任务仍为 ``pending`` 时，旧 worker
+    可能尚未发起回调、正在执行 HTTP，或刚完成 HTTP 尚未提交回调结果；此时覆盖单行
+    任务记录会让旧执行丢失回调或无法记录已送达结果。因此该短暂交接窗口与处理中状态
+    一样必须阻止新执行受理。``failed`` 已代表至少完成过一次真实尝试，平时仍保留显式
+    重跑能力；但其补发租约有效期间也必须阻断，避免旧补发写坏新执行。
+    """
+    if not task:
+        return None
+    status = str(task.get("status") or "")
+    if status in _ACTIVE_FILE_TASK_STATUSES:
+        return "processing"
+    callback_status = str(task.get("callback_status") or "")
+    if callback_status == _FILE_CALLBACK_HANDOFF_STATUS:
+        return "callback_pending"
+    if callback_delivery_in_flight:
+        return "callback_pending"
+    return None
+
 
 class TaskAlreadyProcessingError(RuntimeError):
-    """同一文件已有未结束执行时拒绝创建新任务。"""
+    """同一文件已有活动执行或尚未完成首次回调交接。"""
 
-    def __init__(self, business_key: str, status: str):
+    def __init__(
+        self,
+        business_key: str,
+        status: str,
+        callback_status: str = "",
+        *,
+        callback_delivery_in_flight: bool = False,
+    ):
         self.business_key = business_key
         self.status = status
-        super().__init__(f"任务正在处理中: {business_key}")
+        self.callback_status = callback_status
+        self.reason = file_task_admission_block_reason(
+            {
+                "status": status,
+                "callback_status": callback_status,
+            },
+            callback_delivery_in_flight=callback_delivery_in_flight,
+        )
+        message = (
+            "上一次任务回调尚未结束"
+            if self.reason == "callback_pending"
+            else "任务正在处理中"
+        )
+        super().__init__(f"{message}: {business_key}")
 
 
 class TaskAdmissionBusyError(RuntimeError):
@@ -245,6 +314,8 @@ class LLMTaskService:
                     callback_status TEXT NOT NULL DEFAULT 'pending',
                     callback_attempts INTEGER NOT NULL DEFAULT 0,
                     last_callback_error TEXT NOT NULL DEFAULT '',
+                    callback_claim_id TEXT NOT NULL DEFAULT '',
+                    callback_claim_expires_at REAL NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (business_type, business_key)
@@ -287,6 +358,18 @@ class LLMTaskService:
                 table="llm_tasks",
                 column="execution_id",
                 definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_tasks",
+                column="callback_claim_id",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_tasks",
+                column="callback_claim_expires_at",
+                definition="REAL NOT NULL DEFAULT 0",
             )
             conn.execute(
                 """
@@ -923,9 +1006,10 @@ class LLMTaskService:
                     business_type, business_key, execution_id, request_payload,
                     status, progress, message,
                     result_payload, callback_status, callback_attempts, last_callback_error,
+                    callback_claim_id, callback_claim_expires_at,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_type, business_key) DO UPDATE SET
                     request_payload = excluded.request_payload,
                     execution_id = excluded.execution_id,
@@ -936,6 +1020,8 @@ class LLMTaskService:
                     callback_status = excluded.callback_status,
                     callback_attempts = excluded.callback_attempts,
                     last_callback_error = excluded.last_callback_error,
+                    callback_claim_id = excluded.callback_claim_id,
+                    callback_claim_expires_at = excluded.callback_claim_expires_at,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at
                 """,
@@ -951,6 +1037,8 @@ class LLMTaskService:
                     "pending",
                     0,
                     "",
+                    "",
+                    0.0,
                     now,
                     now,
                 ),
@@ -1000,9 +1088,11 @@ class LLMTaskService:
     ) -> list[Dict[str, Any]]:
         """在一个写事务内原子受理一批文件任务。
 
-        任一业务键仍处于 ``0``/``1`` 时整批回滚，避免路由层“先查后写”的竞态让两个
-        请求同时获得 202。返回值是在同一事务内读取的各执行快照，调用方必须把其中的
-        ``execution_id`` 传给后台执行器。
+        任一业务键仍处于 ``0``/``1``、业务终态的首次回调仍为 ``pending``，或失败
+        回调正在执行补发租约时整批回滚。前者避免路由层“先查后写”的竞态让两个请求
+        同时获得 202；后两者保护外部回调交接窗口，避免新执行覆盖正在发送的旧结果。
+        返回值是在同一事务内读取的各执行快照，调用方必须把其中的 ``execution_id``
+        传给后台执行器。
         """
         if not file_tasks:
             raise ValueError("file_tasks不能为空")
@@ -1033,25 +1123,43 @@ class LLMTaskService:
             )
 
         snapshots: list[Dict[str, Any]] = []
+        admission_epoch = time.time()
         try:
             with self._connection() as conn:
                 # 在读 active 状态前先取得写保留锁，避免两个连接都通过检查后再竞争写入。
                 # JSON 序列化和 UUID 生成已经在锁外完成，锁内只保留有界短 SQL。
                 conn.execute("BEGIN IMMEDIATE")
                 for file_name, _, _, _, _ in normalized_tasks:
-                    active = conn.execute(
+                    blocking = conn.execute(
                         """
-                        SELECT status
+                        SELECT status, callback_status, callback_claim_id,
+                               callback_claim_expires_at
                         FROM llm_tasks
                         WHERE business_type = 'file' AND business_key = ?
-                          AND status IN ('0', '1')
+                          AND (
+                              status IN ('0', '1')
+                              OR callback_status = 'pending'
+                              OR (
+                                  callback_claim_id <> ''
+                                  AND callback_claim_expires_at > ?
+                              )
+                          )
                         """,
-                        (file_name,),
+                        (file_name, admission_epoch),
                     ).fetchone()
-                    if active is not None:
+                    if blocking is not None:
                         raise TaskAlreadyProcessingError(
                             file_name,
-                            str(active["status"]),
+                            str(blocking["status"]),
+                            str(blocking["callback_status"]),
+                            callback_delivery_in_flight=(
+                                bool(blocking["callback_claim_id"])
+                                and float(
+                                    blocking["callback_claim_expires_at"]
+                                    or 0
+                                )
+                                > admission_epoch
+                            ),
                         )
 
                 for (
@@ -1067,9 +1175,13 @@ class LLMTaskService:
                             business_type, business_key, execution_id, request_payload,
                             status, progress, message,
                             result_payload, callback_status, callback_attempts,
-                            last_callback_error, created_at, updated_at
+                            last_callback_error, callback_claim_id,
+                            callback_claim_expires_at, created_at, updated_at
                         )
-                        VALUES ('file', ?, ?, ?, ?, 0.0, '', NULL, 'pending', 0, '', ?, ?)
+                        VALUES (
+                            'file', ?, ?, ?, ?, 0.0, '', NULL, 'pending', 0, '',
+                            '', 0, ?, ?
+                        )
                         ON CONFLICT(business_type, business_key) DO UPDATE SET
                             request_payload = excluded.request_payload,
                             execution_id = excluded.execution_id,
@@ -1080,9 +1192,18 @@ class LLMTaskService:
                             callback_status = excluded.callback_status,
                             callback_attempts = excluded.callback_attempts,
                             last_callback_error = excluded.last_callback_error,
+                            callback_claim_id = excluded.callback_claim_id,
+                            callback_claim_expires_at =
+                                excluded.callback_claim_expires_at,
                             created_at = excluded.created_at,
                             updated_at = excluded.updated_at
-                        WHERE llm_tasks.status NOT IN ('0', '1')
+                        WHERE llm_tasks.status IN ('2', '3')
+                          AND llm_tasks.callback_status
+                              IN ('success', 'failed', 'skipped')
+                          AND (
+                              llm_tasks.callback_claim_id = ''
+                              OR llm_tasks.callback_claim_expires_at <= ?
+                          )
                         """,
                         (
                             file_name,
@@ -1091,12 +1212,14 @@ class LLMTaskService:
                             status,
                             now,
                             now,
+                            admission_epoch,
                         ),
                     )
                     if cursor.rowcount != 1:
-                        active = conn.execute(
+                        blocking = conn.execute(
                             """
-                            SELECT status
+                            SELECT status, callback_status, callback_claim_id,
+                                   callback_claim_expires_at
                             FROM llm_tasks
                             WHERE business_type = 'file' AND business_key = ?
                             """,
@@ -1104,7 +1227,25 @@ class LLMTaskService:
                         ).fetchone()
                         raise TaskAlreadyProcessingError(
                             file_name,
-                            str(active["status"]) if active is not None else "",
+                            (
+                                str(blocking["status"])
+                                if blocking is not None
+                                else ""
+                            ),
+                            (
+                                str(blocking["callback_status"])
+                                if blocking is not None
+                                else ""
+                            ),
+                            callback_delivery_in_flight=(
+                                blocking is not None
+                                and bool(blocking["callback_claim_id"])
+                                and float(
+                                    blocking["callback_claim_expires_at"]
+                                    or 0
+                                )
+                                > admission_epoch
+                            ),
                         )
                     row = conn.execute(
                         """
@@ -2454,6 +2595,131 @@ class LLMTaskService:
                     task["status"],
                 )
 
+    def claim_callback_delivery(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        timeout: float,
+        execution_id: str | None = None,
+    ) -> tuple[str, Dict[str, Any]] | None:
+        """原子领取一次文件终态回调发送租约并返回冻结任务快照。
+
+        ``pending`` 首次发送和 ``failed`` 补发共用同一租约。文件任务受理会在租约有效期
+        内拒绝同名重跑；回调结果写入还必须同时匹配 ``execution_id`` 与租约 ID，从而
+        防止旧补发把新执行误标为成功或失败。租约超过 HTTP timeout 的保守余量后允许
+        接管，避免进程崩溃把任务永久锁死。
+        """
+        if business_type != "file":
+            raise ValueError("回调发送租约当前仅支持file任务")
+        completed_statuses = _COMPLETED_TASK_STATUSES.get(business_type)
+        if not completed_statuses:
+            raise ValueError(f"未知 business_type: {business_type}")
+        expected_execution_id = str(execution_id or "").strip()
+        now_epoch = time.time()
+        now = _utc_now_iso()
+        claim_id = uuid4().hex
+        claim_expires_at = (
+            now_epoch + _callback_delivery_lease_seconds(timeout)
+        )
+        status_placeholders = ", ".join("?" for _ in completed_statuses)
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message, result_payload, callback_status,
+                       callback_attempts, last_callback_error, callback_claim_id,
+                       callback_claim_expires_at, created_at, updated_at
+                FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (business_type, business_key),
+            ).fetchone()
+            if current is None:
+                return None
+            current_execution_id = str(current["execution_id"] or "")
+            if (
+                expected_execution_id
+                and current_execution_id != expected_execution_id
+            ):
+                raise TaskExecutionConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                )
+            if (
+                current["status"] not in completed_statuses
+                or current["callback_status"] not in {"pending", "failed"}
+            ):
+                return None
+            current_claim_id = str(current["callback_claim_id"] or "")
+            current_claim_expires_at = float(
+                current["callback_claim_expires_at"] or 0
+            )
+            if (
+                current_claim_id
+                and current_claim_expires_at > now_epoch
+            ):
+                return None
+
+            cursor = conn.execute(
+                f"""
+                UPDATE llm_tasks
+                SET callback_claim_id = ?, callback_claim_expires_at = ?,
+                    updated_at = ?
+                WHERE business_type = ? AND business_key = ?
+                  AND execution_id = ?
+                  AND status IN ({status_placeholders})
+                  AND callback_status IN ('pending', 'failed')
+                  AND (
+                      callback_claim_id = ''
+                      OR callback_claim_expires_at <= ?
+                  )
+                """,
+                (
+                    claim_id,
+                    claim_expires_at,
+                    now,
+                    business_type,
+                    business_key,
+                    current_execution_id,
+                    *sorted(completed_statuses),
+                    now_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = conn.execute(
+                """
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message, result_payload, callback_status,
+                       callback_attempts, last_callback_error, callback_claim_id,
+                       callback_claim_expires_at, created_at, updated_at
+                FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (business_type, business_key),
+            ).fetchone()
+            if (
+                claimed is None
+                or claimed["execution_id"] != current_execution_id
+                or claimed["callback_claim_id"] != claim_id
+            ):
+                raise RuntimeError("回调发送租约领取后无法读取一致快照")
+            task = self._row_to_task(claimed)
+
+        logger.info(
+            "回调发送租约已领取: business_type=%s business_key=%s "
+            "execution_id=%s lease_seconds=%.3f",
+            business_type,
+            business_key,
+            current_execution_id,
+            claim_expires_at - now_epoch,
+        )
+        return claim_id, task
+
     def _mark_callback_result(
         self,
         business_type: str,
@@ -2462,6 +2728,7 @@ class LLMTaskService:
         callback_status: str,
         error: str,
         execution_id: str | None = None,
+        claim_id: str | None = None,
     ) -> None:
         """以比较并交换方式提交一次真实回调结果。
 
@@ -2483,6 +2750,12 @@ class LLMTaskService:
         now = _utc_now_iso()
         expected_execution_id = str(execution_id or "").strip()
         execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        expected_claim_id = str(claim_id or "").strip()
+        claim_clause = (
+            " AND callback_claim_id = ?"
+            if expected_claim_id
+            else " AND callback_claim_id = ''"
+        )
         update_params: list[Any] = [
             callback_status,
             normalized_error,
@@ -2493,23 +2766,29 @@ class LLMTaskService:
         ]
         if expected_execution_id:
             update_params.append(expected_execution_id)
+        if expected_claim_id:
+            update_params.append(expected_claim_id)
         with self._connection() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE llm_tasks
                 SET callback_status = ?, callback_attempts = callback_attempts + 1,
-                    last_callback_error = ?, updated_at = ?
+                    last_callback_error = ?, callback_claim_id = '',
+                    callback_claim_expires_at = 0, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'failed')
                   AND status IN ({status_placeholders})
                   {execution_clause}
+                  {claim_clause}
                 """,
                 tuple(update_params),
             )
             if cursor.rowcount != 1:
                 task = conn.execute(
                     """
-                    SELECT execution_id, status, callback_status FROM llm_tasks
+                    SELECT execution_id, status, callback_status,
+                           callback_claim_id
+                    FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
                     (business_type, business_key),
@@ -2525,6 +2804,11 @@ class LLMTaskService:
                         business_key,
                         expected_execution_id,
                     )
+                if (
+                    expected_claim_id
+                    and task["callback_claim_id"] != expected_claim_id
+                ):
+                    raise ValueError("回调发送租约已失效")
                 if task["status"] not in completed_statuses:
                     raise ValueError("任务尚未完成，不能提交回调结果")
                 raise ValueError(
@@ -2539,6 +2823,7 @@ class LLMTaskService:
         error: str,
         *,
         execution_id: str | None = None,
+        claim_id: str | None = None,
     ) -> None:
         """记录一次实际失败的回调，禁止覆盖成功或无需回调终态。"""
         self._mark_callback_result(
@@ -2547,6 +2832,7 @@ class LLMTaskService:
             callback_status="failed",
             error=error,
             execution_id=execution_id,
+            claim_id=claim_id,
         )
         logger.warning(
             "外部回调失败已记录: business_type=%s business_key=%s error_chars=%d",
@@ -2561,6 +2847,7 @@ class LLMTaskService:
         business_key: str,
         *,
         execution_id: str | None = None,
+        claim_id: str | None = None,
     ) -> None:
         """记录一次实际成功的回调，成功后状态不可再次改写。"""
         self._mark_callback_result(
@@ -2569,6 +2856,7 @@ class LLMTaskService:
             callback_status="success",
             error="",
             execution_id=execution_id,
+            claim_id=claim_id,
         )
         logger.info(
             "外部回调成功已记录: business_type=%s business_key=%s",
@@ -2596,13 +2884,16 @@ class LLMTaskService:
         status_placeholders = ", ".join("?" for _ in completed_statuses)
         expected_execution_id = str(execution_id or "").strip()
         execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        now_epoch = time.time()
         transition_succeeded = False
         current_status = ""
+        callback_delivery_in_flight = False
         update_params: list[Any] = [
             now,
             business_type,
             business_key,
             *sorted(completed_statuses),
+            now_epoch,
         ]
         if expected_execution_id:
             update_params.append(expected_execution_id)
@@ -2610,10 +2901,16 @@ class LLMTaskService:
             cursor = conn.execute(
                 f"""
                 UPDATE llm_tasks
-                SET callback_status = 'skipped', last_callback_error = '', updated_at = ?
+                SET callback_status = 'skipped', last_callback_error = '',
+                    callback_claim_id = '', callback_claim_expires_at = 0,
+                    updated_at = ?
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'skipped')
                   AND status IN ({status_placeholders})
+                  AND (
+                      callback_claim_id = ''
+                      OR callback_claim_expires_at <= ?
+                  )
                   {execution_clause}
                 """,
                 tuple(update_params),
@@ -2622,7 +2919,8 @@ class LLMTaskService:
             if not transition_succeeded:
                 task = conn.execute(
                     """
-                    SELECT execution_id, status, callback_status
+                    SELECT execution_id, status, callback_status,
+                           callback_claim_id, callback_claim_expires_at
                     FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
@@ -2645,6 +2943,19 @@ class LLMTaskService:
                 if task["status"] not in completed_statuses:
                     raise ValueError("任务尚未完成，不能标记 callback_status=skipped")
                 current_status = task["callback_status"]
+                callback_delivery_in_flight = (
+                    bool(task["callback_claim_id"])
+                    and float(task["callback_claim_expires_at"] or 0)
+                    > now_epoch
+                )
+                if callback_delivery_in_flight:
+                    logger.warning(
+                        "回调发送租约仍有效，暂不标记为 skipped: "
+                        "business_type=%s business_key=%s",
+                        business_type,
+                        business_key,
+                    )
+                    return False
                 if current_status not in {"success", "failed"}:
                     raise ValueError(f"未知 callback_status: {current_status}")
 
@@ -2724,14 +3035,48 @@ class LLMTaskService:
                 in _COMPLETED_TASK_STATUSES.get(business_type, frozenset())
                 and task["callback_status"] == "pending"
             ):
-                self.mark_callback_skipped(business_type, business_key)
-            return False
-        if not self.should_replay_callback(business_type, business_key):
+                self.mark_callback_skipped(
+                    business_type,
+                    business_key,
+                    execution_id=task["execution_id"],
+                )
             return False
 
-        task = self.get_task(business_type, business_key)
-        if not task:
+        if business_type != "file":
+            # report/weaponry 的首次回调目前尚未领取发送租约。只给其 check-task 补发
+            # 单边加租约，会让正在完成的首次回调无法提交真实结果，反而造成状态失真。
+            # 在这两条首次回调链路完成 execution + claim 一体化迁移前，保持既有行为。
+            if not self.should_replay_callback(business_type, business_key):
+                return False
+            task = self.get_task(business_type, business_key)
+            if not task:
+                return False
+            payload = task["result_payload"] or {}
+            callback_ok = post_callback_payload(
+                normalized_callback_url,
+                payload,
+                timeout=timeout,
+                callback_context=self._callback_context_for_task(task),
+            )
+            if callback_ok:
+                self.mark_callback_success(business_type, business_key)
+                return True
+            self.mark_callback_failed(
+                business_type,
+                business_key,
+                "callback replay failed",
+            )
             return False
+
+        claim = self.claim_callback_delivery(
+            business_type,
+            business_key,
+            timeout=timeout,
+        )
+        if claim is None:
+            return False
+        claim_id, task = claim
+        execution_id = task["execution_id"]
 
         payload = task["result_payload"] or {}
         callback_ok = post_callback_payload(
@@ -2741,8 +3086,19 @@ class LLMTaskService:
             callback_context=self._callback_context_for_task(task),
         )
         if callback_ok:
-            self.mark_callback_success(business_type, business_key)
+            self.mark_callback_success(
+                business_type,
+                business_key,
+                execution_id=execution_id,
+                claim_id=claim_id,
+            )
             return True
 
-        self.mark_callback_failed(business_type, business_key, "callback replay failed")
+        self.mark_callback_failed(
+            business_type,
+            business_key,
+            "callback replay failed",
+            execution_id=execution_id,
+            claim_id=claim_id,
+        )
         return False

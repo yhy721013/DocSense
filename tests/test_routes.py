@@ -148,6 +148,124 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
 
     @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_terminal_task_while_callback_is_pending(
+        self,
+        mock_thread,
+    ):
+        previous = self.task_service.create_file_task(
+            "callback-window.txt",
+            {"businessType": "file", "marker": "previous"},
+        )
+        self.task_service.mark_business_result(
+            "file",
+            "callback-window.txt",
+            {"status": "2", "marker": "previous-result"},
+            status="2",
+            execution_id=previous["execution_id"],
+        )
+
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "callback-window.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/"
+                            "callback-window.txt"
+                        ),
+                    }
+                ],
+            },
+        )
+
+        current = self.task_service.get_task(
+            "file",
+            "callback-window.txt",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["error"],
+            "上一次任务回调尚未结束",
+        )
+        self.assertEqual(
+            current["execution_id"],
+            previous["execution_id"],
+        )
+        self.assertEqual(
+            current["result_payload"]["marker"],
+            "previous-result",
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_failed_task_while_replay_lease_is_active(
+        self,
+        mock_thread,
+    ):
+        previous = self.task_service.create_file_task(
+            "callback-replay.txt",
+            {"businessType": "file", "marker": "previous"},
+        )
+        self.task_service.mark_business_result(
+            "file",
+            "callback-replay.txt",
+            {"status": "2", "marker": "previous-result"},
+            status="2",
+            execution_id=previous["execution_id"],
+        )
+        self.task_service.mark_callback_failed(
+            "file",
+            "callback-replay.txt",
+            "first callback failed",
+            execution_id=previous["execution_id"],
+        )
+        self.assertIsNotNone(
+            self.task_service.claim_callback_delivery(
+                "file",
+                "callback-replay.txt",
+                timeout=5,
+                execution_id=previous["execution_id"],
+            )
+        )
+
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "callback-replay.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/"
+                            "callback-replay.txt"
+                        ),
+                    }
+                ],
+            },
+        )
+
+        current = self.task_service.get_task(
+            "file",
+            "callback-replay.txt",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["error"],
+            "上一次任务回调尚未结束",
+        )
+        self.assertEqual(
+            current["execution_id"],
+            previous["execution_id"],
+        )
+        self.assertEqual(
+            current["result_payload"]["marker"],
+            "previous-result",
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
     def test_analysis_keeps_missing_null_and_empty_architecture_compatibility(
         self,
         mock_thread,

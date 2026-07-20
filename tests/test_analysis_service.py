@@ -954,6 +954,11 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 status="2",
                 execution_id=first["execution_id"],
             )
+            task_service.mark_callback_success(
+                "file",
+                file_name,
+                execution_id=first["execution_id"],
+            )
             second = task_service.create_file_task(file_name, request_payload)
             rag_factory = FakeDocumentRagFactory()
             knowledge_factory = FakeKnowledgeIndexFactory()

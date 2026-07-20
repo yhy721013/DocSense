@@ -2,7 +2,7 @@ import hashlib
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import patch
 
 from app.ports.rag import (
@@ -212,6 +212,287 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertEqual(current["execution_id"], active["execution_id"])
             self.assertEqual(current["request_payload"]["marker"], "active")
 
+    def test_batch_admission_rolls_back_on_terminal_pending_callback(self):
+        """批次命中回调交接窗口时不得提前创建其他文件任务。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            previous = service.create_file_task(
+                "callback-window.pdf",
+                {"businessType": "file", "marker": "previous"},
+            )
+            service.mark_business_result(
+                "file",
+                "callback-window.pdf",
+                {"status": "2"},
+                status="2",
+                execution_id=previous["execution_id"],
+            )
+
+            with self.assertRaises(TaskAlreadyProcessingError) as raised:
+                service.create_file_tasks_if_available(
+                    (
+                        ("new.pdf", {"businessType": "file"}, "1"),
+                        (
+                            "callback-window.pdf",
+                            {"businessType": "file"},
+                            "0",
+                        ),
+                    )
+                )
+
+            current = service.get_task("file", "callback-window.pdf")
+            self.assertEqual(raised.exception.reason, "callback_pending")
+            self.assertIsNone(service.get_task("file", "new.pdf"))
+            self.assertEqual(
+                current["execution_id"],
+                previous["execution_id"],
+            )
+
+    def test_terminal_pending_callback_blocks_replacement_until_handoff(self):
+        """业务终态的首次回调尚未结束时不得覆盖旧 execution 和结果。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = service.create_file_task(
+                "callback-window.pdf",
+                {"businessType": "file", "marker": "first"},
+            )
+            service.mark_business_result(
+                "file",
+                "callback-window.pdf",
+                {"status": "2", "marker": "first-result"},
+                status="2",
+                execution_id=first["execution_id"],
+            )
+
+            with self.assertRaises(TaskAlreadyProcessingError) as raised:
+                service.create_file_task(
+                    "callback-window.pdf",
+                    {"businessType": "file", "marker": "too-early"},
+                )
+
+            blocked = service.get_task("file", "callback-window.pdf")
+            self.assertEqual(raised.exception.reason, "callback_pending")
+            self.assertEqual(
+                blocked["execution_id"],
+                first["execution_id"],
+            )
+            self.assertEqual(
+                blocked["result_payload"]["marker"],
+                "first-result",
+            )
+            self.assertEqual(blocked["callback_status"], "pending")
+
+            service.mark_callback_success(
+                "file",
+                "callback-window.pdf",
+                execution_id=first["execution_id"],
+            )
+            second = service.create_file_task(
+                "callback-window.pdf",
+                {"businessType": "file", "marker": "second"},
+            )
+
+        self.assertNotEqual(
+            first["execution_id"],
+            second["execution_id"],
+        )
+        self.assertEqual(second["request_payload"]["marker"], "second")
+
+    def test_terminal_failed_callback_still_allows_explicit_rerun(self):
+        """真实回调已失败过一次后仍允许重跑，避免长期故障造成永久 409。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = service.create_file_task(
+                "callback-failed.pdf",
+                {"businessType": "file", "marker": "first"},
+            )
+            service.mark_business_result(
+                "file",
+                "callback-failed.pdf",
+                {"status": "3"},
+                status="3",
+                execution_id=first["execution_id"],
+            )
+            service.mark_callback_failed(
+                "file",
+                "callback-failed.pdf",
+                "callback unavailable",
+                execution_id=first["execution_id"],
+            )
+
+            second = service.create_file_task(
+                "callback-failed.pdf",
+                {"businessType": "file", "marker": "second"},
+            )
+
+        self.assertNotEqual(
+            first["execution_id"],
+            second["execution_id"],
+        )
+        self.assertEqual(second["status"], "1")
+        self.assertEqual(second["callback_status"], "pending")
+
+    def test_callback_replay_lease_blocks_rerun_and_old_status_write(self):
+        """failed 补发在 HTTP 阶段必须持有租约，结束后才能受理新 execution。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = service.create_file_task(
+                "callback-replay.pdf",
+                {"businessType": "file", "marker": "first"},
+            )
+            service.mark_business_result(
+                "file",
+                "callback-replay.pdf",
+                {"status": "2", "marker": "first-result"},
+                status="2",
+                execution_id=first["execution_id"],
+            )
+            service.mark_callback_failed(
+                "file",
+                "callback-replay.pdf",
+                "first attempt failed",
+                execution_id=first["execution_id"],
+            )
+            callback_started = Event()
+            release_callback = Event()
+            delivered_markers: list[str] = []
+
+            def blocking_callback(_url, payload, timeout, **_kwargs):
+                self.assertEqual(timeout, 5)
+                delivered_markers.append(payload["marker"])
+                callback_started.set()
+                if not release_callback.wait(timeout=5):
+                    raise AssertionError("测试未释放回调阻塞")
+                return True
+
+            with (
+                patch(
+                    "app.services.llm_service.task_service.post_callback_payload",
+                    side_effect=blocking_callback,
+                ) as callback_mock,
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                replay = pool.submit(
+                    service.replay_callback_if_needed,
+                    "file",
+                    "callback-replay.pdf",
+                    callback_url="http://callback.test/llm/callback",
+                    timeout=5,
+                )
+                self.assertTrue(callback_started.wait(timeout=5))
+
+                with self.assertRaises(TaskAlreadyProcessingError) as raised:
+                    service.create_file_task(
+                        "callback-replay.pdf",
+                        {"businessType": "file", "marker": "too-early"},
+                    )
+                self.assertEqual(
+                    raised.exception.reason,
+                    "callback_pending",
+                )
+                # 第二个补发调用拿不到同一租约，不得重复发送。
+                self.assertFalse(
+                    service.replay_callback_if_needed(
+                        "file",
+                        "callback-replay.pdf",
+                        callback_url=(
+                            "http://callback.test/llm/callback"
+                        ),
+                        timeout=5,
+                    )
+                )
+
+                release_callback.set()
+                self.assertTrue(replay.result(timeout=5))
+
+            completed = service.get_task(
+                "file",
+                "callback-replay.pdf",
+            )
+            self.assertEqual(callback_mock.call_count, 1)
+            self.assertEqual(delivered_markers, ["first-result"])
+            self.assertEqual(
+                completed["execution_id"],
+                first["execution_id"],
+            )
+            self.assertEqual(completed["callback_status"], "success")
+
+            second = service.create_file_task(
+                "callback-replay.pdf",
+                {"businessType": "file", "marker": "second"},
+            )
+
+        self.assertNotEqual(
+            first["execution_id"],
+            second["execution_id"],
+        )
+        self.assertEqual(second["callback_status"], "pending")
+
+    def test_expired_callback_replay_lease_can_be_recovered(self):
+        """发送进程崩溃遗留的过期租约可由后续 check-task 安全接管。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task(
+                "stale-callback-lease.pdf",
+                {"businessType": "file"},
+            )
+            service.mark_business_result(
+                "file",
+                "stale-callback-lease.pdf",
+                {"status": "2"},
+                status="2",
+                execution_id=task["execution_id"],
+            )
+            first_claim = service.claim_callback_delivery(
+                "file",
+                "stale-callback-lease.pdf",
+                timeout=5,
+                execution_id=task["execution_id"],
+            )
+            self.assertIsNotNone(first_claim)
+            self.assertIsNone(
+                service.claim_callback_delivery(
+                    "file",
+                    "stale-callback-lease.pdf",
+                    timeout=5,
+                    execution_id=task["execution_id"],
+                )
+            )
+
+            with service._connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE llm_tasks
+                    SET callback_claim_expires_at = 0
+                    WHERE business_type = 'file' AND business_key = ?
+                    """,
+                    ("stale-callback-lease.pdf",),
+                )
+
+            recovered_claim = service.claim_callback_delivery(
+                "file",
+                "stale-callback-lease.pdf",
+                timeout=5,
+                execution_id=task["execution_id"],
+            )
+            self.assertIsNotNone(recovered_claim)
+            self.assertNotEqual(first_claim[0], recovered_claim[0])
+            service.mark_callback_failed(
+                "file",
+                "stale-callback-lease.pdf",
+                "recovered attempt failed",
+                execution_id=task["execution_id"],
+                claim_id=recovered_claim[0],
+            )
+
+            current = service.get_task(
+                "file",
+                "stale-callback-lease.pdf",
+            )
+
+        self.assertEqual(current["callback_status"], "failed")
+        self.assertEqual(current["callback_attempts"], 1)
+
     def test_stale_file_execution_cannot_write_current_task(self):
         """旧 execution 对进度、结果和回调状态的迟到写入必须全部被 CAS 拒绝。"""
         with workspace_tempdir() as tmp:
@@ -225,6 +506,11 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "rerun.pdf",
                 {"status": "2"},
                 status="2",
+                execution_id=first["execution_id"],
+            )
+            service.mark_callback_success(
+                "file",
+                "rerun.pdf",
                 execution_id=first["execution_id"],
             )
             second = service.create_file_task(
@@ -304,6 +590,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             service.mark_business_result(
                 "file", "demo.pdf", {"status": "2"}, status="2"
             )
+            service.mark_callback_skipped("file", "demo.pdf")
             second = service.create_file_task("demo.pdf", {"businessType": "file"})
 
             self.assertNotEqual(first["execution_id"], second["execution_id"])
@@ -460,11 +747,28 @@ class LLMTaskServiceTests(unittest.TestCase):
             service = LLMTaskService(db_path=db_path)
             task = service.get_task("file", "legacy.pdf")
             interaction = service.get_llm_interactions("file", "legacy.pdf")[0]
+            with sqlite3.connect(db_path) as conn:
+                task_columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(llm_tasks)"
+                    ).fetchall()
+                }
             self.assertTrue(task["execution_id"].startswith("legacy-task:"))
             self.assertTrue(
                 interaction["execution_id"].startswith("legacy-interaction:")
             )
             self.assertEqual(interaction["audit_schema_version"], 1)
+            self.assertIn("callback_claim_id", task_columns)
+            self.assertIn("callback_claim_expires_at", task_columns)
+            self.assertIsNotNone(
+                service.claim_callback_delivery(
+                    "file",
+                    "legacy.pdf",
+                    timeout=5,
+                    execution_id=task["execution_id"],
+                )
+            )
 
     def test_legacy_task_database_incrementally_creates_recall_audit_table(self):
         """旧任务库升级只增建召回表，且不以外键级联删除历史 execution。"""
@@ -723,6 +1027,11 @@ class LLMTaskServiceTests(unittest.TestCase):
                 status="2",
                 execution_id=first["execution_id"],
             )
+            service.mark_callback_success(
+                "file",
+                "rerun.pdf",
+                execution_id=first["execution_id"],
+            )
 
             second = service.create_file_task("rerun.pdf", {"businessType": "file"})
             historical = service.get_architecture_recall_decision(
@@ -878,6 +1187,47 @@ class LLMTaskServiceTests(unittest.TestCase):
             service.mark_business_completed("report", "7", {"details": "<div>ok</div>"}, status="1")
             service.mark_callback_failed("report", "7", "timeout")
             self.assertTrue(service.should_replay_callback("report", "7"))
+
+    def test_report_replay_does_not_claim_before_initial_callback_is_migrated(self):
+        """未迁移首次回调前，report 补发不得单边启用发送租约。"""
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            service.create_report_task(
+                report_id=7,
+                request_payload={"businessType": "report"},
+            )
+            service.mark_business_completed(
+                "report",
+                "7",
+                {"details": "<div>ok</div>"},
+                status="1",
+            )
+            service.mark_callback_failed("report", "7", "timeout")
+
+            with (
+                patch.object(
+                    service,
+                    "claim_callback_delivery",
+                    side_effect=AssertionError("report 不应领取 file 回调租约"),
+                ) as claim_callback,
+                patch(
+                    "app.services.llm_service.task_service.post_callback_payload",
+                    return_value=True,
+                ),
+            ):
+                replayed = service.replay_callback_if_needed(
+                    "report",
+                    "7",
+                    callback_url="http://callback.test/llm/callback",
+                    timeout=5,
+                )
+
+            current = service.get_task("report", "7")
+
+        self.assertTrue(replayed)
+        claim_callback.assert_not_called()
+        self.assertEqual(current["callback_status"], "success")
+        self.assertEqual(current["callback_attempts"], 2)
 
     def test_atomic_audit_persists_main_attempts_and_lifecycle_events(self):
         """完整事务提交后才返回 succeeded 门禁结果，并保留全部审计明细。"""

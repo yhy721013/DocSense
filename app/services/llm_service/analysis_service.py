@@ -2865,6 +2865,21 @@ def _submit_callback(
                 exc_info=True,
             )
         return
+    claim = task_service.claim_callback_delivery(
+        "file",
+        file_name,
+        timeout=callback_timeout,
+        execution_id=execution_id,
+    )
+    if claim is None:
+        logger.info(
+            "文件分析回调已有发送租约，当前 worker 不重复提交: "
+            "file_name=%s execution_id=%s",
+            file_name,
+            execution_id,
+        )
+        return
+    callback_claim_id, _ = claim
     callback_context = {
         "businessType": "file",
         "fileName": file_name,
@@ -2885,6 +2900,7 @@ def _submit_callback(
                 file_name,
                 callback_error,
                 execution_id=execution_id,
+                claim_id=callback_claim_id,
             )
         except Exception:
             logger.critical(
@@ -2904,6 +2920,7 @@ def _submit_callback(
                 "file",
                 file_name,
                 execution_id=execution_id,
+                claim_id=callback_claim_id,
             )
             logger.info("文件分析回调提交成功: file_name=%s", file_name)
         else:
@@ -2912,6 +2929,7 @@ def _submit_callback(
                 file_name,
                 "callback failed",
                 execution_id=execution_id,
+                claim_id=callback_claim_id,
             )
             logger.warning("文件分析回调提交失败: file_name=%s", file_name)
     except Exception:
