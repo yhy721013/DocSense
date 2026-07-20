@@ -46,6 +46,7 @@ from app.services.core.architecture_tree import (
     ArchitectureTreeIndex,
     ArchitectureTreeIndexCache,
     ArchitectureTreeValidationError,
+    build_architecture_tree_index,
 )
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 
@@ -88,6 +89,8 @@ ANALYSIS_CLASSIFICATION_MODES = frozenset(
 MAX_ANALYSIS_PROMPT_CHARS = 32_000
 MAX_ANALYSIS_MODEL_CALLS = 4
 MAX_ANALYSIS_PHASE_CALLS = 2
+MAX_ANALYSIS_PARAMS_PER_REQUEST = 32
+MAX_ANALYSIS_REQUEST_BYTES = 64 * 1024 * 1024
 _ARCHITECTURE_TREE_INDEX_CACHE = ArchitectureTreeIndexCache(capacity=4)
 
 DEFAULT_COUNTRY_OPTIONS = [
@@ -168,6 +171,53 @@ def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str,
         "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
         "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
     }
+
+
+def validate_analysis_architecture_ranges(
+    request_params: Mapping[str, Any],
+) -> ArchitectureTreeIndex:
+    """在任何任务或远端副作用前校验 analysis 的领域树输入。
+
+    缺失、``null`` 和空数组继续使用历史默认领域树，避免破坏既有调用方；只要调用方
+    显式提供了非空范围，就必须完整通过结构、拓扑和资源边界校验，不能再静默过滤坏节点。
+    ``architectureStandardList`` 是独立的有限树范围，不要求是主树的子集。
+    """
+    if not isinstance(request_params, Mapping):
+        raise ArchitectureTreeValidationError("params 中的文件项必须是对象")
+
+    raw_architecture_list = request_params.get("architectureList")
+    if raw_architecture_list is None or raw_architecture_list == []:
+        architecture_list: list[dict[str, Any]] = list(
+            DEFAULT_ARCHITECTURE_OPTIONS
+        )
+    elif not isinstance(raw_architecture_list, list):
+        raise ArchitectureTreeValidationError(
+            "architectureList 必须是节点数组"
+        )
+    else:
+        architecture_list = raw_architecture_list
+
+    tree_index = _ARCHITECTURE_TREE_INDEX_CACHE.get_or_build(
+        architecture_list
+    )
+
+    raw_standard_list = request_params.get("architectureStandardList")
+    if raw_standard_list is None or raw_standard_list == []:
+        return tree_index
+    if not isinstance(raw_standard_list, list):
+        raise ArchitectureTreeValidationError(
+            "architectureStandardList 必须是节点数组"
+        )
+    try:
+        # 标准范围通常很小，且不能挤占主领域树的全局 LRU 缓存。
+        build_architecture_tree_index(raw_standard_list)
+    except ArchitectureTreeValidationError as exc:
+        message = str(exc).replace(
+            "architectureList",
+            "architectureStandardList",
+        )
+        raise ArchitectureTreeValidationError(message) from exc
+    return tree_index
 
 
 def _as_text(value: Any) -> str:
@@ -3256,6 +3306,34 @@ def _execute_file_analysis_task(
             callback_timeout=callback_timeout,
         )
 
+    architecture_index_started_at = time.perf_counter()
+    try:
+        ranges = build_effective_analysis_ranges(params)
+        tree_index = validate_analysis_architecture_ranges(params)
+    except ArchitectureTreeValidationError as exc:
+        fields = {
+            "tree_fingerprint": "",
+            "query_digest": hashlib.sha256(b"").hexdigest(),
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(
+                architecture_index_started_at
+            ),
+        }
+        fail_before_remote_session(
+            stage="architecture_index",
+            error=exc,
+            fields=fields,
+        )
+        return
+    architecture_index_elapsed_seconds = (
+        time.perf_counter() - architecture_index_started_at
+    )
+
     logger.info(
         "开始执行文件分析任务: file_name=%s execution_id=%s",
         file_name,
@@ -3318,7 +3396,6 @@ def _execute_file_analysis_task(
         )
         return
 
-    ranges = build_effective_analysis_ranges(params)
     architecture_list = ranges["architectureList"]
     data_standard_profile = _build_data_standard_classification_profile(
         file_name=file_name,
@@ -3361,27 +3438,11 @@ def _execute_file_analysis_task(
         ),
     )
     signal_digest = _architecture_signal_digest(signals)
-    index_started_at = time.perf_counter()
-    try:
-        tree_index = _ARCHITECTURE_TREE_INDEX_CACHE.get_or_build(architecture_list)
-    except Exception as exc:
-        fields = {
-            "tree_fingerprint": "",
-            "query_digest": signal_digest,
-            "base_top64": [],
-            "final_candidates": [],
-            "channel_rankings": {},
-            "rrf_scores": {},
-            "protected_reasons": {},
-            "prompt_chars": 0,
-            "recall_elapsed_ms": _elapsed_ms(index_started_at),
-        }
-        fail_before_remote_session(
-            stage="architecture_index",
-            error=exc,
-            fields=fields,
-        )
-        return
+    # 领域树已在下载前完成索引。将其实际耗时折入既有 recall_elapsed_ms，同时排除
+    # 中间的下载与正文读取耗时，保持审计指标原有语义。
+    index_started_at = (
+        time.perf_counter() - architecture_index_elapsed_seconds
+    )
 
     if scope_guard_active:
         scope_resolution = _resolve_jane_architecture_scope(
@@ -4530,7 +4591,7 @@ def _execute_file_analysis_task(
                 file_name=file_name,
                 original_name=original_name,
                 mapped_result=mapped_result,
-                architecture_list=build_effective_analysis_ranges(params)["architectureList"],
+                architecture_list=architecture_list,
                 prepared_document=prepared_document,
             )
             retain_document = True

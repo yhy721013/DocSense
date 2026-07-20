@@ -222,6 +222,28 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
         self.assertIn(10, decision.direct_tree_ids)
         self.assertTrue(set(range(11, 18)) & set(_channel(decision, "tree")))
 
+    def test_tree_route_handles_the_maximum_legal_depth_iteratively(self):
+        nodes = [
+            {
+                "id": depth,
+                "name": (
+                    "深层目标雷达"
+                    if depth == 128
+                    else f"层级{depth}"
+                ),
+                "parentId": depth - 1 if depth > 1 else None,
+            }
+            for depth in range(1, 129)
+        ]
+        index = build_architecture_tree_index(nodes)
+
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(body="深层目标雷达"),
+        )
+
+        self.assertIn(128, decision.base_leaf_ids)
+
     def test_rrf_uses_declared_rule_weight_and_k(self):
         decision = recall_architecture_candidates(
             self.index,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 import unittest
@@ -7,6 +8,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 
 from app.services.core.architecture_tree import (
+    MAX_ARCHITECTURE_DEPTH,
+    MAX_ARCHITECTURE_NAME_CHARS,
+    MAX_ARCHITECTURE_NODE_COUNT,
+    MAX_ARCHITECTURE_PATH_CHARS,
+    MAX_ARCHITECTURE_PATH_NAME_CHARS,
+    MAX_ARCHITECTURE_REMARK_CHARS,
+    MAX_ARCHITECTURE_SERIALIZED_CHARS,
+    MAX_ARCHITECTURE_TOTAL_TEXT_CHARS,
     MAX_SIGNED_INT64,
     ArchitectureTreeIndexCache,
     ArchitectureTreeValidationError,
@@ -62,6 +71,15 @@ class ArchitectureTreeNormalizationTests(unittest.TestCase):
                     build_architecture_tree_index(
                         [{"id": invalid_id, "name": "非法节点"}]
                     )
+
+    def test_rejects_oversized_numeric_string_with_stable_contract_error(self):
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            "必须是 64 位整数",
+        ):
+            build_architecture_tree_index(
+                [{"id": "9" * 5_000, "name": "非法节点"}]
+            )
 
     def test_rejects_invalid_parent_ids(self):
         invalid_parent_ids = (-1, False, 1.0, "²", "１２３", MAX_SIGNED_INT64 + 1)
@@ -135,6 +153,188 @@ class ArchitectureTreeNormalizationTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ArchitectureTreeValidationError,
                     "父链存在环",
+                ):
+                    build_architecture_tree_index(nodes)
+
+    def test_node_count_limit_accepts_exact_boundary_and_rejects_one_more(self):
+        exact = [
+            {"id": node_id, "name": f"节点{node_id}"}
+            for node_id in range(1, MAX_ARCHITECTURE_NODE_COUNT + 1)
+        ]
+
+        index = build_architecture_tree_index(exact)
+        self.assertEqual(len(index.nodes), MAX_ARCHITECTURE_NODE_COUNT)
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            f"节点数不能超过 {MAX_ARCHITECTURE_NODE_COUNT}",
+        ):
+            build_architecture_tree_index(
+                [
+                    *exact,
+                    {
+                        "id": MAX_ARCHITECTURE_NODE_COUNT + 1,
+                        "name": "超限节点",
+                    },
+                ]
+            )
+
+    def test_depth_limit_is_iterative_and_has_stable_error(self):
+        exact = [
+            {
+                "id": depth,
+                "name": "层",
+                "parentId": depth - 1 if depth > 1 else None,
+            }
+            for depth in range(1, MAX_ARCHITECTURE_DEPTH + 1)
+        ]
+
+        index = build_architecture_tree_index(exact)
+        self.assertEqual(
+            index.require(MAX_ARCHITECTURE_DEPTH).depth,
+            MAX_ARCHITECTURE_DEPTH,
+        )
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            f"可见深度不能超过 {MAX_ARCHITECTURE_DEPTH}",
+        ):
+            build_architecture_tree_index(
+                [
+                    *exact,
+                    {
+                        "id": MAX_ARCHITECTURE_DEPTH + 1,
+                        "name": "超深层",
+                        "parentId": MAX_ARCHITECTURE_DEPTH,
+                    },
+                ]
+            )
+
+    def test_deep_cycle_raises_contract_error_instead_of_recursion_error(self):
+        nodes = [
+            {
+                "id": node_id,
+                "name": f"节点{node_id}",
+                "parentId": node_id - 1 if node_id > 1 else 1_000,
+            }
+            for node_id in range(1, 1_001)
+        ]
+
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            "父链存在环",
+        ):
+            build_architecture_tree_index(nodes)
+
+    def test_each_text_field_accepts_exact_boundary_and_rejects_one_more(self):
+        cases = (
+            ("name", MAX_ARCHITECTURE_NAME_CHARS),
+            ("path", MAX_ARCHITECTURE_PATH_CHARS),
+            ("pathName", MAX_ARCHITECTURE_PATH_NAME_CHARS),
+            ("remark", MAX_ARCHITECTURE_REMARK_CHARS),
+        )
+        for field, limit in cases:
+            with self.subTest(field=field, boundary="exact"):
+                node = {"id": 1, "name": "节点", field: "x" * limit}
+                index = build_architecture_tree_index([node])
+                self.assertEqual(len(index.nodes), 1)
+            with self.subTest(field=field, boundary="over"):
+                node = {
+                    "id": 1,
+                    "name": "节点",
+                    field: "x" * (limit + 1),
+                }
+                with self.assertRaisesRegex(
+                    ArchitectureTreeValidationError,
+                    rf"\.{field} 长度不能超过 {limit}",
+                ):
+                    build_architecture_tree_index([node])
+
+    def test_total_text_limit_accepts_exact_boundary_and_rejects_one_more(self):
+        node_count = 500
+        exact_remark_length = (
+            MAX_ARCHITECTURE_TOTAL_TEXT_CHARS // node_count - 1
+        )
+        exact = [
+            {
+                "id": node_id,
+                "name": "n",
+                "remark": "r" * exact_remark_length,
+            }
+            for node_id in range(1, node_count + 1)
+        ]
+
+        index = build_architecture_tree_index(exact)
+        self.assertEqual(len(index.nodes), node_count)
+        over = [dict(item) for item in exact]
+        over[0]["remark"] += "r"
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            f"累计长度不能超过 {MAX_ARCHITECTURE_TOTAL_TEXT_CHARS}",
+        ):
+            build_architecture_tree_index(over)
+
+    def test_serialized_limit_counts_unknown_fields_before_indexing(self):
+        base = [{"id": 1, "name": "节点", "extension": ""}]
+        overhead = len(
+            json.dumps(
+                base,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+        )
+        exact = [
+            {
+                **base[0],
+                "extension": "x" * (
+                    MAX_ARCHITECTURE_SERIALIZED_CHARS - overhead
+                ),
+            }
+        ]
+
+        index = build_architecture_tree_index(exact)
+        self.assertEqual(len(index.nodes), 1)
+        exact[0]["extension"] += "x"
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            f"紧凑 JSON 长度不能超过 {MAX_ARCHITECTURE_SERIALIZED_CHARS}",
+        ):
+            build_architecture_tree_index(exact)
+
+    def test_circular_unknown_extension_has_stable_serialization_error(self):
+        extension: dict[str, object] = {}
+        extension["self"] = extension
+
+        with self.assertRaisesRegex(
+            ArchitectureTreeValidationError,
+            "必须是 JSON 可序列化节点数组",
+        ):
+            build_architecture_tree_index(
+                [{"id": 1, "name": "节点", "extension": extension}]
+            )
+
+    def test_rejects_surrogates_and_non_finite_numbers_before_fingerprint(self):
+        invalid_nodes = (
+            [{"id": 1, "name": "\ud800"}],
+            [
+                {
+                    "id": 1,
+                    "name": "节点",
+                    "extension": "\ud800",
+                }
+            ],
+            [
+                {
+                    "id": 1,
+                    "name": "节点",
+                    "extension": float("nan"),
+                }
+            ],
+        )
+        for nodes in invalid_nodes:
+            with self.subTest(nodes=nodes):
+                with self.assertRaisesRegex(
+                    ArchitectureTreeValidationError,
+                    "必须是 JSON 可序列化节点数组",
                 ):
                     build_architecture_tree_index(nodes)
 

@@ -14,6 +14,14 @@ from typing import Any
 
 
 MAX_SIGNED_INT64 = (1 << 63) - 1
+MAX_ARCHITECTURE_NODE_COUNT = 10_000
+MAX_ARCHITECTURE_DEPTH = 128
+MAX_ARCHITECTURE_NAME_CHARS = 256
+MAX_ARCHITECTURE_PATH_CHARS = 2_048
+MAX_ARCHITECTURE_PATH_NAME_CHARS = 2_048
+MAX_ARCHITECTURE_REMARK_CHARS = 4_096
+MAX_ARCHITECTURE_TOTAL_TEXT_CHARS = 2_000_000
+MAX_ARCHITECTURE_SERIALIZED_CHARS = 4_000_000
 
 _DETAIL_SUFFIXES = frozenset(
     {
@@ -33,6 +41,28 @@ _ASCII_UNSIGNED_INTEGER_RE = re.compile(r"[0-9]+\Z")
 
 class ArchitectureTreeValidationError(ValueError):
     """领域树无法建立可靠索引时抛出的稳定合同异常。"""
+
+
+class _SiblingMapping(Mapping[int, tuple[int, ...]]):
+    """按访问惰性生成同胞列表，避免宽树为每个节点复制整个同胞族。"""
+
+    def __init__(
+        self,
+        families_by_node_id: Mapping[int, tuple[int, ...]],
+    ) -> None:
+        self._families_by_node_id = MappingProxyType(
+            dict(families_by_node_id)
+        )
+
+    def __getitem__(self, node_id: int) -> tuple[int, ...]:
+        family = self._families_by_node_id[node_id]
+        return tuple(member_id for member_id in family if member_id != node_id)
+
+    def __iter__(self):
+        return iter(self._families_by_node_id)
+
+    def __len__(self) -> int:
+        return len(self._families_by_node_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +145,11 @@ def _snapshot_nodes(nodes: Iterable[Mapping[str, Any]]) -> tuple[dict[str, Any],
 
     snapshot: list[dict[str, Any]] = []
     for ordinal, item in enumerate(iterator):
+        if ordinal >= MAX_ARCHITECTURE_NODE_COUNT:
+            raise ArchitectureTreeValidationError(
+                "architectureList 节点数不能超过 "
+                f"{MAX_ARCHITECTURE_NODE_COUNT}"
+            )
         if not isinstance(item, Mapping):
             raise ArchitectureTreeValidationError(
                 f"architectureList[{ordinal}] 必须是对象"
@@ -122,6 +157,30 @@ def _snapshot_nodes(nodes: Iterable[Mapping[str, Any]]) -> tuple[dict[str, Any],
         snapshot.append(dict(item))
     if not snapshot:
         raise ArchitectureTreeValidationError("architectureList 不能为空")
+    try:
+        serialized = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        # ``ensure_ascii=False`` 会把孤立 UTF-16 surrogate 保留在 Python
+        # 字符串中；显式编码可在进入 fingerprint 或 SQLite 前稳定拒绝它。
+        serialized.encode("utf-8")
+    except (
+        TypeError,
+        ValueError,
+        RecursionError,
+        UnicodeEncodeError,
+    ) as exc:
+        raise ArchitectureTreeValidationError(
+            "architectureList 必须是 JSON 可序列化节点数组"
+        ) from exc
+    if len(serialized) > MAX_ARCHITECTURE_SERIALIZED_CHARS:
+        raise ArchitectureTreeValidationError(
+            "architectureList 紧凑 JSON 长度不能超过 "
+            f"{MAX_ARCHITECTURE_SERIALIZED_CHARS} 个字符"
+        )
     return tuple(snapshot)
 
 
@@ -131,6 +190,23 @@ def _normalize_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return str(value).strip()
+
+
+def _normalize_bounded_text(
+    value: Any,
+    *,
+    field: str,
+    ordinal: int,
+    max_chars: int,
+) -> str:
+    """规范化单个文本字段，并在进入指纹和索引前执行稳定长度门禁。"""
+    normalized = _normalize_text(value)
+    if len(normalized) > max_chars:
+        raise ArchitectureTreeValidationError(
+            f"architectureList[{ordinal}].{field} 长度不能超过 "
+            f"{max_chars} 个字符"
+        )
+    return normalized
 
 
 def _normalize_integer(
@@ -147,8 +223,21 @@ def _normalize_integer(
 
     if isinstance(value, int):
         normalized = value
-    elif isinstance(value, str) and _ASCII_UNSIGNED_INTEGER_RE.fullmatch(value.strip()):
-        normalized = int(value.strip(), 10)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if (
+            len(stripped) > len(str(MAX_SIGNED_INT64))
+            or _ASCII_UNSIGNED_INTEGER_RE.fullmatch(stripped) is None
+        ):
+            raise ArchitectureTreeValidationError(
+                f"architectureList[{ordinal}].{field} 必须是 64 位整数"
+            )
+        try:
+            normalized = int(stripped, 10)
+        except ValueError as exc:
+            raise ArchitectureTreeValidationError(
+                f"architectureList[{ordinal}].{field} 必须是 64 位整数"
+            ) from exc
     else:
         raise ArchitectureTreeValidationError(
             f"architectureList[{ordinal}].{field} 必须是 64 位整数"
@@ -180,6 +269,7 @@ def _normalize_raw_nodes(
 ) -> tuple[_RawArchitectureNode, ...]:
     normalized_nodes: list[_RawArchitectureNode] = []
     seen_ids: set[int] = set()
+    total_text_chars = 0
 
     for ordinal, item in enumerate(snapshot):
         node_id = _normalize_integer(
@@ -194,10 +284,42 @@ def _normalize_raw_nodes(
             )
         seen_ids.add(node_id)
 
-        name = _normalize_text(item.get("name"))
+        name = _normalize_bounded_text(
+            item.get("name"),
+            field="name",
+            ordinal=ordinal,
+            max_chars=MAX_ARCHITECTURE_NAME_CHARS,
+        )
         if not name:
             raise ArchitectureTreeValidationError(
                 f"architectureList[{ordinal}].name 不能为空"
+            )
+        source_path = _normalize_bounded_text(
+            item.get("path"),
+            field="path",
+            ordinal=ordinal,
+            max_chars=MAX_ARCHITECTURE_PATH_CHARS,
+        )
+        path_name = _normalize_bounded_text(
+            item.get("pathName"),
+            field="pathName",
+            ordinal=ordinal,
+            max_chars=MAX_ARCHITECTURE_PATH_NAME_CHARS,
+        )
+        remark = _normalize_bounded_text(
+            item.get("remark"),
+            field="remark",
+            ordinal=ordinal,
+            max_chars=MAX_ARCHITECTURE_REMARK_CHARS,
+        )
+        total_text_chars += sum(
+            len(value)
+            for value in (name, source_path, path_name, remark)
+        )
+        if total_text_chars > MAX_ARCHITECTURE_TOTAL_TEXT_CHARS:
+            raise ArchitectureTreeValidationError(
+                "architectureList 文本字段累计长度不能超过 "
+                f"{MAX_ARCHITECTURE_TOTAL_TEXT_CHARS} 个字符"
             )
 
         normalized_nodes.append(
@@ -205,9 +327,9 @@ def _normalize_raw_nodes(
                 id=node_id,
                 parent_id=_normalize_parent_id(item.get("parentId"), ordinal=ordinal),
                 name=name,
-                source_path=_normalize_text(item.get("path")),
-                path_name=_normalize_text(item.get("pathName")),
-                remark=_normalize_text(item.get("remark")),
+                source_path=source_path,
+                path_name=path_name,
+                remark=remark,
                 ordinal=ordinal,
             )
         )
@@ -246,29 +368,29 @@ def _validate_acyclic(
     raw_by_id: Mapping[int, _RawArchitectureNode],
     ordered_ids: tuple[int, ...],
 ) -> None:
-    state: dict[int, int] = {}
-    stack: list[int] = []
-
-    def visit(node_id: int) -> None:
-        current_state = state.get(node_id, 0)
-        if current_state == 2:
-            return
-        if current_state == 1:
-            cycle_start = stack.index(node_id)
-            cycle = stack[cycle_start:] + [node_id]
-            cycle_text = " -> ".join(str(value) for value in cycle)
-            raise ArchitectureTreeValidationError(f"领域树父链存在环: {cycle_text}")
-
-        state[node_id] = 1
-        stack.append(node_id)
-        parent_id = raw_by_id[node_id].parent_id
-        if parent_id in raw_by_id:
-            visit(parent_id)
-        stack.pop()
-        state[node_id] = 2
-
-    for node_id in ordered_ids:
-        visit(node_id)
+    """迭代检查单父链环，避免畸形深树先触发 Python ``RecursionError``。"""
+    resolved: set[int] = set()
+    for start_id in ordered_ids:
+        if start_id in resolved:
+            continue
+        chain: list[int] = []
+        positions: dict[int, int] = {}
+        node_id = start_id
+        while node_id in raw_by_id and node_id not in resolved:
+            cycle_start = positions.get(node_id)
+            if cycle_start is not None:
+                cycle = chain[cycle_start:] + [node_id]
+                cycle_text = " -> ".join(str(value) for value in cycle)
+                raise ArchitectureTreeValidationError(
+                    f"领域树父链存在环: {cycle_text}"
+                )
+            positions[node_id] = len(chain)
+            chain.append(node_id)
+            parent_id = raw_by_id[node_id].parent_id
+            if parent_id not in raw_by_id:
+                break
+            node_id = parent_id
+        resolved.update(chain)
 
 
 def _detail_path_segment(name: str, parent_name: str) -> str:
@@ -303,14 +425,6 @@ def _build_aliases(name: str, semantic_path: str) -> tuple[str, ...]:
     return tuple(aliases)
 
 
-def _freeze_tuple_mapping(
-    mapping: Mapping[int, Iterable[int]],
-) -> Mapping[int, tuple[int, ...]]:
-    return MappingProxyType(
-        {key: tuple(values) for key, values in mapping.items()}
-    )
-
-
 def _build_index_from_normalized(
     raw_nodes: tuple[_RawArchitectureNode, ...],
 ) -> ArchitectureTreeIndex:
@@ -331,11 +445,10 @@ def _build_index_from_normalized(
     semantic_paths: dict[int, str] = {}
     structural_paths: dict[int, str] = {}
     root_by_id: dict[int, int] = {}
-
-    def resolve_node(node_id: int) -> None:
-        if node_id in ancestors:
-            return
-
+    topology_order: list[int] = []
+    pending = list(reversed(root_ids))
+    while pending:
+        node_id = pending.pop()
         node = raw_by_id[node_id]
         parent = raw_by_id.get(node.parent_id)
         if parent is None:
@@ -344,28 +457,39 @@ def _build_index_from_normalized(
             reconstructed_path = str(node_id)
             reconstructed_semantic_path = node.name
         else:
-            resolve_node(parent.id)
             ancestor_ids = ancestors[parent.id] + (parent.id,)
             root_id = root_by_id[parent.id]
             reconstructed_path = f"{structural_paths[parent.id]}/{node_id}"
             segment = _detail_path_segment(node.name, parent.name)
             reconstructed_semantic_path = f"{semantic_paths[parent.id]}/{segment}"
 
+        depth = len(ancestor_ids) + 1
+        if depth > MAX_ARCHITECTURE_DEPTH:
+            raise ArchitectureTreeValidationError(
+                f"领域树可见深度不能超过 {MAX_ARCHITECTURE_DEPTH}"
+            )
+        resolved_structural_path = node.source_path or reconstructed_path
+        resolved_semantic_path = node.path_name or reconstructed_semantic_path
+        if len(resolved_structural_path) > MAX_ARCHITECTURE_PATH_CHARS:
+            raise ArchitectureTreeValidationError(
+                "领域树重建 path 长度不能超过 "
+                f"{MAX_ARCHITECTURE_PATH_CHARS} 个字符"
+            )
+        if len(resolved_semantic_path) > MAX_ARCHITECTURE_PATH_NAME_CHARS:
+            raise ArchitectureTreeValidationError(
+                "领域树重建 pathName 长度不能超过 "
+                f"{MAX_ARCHITECTURE_PATH_NAME_CHARS} 个字符"
+            )
         ancestors[node_id] = ancestor_ids
         root_by_id[node_id] = root_id
-        structural_paths[node_id] = node.source_path or reconstructed_path
+        structural_paths[node_id] = resolved_structural_path
         # 非空 pathName 是调用方提供的不透明语义字符串，绝不按“/”反推拓扑。
-        semantic_paths[node_id] = node.path_name or reconstructed_semantic_path
-
-    for node_id in ordered_ids:
-        resolve_node(node_id)
+        semantic_paths[node_id] = resolved_semantic_path
+        topology_order.append(node_id)
+        pending.extend(reversed(children[node_id]))
 
     leaf_descendants: dict[int, tuple[int, ...]] = {}
-
-    def resolve_leaf_descendants(node_id: int) -> tuple[int, ...]:
-        cached = leaf_descendants.get(node_id)
-        if cached is not None:
-            return cached
+    for node_id in reversed(topology_order):
         child_ids = children[node_id]
         if not child_ids:
             result = (node_id,)
@@ -373,23 +497,23 @@ def _build_index_from_normalized(
             result = tuple(
                 leaf_id
                 for child_id in child_ids
-                for leaf_id in resolve_leaf_descendants(child_id)
+                for leaf_id in leaf_descendants[child_id]
             )
         leaf_descendants[node_id] = result
-        return result
-
-    for node_id in ordered_ids:
-        resolve_leaf_descendants(node_id)
 
     root_tuple = tuple(root_ids)
-    siblings: dict[int, tuple[int, ...]] = {}
+    frozen_children = {
+        node_id: tuple(child_ids)
+        for node_id, child_ids in children.items()
+    }
+    families_by_node_id: dict[int, tuple[int, ...]] = {}
     for node in raw_nodes:
         family = (
-            tuple(children[node.parent_id])
+            frozen_children[node.parent_id]
             if node.parent_id in raw_by_id
             else root_tuple
         )
-        siblings[node.id] = tuple(member_id for member_id in family if member_id != node.id)
+        families_by_node_id[node.id] = family
 
     profiles: list[ArchitectureNodeProfile] = []
     for raw_node in raw_nodes:
@@ -421,10 +545,10 @@ def _build_index_from_normalized(
         nodes_by_id=MappingProxyType(profile_by_id),
         root_ids=root_tuple,
         leaf_ids=tuple(profile.id for profile in profiles_tuple if profile.is_leaf),
-        children_by_id=_freeze_tuple_mapping(children),
+        children_by_id=MappingProxyType(frozen_children),
         ancestors_by_id=MappingProxyType(dict(ancestors)),
         leaf_descendants_by_id=MappingProxyType(dict(leaf_descendants)),
-        siblings_by_id=MappingProxyType(siblings),
+        siblings_by_id=_SiblingMapping(families_by_node_id),
         alias_to_ids=MappingProxyType(
             {alias: tuple(node_ids) for alias, node_ids in alias_index.items()}
         ),

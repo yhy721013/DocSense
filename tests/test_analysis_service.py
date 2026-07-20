@@ -991,6 +991,72 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(current["execution_id"], second["execution_id"])
         self.assertEqual(current["status"], "1")
 
+    def test_invalid_tree_stops_worker_before_download_and_remote_ports(self):
+        """即使绕过 HTTP 路由，worker 也必须在本地副作用前拒绝坏树。"""
+        with workspace_tempdir() as tmp:
+            file_name = "invalid-tree-worker.txt"
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": file_name,
+                        "filePath": (
+                            "https://example.invalid/"
+                            "invalid-tree-worker.txt"
+                        ),
+                        "architectureList": [{}],
+                    }
+                ],
+            }
+            task_service = LLMTaskService(
+                db_path=f"{tmp}/tasks.sqlite3"
+            )
+            task = task_service.create_file_task(
+                file_name,
+                request_payload,
+            )
+            rag_factory = FakeDocumentRagFactory()
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "download_to_temp_file"
+                ) as download_mock,
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "_publish_progress"
+                ) as publish_mock,
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_task,
+                )
+
+                run_file_analysis_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                    execution_id=task["execution_id"],
+                )
+
+            current = task_service.get_task("file", file_name)
+            recall = task_service.get_architecture_recall_decision(
+                execution_id=task["execution_id"]
+            )
+
+        download_mock.assert_not_called()
+        publish_mock.assert_called_once()
+        self.assertEqual(publish_mock.call_args.args[2], 1.0)
+        self.assertEqual(current["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_index")
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge_factory.ports), 0)
+
     @staticmethod
     def _stage9_model_response(file_name: str, architecture_id: int | str) -> str:
         """生成满足阶段 9 顶层契约的最小严格 JSON 回答。"""

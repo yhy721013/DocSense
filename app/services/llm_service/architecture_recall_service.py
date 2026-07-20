@@ -624,18 +624,25 @@ def _tree_rank(
         return (), ()
 
     subtree_scores: dict[int, float] = {}
-
-    def subtree_score(node_id: int) -> float:
-        cached = subtree_scores.get(node_id)
-        if cached is not None:
-            return cached
+    for node in sorted(
+        index.nodes,
+        key=lambda candidate: candidate.depth,
+        reverse=True,
+    ):
         child_score = max(
-            (subtree_score(child_id) for child_id in index.children_by_id[node_id]),
+            (
+                subtree_scores[child_id]
+                for child_id in index.children_by_id[node.id]
+            ),
             default=0.0,
         )
-        result = max(local_scores.get(node_id, 0.0), child_score)
-        subtree_scores[node_id] = result
-        return result
+        subtree_scores[node.id] = max(
+            local_scores.get(node.id, 0.0),
+            child_score,
+        )
+
+    def subtree_score(node_id: int) -> float:
+        return subtree_scores[node_id]
 
     root_ids = sorted(
         (root_id for root_id in index.root_ids if subtree_score(root_id) > 0),
