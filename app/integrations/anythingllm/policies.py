@@ -55,11 +55,12 @@ def _document_workspace_settings(*, open_ai_history: int) -> dict[str, object]:
 def analysis_rag_workspace_settings() -> dict[str, object]:
     """返回临时文件分析 Workspace 策略。
 
-    分类和字段抽取会在同一隔离线程中顺序执行，但字段抽取不得读取上一轮分类 Prompt 中
-    的完整候选集，因此把 AnythingLLM 历史窗口显式关闭。每次返回独立字典，避免任务间
-    共享可变配置。
+    两阶段模式会为分类和字段抽取创建两个独立线程，因此历史窗口只需保留一轮，供各阶段
+    自己的 repair 请求读取上一轮模型回答。不能使用 ``0``：AnythingLLM 1.15.0 会通过
+    truthy 默认表达式把零回退成更大的默认历史窗口。每次返回独立字典，避免任务间共享
+    可变配置。
     """
-    return _document_workspace_settings(open_ai_history=0)
+    return _document_workspace_settings(open_ai_history=1)
 
 
 def knowledge_index_workspace_settings() -> dict[str, object]:

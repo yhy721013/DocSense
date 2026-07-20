@@ -3909,7 +3909,7 @@ def _execute_file_analysis_task(
                     architecture_list,
                     ranges["architectureStandardList"],
                 )
-                final_prompt = _normalize_bounded_analysis_prompt(
+                extraction_prompt = _normalize_bounded_analysis_prompt(
                     build_file_extraction_prompt(
                         params,
                         resolved_architecture_id=architecture_id,
@@ -3921,6 +3921,20 @@ def _execute_file_analysis_task(
                     )
                 )
                 workflow_failure_stage = "analysis_extraction"
+                session.start_fresh_conversation(
+                    conversation_name=(
+                        f"analysis-extraction-{Path(file_name).stem}"
+                    ),
+                )
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    session.trace,
+                    prepared_document,
+                )
+                # 只有第二线程已经创建成功，抽取 Prompt 才成为审计中的最后实际请求。
+                # 创建失败时 final_prompt 继续指向分类或分类 repair Prompt。
+                final_prompt = extraction_prompt
                 extraction_started = len(session.trace.attempts)
                 extraction_result = session.ask(
                     final_prompt,

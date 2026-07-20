@@ -53,10 +53,10 @@
 - 增加 `ARCHITECTURE_CLASSIFICATION` 与 `ANALYSIS_EXTRACTION` 两种 PromptKind。
 - 多候选首先执行领域分类，只输出 `{"architectureId": 数字或 null}`；结果必须同时属于模型候选和完整树。
 - 分类非法或为空时，在分类阶段剩余预算内对完全相同的候选执行一次 repair。
-- 分类确定后，在同一文档 Session 中执行字段抽取；抽取 Prompt 不包含 `architectureList`，只把已确认 ID、语义路径和节点类型作为只读上下文。
+- 分类确定后，在同一文档 Session 内创建无历史的新 Thread 执行字段抽取；只复用已上传、绑定和 Pin 的目标文档。抽取 Prompt 不包含 `architectureList`，只把已确认 ID、语义路径和节点类型作为只读上下文。
 - 单候选跳过分类，直接把字段抽取作为首次模型查询。
 - 分类和抽取阶段各最多使用 2 次模型查询；供应商重试与 repair 共享阶段预算，总上限 4 次。
-- analysis 临时 workspace 使用 `openAiHistory=0`，避免分类候选污染抽取；永久知识库配置保持不变。
+- analysis 临时 workspace 使用 `openAiHistory=1`，只为分类 repair 或抽取 JSON repair 保留同阶段上一轮回答；分类与抽取的历史隔离由两个不同 Thread 保证，永久知识库配置保持不变。
 
 ## 5. 审计、配置与失败边界
 

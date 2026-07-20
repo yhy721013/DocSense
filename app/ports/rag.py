@@ -466,6 +466,15 @@ class DocumentRagSession(Protocol):
         """准备目标文档并按显式用途完成首次查询；整个会话只允许调用一次。"""
         ...
 
+    def start_fresh_conversation(self, *, conversation_name: str) -> None:
+        """在同一隔离上下文内切换到一个无历史的新对话。
+
+        只有 ``analyse`` 成功后才允许调用，且每个 Session 最多尝试切换一次。新对话继续
+        使用已经上传、绑定并 Pin 的唯一目标文档，不得重复执行文档准备。创建失败必须
+        直接抛出带完整轨迹的 ``RagOperationError``，不得回退到原对话继续查询。
+        """
+        ...
+
     def ask(
         self,
         prompt: str,

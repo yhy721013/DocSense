@@ -68,11 +68,11 @@ class AnythingLLMPolicyTests(unittest.TestCase):
                     )
 
     def test_analysis_and_knowledge_history_policies_are_explicitly_separated(self) -> None:
-        """临时两阶段分析关闭历史，永久知识库保留原有一轮历史。"""
+        """分析和永久知识库都只保留修复所需的一轮最小历史。"""
         analysis_settings = analysis_rag_workspace_settings()
         knowledge_settings = knowledge_index_workspace_settings()
 
-        self.assertEqual(0, analysis_settings["openAiHistory"])
+        self.assertEqual(1, analysis_settings["openAiHistory"])
         self.assertEqual(1, knowledge_settings["openAiHistory"])
         self.assertEqual(
             {key: value for key, value in analysis_settings.items() if key != "openAiHistory"},
@@ -89,7 +89,7 @@ class AnythingLLMPolicyTests(unittest.TestCase):
         first = analysis_rag_workspace_settings()
         first["openAiHistory"] = 99
 
-        self.assertEqual(0, analysis_rag_workspace_settings()["openAiHistory"])
+        self.assertEqual(1, analysis_rag_workspace_settings()["openAiHistory"])
 
 
 if __name__ == "__main__":

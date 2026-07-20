@@ -332,6 +332,9 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 )
             interaction = task_service.get_llm_interactions("file", file_name)[0]
             attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+            lifecycle_events = task_service.get_llm_interaction_lifecycle_events(
+                interaction["id"]
+            )
 
         self.assertEqual(
             [item["prompt_kind"] for item in attempts],
@@ -342,8 +345,73 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(classification_prompt.call_count, 1)
         self.assertEqual(extraction_prompt.call_count, 1)
         self.assertNotIn("模型候选", interaction["prompt"])
+        session = rag_factory.ports[0].sessions[0]
+        self.assertEqual(
+            ["conversation:1", "conversation:1:fresh"],
+            list(session.attempt_conversation_refs),
+        )
+        conversation_events = [
+            event
+            for event in lifecycle_events
+            if event["operation"] == "conversation_create" and event["success"]
+        ]
+        self.assertEqual([1, 2], [event["attempt_no"] for event in conversation_events])
+        self.assertEqual(
+            2,
+            len({event["external_ref"] for event in conversation_events}),
+        )
         # 完整树仍用于 storage，基础数据叶子归并到装备父节点 10。
         self.assertIn(10, knowledge.ports[0]._collections_by_architecture)
+
+    def test_second_conversation_failure_is_audited_without_extraction_fallback(self):
+        """第二线程失败时保留最后一次真实分类 Prompt，并清理临时资源。"""
+        with workspace_tempdir() as tmp:
+            file_name = "fresh-conversation-failure.txt"
+            request = self._request(file_name, self._tree())
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":11}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                fresh_conversation_error_message="创建阶段隔离对话失败",
+            )
+            task_service, task, recall, rag_factory, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(index),
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+            lifecycle_events = task_service.get_llm_interaction_lifecycle_events(
+                interaction["id"]
+            )
+
+        self.assertEqual("3", task["status"])
+        self.assertEqual("analysis_extraction", recall["failure_stage"])
+        self.assertEqual("failed", interaction["status"])
+        self.assertEqual(
+            attempts[-1]["prompt_digest"],
+            hashlib.sha256(interaction["prompt"].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            ["architecture_classification"],
+            [attempt["prompt_kind"] for attempt in attempts],
+        )
+        self.assertTrue(
+            any(
+                event["operation"] == "conversation_create"
+                and event["attempt_no"] == 2
+                and not event["success"]
+                for event in lifecycle_events
+            )
+        )
+        self.assertEqual(0, len(knowledge.ports))
+        session = rag_factory.ports[0].sessions[0]
+        self.assertFalse(session.retain_document_on_close)
+        self.assertEqual(1, len(session.attempt_conversation_refs))
 
     def test_two_stage_constraint_decision_is_computed_once_and_reused(self):
         with workspace_tempdir() as tmp:
@@ -835,6 +903,16 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 "analysis_extraction",
                 "json_repair",
             ],
+        )
+        session = rag_factory.ports[0].sessions[0]
+        self.assertEqual(
+            [
+                "conversation:1",
+                "conversation:1",
+                "conversation:1:fresh",
+                "conversation:1:fresh",
+            ],
+            list(session.attempt_conversation_refs),
         )
 
     def test_supplier_retry_consumes_classification_budget_and_prevents_repair(self):

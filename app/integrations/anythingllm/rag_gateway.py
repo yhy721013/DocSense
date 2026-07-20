@@ -355,8 +355,9 @@ class _AnythingLLMRagSession:
     """一个文件分析任务独占的纯方案 B 会话。
 
     Session 在构造时已经拥有完整工作区和线程。``analyse`` 负责一次性完成上传、加入、
-    Pin 和首次查询；``ask`` 只在同一线程中追加查询。调用轨迹以不可变快照返回；清理会
-    按所有权状态决定是否补偿删除全局文档，并保证外部删除最多执行一次。
+    Pin 和首次查询；调用方可在准备成功后创建一次无历史的新线程，再由 ``ask`` 在当前
+    活跃线程中追加查询。调用轨迹以不可变快照返回；清理会按所有权状态决定是否补偿删除
+    全局文档，并保证外部删除最多执行一次。
     """
 
     _TRANSIENT_EMBEDDING_STATUS_CODES = frozenset({502, 503, 504})
@@ -396,7 +397,11 @@ class _AnythingLLMRagSession:
         self._thread_client = thread_client
         self._context_name = normalized_context_name
         self._context_ref = context_ref
-        self._conversation_ref = conversation_ref
+        # 主线程引用继续作为 RagExecutionTrace 的稳定会话标识，避免既有审计和资源租约
+        # 因阶段切换而失去最初创建身份。实际查询始终使用 active 引用；第二线程通过
+        # lifecycle_events 的 conversation_create 事件独立审计。
+        self._primary_conversation_ref = conversation_ref
+        self._active_conversation_ref = conversation_ref
         self._user_id = user_id
         self._embedding_max_attempts = validated_embedding_attempts
         self._source_marker = normalized_source_marker
@@ -414,6 +419,7 @@ class _AnythingLLMRagSession:
         self._global_document_cleanup_required = False
         self._analyse_started = False
         self._analyse_succeeded = False
+        self._fresh_conversation_attempted = False
         self._closed = False
         self._first_cleanup_result: Optional[CleanupResult] = None
         self._failure_stage: Optional[str] = None
@@ -474,6 +480,82 @@ class _AnythingLLMRagSession:
 
         self._analyse_succeeded = True
         return result
+
+    def start_fresh_conversation(self, *, conversation_name: str) -> None:
+        """为后续阶段创建一次无历史线程，并原子切换查询目标。
+
+        第二线程创建前完成全部本地状态校验，重复切换和错误调用顺序不会产生外部请求。
+        创建请求存在不确定结果时不重试，也不回退到主线程；上层必须按失败路径审计并
+        清理整个 Workspace，避免字段抽取意外继承分类候选历史。
+        """
+        self._ensure_open()
+        normalized_name = self._required_text(
+            conversation_name,
+            name="conversation_name",
+        )
+        if not self._analyse_succeeded or not self._document_ref:
+            raise self._operation_error(
+                "新对话只能在 analyse 成功后创建",
+                failure_stage="session_not_prepared",
+            )
+        if self._fresh_conversation_attempted:
+            raise self._operation_error(
+                "每个 RAG Session 最多切换一次新对话",
+                failure_stage="conversation_switch_repeated",
+            )
+
+        # 在外部调用前锁定一次性门禁。即使请求超时，也不能盲目重放可能已经成功的创建。
+        self._fresh_conversation_attempted = True
+        lifecycle_attempt = self._next_lifecycle_attempt("conversation_create")
+        try:
+            thread = self._thread_client.create_thread(
+                self._context_ref,
+                normalized_name,
+                user_id=self._user_id,
+            )
+            conversation_ref = str(
+                getattr(thread, "slug", "") or ""
+            ).strip()
+            if not conversation_ref:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM 创建线程结果缺少有效 slug"
+                )
+            if conversation_ref == self._primary_conversation_ref:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM 新线程引用与主线程重复"
+                )
+        except Exception as exc:
+            error_message = self._safe_error(
+                exc,
+                fallback="创建阶段隔离对话失败",
+            )
+            self._record_lifecycle_event(
+                operation="conversation_create",
+                attempt=lifecycle_attempt,
+                success=False,
+                failure_stage="conversation_create",
+                error_message=error_message,
+            )
+            if self._uploaded_document is not None:
+                self._schedule_failed_document_cleanup(self._uploaded_document)
+            raise self._operation_error(
+                error_message,
+                failure_stage="conversation_create",
+            ) from exc
+
+        self._record_lifecycle_event(
+            operation="conversation_create",
+            attempt=lifecycle_attempt,
+            success=True,
+            external_ref=conversation_ref,
+        )
+        self._active_conversation_ref = conversation_ref
+        logger.info(
+            "AnythingLLM 阶段隔离会话创建完成: action=start_fresh_conversation "
+            "has_context_ref=%s has_conversation_ref=%s",
+            bool(self._context_ref),
+            bool(conversation_ref),
+        )
 
     def ask(
         self,
@@ -916,7 +998,7 @@ class _AnythingLLMRagSession:
             try:
                 answer = self._thread_client.ask(
                     self._context_ref,
-                    self._conversation_ref,
+                    self._active_conversation_ref,
                     prompt,
                     user_id=self._user_id,
                     mode="query",
@@ -1112,9 +1194,23 @@ class _AnythingLLMRagSession:
             for event in self._lifecycle_events
             if event.operation == "conversation_create" and event.success
         ]
+        successful_conversation_refs = [
+            str(event.external_ref or "").strip()
+            for event in successful_conversation_events
+        ]
+        expected_conversation_count = (
+            2 if self._fresh_conversation_attempted else 1
+        )
         context_isolated = (
             len(successful_context_events) == 1
-            and len(successful_conversation_events) == 1
+            and len(successful_conversation_events) == expected_conversation_count
+            and all(successful_conversation_refs)
+            and len(set(successful_conversation_refs))
+            == len(successful_conversation_refs)
+            and successful_conversation_refs[0]
+            == self._primary_conversation_ref
+            and successful_conversation_refs[-1]
+            == self._active_conversation_ref
             and self._bound_locations == {external_location}
             and self._pinned_location == external_location
         )
@@ -1289,7 +1385,7 @@ class _AnythingLLMRagSession:
         logger.error(
             "AnythingLLM RAG 操作失败: has_context_ref=%s has_conversation_ref=%s stage=%s",
             bool(self._context_ref),
-            bool(self._conversation_ref),
+            bool(self._active_conversation_ref),
             failure_stage,
         )
         return RagOperationError(message, self._trace())
@@ -1299,7 +1395,7 @@ class _AnythingLLMRagSession:
         return RagExecutionTrace(
             context_name=self._context_name,
             context_ref=self._context_ref,
-            conversation_ref=self._conversation_ref,
+            conversation_ref=self._primary_conversation_ref,
             attempts=tuple(self._attempts),
             failure_stage=self._failure_stage,
             error_message=self._error_message,

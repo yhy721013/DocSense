@@ -89,7 +89,7 @@ class AnythingLLMGatewayFactoryTests(unittest.TestCase):
 
         with factory.create() as first_gateway:
             self.assertIsInstance(first_gateway, DocumentRagPort)
-            self.assertEqual(0, first_gateway._workspace_settings["openAiHistory"])
+            self.assertEqual(1, first_gateway._workspace_settings["openAiHistory"])
             first_transport.close.assert_not_called()
         with factory.create() as second_gateway:
             self.assertIsInstance(second_gateway, DocumentRagPort)
