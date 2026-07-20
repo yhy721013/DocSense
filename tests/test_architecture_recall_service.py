@@ -147,6 +147,71 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
         self.assertEqual(lexical[0], 2)
         self.assertLessEqual(len(lexical), BM25_LIMIT)
 
+    def test_generic_cjk_parent_does_not_starve_specific_bm25_leaf(self):
+        """通用中文父节点命中不能用受保护后代挤出具体 BM25/树候选。"""
+        nodes: list[dict[str, object]] = [
+            {"id": 1, "name": "领域根"},
+            {"id": 2, "name": "海军", "parentId": 1},
+            {"id": 3, "name": "雷达装备", "parentId": 1},
+            {
+                "id": 4,
+                "name": "宙斯盾雷达系统",
+                "parentId": 3,
+                "remark": "有源相控阵火控技术指标",
+            },
+        ]
+        nodes.extend(
+            {
+                "id": 1_000 + index,
+                "name": f"通用资料{index}",
+                "parentId": 2,
+            }
+            for index in range(100)
+        )
+        index = build_architecture_tree_index(nodes)
+
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(
+                body="海军有源相控阵火控技术指标"
+            ),
+        )
+        generic_leaf_ids = set(range(1_000, 1_100))
+
+        self.assertIn(2, decision.direct_exact_ids)
+        self.assertEqual(_channel(decision, "lexical")[0], 4)
+        self.assertIn(4, decision.base_leaf_ids)
+        self.assertFalse(
+            generic_leaf_ids & set(dict(decision.protected_reasons))
+        )
+
+    def test_direct_leaf_precedes_generic_parent_descendants(self):
+        """即使普通父节点在请求顺序更早，直接叶命中仍必须先进入 exact 通道。"""
+        nodes: list[dict[str, object]] = [
+            {"id": 1, "name": "领域根"},
+            {"id": 2, "name": "海军", "parentId": 1},
+            {"id": 3, "name": "精确目标", "parentId": 1},
+        ]
+        nodes.extend(
+            {
+                "id": 2_000 + index,
+                "name": f"海军资料{index}",
+                "parentId": 2,
+            }
+            for index in range(BM25_LIMIT)
+        )
+        decision = recall_architecture_candidates(
+            build_architecture_tree_index(nodes),
+            build_document_architecture_signals(title="海军 精确目标"),
+        )
+
+        self.assertEqual(_channel(decision, "exact")[0], 3)
+        self.assertEqual(decision.base_leaf_ids[0], 3)
+        self.assertEqual(
+            dict(decision.protected_reasons)[3],
+            ("exact:3",),
+        )
+
     def test_tree_route_is_bounded_and_records_direct_nodes(self):
         decision = recall_architecture_candidates(
             self.index,
@@ -475,13 +540,16 @@ class ArchitectureRecallCandidateContractTests(unittest.TestCase):
         )
         decision = recall_architecture_candidates(
             index,
-            build_document_architecture_signals(title="直接命中根"),
+            build_document_architecture_signals(
+                title="直接命中根 候选叶甲"
+            ),
         )
         protected_ids = {node_id for node_id, _ in decision.protected_reasons}
 
         self.assertNotIn(1, decision.final_candidate_ids)
         self.assertNotIn(1, protected_ids)
         self.assertTrue(protected_ids)
+        self.assertIn(2, protected_ids)
         self.assertTrue(protected_ids.issubset(set(decision.final_candidate_ids)))
 
     def test_prompt_budget_constructor_rejects_bool_and_non_integers(self):

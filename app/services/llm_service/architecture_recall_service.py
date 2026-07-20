@@ -530,28 +530,66 @@ def _expand_exact_leaves(
     index: ArchitectureTreeIndex,
     direct_ids: Sequence[int],
 ) -> tuple[tuple[int, ...], dict[int, tuple[str, ...]]]:
+    """按证据强度展开 exact 通道，并只保护可证明的候选。
+
+    直接命中的叶节点优先，其次是具有完整七类明细结构的装备 family。普通中文父节点
+    命中仍可为 exact 通道补充后代，但这些后代不再获得 protected-first 优先级，避免
+    “海军”等通用短词把 BM25/树路由的高置信候选挤出 Top-64。
+    """
     ranked: list[int] = []
     reasons: defaultdict[int, list[str]] = defaultdict(list)
+
+    def append_ranked(node_id: int) -> bool:
+        if node_id in ranked:
+            return True
+        if len(ranked) < BM25_LIMIT:
+            ranked.append(node_id)
+            return True
+        return False
+
+    # 直接节点自身始终保留 exact 证据；其中叶节点是最强、最窄的候选，优先入通道。
     for direct_id in direct_ids:
         node = index.require(direct_id)
-        direct_reason = f"exact:{direct_id}"
-        if direct_reason not in reasons[direct_id]:
-            reasons[direct_id].append(direct_reason)
-        leaf_ids = (direct_id,) if node.is_leaf else index.leaf_descendants_by_id[direct_id]
-        for leaf_id in leaf_ids:
-            reason = (
-                f"exact:{direct_id}"
-                if leaf_id == direct_id
-                else f"exact-descendant:{direct_id}"
-            )
-            if reason not in reasons[leaf_id]:
+        if not node.is_leaf or append_ranked(direct_id):
+            direct_reason = f"exact:{direct_id}"
+            if direct_reason not in reasons[direct_id]:
+                reasons[direct_id].append(direct_reason)
+
+    # 完整七类装备 family 是窄范围、结构化的型号证据，允许整体保护并先于普通父节点展开。
+    family_leaf_ids_by_parent: dict[int, tuple[int, ...]] = {}
+    for direct_id in direct_ids:
+        node = index.require(direct_id)
+        if node.is_leaf:
+            continue
+        family_leaf_ids = _equipment_family(index, direct_id)
+        if not family_leaf_ids:
+            continue
+        family_leaf_ids_by_parent[direct_id] = family_leaf_ids
+        for leaf_id in family_leaf_ids:
+            reason = f"exact-descendant:{direct_id}"
+            if append_ranked(leaf_id) and reason not in reasons[leaf_id]:
                 reasons[leaf_id].append(reason)
-            if leaf_id not in ranked:
-                ranked.append(leaf_id)
             if len(ranked) >= BM25_LIMIT:
                 break
         if len(ranked) >= BM25_LIMIT:
             break
+
+    # 普通父节点后代只参与 exact 排名，不继承 protected 身份。这样仍保留召回覆盖面，
+    # 同时让具有 lexical/tree RRF 分数的具体叶节点可以公平进入基础候选集。
+    for direct_id in direct_ids:
+        node = index.require(direct_id)
+        if node.is_leaf:
+            continue
+        family_leaf_ids = set(family_leaf_ids_by_parent.get(direct_id, ()))
+        for leaf_id in index.leaf_descendants_by_id[direct_id]:
+            if leaf_id in family_leaf_ids:
+                continue
+            append_ranked(leaf_id)
+            if len(ranked) >= BM25_LIMIT:
+                break
+        if len(ranked) >= BM25_LIMIT:
+            break
+
     return tuple(ranked), {node_id: tuple(values) for node_id, values in reasons.items()}
 
 
