@@ -220,6 +220,28 @@ class DocumentRagPortContractTests(unittest.TestCase):
                     session.trace.attempts[0].prompt_kind,
                 )
 
+    def test_fake_records_architecture_reselect_as_dedicated_prompt_kind(self) -> None:
+        """分支冲突重选必须与契约修复分开审计，不能复用通用 follow_up。"""
+        session = FakeDocumentRagPort().open_isolated_session(
+            context_name="file-task-architecture-reselect",
+            conversation_name="analysis",
+        )
+        session.analyse(
+            "sample.pdf",
+            "领域分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+
+        session.ask(
+            "在已确认装备分支内受限重选",
+            prompt_kind=RagPromptKind.ARCHITECTURE_RESELECT,
+        )
+
+        self.assertEqual(
+            ["architecture_classification", "architecture_reselect"],
+            [attempt.prompt_kind for attempt in session.trace.attempts],
+        )
+
     def test_invalid_analyse_prompt_kind_does_not_start_fake_session(self) -> None:
         """非法首次用途不得消费结果或把 Session 错误标记为已经开始。"""
         session = FakeDocumentRagPort().open_isolated_session(
@@ -281,8 +303,8 @@ class DocumentRagPortContractTests(unittest.TestCase):
             len({event.external_ref for event in conversation_events}),
         )
 
-    def test_fresh_conversation_requires_prepared_open_session_and_is_one_shot(self) -> None:
-        """切换门禁必须在模拟外部副作用前拒绝错误顺序、重复调用和关闭后调用。"""
+    def test_fresh_conversation_requires_prepared_session_and_allows_two_switches(self) -> None:
+        """切换门禁应允许两个隔离阶段，并在第三次调用前拒绝外部副作用。"""
         session = FakeDocumentRagPort().open_isolated_session(
             context_name="file-task-fresh-gates",
             conversation_name="analysis",
@@ -306,15 +328,20 @@ class DocumentRagPortContractTests(unittest.TestCase):
         )
 
         session.analyse("sample.pdf", "领域分类")
-        session.start_fresh_conversation(conversation_name="extraction")
+        self.assertTrue(
+            session.start_fresh_conversation(conversation_name="reselect")
+        )
+        self.assertTrue(
+            session.start_fresh_conversation(conversation_name="extraction")
+        )
         with self.assertRaises(RagOperationError) as repeated:
-            session.start_fresh_conversation(conversation_name="again")
+            session.start_fresh_conversation(conversation_name="third")
         self.assertEqual(
             "conversation_switch_repeated",
             repeated.exception.trace.failure_stage,
         )
         self.assertEqual(
-            2,
+            3,
             len(
                 [
                     event
@@ -328,6 +355,124 @@ class DocumentRagPortContractTests(unittest.TestCase):
         with self.assertRaises(RagOperationError) as after_close:
             session.start_fresh_conversation(conversation_name="closed")
         self.assertEqual("session_closed", after_close.exception.trace.failure_stage)
+
+    def test_second_fresh_conversation_failure_is_fatal_without_fallback(self) -> None:
+        """第二次线程创建失败后必须阻断 ask，不能退回第一次切换后的线程。"""
+        session = FakeDocumentRagPort(
+            fresh_conversation_error_messages=(
+                "",
+                "创建字段抽取对话失败",
+            ),
+        ).open_isolated_session(
+            context_name="file-task-second-fresh-failure",
+            conversation_name="analysis",
+        )
+        session.analyse("sample.pdf", "领域分类")
+        session.start_fresh_conversation(conversation_name="reselect")
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.start_fresh_conversation(conversation_name="extraction")
+
+        self.assertEqual("conversation_create", raised.exception.trace.failure_stage)
+        with self.assertRaises(RagOperationError) as ask_raised:
+            session.ask("不得退回重选线程抽取")
+        self.assertEqual(
+            "session_not_prepared",
+            ask_raised.exception.trace.failure_stage,
+        )
+        self.assertEqual(1, len(session.attempt_conversation_refs))
+
+    def test_optional_fresh_failure_consumes_attempt_but_allows_extraction_switch(
+        self,
+    ) -> None:
+        """可选重选线程失败应 fail-open，且剩余一次切换仍可用于字段抽取。"""
+        session = FakeDocumentRagPort(
+            fresh_conversation_error_messages=(
+                "创建可选重选对话失败",
+                "",
+            ),
+        ).open_isolated_session(
+            context_name="file-task-optional-fresh-failure",
+            conversation_name="analysis",
+        )
+        session.analyse("sample.pdf", "领域分类")
+
+        created = session.start_fresh_conversation(
+            conversation_name="reselect",
+            failure_is_fatal=False,
+        )
+        self.assertFalse(created)
+        self.assertIsNone(session.trace.failure_stage)
+        with self.assertRaises(RagOperationError) as repeated:
+            session.start_fresh_conversation(
+                conversation_name="reselect",
+                failure_is_fatal=False,
+            )
+        self.assertEqual(
+            "conversation_switch_repeated",
+            repeated.exception.trace.failure_stage,
+        )
+        self.assertTrue(
+            session.start_fresh_conversation(conversation_name="extraction")
+        )
+        result = session.ask("字段抽取")
+
+        self.assertEqual("模拟结果", result.text)
+        self.assertEqual(
+            ["conversation:1", "conversation:1:fresh:2"],
+            list(session.attempt_conversation_refs),
+        )
+        conversation_events = [
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "conversation_create"
+        ]
+        self.assertEqual(
+            [True, False, True],
+            [event.success for event in conversation_events],
+        )
+
+    def test_optional_ask_failure_preserves_attempt_and_allows_extraction(self) -> None:
+        """可选重选查询失败应保留失败 attempt，但不得污染后续字段抽取。"""
+        source = RagSource(document_ref="document:target", text="目标证据")
+        session = FakeDocumentRagPort(
+            ask_outcomes=(
+                FakeRagOutcome(
+                    text=None,
+                    failure_stage="query",
+                    error_message="可选重选查询失败",
+                ),
+                FakeRagOutcome(text="字段结果", sources=(source,)),
+            ),
+        ).open_isolated_session(
+            context_name="file-task-optional-query-failure",
+            conversation_name="analysis",
+        )
+        session.analyse("sample.pdf", "领域分类")
+        session.start_fresh_conversation(conversation_name="reselect")
+
+        optional_result = session.ask_optional(
+            "受限重选",
+            prompt_kind=RagPromptKind.ARCHITECTURE_RESELECT,
+        )
+
+        self.assertIsNone(optional_result)
+        self.assertIsNone(session.trace.failure_stage)
+        self.assertEqual("query", session.trace.attempts[-1].failure_stage)
+        session.start_fresh_conversation(conversation_name="extraction")
+        extraction_result = session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+        self.assertEqual("字段结果", extraction_result.text)
+        self.assertEqual(
+            [
+                "conversation:1",
+                "conversation:1:fresh",
+                "conversation:1:fresh:2",
+            ],
+            list(session.attempt_conversation_refs),
+        )
 
     def test_fresh_conversation_failure_does_not_fall_back_to_primary(self) -> None:
         """第二对话创建失败后不得允许 ask 在原对话继续抽取。"""

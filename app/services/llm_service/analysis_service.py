@@ -39,6 +39,9 @@ from app.services.core.config import (
     ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     ANALYSIS_FILENAME_CONSTRAINT_MODES,
+    ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+    ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
+    ANALYSIS_IDENTITY_RESELECT_MODES,
     load_ocr_config,
 )
 from app.services.core.architecture_tree import (
@@ -60,6 +63,7 @@ from app.services.core.prompts import (
     ANALYSIS_KEYWORD_MAX_CHARS,
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
+    build_architecture_reselect_prompt,
     build_data_standard_classification_prompt,
     build_file_analysis_prompt,
     build_file_extraction_prompt,
@@ -894,6 +898,66 @@ def _opening_text(original_text: str, *, max_chars: int = 2000, max_lines: int =
     return original_text[:max_chars]
 
 
+def _opening_identity_evidence_text(
+    original_text: str,
+    original_name: str,
+    *,
+    max_chars: int = 2000,
+    max_lines: int = 80,
+) -> str:
+    """剔除转换器可能回显的原文件名，避免把同一信号当成双重证据。"""
+
+    opening = _opening_text(
+        original_text,
+        max_chars=max_chars,
+        max_lines=max_lines,
+    )
+    if not opening:
+        return ""
+    def normalize_echo(value: Any) -> str:
+        return re.sub(
+            r"[^a-z0-9\u3400-\u4dbf\u4e00-\u9fff]+",
+            "",
+            unicodedata.normalize("NFKC", _as_text(value)).casefold(),
+        )
+
+    basename = Path(original_name.replace("\\", "/")).name
+    echo_values = {
+        normalized
+        for value in (basename, Path(basename).stem)
+        if (normalized := normalize_echo(value))
+    }
+    if not echo_values:
+        return opening
+
+    label_prefixes = (
+        "filename",
+        "originalfilename",
+        "documentname",
+        "title",
+        "文件名",
+        "原文件名",
+        "文档名",
+        "标题",
+    )
+    evidence_lines: list[str] = []
+    for line in opening.splitlines():
+        normalized_line = normalize_echo(line)
+        labelled_echo = any(
+            normalized_line == f"{prefix}{echo_value}"
+            for prefix in label_prefixes
+            for echo_value in echo_values
+        )
+        path_echo = (
+            ("file://" in line.casefold() or line.lstrip().startswith(("/", "\\")))
+            and any(echo_value in normalized_line for echo_value in echo_values)
+        )
+        if normalized_line in echo_values or labelled_echo or path_echo:
+            continue
+        evidence_lines.append(line)
+    return "\n".join(evidence_lines)[:max_chars]
+
+
 def _extract_security_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
     opening = _opening_text(original_text)
     if not opening:
@@ -1395,6 +1459,15 @@ def _normalize_analysis_data_standard_mode(value: Any) -> str:
     return mode
 
 
+def _normalize_analysis_identity_reselect_mode(value: Any) -> str:
+    mode = _as_text(value) or ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE
+    if mode not in ANALYSIS_IDENTITY_RESELECT_MODES:
+        raise ValueError(
+            "analysis_identity_reselect_mode 必须是 off、shadow 或 enforce"
+        )
+    return mode
+
+
 def _extract_recall_headings(original_text: str) -> tuple[str, ...]:
     """从正文提取最多 64 条短标题信号，不把长正文行重复塞入召回查询。"""
     headings: list[str] = []
@@ -1561,7 +1634,7 @@ _FILENAME_DATE_IDENTIFIER_PREFIXES = frozenset(
     }
 )
 _EQUIPMENT_DETAIL_KINDS = frozenset(
-    {
+    (
         "基础数据",
         "战技指标",
         "运用数据",
@@ -1569,7 +1642,16 @@ _EQUIPMENT_DETAIL_KINDS = frozenset(
         "模型数据",
         "目特数据",
         "声像数据",
-    }
+    )
+)
+_ORDERED_EQUIPMENT_DETAIL_KINDS = (
+    "基础数据",
+    "战技指标",
+    "运用数据",
+    "效能数据",
+    "模型数据",
+    "目特数据",
+    "声像数据",
 )
 _STRONG_GJB_FILENAME_RE = re.compile(
     r"(?<![A-Za-z0-9])GJB(?:\s*[/_-]\s*Z)?\s*[- ]?\s*\d+[A-Za-z]?",
@@ -1831,6 +1913,31 @@ class _JaneClassificationProfile:
     recall_identity_enabled: bool = False
     identity_confirmed: bool = False
     identity_conflict: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _EquipmentIdentityReselectProfile:
+    """候选召回之外建立的普通装备双证据身份快照。"""
+
+    active: bool = False
+    filename_identity_kind: str = "absent"
+    filename_identifiers: tuple[str, ...] = ()
+    opening_identifiers: tuple[str, ...] = ()
+    shared_identifiers: tuple[str, ...] = ()
+    conflicting_identifiers: tuple[str, ...] = ()
+    identifier: str = ""
+    target_parent_id: int | None = None
+    target_parent_path: str = ""
+    candidate_ids: tuple[int, ...] = ()
+    evidence_sources: tuple[str, ...] = ()
+    reason_code: str = "no_explicit_original_filename"
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityReselectGateDecision:
+    should_reselect: bool = False
+    relation: str = "not_evaluated"
+    reason_code: str = "profile_inactive"
 
 
 def _jane_recall_filename_signals(
@@ -2160,6 +2267,168 @@ def _equipment_entities_by_identifier(
     }
 
 
+def _ordered_equipment_family_scope_ids(
+    parent_id: int,
+    tree_index: ArchitectureTreeIndex,
+) -> tuple[int, ...]:
+    """返回七类明细叶与父节点；拓扑不唯一时拒绝建立受限分支。"""
+
+    parent = tree_index.get(parent_id)
+    if parent is None or parent.is_leaf:
+        return ()
+    children_by_kind: dict[str, list[int]] = {
+        kind: [] for kind in _ORDERED_EQUIPMENT_DETAIL_KINDS
+    }
+    for child_id in tree_index.children_by_id[parent.id]:
+        child = tree_index.require(child_id)
+        if not child.is_leaf:
+            continue
+        detail_kind = _equipment_detail_kind(child.name, parent.name)
+        if detail_kind in children_by_kind:
+            children_by_kind[detail_kind].append(child.id)
+    if any(len(children_by_kind[kind]) != 1 for kind in children_by_kind):
+        return ()
+    return tuple(
+        children_by_kind[kind][0]
+        for kind in _ORDERED_EQUIPMENT_DETAIL_KINDS
+    ) + (parent.id,)
+
+
+def _build_equipment_identity_reselect_profile(
+    *,
+    requested_original_name: str,
+    original_text: str,
+    tree_index: ArchitectureTreeIndex,
+    visible_ids: set[int],
+    jane_active: bool,
+    data_standard_active: bool,
+) -> _EquipmentIdentityReselectProfile:
+    """用显式原文件名和 opening 身份区确认普通装备的唯一树分支。"""
+
+    original_name = _as_text(requested_original_name)
+    filename_identity_kind = _jane_filename_identity_kind(original_name)
+    if not original_name:
+        return _EquipmentIdentityReselectProfile()
+    if jane_active:
+        return _EquipmentIdentityReselectProfile(
+            filename_identity_kind=filename_identity_kind,
+            reason_code="jane_scope_owned",
+        )
+    if data_standard_active:
+        return _EquipmentIdentityReselectProfile(
+            filename_identity_kind=filename_identity_kind,
+            reason_code="data_standard_scope_owned",
+        )
+    if filename_identity_kind != "descriptive":
+        return _EquipmentIdentityReselectProfile(
+            filename_identity_kind=filename_identity_kind,
+            reason_code="filename_not_descriptive",
+        )
+
+    entities_by_identifier = _equipment_entities_by_identifier(tree_index)
+    filename_identifiers = tuple(
+        identifier
+        for identifier in _ordered_strong_identifiers(original_name)
+        if entities_by_identifier.get(identifier)
+    )
+    if not filename_identifiers:
+        return _EquipmentIdentityReselectProfile(
+            filename_identity_kind=filename_identity_kind,
+            reason_code="filename_identifier_not_in_tree",
+        )
+    target_parent_ids = tuple(
+        dict.fromkeys(
+            parent_id
+            for identifier in filename_identifiers
+            for parent_id in entities_by_identifier[identifier]
+        )
+    )
+    if len(target_parent_ids) != 1:
+        return _EquipmentIdentityReselectProfile(
+            filename_identity_kind=filename_identity_kind,
+            filename_identifiers=filename_identifiers,
+            reason_code="filename_identity_ambiguous",
+        )
+
+    target_parent_id = target_parent_ids[0]
+    filename_prefixes = {
+        prefix
+        for prefix in map(_identifier_prefix, filename_identifiers)
+        if prefix
+    }
+    opening_identifiers = tuple(
+        identifier
+        for identifier in _ordered_strong_identifiers(
+            _opening_identity_evidence_text(
+                original_text,
+                original_name,
+                max_chars=2000,
+                max_lines=80,
+            )
+        )
+        if (
+            _identifier_prefix(identifier) in filename_prefixes
+            and entities_by_identifier.get(identifier)
+        )
+    )
+    shared_identifiers = tuple(
+        identifier
+        for identifier in filename_identifiers
+        if identifier in set(opening_identifiers)
+    )
+    conflicting_identifiers = tuple(
+        identifier
+        for identifier in opening_identifiers
+        if any(
+            parent_id != target_parent_id
+            for parent_id in entities_by_identifier[identifier]
+        )
+    )
+    common_fields = {
+        "filename_identity_kind": filename_identity_kind,
+        "filename_identifiers": filename_identifiers,
+        "opening_identifiers": opening_identifiers,
+        "shared_identifiers": shared_identifiers,
+        "conflicting_identifiers": conflicting_identifiers,
+        "target_parent_id": target_parent_id,
+        "target_parent_path": tree_index.require(target_parent_id).semantic_path,
+    }
+    if conflicting_identifiers:
+        return _EquipmentIdentityReselectProfile(
+            **common_fields,
+            reason_code="opening_identity_conflict",
+        )
+    if not shared_identifiers:
+        return _EquipmentIdentityReselectProfile(
+            **common_fields,
+            reason_code="independent_identity_missing",
+        )
+
+    candidate_ids = _ordered_equipment_family_scope_ids(
+        target_parent_id,
+        tree_index,
+    )
+    if len(candidate_ids) != 8:
+        return _EquipmentIdentityReselectProfile(
+            **common_fields,
+            reason_code="equipment_family_topology_invalid",
+        )
+    if not set(candidate_ids).issubset(visible_ids):
+        return _EquipmentIdentityReselectProfile(
+            **common_fields,
+            candidate_ids=candidate_ids,
+            reason_code="equipment_family_scope_incomplete",
+        )
+    return _EquipmentIdentityReselectProfile(
+        active=True,
+        **common_fields,
+        identifier=shared_identifiers[0],
+        candidate_ids=candidate_ids,
+        evidence_sources=("originalFileName", "openingIdentity"),
+        reason_code="identity_confirmed",
+    )
+
+
 def _scope_parent_clusters(
     profile: _JaneClassificationProfile,
     original_text: str,
@@ -2439,6 +2708,84 @@ def _architecture_id_is_in_branch(
     return (
         architecture_id == branch_parent_id
         or branch_parent_id in tree_index.ancestors_by_id[architecture_id]
+    )
+
+
+def _identity_reselect_relation(
+    architecture_id: int,
+    target_parent_id: int,
+    tree_index: ArchitectureTreeIndex,
+) -> str:
+    if _architecture_id_is_in_branch(
+        architecture_id,
+        target_parent_id,
+        tree_index,
+    ):
+        return "in_target_branch"
+    if architecture_id in tree_index.ancestors_by_id[target_parent_id]:
+        return "target_ancestor"
+
+    selected = tree_index.require(architecture_id)
+    target = tree_index.require(target_parent_id)
+    selected_family_id = (
+        selected.id
+        if not selected.is_leaf
+        and _has_seven_equipment_detail_leaves(selected, tree_index)
+        else selected.parent_id
+    )
+    if (
+        selected_family_id in tree_index.nodes_by_id
+        and target.parent_id is not None
+        and tree_index.require(selected_family_id).parent_id == target.parent_id
+    ):
+        return "sibling_equipment"
+    return "cross_branch"
+
+
+def _decide_identity_reselect_gate(
+    architecture_id: int,
+    *,
+    profile: _EquipmentIdentityReselectProfile,
+    tree_index: ArchitectureTreeIndex,
+) -> _IdentityReselectGateDecision:
+    if not profile.active or profile.target_parent_id is None:
+        return _IdentityReselectGateDecision(reason_code=profile.reason_code)
+    relation = _identity_reselect_relation(
+        architecture_id,
+        profile.target_parent_id,
+        tree_index,
+    )
+    if relation == "in_target_branch":
+        return _IdentityReselectGateDecision(
+            relation=relation,
+            reason_code="initial_result_in_target_branch",
+        )
+    return _IdentityReselectGateDecision(
+        should_reselect=True,
+        relation=relation,
+        reason_code="branch_conflict_reselect",
+    )
+
+
+def _parse_architecture_reselect_result(
+    raw_result: Any,
+    *,
+    scoped_ids: set[int],
+    tree_index: ArchitectureTreeIndex,
+    architecture_list: Iterable[Dict[str, Any]],
+) -> int | None:
+    parsed = _parse_strict_json_object(raw_result)
+    if parsed is None or set(parsed) != {"architectureId"}:
+        raise ArchitectureContractError(
+            "受限重选结果必须是仅含 architectureId 的严格 JSON 对象"
+        )
+    if parsed["architectureId"] is None:
+        return None
+    return _validate_topk_architecture_id(
+        parsed["architectureId"],
+        visible_ids=scoped_ids,
+        tree_index=tree_index,
+        architecture_list=architecture_list,
     )
 
 
@@ -3209,6 +3556,7 @@ def _execute_file_analysis_task(
         ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
     ),
     analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    analysis_identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
 ) -> None:
     """按审计硬前置契约执行单文件分析和永久知识库转交。
 
@@ -3228,6 +3576,9 @@ def _execute_file_analysis_task(
     )
     data_standard_mode = _normalize_analysis_data_standard_mode(
         analysis_data_standard_mode
+    )
+    identity_reselect_mode = _normalize_analysis_identity_reselect_mode(
+        analysis_identity_reselect_mode
     )
     # 三种运行模式都必须先持久化模型可见候选，审计故障时禁止创建远端 Session。
     # legacy 仍发送完整小树，但同样受全局 128 候选与 32K Prompt 硬门禁约束。
@@ -3270,6 +3621,7 @@ def _execute_file_analysis_task(
     data_standard_scope_ids: tuple[int, ...] = ()
     data_standard_remark_overrides: dict[int, str] = {}
     jane_profile = _JaneClassificationProfile()
+    equipment_identity_profile = _EquipmentIdentityReselectProfile()
     scope_resolution = _ArchitectureScopeResolution()
     constraint_decision: _ArchitectureConstraintDecision | None = None
     data_standard_general_fallback_applied = False
@@ -3769,6 +4121,46 @@ def _execute_file_analysis_task(
         )
         return
 
+    if (
+        identity_reselect_mode != ANALYSIS_IDENTITY_RESELECT_MODE_OFF
+        and classification_mode == "topk_two_stage"
+        and filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        and resolved_direct_architecture_id is None
+    ):
+        try:
+            equipment_identity_profile = (
+                _build_equipment_identity_reselect_profile(
+                    requested_original_name=requested_original_name,
+                    original_text=original_text,
+                    tree_index=tree_index,
+                    visible_ids=visible_ids,
+                    jane_active=jane_profile.active,
+                    data_standard_active=data_standard_scope_guard_active,
+                )
+            )
+        except Exception:
+            equipment_identity_profile = _EquipmentIdentityReselectProfile(
+                reason_code="identity_profile_error"
+            )
+            logger.exception(
+                "装备双证据身份画像失败，保留普通分类链路: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+    logger.info(
+        "装备身份受限重选门禁已评估: execution_id=%s mode=%s active=%s "
+        "reason=%s identifier=%s target_parent_id=%s candidate_count=%d",
+        execution_id,
+        identity_reselect_mode,
+        equipment_identity_profile.active,
+        equipment_identity_profile.reason_code,
+        equipment_identity_profile.identifier,
+        equipment_identity_profile.target_parent_id,
+        len(equipment_identity_profile.candidate_ids),
+    )
+
     if recall_audit_enabled and recall_audit_fields is None:
         raise RuntimeError("领域召回未生成可审计决策")
     if recall_audit_enabled:
@@ -3984,6 +4376,151 @@ def _execute_file_analysis_task(
 
                 if architecture_id is None:
                     raise ArchitectureContractError("无法确定领域分类")
+                initial_architecture_id = architecture_id
+                identity_gate_decision = _decide_identity_reselect_gate(
+                    architecture_id,
+                    profile=equipment_identity_profile,
+                    tree_index=tree_index,
+                )
+                identity_reselect_architecture_id: int | None = None
+                identity_reselect_outcome = identity_gate_decision.reason_code
+                classification_attempts_used = _phase_attempt_count(
+                    session,
+                    classification_started,
+                )
+                if identity_gate_decision.should_reselect:
+                    if classification_attempts_used != 1:
+                        identity_reselect_outcome = "skip_call_budget"
+                    else:
+                        try:
+                            scoped_candidates = tuple(
+                                _node_prompt_projection(tree_index.require(node_id))
+                                for node_id in equipment_identity_profile.candidate_ids
+                            )
+                            reselect_prompt = _normalize_bounded_analysis_prompt(
+                                build_architecture_reselect_prompt(
+                                    {"architectureId": initial_architecture_id},
+                                    {
+                                        "identifier": (
+                                            equipment_identity_profile.identifier
+                                        ),
+                                        "matchedParentId": (
+                                            equipment_identity_profile.target_parent_id
+                                        ),
+                                        "matchedParentPath": (
+                                            equipment_identity_profile.target_parent_path
+                                        ),
+                                        "evidenceSources": list(
+                                            equipment_identity_profile.evidence_sources
+                                        ),
+                                    },
+                                    scoped_candidates,
+                                )
+                            )
+                        except Exception:
+                            identity_reselect_outcome = "prompt_build_failed"
+                            logger.exception(
+                                "装备身份受限重选 Prompt 构造失败，保留初次分类: "
+                                "file_name=%s execution_id=%s",
+                                file_name,
+                                execution_id,
+                            )
+                        else:
+                            reselect_conversation_ready = (
+                                session.start_fresh_conversation(
+                                    conversation_name=(
+                                        "analysis-identity-reselect-"
+                                        f"{Path(file_name).stem}"
+                                    ),
+                                    failure_is_fatal=False,
+                                )
+                            )
+                            _record_lease_resources(
+                                task_service,
+                                execution_id,
+                                session.trace,
+                                prepared_document,
+                            )
+                            if not reselect_conversation_ready:
+                                identity_reselect_outcome = (
+                                    "conversation_unavailable_keep_initial"
+                                )
+                            else:
+                                final_prompt = reselect_prompt
+                                reselect_result = session.ask_optional(
+                                    final_prompt,
+                                    prompt_kind=(
+                                        RagPromptKind.ARCHITECTURE_RESELECT
+                                    ),
+                                    require_sources=True,
+                                    max_attempts=1,
+                                )
+                                _record_lease_resources(
+                                    task_service,
+                                    execution_id,
+                                    session.trace,
+                                    prepared_document,
+                                )
+                                if reselect_result is None:
+                                    identity_reselect_outcome = (
+                                        "query_failed_keep_initial"
+                                    )
+                                else:
+                                    try:
+                                        identity_reselect_architecture_id = (
+                                            _parse_architecture_reselect_result(
+                                                reselect_result.text,
+                                                scoped_ids=set(
+                                                    equipment_identity_profile.candidate_ids
+                                                ),
+                                                tree_index=tree_index,
+                                                architecture_list=architecture_list,
+                                            )
+                                        )
+                                    except ArchitectureContractError:
+                                        identity_reselect_outcome = (
+                                            "invalid_result_keep_initial"
+                                        )
+                                        logger.warning(
+                                            "装备身份受限重选结果不合法，保留初次分类: "
+                                            "file_name=%s execution_id=%s",
+                                            file_name,
+                                            execution_id,
+                                        )
+                                    else:
+                                        if identity_reselect_architecture_id is None:
+                                            identity_reselect_outcome = (
+                                                "null_result_keep_initial"
+                                            )
+                                        elif (
+                                            identity_reselect_mode
+                                            == ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE
+                                        ):
+                                            architecture_id = (
+                                                identity_reselect_architecture_id
+                                            )
+                                            identity_reselect_outcome = (
+                                                "enforce_applied"
+                                            )
+                                        else:
+                                            identity_reselect_outcome = (
+                                                "shadow_kept_initial"
+                                            )
+                logger.info(
+                    "装备身份受限重选完成: execution_id=%s mode=%s relation=%s "
+                    "gate_reason=%s initial_architecture_id=%s "
+                    "reselect_architecture_id=%s pre_constraint_architecture_id=%s "
+                    "classification_attempts=%d outcome=%s",
+                    execution_id,
+                    identity_reselect_mode,
+                    identity_gate_decision.relation,
+                    identity_gate_decision.reason_code,
+                    initial_architecture_id,
+                    identity_reselect_architecture_id,
+                    architecture_id,
+                    classification_attempts_used,
+                    identity_reselect_outcome,
+                )
                 constraint_decision = (
                     _decide_topk_deterministic_architecture_constraint(
                         architecture_id,
@@ -4802,6 +5339,7 @@ def run_file_analysis_task(
         ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
     ),
     analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    analysis_identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
 ) -> None:
     """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
 
@@ -4823,6 +5361,7 @@ def run_file_analysis_task(
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
             analysis_data_standard_mode=analysis_data_standard_mode,
+            analysis_identity_reselect_mode=analysis_identity_reselect_mode,
         )
     except (TaskExecutionConflictError, TaskStateConflictError):
         logger.warning(
@@ -4942,6 +5481,7 @@ def run_file_analysis_batch_task(
         ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
     ),
     analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    analysis_identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
 ) -> None:
     """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
@@ -4982,4 +5522,5 @@ def run_file_analysis_batch_task(
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
             analysis_data_standard_mode=analysis_data_standard_mode,
+            analysis_identity_reselect_mode=analysis_identity_reselect_mode,
         )

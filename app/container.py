@@ -270,11 +270,13 @@ def create_application_services() -> ApplicationServices:
         "已读取运行模式配置: chat_runtime_mode=%s "
         "analysis_classification_mode=%s "
         "analysis_filename_constraint_mode=%s "
-        "analysis_data_standard_mode=%s",
+        "analysis_data_standard_mode=%s "
+        "analysis_identity_reselect_mode=%s",
         chat_infrastructure_config.runtime_mode,
         analysis_classification_config.mode,
         analysis_classification_config.filename_constraint_mode,
         analysis_classification_config.data_standard_mode,
+        analysis_classification_config.identity_reselect_mode,
     )
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
@@ -353,13 +355,15 @@ def create_application_services() -> ApplicationServices:
         "upload_max_concurrency=%d chat_runtime_mode=%s "
         "analysis_classification_mode=%s "
         "analysis_filename_constraint_mode=%s "
-        "analysis_data_standard_mode=%s",
+        "analysis_data_standard_mode=%s "
+        "analysis_identity_reselect_mode=%s",
         services.knowledge_index_factory is not None,
         services.upload_task_limiter.max_concurrency,
         services.chat_infrastructure_config.runtime_mode,
         services.analysis_classification_config.mode,
         services.analysis_classification_config.filename_constraint_mode,
         services.analysis_classification_config.data_standard_mode,
+        services.analysis_classification_config.identity_reselect_mode,
     )
     return services
 

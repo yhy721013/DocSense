@@ -188,6 +188,7 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - `architectureStandardList` 仍是独立的数据标准扩展字段开关；只有最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 才额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。它不替代完整 `architectureList`，也不改变领域分类候选。
    - 运行模式由 `DOCSENSE_ANALYSIS_CLASSIFICATION_MODE` 控制：`topk_two_stage` 为默认模式；`topk_single` 保留 Top-K 有界候选但回滚为单阶段分类与抽取；`legacy` 仅适用于完整树候选不超过 128 且最终完整 Prompt 不超过 32,000 字符的小树。
    - 文件名分类约束由 `DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE` 控制：默认 `scope_guard`，启用简氏作用域识别，以及 `originalFileName` 与首页真实标题的双源分支约束；可显式设置为 `legacy` 即时回滚到既有文件名硬约束。文件名只作为优先分类信号，不能在证据冲突或不足时单独决定最终分类；显式空值或未知值会使服务拒绝启动。
+   - 装备身份受限重选由 `DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE` 独立控制，默认 `enforce`。只有描述性 `originalFileName` 与文档开头/标题两路相互独立的证据共同确认同一唯一装备型号、该型号唯一映射到一个装备父节点，且父节点及七类直属明细叶子均在模型可见候选中时，门禁才可能通过；正文中偶然提及的部件或同级舰不能单独触发。初次分类已在该装备分支内时保持原结果，只有落在分支外或仅命中过粗祖先时才允许在“确认的装备父节点 + 七类直属明细叶子”内重选一次。`shadow` 会记录这次重选但不采纳，`enforce` 会采纳合法结果；重选返回空值、越界节点或调用失败时 fail-open 保留初次分类，不扩大候选、不循环重试。需要即时关闭该优化时可显式设置为 `off`。
    - 数据标准正文保护与文件名分类约束相互独立；启用时日志会记录标准号、标准标题、证据来源、候选作用域，以及最终是模型叶子命中还是 `data_standard_general_fallback` 受控兜底。
    - 召回决策按任务 execution 持久化 tree fingerprint、query digest、候选与排名、Prompt 字符数、返回 ID/rank、耗时和失败阶段，不保存正文。AnythingLLM 标签向量召回不在本轮实现范围；在人工 gold 门禁通过前，不据此宣称生产分类准确率已经提升。
    - 当最终分类名称严格符合 `<武器装备名称>-基础数据`、`<武器装备名称>-战技指标`、`<武器装备名称>-运用数据` 或 `<武器装备名称>-效能数据` 时，回调 `data.architectureId` 返回具体子分类 ID；本地知识库关系和 AnythingLLM workspace 按解析出的装备级父节点 ID 归并。业务 metadata 以 DocSense 本地数据库为准，AnythingLLM 上传 metadata 当前仅写入用于来源追踪的 `docSource`，不写入分类 ID。

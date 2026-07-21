@@ -27,6 +27,7 @@ from app.services.core.config import (
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
     AnalysisClassificationConfig,
     AnythingLLMConfig,
     LLMIntegrationConfig,
@@ -412,6 +413,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertEqual(
             ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
             task_kwargs["analysis_filename_constraint_mode"],
+        )
+        self.assertEqual(
+            ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+            task_kwargs["analysis_identity_reselect_mode"],
         )
         target = thread_type.call_args.kwargs["target"]
         self.assertIs(

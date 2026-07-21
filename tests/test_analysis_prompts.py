@@ -11,6 +11,7 @@ from app.services.core.prompts import (
     ANALYSIS_SUMMARY_MAX_CHARS,
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
+    build_architecture_reselect_prompt,
     build_data_standard_classification_prompt,
     build_file_analysis_prompt,
     build_file_extraction_prompt,
@@ -18,6 +19,38 @@ from app.services.core.prompts import (
 
 
 class AnalysisPromptSplitTests(unittest.TestCase):
+    @staticmethod
+    def _reselect_candidates() -> list[dict]:
+        parent_path = "海军装备/航空母舰/CVN-68"
+        candidates = [
+            {
+                "id": "6800",
+                "pathName": parent_path,
+                "nodeType": "parent",
+                "remark": "CVN-68 单舰资料。",
+            }
+        ]
+        for index, detail_name in enumerate(
+            (
+                "基础数据",
+                "战技指标",
+                "运用数据",
+                "效能数据",
+                "编制数据",
+                "保障数据",
+                "部署数据",
+            ),
+            start=1,
+        ):
+            candidates.append(
+                {
+                    "id": 6800 + index,
+                    "pathName": f"{parent_path}/{detail_name}",
+                    "nodeType": "leaf",
+                }
+            )
+        return candidates
+
     def test_classification_prompt_uses_only_model_candidate_projection(self):
         prompt = build_architecture_classification_prompt(
             {
@@ -347,6 +380,99 @@ class AnalysisPromptSplitTests(unittest.TestCase):
         self.assertNotIn("不应进入修复上下文", prompt)
         self.assertIn("数字或null", prompt)
         self.assertIn("证据不足时不要猜测，输出 null", prompt)
+
+    def test_architecture_reselect_uses_only_confirmed_identity_and_family_candidates(self):
+        prompt = build_architecture_reselect_prompt(
+            {
+                "architectureId": 999,
+                "country": "不应进入重选上下文",
+            },
+            {
+                "identifier": "CVN-68",
+                "matchedParentId": "6800",
+                "matchedParentPath": "海军装备/航空母舰/CVN-68",
+                "evidenceSources": ["originalFileName", "title"],
+            },
+            self._reselect_candidates(),
+        )
+
+        context = json.loads(
+            prompt.split("【已确认身份上下文】\n", 1)[1].splitlines()[0]
+        )
+        candidates = json.loads(prompt.split("【受限候选】\n", 1)[1].strip())
+        self.assertEqual(
+            context,
+            {
+                "identifier": "CVN-68",
+                "matchedParentId": 6800,
+                "matchedParentPath": "海军装备/航空母舰/CVN-68",
+                "evidenceSources": ["originalFileName", "title"],
+            },
+        )
+        self.assertEqual(8, len(candidates))
+        self.assertEqual("parent", candidates[0]["nodeType"])
+        self.assertTrue(all(item["nodeType"] == "leaf" for item in candidates[1:]))
+        self.assertTrue(all(isinstance(item["id"], int) for item in candidates))
+        self.assertIn('{"architectureId":999}', prompt)
+        self.assertIn("叶子证据不足", prompt)
+        self.assertIn("必须选择 parent", prompt)
+        self.assertIn("architectureId 输出 null", prompt)
+        self.assertIn('{"architectureId": null}', prompt)
+        self.assertNotIn("不应进入重选上下文", prompt)
+
+    def test_architecture_reselect_rejects_unconfirmed_or_cross_branch_context(self):
+        candidates = self._reselect_candidates()
+        valid_context = {
+            "identifier": "CVN-68",
+            "matchedParentId": 6800,
+            "matchedParentPath": "海军装备/航空母舰/CVN-68",
+            "evidenceSources": ["originalFileName", "title"],
+        }
+
+        invalid_cases = (
+            (
+                {**valid_context, "body": "正文不得进入身份上下文"},
+                candidates,
+                "不允许的字段",
+            ),
+            (
+                {**valid_context, "evidenceSources": ["originalFileName"]},
+                candidates,
+                "两个独立身份凭据来源",
+            ),
+            (
+                {**valid_context, "matchedParentId": 6900},
+                candidates,
+                "与 parent candidate 不一致",
+            ),
+            (
+                valid_context,
+                [
+                    *candidates[:-1],
+                    {
+                        "id": 6807,
+                        "pathName": "海军装备/航空母舰/CVN-69/部署数据",
+                        "nodeType": "leaf",
+                    },
+                ],
+                "直接子节点",
+            ),
+        )
+        for context, candidate_set, message in invalid_cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    build_architecture_reselect_prompt(
+                        {"architectureId": 999},
+                        context,
+                        candidate_set,
+                    )
+
+        with self.assertRaisesRegex(ValueError, "恰好包含"):
+            build_architecture_reselect_prompt(
+                {"architectureId": 999},
+                valid_context,
+                candidates[:-1],
+            )
 
     def test_legacy_analysis_prompt_remains_available(self):
         prompt = build_file_analysis_prompt(

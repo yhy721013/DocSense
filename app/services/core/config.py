@@ -76,9 +76,20 @@ ANALYSIS_DATA_STANDARD_MODES = frozenset(
     }
 )
 
+ANALYSIS_IDENTITY_RESELECT_MODE_OFF = "off"
+ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW = "shadow"
+ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE = "enforce"
+ANALYSIS_IDENTITY_RESELECT_MODES = frozenset(
+    {
+        ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
+        ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW,
+        ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+    }
+)
+
 
 class AnalysisClassificationConfigurationError(RuntimeError):
-    """领域分类、文件名约束、数据标准模式或固定合同上限非法时抛出。"""
+    """领域分类、保护模式或固定合同上限非法时抛出。"""
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,7 @@ class AnalysisClassificationConfig:
         ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
     )
     data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+    identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE
     model_candidate_limit: int = 128
     classification_prompt_char_limit: int = 32_000
     base_leaf_limit: int = 64
@@ -118,6 +130,18 @@ class AnalysisClassificationConfig:
             raise AnalysisClassificationConfigurationError(
                 "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE 配置非法："
                 f"{self.filename_constraint_mode!r}；仅支持 {allowed}"
+            )
+
+        if not isinstance(self.identity_reselect_mode, str):
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE 必须是字符串"
+            )
+        identity_reselect_mode = self.identity_reselect_mode.strip().lower()
+        if identity_reselect_mode not in ANALYSIS_IDENTITY_RESELECT_MODES:
+            allowed = ", ".join(sorted(ANALYSIS_IDENTITY_RESELECT_MODES))
+            raise AnalysisClassificationConfigurationError(
+                "DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE 配置非法："
+                f"{self.identity_reselect_mode!r}；仅支持 {allowed}"
             )
 
         for field_name in (
@@ -154,6 +178,11 @@ class AnalysisClassificationConfig:
             self,
             "filename_constraint_mode",
             filename_constraint_mode,
+        )
+        object.__setattr__(
+            self,
+            "identity_reselect_mode",
+            identity_reselect_mode,
         )
 
         if not isinstance(self.data_standard_mode, str):
@@ -297,11 +326,11 @@ def load_llm_integration_config() -> LLMIntegrationConfig:
 
 
 def load_analysis_classification_config() -> AnalysisClassificationConfig:
-    """读取并严格校验领域分类、文件名约束和数据标准模式。
+    """读取并严格校验领域分类、文件名约束和保护模式。
 
-    环境变量缺失时三个模式分别使用 ``topk_two_stage``、``scope_guard`` 和
-    ``scope_guard``；数据标准门禁可显式设置为 ``legacy`` 独立回滚。显式空值或
-    未知值都必须拒绝，避免误配时静默切换分类链路。
+    环境变量缺失时分类、文件名约束、数据标准和身份重选分别使用
+    ``topk_two_stage``、``scope_guard``、``scope_guard`` 和 ``enforce``。显式空值
+    或未知值都必须拒绝，避免误配时静默切换分类链路。
     """
     raw_mode = os.getenv("DOCSENSE_ANALYSIS_CLASSIFICATION_MODE")
     raw_filename_constraint_mode = os.getenv(
@@ -310,10 +339,14 @@ def load_analysis_classification_config() -> AnalysisClassificationConfig:
     raw_data_standard_mode = os.getenv(
         "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE"
     )
+    raw_identity_reselect_mode = os.getenv(
+        "DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE"
+    )
     if (
         raw_mode is None
         and raw_filename_constraint_mode is None
         and raw_data_standard_mode is None
+        and raw_identity_reselect_mode is None
     ):
         return AnalysisClassificationConfig.topk_two_stage()
     return AnalysisClassificationConfig(
@@ -331,6 +364,11 @@ def load_analysis_classification_config() -> AnalysisClassificationConfig:
             ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
             if raw_data_standard_mode is None
             else raw_data_standard_mode
+        ),
+        identity_reselect_mode=(
+            ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE
+            if raw_identity_reselect_mode is None
+            else raw_identity_reselect_mode
         ),
     )
 

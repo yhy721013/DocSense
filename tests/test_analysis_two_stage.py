@@ -35,6 +35,63 @@ class AnalysisTwoStageTests(unittest.TestCase):
         ]
 
     @staticmethod
+    def _equipment_identity_tree() -> list[dict]:
+        detail_kinds = (
+            "基础数据",
+            "战技指标",
+            "运用数据",
+            "效能数据",
+            "模型数据",
+            "目特数据",
+            "声像数据",
+        )
+        nodes = [{"id": 1, "name": "航空母舰", "parentId": None}]
+        for parent_id, identifier in ((680, "CVN-68"), (690, "CVN-69")):
+            nodes.append(
+                {"id": parent_id, "name": identifier, "parentId": 1}
+            )
+            nodes.extend(
+                {
+                    "id": parent_id + offset,
+                    "name": f"{identifier}-{detail_kind}",
+                    "parentId": parent_id,
+                }
+                for offset, detail_kind in enumerate(detail_kinds, start=1)
+            )
+        return nodes
+
+    @staticmethod
+    def _equipment_identity_candidate_ids() -> tuple[int, ...]:
+        return (
+            681,
+            682,
+            683,
+            684,
+            685,
+            686,
+            687,
+            680,
+            691,
+            692,
+            693,
+            694,
+            695,
+            696,
+            697,
+            690,
+        )
+
+    @staticmethod
+    def _equipment_identity_body() -> str:
+        return "\n".join(
+            (
+                "USS Nimitz (CVN-68)",
+                "CVN-68 is the lead ship described by this document.",
+                "The following sections cover its characteristics and operations.",
+            )
+        )
+
+    @staticmethod
     def _data_standard_tree(*, include_general: bool = True) -> list[dict]:
         nodes = [
             {"id": 100, "name": "数据标准", "parentId": None},
@@ -155,6 +212,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
             mode: str = "topk_two_stage",
             filename_constraint_mode: str = "legacy",
             data_standard_mode: str = "legacy",
+            identity_reselect_mode: str = "off",
     ):
         file_name = request["params"][0]["fileName"]
         local_file = Path(tmp, file_name)
@@ -206,6 +264,7 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 analysis_classification_mode=mode,
                 analysis_filename_constraint_mode=filename_constraint_mode,
                 analysis_data_standard_mode=data_standard_mode,
+                analysis_identity_reselect_mode=identity_reselect_mode,
             )
         return (
             task_service,
@@ -362,6 +421,393 @@ class AnalysisTwoStageTests(unittest.TestCase):
         )
         # 完整树仍用于 storage，基础数据叶子归并到装备父节点 10。
         self.assertIn(10, knowledge.ports[0]._collections_by_architecture)
+
+    def test_identity_reselect_shadow_keeps_initial_result_in_three_conversations(self):
+        with workspace_tempdir() as tmp:
+            file_name = "CVN-68 overview.txt"
+            tree = self._equipment_identity_tree()
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text(
+                self._equipment_identity_body(),
+                encoding="utf-8",
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":690}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":680}',
+                        sources=(self.SOURCE,),
+                    ),
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    ),
+                ],
+            )
+            task_service, task, recall, rag_factory, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    self._equipment_identity_candidate_ids(),
+                ),
+                filename_constraint_mode="scope_guard",
+                identity_reselect_mode="shadow",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual("2", task["status"])
+        self.assertEqual(690, task["result_payload"]["data"]["architectureId"])
+        self.assertEqual(690, recall["returned_architecture_id"])
+        self.assertIn(690, knowledge.ports[0]._collections_by_architecture)
+        self.assertEqual(
+            [
+                "architecture_classification",
+                "architecture_reselect",
+                "analysis_extraction",
+            ],
+            [attempt["prompt_kind"] for attempt in attempts],
+        )
+        session = rag_factory.ports[0].sessions[0]
+        self.assertEqual(
+            (
+                "conversation:1",
+                "conversation:1:fresh",
+                "conversation:1:fresh:2",
+            ),
+            session.attempt_conversation_refs,
+        )
+
+    def test_identity_reselect_enforce_applies_valid_scoped_parent_everywhere(self):
+        with workspace_tempdir() as tmp:
+            file_name = "CVN-68 identity report.txt"
+            tree = self._equipment_identity_tree()
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text(
+                self._equipment_identity_body(),
+                encoding="utf-8",
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":690}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":680}',
+                        sources=(self.SOURCE,),
+                    ),
+                    FakeRagOutcome(
+                        text=self._extraction(file_name, architecture_id=690),
+                        sources=(self.SOURCE,),
+                    ),
+                ],
+            )
+            task_service, task, recall, _rag, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    self._equipment_identity_candidate_ids(),
+                ),
+                filename_constraint_mode="scope_guard",
+                identity_reselect_mode="enforce",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual("2", task["status"])
+        self.assertEqual(680, task["result_payload"]["data"]["architectureId"])
+        self.assertEqual(680, recall["returned_architecture_id"])
+        self.assertEqual(8, recall["returned_rank"])
+        self.assertIn(680, knowledge.ports[0]._collections_by_architecture)
+        self.assertEqual(
+            [
+                "architecture_classification",
+                "architecture_reselect",
+                "analysis_extraction",
+            ],
+            [attempt["prompt_kind"] for attempt in attempts],
+        )
+
+    def test_identity_reselect_skips_when_initial_result_is_already_in_target_branch(self):
+        with workspace_tempdir() as tmp:
+            file_name = "CVN-68 branch evidence.txt"
+            tree = self._equipment_identity_tree()
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text(
+                self._equipment_identity_body(),
+                encoding="utf-8",
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text='{"architectureId":681}',
+                        sources=(self.SOURCE,),
+                    )
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            task_service, task, recall, rag_factory, knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    self._equipment_identity_candidate_ids(),
+                ),
+                filename_constraint_mode="scope_guard",
+                identity_reselect_mode="enforce",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual("2", task["status"])
+        self.assertEqual(681, task["result_payload"]["data"]["architectureId"])
+        self.assertEqual(681, recall["returned_architecture_id"])
+        self.assertIn(680, knowledge.ports[0]._collections_by_architecture)
+        self.assertEqual(
+            ["architecture_classification", "analysis_extraction"],
+            [attempt["prompt_kind"] for attempt in attempts],
+        )
+        self.assertEqual(
+            ("conversation:1", "conversation:1:fresh"),
+            rag_factory.ports[0].sessions[0].attempt_conversation_refs,
+        )
+
+    def test_identity_reselect_skips_when_classification_used_two_attempts(self):
+        with workspace_tempdir() as tmp:
+            file_name = "CVN-68 retried classification.txt"
+            tree = self._equipment_identity_tree()
+            request = self._request(file_name, tree)
+            Path(tmp, file_name).write_text(
+                self._equipment_identity_body(),
+                encoding="utf-8",
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=None,
+                        failure_stage="query",
+                        error_message="首次分类请求失败",
+                    ),
+                    FakeRagOutcome(
+                        text='{"architectureId":690}',
+                        sources=(self.SOURCE,),
+                    ),
+                ],
+                ask_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ],
+            )
+            task_service, task, recall, _rag, _knowledge = self._run(
+                tmp=tmp,
+                request=request,
+                rag_factory=rag_factory,
+                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
+                    index,
+                    self._equipment_identity_candidate_ids(),
+                ),
+                filename_constraint_mode="scope_guard",
+                identity_reselect_mode="enforce",
+            )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        self.assertEqual("2", task["status"])
+        self.assertEqual(690, task["result_payload"]["data"]["architectureId"])
+        self.assertEqual(690, recall["returned_architecture_id"])
+        self.assertEqual(
+            [
+                "architecture_classification",
+                "architecture_classification",
+                "analysis_extraction",
+            ],
+            [attempt["prompt_kind"] for attempt in attempts],
+        )
+
+    def test_identity_reselect_null_or_invalid_result_keeps_initial_classification(self):
+        cases = (
+            ("null", '{"architectureId":null}'),
+            ("outside-scope", '{"architectureId":9999}'),
+        )
+        for case_name, reselect_response in cases:
+            with self.subTest(case=case_name), workspace_tempdir() as tmp:
+                file_name = f"CVN-68 reselect {case_name}.txt"
+                tree = self._equipment_identity_tree()
+                request = self._request(file_name, tree)
+                Path(tmp, file_name).write_text(
+                    self._equipment_identity_body(),
+                    encoding="utf-8",
+                )
+                rag_factory = FakeDocumentRagFactory(
+                    analyse_outcomes=[
+                        FakeRagOutcome(
+                            text='{"architectureId":690}',
+                            sources=(self.SOURCE,),
+                        )
+                    ],
+                    ask_outcomes=[
+                        FakeRagOutcome(
+                            text=reselect_response,
+                            sources=(self.SOURCE,),
+                        ),
+                        FakeRagOutcome(
+                            text=self._extraction(file_name),
+                            sources=(self.SOURCE,),
+                        ),
+                    ],
+                )
+                task_service, task, recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=(
+                        lambda index, *_args, **_kwargs: self._decision(
+                            index,
+                            self._equipment_identity_candidate_ids(),
+                        )
+                    ),
+                    filename_constraint_mode="scope_guard",
+                    identity_reselect_mode="enforce",
+                )
+                interaction = task_service.get_llm_interactions(
+                    "file", file_name
+                )[0]
+                attempts = task_service.get_llm_interaction_attempts(
+                    interaction["id"]
+                )
+
+            self.assertEqual("2", task["status"])
+            self.assertEqual(
+                690,
+                task["result_payload"]["data"]["architectureId"],
+            )
+            self.assertEqual(690, recall["returned_architecture_id"])
+            self.assertEqual(
+                [
+                    "architecture_classification",
+                    "architecture_reselect",
+                    "analysis_extraction",
+                ],
+                [attempt["prompt_kind"] for attempt in attempts],
+            )
+
+    def test_identity_reselect_optional_failures_keep_initial_and_continue_extraction(self):
+        cases = ("conversation", "query")
+        for case_name in cases:
+            with self.subTest(case=case_name), workspace_tempdir() as tmp:
+                file_name = f"CVN-68 optional {case_name}.txt"
+                tree = self._equipment_identity_tree()
+                request = self._request(file_name, tree)
+                Path(tmp, file_name).write_text(
+                    self._equipment_identity_body(),
+                    encoding="utf-8",
+                )
+                ask_outcomes = [
+                    FakeRagOutcome(
+                        text=self._extraction(file_name),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+                factory_options = {}
+                if case_name == "conversation":
+                    factory_options["fresh_conversation_error_messages"] = (
+                        "受限重选对话创建失败",
+                        "",
+                    )
+                else:
+                    ask_outcomes.insert(
+                        0,
+                        FakeRagOutcome(
+                            text=None,
+                            failure_stage="query",
+                            error_message="受限重选请求失败",
+                        ),
+                    )
+                rag_factory = FakeDocumentRagFactory(
+                    analyse_outcomes=[
+                        FakeRagOutcome(
+                            text='{"architectureId":690}',
+                            sources=(self.SOURCE,),
+                        )
+                    ],
+                    ask_outcomes=ask_outcomes,
+                    **factory_options,
+                )
+                task_service, task, recall, rag_factory, knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                    recall_side_effect=(
+                        lambda index, *_args, **_kwargs: self._decision(
+                            index,
+                            self._equipment_identity_candidate_ids(),
+                        )
+                    ),
+                    filename_constraint_mode="scope_guard",
+                    identity_reselect_mode="enforce",
+                )
+                interaction = task_service.get_llm_interactions(
+                    "file", file_name
+                )[0]
+                attempts = task_service.get_llm_interaction_attempts(
+                    interaction["id"]
+                )
+
+            self.assertEqual("2", task["status"])
+            self.assertEqual(
+                690,
+                task["result_payload"]["data"]["architectureId"],
+            )
+            self.assertEqual(690, recall["returned_architecture_id"])
+            self.assertIn(690, knowledge.ports[0]._collections_by_architecture)
+            self.assertEqual(
+                "analysis_extraction",
+                attempts[-1]["prompt_kind"],
+            )
+            if case_name == "conversation":
+                self.assertEqual(
+                    ["architecture_classification", "analysis_extraction"],
+                    [attempt["prompt_kind"] for attempt in attempts],
+                )
+            else:
+                self.assertEqual(
+                    [
+                        "architecture_classification",
+                        "architecture_reselect",
+                        "analysis_extraction",
+                    ],
+                    [attempt["prompt_kind"] for attempt in attempts],
+                )
+            self.assertEqual(
+                2 if case_name == "conversation" else 3,
+                len(
+                    set(
+                        rag_factory.ports[0]
+                        .sessions[0]
+                        .attempt_conversation_refs
+                    )
+                ),
+            )
 
     def test_second_conversation_failure_is_audited_without_extraction_fallback(self):
         """第二线程失败时保留最后一次真实分类 Prompt，并清理临时资源。"""

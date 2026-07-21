@@ -13,6 +13,9 @@ from app.services.core.config import (
     ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+    ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
+    ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW,
     AnalysisClassificationConfig,
     AnalysisClassificationConfigurationError,
     load_analysis_classification_config,
@@ -24,12 +27,14 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
     ENV_NAME = "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE"
     CONSTRAINT_ENV_NAME = "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE"
     DATA_STANDARD_ENV_NAME = "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE"
+    IDENTITY_RESELECT_ENV_NAME = "DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE"
 
     def test_missing_environment_uses_topk_two_stage_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop(self.ENV_NAME, None)
             os.environ.pop(self.CONSTRAINT_ENV_NAME, None)
             os.environ.pop(self.DATA_STANDARD_ENV_NAME, None)
+            os.environ.pop(self.IDENTITY_RESELECT_ENV_NAME, None)
             config = load_analysis_classification_config()
 
         self.assertEqual(ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE, config.mode)
@@ -40,6 +45,10 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
         self.assertEqual(
             ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
             config.data_standard_mode,
+        )
+        self.assertEqual(
+            ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+            config.identity_reselect_mode,
         )
         self.assertEqual(128, config.model_candidate_limit)
         self.assertEqual(32_000, config.classification_prompt_char_limit)
@@ -92,6 +101,7 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
                 self.ENV_NAME: "  TOPK_TWO_STAGE  ",
                 self.CONSTRAINT_ENV_NAME: "  SCOPE_GUARD  ",
                 self.DATA_STANDARD_ENV_NAME: "  SCOPE_GUARD  ",
+                self.IDENTITY_RESELECT_ENV_NAME: "  SHADOW  ",
             },
             clear=False,
         ):
@@ -105,6 +115,10 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
         self.assertEqual(
             ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
             config.data_standard_mode,
+        )
+        self.assertEqual(
+            ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW,
+            config.identity_reselect_mode,
         )
 
     def test_all_supported_data_standard_modes_are_loaded(self) -> None:
@@ -128,6 +142,48 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
                         mode,
                         load_analysis_classification_config().data_standard_mode,
                     )
+
+    def test_all_supported_identity_reselect_modes_are_loaded_with_other_modes(
+        self,
+    ) -> None:
+        combinations = (
+            (
+                ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
+                ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+                ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+                ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+            ),
+            (
+                ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW,
+                ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+                ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+                ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+            ),
+            (
+                ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+                ANALYSIS_CLASSIFICATION_MODE_LEGACY,
+                ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+                ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+            ),
+        )
+        for identity_mode, mode, filename_mode, data_standard_mode in combinations:
+            with self.subTest(identity_mode=identity_mode):
+                with patch.dict(
+                    os.environ,
+                    {
+                        self.ENV_NAME: mode,
+                        self.CONSTRAINT_ENV_NAME: filename_mode,
+                        self.DATA_STANDARD_ENV_NAME: data_standard_mode,
+                        self.IDENTITY_RESELECT_ENV_NAME: identity_mode,
+                    },
+                    clear=False,
+                ):
+                    config = load_analysis_classification_config()
+
+                self.assertEqual(identity_mode, config.identity_reselect_mode)
+                self.assertEqual(mode, config.mode)
+                self.assertEqual(filename_mode, config.filename_constraint_mode)
+                self.assertEqual(data_standard_mode, config.data_standard_mode)
 
     def test_explicit_blank_and_unknown_modes_are_rejected(self) -> None:
         for raw_mode in ("", "   ", "topk", "two_stage", "none"):
@@ -180,6 +236,36 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
                     with self.assertRaises(AnalysisClassificationConfigurationError):
                         load_analysis_classification_config()
 
+    def test_explicit_blank_and_unknown_identity_reselect_modes_are_rejected(
+        self,
+    ) -> None:
+        for raw_mode in ("", "   ", "guard", "scope_guard", "none"):
+            with self.subTest(raw_mode=raw_mode):
+                with patch.dict(
+                    os.environ,
+                    {
+                        self.ENV_NAME: ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+                        self.CONSTRAINT_ENV_NAME: (
+                            ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+                        ),
+                        self.DATA_STANDARD_ENV_NAME: (
+                            ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+                        ),
+                        self.IDENTITY_RESELECT_ENV_NAME: raw_mode,
+                    },
+                    clear=False,
+                ):
+                    with self.assertRaises(AnalysisClassificationConfigurationError):
+                        load_analysis_classification_config()
+
+    def test_non_string_identity_reselect_mode_is_rejected(self) -> None:
+        for raw_mode in (None, 1, True, object()):
+            with self.subTest(raw_mode=raw_mode):
+                with self.assertRaises(AnalysisClassificationConfigurationError):
+                    AnalysisClassificationConfig(
+                        identity_reselect_mode=raw_mode,  # type: ignore[arg-type]
+                    )
+
     def test_config_is_immutable(self) -> None:
         config = AnalysisClassificationConfig.topk_two_stage()
 
@@ -192,6 +278,10 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             config.data_standard_mode = (  # type: ignore[misc]
                 ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+            )
+        with self.assertRaises(FrozenInstanceError):
+            config.identity_reselect_mode = (  # type: ignore[misc]
+                ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW
             )
 
     def test_limits_must_be_positive_integers_and_reject_bool(self) -> None:
@@ -293,6 +383,29 @@ class AnalysisClassificationConfigTests(unittest.TestCase):
                     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
                 ),
                 self.DATA_STANDARD_ENV_NAME: "unsupported",
+            },
+            clear=False,
+        ):
+            with patch(
+                "app.container.load_anythingllm_config"
+            ) as load_anythingllm:
+                with self.assertRaises(AnalysisClassificationConfigurationError):
+                    create_application_services()
+
+        load_anythingllm.assert_not_called()
+
+    def test_invalid_identity_reselect_mode_fails_during_container_startup(
+        self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                self.ENV_NAME: ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+                self.CONSTRAINT_ENV_NAME: (
+                    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+                ),
+                self.DATA_STANDARD_ENV_NAME: ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+                self.IDENTITY_RESELECT_ENV_NAME: "unsupported",
             },
             clear=False,
         ):

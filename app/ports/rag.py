@@ -20,6 +20,13 @@ MAX_RAG_QUERY_ATTEMPTS = 3
 1 到该值之间选择更小次数，但不得通过配置错误或参数透传制造无界模型调用。
 """
 
+MAX_RAG_FRESH_CONVERSATION_SWITCHES = 2
+"""单个文档 RAG 会话允许创建的阶段隔离对话数量上限。
+
+初始对话不计入该值。两次切换分别供可选的身份分支重选和最终字段抽取使用；每次创建
+尝试在发出外部请求前即消费名额，避免超时或失败后盲目重放有副作用的创建请求。
+"""
+
 
 def normalize_rag_prompt(value: str) -> str:
     """返回模型调用、摘要计算和审计持久化共同使用的规范 Prompt。
@@ -50,6 +57,7 @@ class RagPromptKind(str, Enum):
     ANALYSIS_EXTRACTION = "analysis_extraction"
     JSON_REPAIR = "json_repair"
     ARCHITECTURE_REPAIR = "architecture_repair"
+    ARCHITECTURE_RESELECT = "architecture_reselect"
     FOLLOW_UP = "follow_up"
 
 
@@ -466,12 +474,19 @@ class DocumentRagSession(Protocol):
         """准备目标文档并按显式用途完成首次查询；整个会话只允许调用一次。"""
         ...
 
-    def start_fresh_conversation(self, *, conversation_name: str) -> None:
+    def start_fresh_conversation(
+        self,
+        *,
+        conversation_name: str,
+        failure_is_fatal: bool = True,
+    ) -> bool:
         """在同一隔离上下文内切换到一个无历史的新对话。
 
-        只有 ``analyse`` 成功后才允许调用，且每个 Session 最多尝试切换一次。新对话继续
-        使用已经上传、绑定并 Pin 的唯一目标文档，不得重复执行文档准备。创建失败必须
-        直接抛出带完整轨迹的 ``RagOperationError``，不得回退到原对话继续查询。
+        只有 ``analyse`` 成功后才允许调用，且每个 Session 最多尝试切换两次。新对话继续
+        使用已经上传、绑定并 Pin 的唯一目标文档，不得重复执行文档准备。默认创建失败
+        直接抛出带完整轨迹的 ``RagOperationError``；显式传入
+        ``failure_is_fatal=False`` 时，预期的外部创建失败返回 ``False``，保持原活动对话
+        和会话成功态不变，但仍记录生命周期事件并消费一次切换名额。
         """
         ...
 
@@ -484,6 +499,22 @@ class DocumentRagSession(Protocol):
         max_attempts: int = 1,
     ) -> RagResult:
         """在已准备会话中按显式用途和规范 Prompt 查询，不重复准备文档。"""
+        ...
+
+    def ask_optional(
+        self,
+        prompt: str,
+        *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
+        require_sources: bool = True,
+        max_attempts: int = 1,
+    ) -> Optional[RagResult]:
+        """执行一次可失败开放的增强查询，并保留全部尝试审计。
+
+        只有已经真正进入模型调用边界的预期 ``RagOperationError`` 才返回 ``None``；参数
+        错误、状态机错误和适配器编程异常继续抛出。可选失败不得要求清理目标文档，也不得
+        污染此前成功会话的总体失败状态。
+        """
         ...
 
     @property

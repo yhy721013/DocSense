@@ -673,6 +673,199 @@ def build_architecture_repair_prompt(
     )
 
 
+_ARCHITECTURE_RESELECT_IDENTITY_FIELDS = (
+    "identifier",
+    "matchedParentId",
+    "matchedParentPath",
+    "evidenceSources",
+)
+"""受限重选 Prompt 允许接收的服务端身份上下文字段。"""
+
+
+def _normalize_reselect_architecture_id(value: Any, *, field_name: str) -> int:
+    """将内部领域节点 ID 收敛为 JSON 数字，拒绝布尔值和非 ASCII 数字。"""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} 必须是正整数")
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text or not text.isascii() or not text.isdecimal():
+            raise ValueError(f"{field_name} 必须是正整数")
+        normalized = int(text)
+    else:
+        raise ValueError(f"{field_name} 必须是正整数")
+    if normalized <= 0:
+        raise ValueError(f"{field_name} 必须是正整数")
+    return normalized
+
+
+def build_architecture_reselect_prompt(
+    initial_result: Mapping[str, Any],
+    confirmed_identity_context: Mapping[str, Any],
+    architecture_candidates: Iterable[Any],
+) -> str:
+    """构造双证据身份确认后的单装备分支受限重选 Prompt。
+
+    该 Prompt 只允许一个已确认装备父节点和它的七个直接明细叶节点进入模型上下文。
+    身份上下文只接收服务端生成的标识、匹配父节点和证据来源标签，不接收正文片段；因此
+    重选不会把正文中的同级舰或部件再次升级为身份强证据。
+    """
+
+    if not isinstance(initial_result, Mapping):
+        raise TypeError("initial_result 必须是 Mapping")
+    if not isinstance(confirmed_identity_context, Mapping):
+        raise TypeError("confirmed_identity_context 必须是 Mapping")
+
+    unexpected_context_fields = set(confirmed_identity_context) - set(
+        _ARCHITECTURE_RESELECT_IDENTITY_FIELDS
+    )
+    if unexpected_context_fields:
+        raise ValueError("confirmed_identity_context 包含不允许的字段")
+
+    identifier = str(confirmed_identity_context.get("identifier") or "").strip()
+    matched_parent_path = str(
+        confirmed_identity_context.get("matchedParentPath") or ""
+    ).strip()
+    if not identifier or "\n" in identifier or "\r" in identifier:
+        raise ValueError("confirmed_identity_context.identifier 不能为空或包含换行")
+    if len(identifier) > 128:
+        raise ValueError("confirmed_identity_context.identifier 过长")
+    if (
+        not matched_parent_path
+        or "\n" in matched_parent_path
+        or "\r" in matched_parent_path
+    ):
+        raise ValueError("confirmed_identity_context.matchedParentPath 不能为空或包含换行")
+
+    matched_parent_id = _normalize_reselect_architecture_id(
+        confirmed_identity_context.get("matchedParentId"),
+        field_name="confirmed_identity_context.matchedParentId",
+    )
+    raw_evidence_sources = confirmed_identity_context.get("evidenceSources")
+    if (
+        isinstance(raw_evidence_sources, (str, bytes))
+        or not isinstance(raw_evidence_sources, Sequence)
+    ):
+        raise ValueError("confirmed_identity_context.evidenceSources 必须是序列")
+    evidence_sources: list[str] = []
+    for source in raw_evidence_sources:
+        normalized_source = str(source or "").strip()
+        if (
+            not normalized_source
+            or "\n" in normalized_source
+            or "\r" in normalized_source
+            or len(normalized_source) > 64
+        ):
+            raise ValueError("confirmed_identity_context.evidenceSources 包含非法来源标签")
+        if normalized_source not in evidence_sources:
+            evidence_sources.append(normalized_source)
+    if len(evidence_sources) < 2:
+        raise ValueError("受限重选至少需要两个独立身份凭据来源")
+
+    projected_candidates = _project_architecture_candidates(architecture_candidates)
+    if len(projected_candidates) != 8:
+        raise ValueError("architecture_candidates 必须恰好包含 1 个 parent 和 7 个 leaf")
+    parent_candidates = [
+        item for item in projected_candidates if item.get("nodeType") == "parent"
+    ]
+    leaf_candidates = [
+        item for item in projected_candidates if item.get("nodeType") == "leaf"
+    ]
+    if len(parent_candidates) != 1 or len(leaf_candidates) != 7:
+        raise ValueError("architecture_candidates 必须恰好包含 1 个 parent 和 7 个 leaf")
+
+    parent_candidate = parent_candidates[0]
+    parent_id = _normalize_reselect_architecture_id(
+        parent_candidate.get("id"),
+        field_name="parent candidate id",
+    )
+    parent_path = str(parent_candidate.get("pathName") or "").strip().rstrip("/")
+    if not parent_path:
+        raise ValueError("parent candidate pathName 不能为空")
+    if (
+        matched_parent_id != parent_id
+        or matched_parent_path.rstrip("/") != parent_path
+    ):
+        raise ValueError("confirmed_identity_context 与 parent candidate 不一致")
+
+    normalized_parent = dict(parent_candidate)
+    normalized_parent["id"] = parent_id
+    normalized_parent["pathName"] = parent_path
+    normalized_leaves: list[dict[str, Any]] = []
+    candidate_ids = {parent_id}
+    leaf_prefix = f"{parent_path}/"
+    for leaf_candidate in leaf_candidates:
+        leaf_id = _normalize_reselect_architecture_id(
+            leaf_candidate.get("id"),
+            field_name="leaf candidate id",
+        )
+        leaf_path = str(leaf_candidate.get("pathName") or "").strip().rstrip("/")
+        leaf_suffix = leaf_path.removeprefix(leaf_prefix)
+        if (
+            not leaf_path.startswith(leaf_prefix)
+            or not leaf_suffix
+            or "/" in leaf_suffix
+        ):
+            raise ValueError("所有 leaf candidate 必须是 parent pathName 的直接子节点")
+        if leaf_id in candidate_ids:
+            raise ValueError("architecture_candidates id 必须唯一")
+        candidate_ids.add(leaf_id)
+        normalized_leaf = dict(leaf_candidate)
+        normalized_leaf["id"] = leaf_id
+        normalized_leaf["pathName"] = leaf_path
+        normalized_leaves.append(normalized_leaf)
+
+    raw_initial_id = initial_result.get("architectureId")
+    initial_id = (
+        None
+        if raw_initial_id is None
+        else _normalize_reselect_architecture_id(
+            raw_initial_id,
+            field_name="initial_result.architectureId",
+        )
+    )
+    identity_context = {
+        "identifier": identifier,
+        "matchedParentId": matched_parent_id,
+        "matchedParentPath": parent_path,
+        "evidenceSources": evidence_sources,
+    }
+    normalized_candidates_by_id = {
+        item["id"]: item for item in (normalized_parent, *normalized_leaves)
+    }
+    candidates = [
+        normalized_candidates_by_id[
+            _normalize_reselect_architecture_id(
+                item.get("id"),
+                field_name="candidate id",
+            )
+        ]
+        for item in projected_candidates
+    ]
+
+    return (
+        "你是领域分类受限重选器。服务端已用两个独立身份凭据确认文档的主要装备；"
+        "请仅在该装备父节点及其七个直接明细叶节点中重新判断。\n"
+        "【已确认身份上下文】\n"
+        f"{json.dumps(identity_context, ensure_ascii=False, separators=(',', ':'))}\n"
+        "【首次分类结果】\n"
+        f"{json.dumps({'architectureId': initial_id}, ensure_ascii=False, separators=(',', ':'))}\n"
+        "【重选规则】\n"
+        "1. 首次分类结果只说明触发了分支冲突检查，不是重选依据；不得输出候选外 ID。\n"
+        "2. 应按全文主要内容和覆盖粒度判断。只有全文主要描述某一个明细类别时，才选择对应 leaf。\n"
+        "3. 已确认主要装备，但叶子证据不足、多个叶子同等成立或文档是综合资料时，必须选择 parent。\n"
+        "4. 如果文档证据与已确认身份矛盾，或连 parent 都无法支持，architectureId 输出 null，不得猜测。\n"
+        "5. architectureId 有值时必须是下方候选中的 JSON 数字，不能是字符串。\n"
+        "6. 只输出严格 JSON 对象，唯一键为 architectureId；不要输出 Markdown、概率、解释、候选列表或思考过程。\n"
+        "【输出结构】\n"
+        '{"architectureId": null}\n'
+        "【受限候选】\n"
+        f"{json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))}\n"
+    )
+
+
 def build_report_prompt(request_params: dict) -> str:
     return (
         "请基于提供的全部文件内容生成 HTML 报告片段。\n"

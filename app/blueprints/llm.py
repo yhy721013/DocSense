@@ -543,6 +543,9 @@ def llm_analysis():
         "analysis_data_standard_mode": (
             services.analysis_classification_config.data_standard_mode
         ),
+        "analysis_identity_reselect_mode": (
+            services.analysis_classification_config.identity_reselect_mode
+        ),
     }
     if len(tasks) == 1:
         _task_kwargs["execution_id"] = tasks[0]["execution_id"]
