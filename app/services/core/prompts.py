@@ -29,6 +29,9 @@ ANALYSIS_SUMMARY_MAX_CHARS = 500
 ANALYSIS_RESPONSE_MAX_CHARS = 6_000
 """文件分析结构化 JSON 回答建议遵守的整体字符上限。"""
 
+UNKNOWN_SOURCE_VALUE = "未明确数据来源"
+"""文件内容未提供具体来源出处时使用的唯一 source 占位值。"""
+
 ANALYSIS_COMPACT_OUTPUT_RULES = (
     "【输出长度、相关性与去重硬约束】\n"
     f"1. keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个关键词，每个关键词不超过 "
@@ -68,7 +71,7 @@ SOURCE_SCORE_RULES = (
     "2. 专业科研单位，如兰德、简氏等知名智库及装备研制单位等，评分 85。\n"
     "3. 专业信息网站，如海上舰艇交通网、美舰艇历史与部署网、海军学院新闻网、防务新闻网等，评分 75。\n"
     "4. 普通信息网站，如综合性新闻网、百度百科等，评分 65。\n"
-    "5. 未明确数据来源的资料，评分 55。\n"
+    f"5. source 为“{UNKNOWN_SOURCE_VALUE}”时，score 必须且只能输出 55。\n"
 )
 
 
@@ -76,8 +79,9 @@ SOURCE_FIELD_RULES = (
     "【source 来源出处规则】\n"
     "source 必须输出文档内容中提到的具体数据来源出处，如发布机构、网站、刊物、报告名、原文出处或资料页来源。\n"
     "不要把 score 数字、评分档位或“权威机构公开发布/专业信息网站”等泛泛评分理由当作 source。\n"
-    "文档未明确提到具体来源出处时，source 输出“未明确数据来源”；这种情况下 score 应按评分规则输出 55。\n"
-    "source 不允许留空，必须输出具体来源或“未明确数据来源”。\n"
+    f"文档未明确提到具体来源出处时，source 必须且只能输出“{UNKNOWN_SOURCE_VALUE}”，"
+    "且 score 必须且只能输出 55；禁止在这种情况下输出 95、85、75 或 65。\n"
+    f"source 不允许留空，必须输出具体来源或“{UNKNOWN_SOURCE_VALUE}”。\n"
     "source 必须从文档内容中提取，不得凭常识、推测或编造。\n"
     "source 不允许与 channel（机构名称）、originalLink 等字段内容一致。\n"
 )
@@ -481,7 +485,8 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/security/format 是否都为候选 value 或空字符串；security 缺少文档开头密级说明时是否已按默认规则输出（候选包含“公开”则输出“公开”，否则输出候选第一个 value）；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
         + "2. architectureId 是否为有文档证据支持的候选叶子 id；不得使用候选外 ID 或默认值。\n"
-        + "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”。\n"
+        + "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”；"
+        + "当 source 为“未明确数据来源”时，score 是否严格等于 55。\n"
         + "4. fileDataItem.dataTime 是否为 yyyy-MM-dd 或空字符串。\n"
         + "5. 当文件内容与数据标准相关时，architectureId 【禁止】输出「数据标准」对应的ID，而是输出其下的六个子类别之一的对应ID：建模与仿真标准，军用软件标准，目标特性标准，术语与定义标准，通用要求标准，元数据标准。\n"
         + data_standard_self_check
@@ -626,7 +631,8 @@ def build_file_extraction_prompt(
         "【输出前自检清单】\n"
         "1. 顶层是否只包含允许字段，且未输出领域分类字段。\n"
         "2. country/channel/maturity/security/format 是否为候选 value 或空字符串；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
-        "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”。\n"
+        "3. score 是否为 95、85、75、65、55 之一；source 是否为具体来源出处或“未明确数据来源”；"
+        "当 source 为“未明确数据来源”时，score 是否严格等于 55。\n"
         "4. fileDataItem.dataTime 是否为 yyyy-MM-dd 或空字符串。\n"
         + standard_self_check
         + "6. 是否仅使用英文键名且 JSON 语法可解析。\n"

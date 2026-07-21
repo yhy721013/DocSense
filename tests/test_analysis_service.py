@@ -510,12 +510,46 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             {
                 "fileDataItem": {
                     "score": "85",
+                    "source": "简氏防务",
                 }
             },
             request_params,
         )
 
         self.assertEqual(result["fileDataItem"]["score"], 85)
+
+    def test_map_analysis_result_forces_score_55_when_source_is_unknown(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 10, "name": "测试"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "score": 95,
+                    "source": "未明确数据来源",
+                }
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["fileDataItem"]["source"], "未明确数据来源")
+        self.assertEqual(result["fileDataItem"]["score"], 55)
+
+    def test_map_analysis_result_defaults_missing_source_to_unknown_and_forces_score_55(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 10, "name": "测试"}],
+        }
+
+        result = map_analysis_result(
+            {"fileDataItem": {"score": 85}},
+            request_params,
+        )
+
+        self.assertEqual(result["fileDataItem"]["source"], "未明确数据来源")
+        self.assertEqual(result["fileDataItem"]["score"], 55)
 
     def test_map_analysis_result_falls_back_score_to_55_when_missing_or_invalid(self):
         request_params = {
@@ -668,6 +702,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("分类到最底层的叶子节点", prompt)
         self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
+        self.assertIn("source 为“未明确数据来源”时，score 必须且只能输出 55", prompt)
+        self.assertIn("禁止在这种情况下输出 95、85、75 或 65", prompt)
         self.assertIn("候选包含“公开”则输出“公开”", prompt)
         self.assertIn("固定输出 10 个关键词", prompt)
         self.assertIn("关键词之间允许语义相近、同义或内容重叠", prompt)

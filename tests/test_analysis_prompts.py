@@ -311,6 +311,18 @@ class AnalysisPromptSplitTests(unittest.TestCase):
                     f"完整 JSON 对象不超过 {ANALYSIS_RESPONSE_MAX_CHARS} 个字符",
                     prompt,
                 )
+                self.assertIn(
+                    "source 为“未明确数据来源”时，score 必须且只能输出 55",
+                    prompt,
+                )
+                self.assertIn(
+                    "禁止在这种情况下输出 95、85、75 或 65",
+                    prompt,
+                )
+                self.assertIn(
+                    "当 source 为“未明确数据来源”时，score 是否严格等于 55",
+                    prompt,
+                )
                 self.assertIn("禁止循环枚举或按编号规律补造实体", prompt)
                 self.assertNotIn("至少 10 个关键词", prompt)
                 self.assertNotIn("互不重复的关键词", prompt)

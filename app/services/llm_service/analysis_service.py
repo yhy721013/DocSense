@@ -61,6 +61,7 @@ from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
     ANALYSIS_KEYWORD_COUNT,
     ANALYSIS_KEYWORD_MAX_CHARS,
+    UNKNOWN_SOURCE_VALUE,
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
     build_architecture_reselect_prompt,
@@ -1104,6 +1105,14 @@ def map_analysis_result(
         _first_non_empty_value(file_item, "keyword", "keywords", "关键词")
         or _first_non_empty_value(parsed_result, "keyword", "keywords", "关键词")
     )
+    resolved_source = (
+        _resolve_field(parsed_result, file_item, "source", "资料来源", "来源")
+        or _extract_source(normalized_original_text)
+        or UNKNOWN_SOURCE_VALUE
+    )
+    normalized_score = _normalize_source_score(raw_score)
+    if resolved_source == UNKNOWN_SOURCE_VALUE:
+        normalized_score = 55
     architecture_id = _coerce_int(resolved_architecture_id)
     if architecture_id is None:
         architecture_id = (
@@ -1123,10 +1132,9 @@ def map_analysis_result(
         "dataTime": resolved_date or _extract_date(normalized_original_text),
         "keyword": resolved_keyword,
         "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
-        "score": _normalize_source_score(raw_score),
+        "score": normalized_score,
         "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
-        "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(
-            normalized_original_text),
+        "source": resolved_source,
         "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
         "language": resolved_language or _infer_language(normalized_original_text),
         "dataFormat": resolved_format,
