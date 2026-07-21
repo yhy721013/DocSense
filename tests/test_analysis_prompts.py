@@ -272,7 +272,19 @@ class AnalysisPromptSplitTests(unittest.TestCase):
         for prompt in (legacy_prompt, extraction_prompt):
             with self.subTest(prompt_kind=prompt.splitlines()[0]):
                 self.assertIn(
-                    f"keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个互不重复的关键词",
+                    f"keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个关键词",
+                    prompt,
+                )
+                self.assertIn(
+                    "关键词之间允许语义相近、同义或内容重叠",
+                    prompt,
+                )
+                self.assertIn(
+                    "每一项都必须与文档主题、主要对象或关键内容有明确且较强的相关性",
+                    prompt,
+                )
+                self.assertIn(
+                    "不得为凑数量添加与文档相关性不大的词",
                     prompt,
                 )
                 self.assertIn(
@@ -301,6 +313,7 @@ class AnalysisPromptSplitTests(unittest.TestCase):
                 )
                 self.assertIn("禁止循环枚举或按编号规律补造实体", prompt)
                 self.assertNotIn("至少 10 个关键词", prompt)
+                self.assertNotIn("互不重复的关键词", prompt)
 
     def test_extraction_standard_schema_is_controlled_only_by_boolean(self):
         params_with_standard_range = {
