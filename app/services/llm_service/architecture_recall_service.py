@@ -1117,6 +1117,7 @@ class ArchitectureRecallService:
         *,
         strong_evidence_only: bool = False,
         strong_identity_enabled: bool = True,
+        jane_title_type_alias_enabled: bool = True,
         preferred_parent_reasons: Mapping[int, Sequence[str]] | None = None,
         candidate_scope_ids: Sequence[int] | None = None,
         candidate_scope_reason: str = "",
@@ -1129,6 +1130,8 @@ class ArchitectureRecallService:
             raise TypeError("strong_evidence_only 必须是布尔值")
         if not isinstance(strong_identity_enabled, bool):
             raise TypeError("strong_identity_enabled 必须是布尔值")
+        if not isinstance(jane_title_type_alias_enabled, bool):
+            raise TypeError("jane_title_type_alias_enabled 必须是布尔值")
         if signals.is_empty:
             raise ArchitectureRecallError("文档不包含可用于领域召回的有效信号")
 
@@ -1193,10 +1196,14 @@ class ArchitectureRecallService:
             strong_evidence_only=strong_evidence_only,
             strong_identity_enabled=strong_identity_enabled,
         )
-        title_type_alias_ids = _jane_title_type_alias_rule_ids(
-            self._index,
-            signals,
-            strong_evidence_only=strong_evidence_only,
+        title_type_alias_ids = (
+            _jane_title_type_alias_rule_ids(
+                self._index,
+                signals,
+                strong_evidence_only=strong_evidence_only,
+            )
+            if jane_title_type_alias_enabled
+            else ()
         )
         rule_ids = tuple(dict.fromkeys((*rule_ids, *title_type_alias_ids)))
         for node_id in title_type_alias_ids:
@@ -1387,6 +1394,7 @@ def recall_architecture_candidates(
     prompt_overhead_chars: int = CLASSIFICATION_PROMPT_OVERHEAD_CHARS,
     strong_evidence_only: bool = False,
     strong_identity_enabled: bool = True,
+    jane_title_type_alias_enabled: bool = True,
     preferred_parent_reasons: Mapping[int, Sequence[str]] | None = None,
     candidate_scope_ids: Sequence[int] | None = None,
     candidate_scope_reason: str = "",
@@ -1402,6 +1410,7 @@ def recall_architecture_candidates(
         signals,
         strong_evidence_only=strong_evidence_only,
         strong_identity_enabled=strong_identity_enabled,
+        jane_title_type_alias_enabled=jane_title_type_alias_enabled,
         preferred_parent_reasons=preferred_parent_reasons,
         candidate_scope_ids=candidate_scope_ids,
         candidate_scope_reason=candidate_scope_reason,

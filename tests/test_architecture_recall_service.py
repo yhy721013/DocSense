@@ -342,6 +342,33 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
         self.assertEqual(tree_rank.call_args.args[2], set())
         self.assertTrue(set(range(11, 18)) & set(_channel(decision, "lexical")))
 
+    def test_scope_guard_keeps_body_component_lexical_without_exact_protection(self):
+        index = build_architecture_tree_index(
+            [
+                {"id": 1, "name": "装备目标"},
+                {"id": 2, "name": "航空母舰", "parentId": 1},
+                {"id": 3, "name": "CVN-71", "parentId": 2},
+                {"id": 4, "name": "雷达", "parentId": 1},
+                {"id": 5, "name": "AN/SPS-48E", "parentId": 4},
+            ]
+        )
+        signals = build_document_architecture_signals(
+            original_filename="CVN-71 基本情况.mhtml",
+            title="USS Theodore Roosevelt (CVN-71)",
+            body="舰载设备包括 AN/SPS-48E 三坐标雷达。",
+        )
+
+        decision = recall_architecture_candidates(
+            index,
+            signals,
+            strong_evidence_only=True,
+        )
+
+        self.assertIn(3, decision.direct_exact_ids)
+        self.assertNotIn(5, decision.direct_exact_ids)
+        self.assertNotIn(5, dict(decision.protected_reasons))
+        self.assertIn(5, _channel(decision, "lexical"))
+
     def test_scope_guard_conflict_disables_both_identity_exact_matches(self):
         signals = build_document_architecture_signals(
             filename="technical-upload.pdf",
@@ -502,6 +529,29 @@ class ArchitectureRecallChannelTests(unittest.TestCase):
                 if case["name"] == "duplicate_canonical_leaf":
                     self.assertNotIn(5, _channel(decision, "rule"))
                     self.assertNotIn(5, dict(decision.protected_reasons))
+
+    def test_non_jane_scope_guard_does_not_enable_jane_title_body_rule(self):
+        index = build_architecture_tree_index(
+            [
+                {"id": 1, "name": "装备目标"},
+                {"id": 2, "name": "水下装备", "parentId": 1},
+                {"id": 3, "name": "无人潜航器", "parentId": 2},
+                {"id": 4, "name": "payload", "parentId": 2},
+            ]
+        )
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(
+                title="Orca XLUUV",
+                body="unmanned underwater vehicle payload",
+            ),
+            strong_evidence_only=True,
+            jane_title_type_alias_enabled=False,
+        )
+
+        self.assertNotIn(3, _channel(decision, "rule"))
+        self.assertNotIn(3, dict(decision.protected_reasons))
+        self.assertTrue(_channel(decision, "lexical"))
 
     def test_legacy_mode_keeps_body_identifier_exact_and_family_expansion(self):
         signals = build_document_architecture_signals(

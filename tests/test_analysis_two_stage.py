@@ -1452,6 +1452,12 @@ class AnalysisTwoStageTests(unittest.TestCase):
         return nodes
 
     def test_unique_cvn68_filename_identifier_forces_cross_branch_choice_to_parent(self):
+        recall_kwargs = {}
+
+        def recall_side_effect(index, *_args, **kwargs):
+            recall_kwargs.update(kwargs)
+            return self._decision(index, (561, 562, 516, 56, 515))
+
         with workspace_tempdir() as tmp:
             file_name = "e2e-topk-cvn68-20260715.txt"
             request = self._request(file_name, self._two_equipment_tree())
@@ -1470,19 +1476,23 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 tmp=tmp,
                 request=request,
                 rag_factory=rag_factory,
-                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
-                    index,
-                    (561, 562, 516, 56, 515),
-                ),
+                recall_side_effect=recall_side_effect,
             )
 
         self.assertEqual(task["status"], "2")
+        self.assertFalse(recall_kwargs["strong_evidence_only"])
         self.assertEqual(task["result_payload"]["data"]["architectureId"], 56)
         self.assertEqual(recall["returned_architecture_id"], 56)
         self.assertEqual(recall["returned_rank"], 4)
 
     def test_scope_guard_non_jane_filename_does_not_force_cross_branch_choice(self):
         """默认保护模式下，非 Jane 文件名不能作为单一证据硬覆盖模型结果。"""
+        recall_kwargs = {}
+
+        def recall_side_effect(index, *_args, **kwargs):
+            recall_kwargs.update(kwargs)
+            return self._decision(index, (561, 516, 56, 515))
+
         with workspace_tempdir() as tmp:
             file_name = "technical-upload.txt"
             request = self._request(file_name, self._two_equipment_tree())
@@ -1511,14 +1521,15 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 tmp=tmp,
                 request=request,
                 rag_factory=rag_factory,
-                recall_side_effect=lambda index, *_args, **_kwargs: self._decision(
-                    index,
-                    (561, 516, 56, 515),
-                ),
+                recall_side_effect=recall_side_effect,
                 filename_constraint_mode="scope_guard",
             )
 
         self.assertEqual("2", task["status"])
+        self.assertTrue(recall_kwargs["strong_evidence_only"])
+        self.assertTrue(recall_kwargs["strong_identity_enabled"])
+        self.assertFalse(recall_kwargs["jane_title_type_alias_enabled"])
+        self.assertIsNone(recall_kwargs["preferred_parent_reasons"])
         self.assertEqual(516, task["result_payload"]["data"]["architectureId"])
         self.assertEqual(516, recall["returned_architecture_id"])
         self.assertEqual(2, recall["returned_rank"])

@@ -3439,6 +3439,15 @@ def _execute_file_analysis_task(
         and jane_profile.active
         and not data_standard_scope_guard_active
     )
+    # 召回强证据收窄与 Jane 最终作用域约束是两个独立边界：普通非 Jane 文档在
+    # scope_guard 模式下也只能让原文件名/可信标题参与 exact 与装备 family 规则，
+    # 正文、章节和 Fleetlist 仍保留在 query_text 中参与 lexical/tree 召回；但这里
+    # 不会激活下游 Jane 硬约束，最终分类仍由模型在可见候选内决定。
+    recall_strong_evidence_only = (
+        filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        or data_standard_scope_guard_active
+    )
     recall_file_name, recall_original_name = _jane_recall_filename_signals(
         file_name=file_name,
         original_name=original_name,
@@ -3523,15 +3532,15 @@ def _execute_file_analysis_task(
                     signals,
                     prompt_char_limit=2_000_000,
                     prompt_overhead_chars=0,
-                    strong_evidence_only=(
-                        scope_guard_active
-                        or data_standard_scope_guard_active
-                    ),
+                    strong_evidence_only=recall_strong_evidence_only,
                     strong_identity_enabled=(
                         jane_profile.recall_identity_enabled
                         if scope_guard_active
                         else True
                     ),
+                    # Jane 标题+正文类型别名是既有的双源特例，不能因普通非 Jane
+                    # 文档启用召回强证据收窄而被意外激活。
+                    jane_title_type_alias_enabled=scope_guard_active,
                     preferred_parent_reasons=(
                         scope_resolution.preferred_parent_reasons
                         if scope_guard_active
