@@ -43,7 +43,10 @@ from .common import (
     WeaponryOperation,
 )
 from .creation_intents import (
+    ClaimWeaponryCreationIntentRecovery,
+    CompleteWeaponryCreationIntentRecovery,
     QuarantineWeaponryCreationIntent,
+    QuarantineWeaponryCreationIntentRecovery,
     ResolveWeaponryCreationIntent,
     WeaponryCreationIntent,
     WeaponryCreationIntentKind,
@@ -116,7 +119,10 @@ from .translation import (
 )
 
 __all__ = [
+    "ClaimWeaponryCreationIntentRecovery",
+    "CompleteWeaponryCreationIntentRecovery",
     "QuarantineWeaponryCreationIntent",
+    "QuarantineWeaponryCreationIntentRecovery",
     "ResolveWeaponryCreationIntent",
     "WeaponryCreationIntent",
     "WeaponryCreationIntentKind",

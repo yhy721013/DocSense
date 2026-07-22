@@ -246,6 +246,11 @@ class AnythingLLMTargetEvidenceRetrievalAdapter:
                     "retrieval_workspace_creation_resolved",
                     "检索 workspace 创建意图已经完成，禁止重复打开",
                 )
+            if intent.state is WeaponryCreationIntentState.RECOVERING:
+                raise WeaponryPortStateError(
+                    "retrieval_workspace_creation_recovering",
+                    "检索 workspace 创建意图正由恢复器接管，禁止 Worker 继续修改现场",
+                )
             # 标记必须发生在调用前。超时/断连时即使尚未取得 slug，供应商也可能已经
             # 创建 workspace，不能再把它误报成可以安全重试的明确失败。
             if reservation.created:

@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event
 from types import MappingProxyType
@@ -62,6 +63,8 @@ from app.modules.weaponry.ports import (
     AcquireWeaponryCleanupLease,
     AuxiliaryGuidanceOutcome,
     AuxiliaryGuidanceRequest,
+    ClaimWeaponryCreationIntentRecovery,
+    CompleteWeaponryCreationIntentRecovery,
     CompleteWeaponryInteraction,
     CompleteWeaponryResourceCleanup,
     EvidenceExtractionRequest,
@@ -70,6 +73,7 @@ from app.modules.weaponry.ports import (
     QuarantineWeaponryResources,
     RegisterWeaponryResource,
     ReserveWeaponryInteraction,
+    ResolveWeaponryCreationIntent,
     SearchTargetEvidence,
     WeaponryAuditOutcome,
     WeaponryAuditReserveOutcome,
@@ -139,12 +143,15 @@ def _resource_record(task_id: TaskId, business_key: str = "7") -> WeaponryResour
 def _resource_registrar(
     store: SQLiteWeaponryResourceStoreAdapter,
     db_path: str,
+    *,
+    instance_id: str = "test-worker",
 ) -> StoreBackedWeaponryResourceRegistrar:
     """为测试创建共享同一 SQLite 文件的资源事实与创建意图适配器。"""
 
     return StoreBackedWeaponryResourceRegistrar(
         store,
         SQLiteWeaponryCreationIntentStoreAdapter(db_path),
+        instance_id=instance_id,
     )
 
 
@@ -980,6 +987,267 @@ class WeaponryAnythingLLMRetrievalAdapterTests(unittest.TestCase):
 
 
 class WeaponryCreationIntentRecoveryTests(unittest.TestCase):
+    def test_existing_creation_intent_table_is_migrated_in_place(self) -> None:
+        """旧数据库启动时应只增补恢复字段，并保留既有 pending 意图。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "tasks.sqlite3")
+            with closing(sqlite3.connect(db_path)) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE weaponry_creation_intents (
+                        task_id TEXT NOT NULL,
+                        intent_id TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        expected_name TEXT NOT NULL,
+                        identity_digest TEXT NOT NULL,
+                        parent_external_ref TEXT NOT NULL,
+                        document_key TEXT NOT NULL,
+                        call_id TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        external_ref TEXT NOT NULL,
+                        error_code TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        PRIMARY KEY (task_id, intent_id)
+                    );
+                    INSERT INTO weaponry_creation_intents (
+                        task_id, intent_id, kind, expected_name,
+                        identity_digest, parent_external_ref, document_key,
+                        call_id, state, external_ref, error_code, version
+                    ) VALUES (
+                        'legacy-task', 'retrieval-workspace',
+                        'retrieval_workspace', 'legacy-workspace',
+                        '0000000000000000000000000000000000000000000000000000000000000000',
+                        '', '', '', 'pending', '', '', 0
+                    );
+                    """
+                )
+                connection.commit()
+
+            intents = SQLiteWeaponryCreationIntentStoreAdapter(db_path)
+            stored = intents.get(
+                TaskId("legacy-task"),
+                "retrieval-workspace",
+            )
+            candidates = intents.list_recovery_candidates(
+                active_instance_id="current-runtime",
+                observed_at=datetime(
+                    2026,
+                    7,
+                    22,
+                    tzinfo=timezone.utc,
+                ).isoformat(),
+                limit=10,
+            )
+
+        self.assertIsNotNone(stored)
+        self.assertEqual("", stored.owner_instance_id)
+        self.assertEqual(0, stored.recovery_fencing_token)
+        self.assertEqual("", stored.recovery_lease_until)
+        self.assertEqual((stored,), candidates)
+
+    def test_active_instance_pending_intent_is_not_recovered(self) -> None:
+        """维护器不得把同一运行实例中尚未 resolve 的 Worker 误判为崩溃。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "tasks.sqlite3")
+            task_id = TaskId("creation-active-worker")
+            resources = SQLiteWeaponryResourceStoreAdapter(db_path)
+            resources.create(_resource_record(task_id))
+            intents = SQLiteWeaponryCreationIntentStoreAdapter(db_path)
+            registrar = StoreBackedWeaponryResourceRegistrar(
+                resources,
+                intents,
+                instance_id="active-runtime",
+            )
+            intent = WeaponryCreationIntent(
+                task_id=task_id,
+                intent_id="retrieval-workspace",
+                kind=WeaponryCreationIntentKind.RETRIEVAL_WORKSPACE,
+                expected_name="docsense-weaponry-active-worker",
+                identity_digest=hashlib.sha256(b"scope").hexdigest(),
+            )
+            reserved = registrar.reserve_creation(intent).intent
+            runtime = _FakeAnythingRuntime()
+            recovery = AnythingLLMWeaponryCreationIntentRecoveryAdapter(
+                runtime,
+                intents,
+                resources,
+                instance_id="active-runtime",
+                lease_seconds=30,
+            )
+
+            result = recovery.run_once(limit=10)
+            stored_intent = intents.get(task_id, intent.intent_id)
+            resource_record = resources.get(task_id)
+
+        self.assertEqual("active-runtime", reserved.owner_instance_id)
+        self.assertEqual(0, result.scanned_count)
+        self.assertEqual(0, runtime.list_workspaces_calls)
+        self.assertEqual(WeaponryCreationIntentState.PENDING, stored_intent.state)
+        self.assertEqual(
+            WeaponryResourceRecordState.TRACKING,
+            resource_record.state,
+        )
+
+    def test_worker_resolve_after_candidate_snapshot_fences_recovery(self) -> None:
+        """候选快照过期时，claim CAS 必须先失败且不得隔离资源记录。"""
+
+        class _ResolveAfterSnapshotStore(
+            SQLiteWeaponryCreationIntentStoreAdapter
+        ):
+            def list_recovery_candidates(self, **kwargs):
+                candidates = super().list_recovery_candidates(**kwargs)
+                if candidates:
+                    candidate = candidates[0]
+                    self.resolve(
+                        ResolveWeaponryCreationIntent(
+                            task_id=candidate.task_id,
+                            intent_id=candidate.intent_id,
+                            expected_version=candidate.version,
+                            external_ref="worker-completed-workspace",
+                        )
+                    )
+                return candidates
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "tasks.sqlite3")
+            task_id = TaskId("creation-stale-recovery-snapshot")
+            resources = SQLiteWeaponryResourceStoreAdapter(db_path)
+            resources.create(_resource_record(task_id))
+            intents = _ResolveAfterSnapshotStore(db_path)
+            intent = WeaponryCreationIntent(
+                task_id=task_id,
+                intent_id="retrieval-workspace",
+                kind=WeaponryCreationIntentKind.RETRIEVAL_WORKSPACE,
+                expected_name="docsense-weaponry-stale-snapshot",
+                identity_digest=hashlib.sha256(b"scope").hexdigest(),
+                owner_instance_id="previous-runtime",
+            )
+            intents.reserve(intent)
+            runtime = _FakeAnythingRuntime()
+            recovery = AnythingLLMWeaponryCreationIntentRecoveryAdapter(
+                runtime,
+                intents,
+                resources,
+                instance_id="current-runtime",
+                lease_seconds=30,
+            )
+
+            result = recovery.run_once(limit=10)
+            stored_intent = intents.get(task_id, intent.intent_id)
+            resource_record = resources.get(task_id)
+
+        self.assertEqual(1, result.scanned_count)
+        self.assertEqual(1, result.deferred_count)
+        self.assertEqual(0, runtime.list_workspaces_calls)
+        self.assertEqual(WeaponryCreationIntentState.RESOLVED, stored_intent.state)
+        self.assertEqual(
+            WeaponryResourceRecordState.TRACKING,
+            resource_record.state,
+        )
+
+    def test_recovery_lease_expiry_and_fencing_prevent_double_recovery(self) -> None:
+        """未过期租约不能被抢占；过期接管后旧 fencing token 必须失效。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            intents = SQLiteWeaponryCreationIntentStoreAdapter(
+                str(Path(directory) / "tasks.sqlite3")
+            )
+            task_id = TaskId("creation-recovery-fencing")
+            intent = WeaponryCreationIntent(
+                task_id=task_id,
+                intent_id="retrieval-workspace",
+                kind=WeaponryCreationIntentKind.RETRIEVAL_WORKSPACE,
+                expected_name="docsense-weaponry-recovery-fencing",
+                identity_digest=hashlib.sha256(b"scope").hexdigest(),
+                owner_instance_id="stopped-runtime",
+            )
+            intents.reserve(intent)
+            base = datetime(2026, 7, 22, tzinfo=timezone.utc)
+            claimed_a = intents.claim_recovery(
+                ClaimWeaponryCreationIntentRecovery(
+                    task_id=task_id,
+                    intent_id=intent.intent_id,
+                    expected_version=0,
+                    recovery_owner_id="recovery-a",
+                    observed_at=base.isoformat(),
+                    lease_until=(base + timedelta(seconds=30)).isoformat(),
+                )
+            )
+
+            with self.assertRaises(WeaponryPortStateError) as active_lease:
+                intents.claim_recovery(
+                    ClaimWeaponryCreationIntentRecovery(
+                        task_id=task_id,
+                        intent_id=intent.intent_id,
+                        expected_version=claimed_a.version,
+                        recovery_owner_id="recovery-b",
+                        observed_at=(base + timedelta(seconds=10)).isoformat(),
+                        lease_until=(base + timedelta(seconds=40)).isoformat(),
+                    )
+                )
+            claimed_b = intents.claim_recovery(
+                ClaimWeaponryCreationIntentRecovery(
+                    task_id=task_id,
+                    intent_id=intent.intent_id,
+                    expected_version=claimed_a.version,
+                    recovery_owner_id="recovery-b",
+                    observed_at=(base + timedelta(seconds=31)).isoformat(),
+                    lease_until=(base + timedelta(seconds=61)).isoformat(),
+                )
+            )
+            with self.assertRaises(WeaponryPortStateError) as stale_owner:
+                intents.complete_recovery(
+                    CompleteWeaponryCreationIntentRecovery(
+                        task_id=task_id,
+                        intent_id=intent.intent_id,
+                        expected_version=claimed_a.version,
+                        recovery_owner_id="recovery-a",
+                        recovery_fencing_token=(
+                            claimed_a.recovery_fencing_token
+                        ),
+                        external_ref="stale-workspace",
+                    )
+                )
+            completed = intents.complete_recovery(
+                CompleteWeaponryCreationIntentRecovery(
+                    task_id=task_id,
+                    intent_id=intent.intent_id,
+                    expected_version=claimed_b.version,
+                    recovery_owner_id="recovery-b",
+                    recovery_fencing_token=claimed_b.recovery_fencing_token,
+                    external_ref="recovered-workspace",
+                )
+            )
+            with self.assertRaises(WeaponryPortStateError) as stale_worker:
+                intents.resolve(
+                    ResolveWeaponryCreationIntent(
+                        task_id=task_id,
+                        intent_id=intent.intent_id,
+                        expected_version=0,
+                        external_ref="recovered-workspace",
+                    )
+                )
+
+        self.assertEqual(
+            "creation_intent_recovery_lease_active",
+            active_lease.exception.error_code,
+        )
+        self.assertEqual(
+            "creation_intent_recovery_fenced",
+            stale_owner.exception.error_code,
+        )
+        self.assertGreater(
+            claimed_b.recovery_fencing_token,
+            claimed_a.recovery_fencing_token,
+        )
+        self.assertEqual(
+            "creation_intent_recovery_fenced",
+            stale_worker.exception.error_code,
+        )
+        self.assertEqual(WeaponryCreationIntentState.RESOLVED, completed.state)
+
     def test_crash_window_workspace_is_reconciled_and_scene_is_quarantined(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             db_path = str(Path(directory) / "tasks.sqlite3")
@@ -1001,6 +1269,8 @@ class WeaponryCreationIntentRecoveryTests(unittest.TestCase):
                 runtime,
                 intents,
                 resources,
+                instance_id="recovery-worker",
+                lease_seconds=30,
             )
 
             result = recovery.run_once(limit=10)
@@ -1036,6 +1306,8 @@ class WeaponryCreationIntentRecoveryTests(unittest.TestCase):
                 runtime,
                 intents,
                 resources,
+                instance_id="recovery-worker",
+                lease_seconds=30,
             )
 
             result = recovery.run_once(limit=10)
@@ -1072,6 +1344,8 @@ class WeaponryCreationIntentRecoveryTests(unittest.TestCase):
                 runtime,
                 intents,
                 resources,
+                instance_id="recovery-worker",
+                lease_seconds=30,
             )
 
             result = recovery.run_once(limit=10)

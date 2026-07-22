@@ -25,9 +25,15 @@ class WeaponryCreationIntentKind(str, Enum):
 
 
 class WeaponryCreationIntentState(str, Enum):
-    """创建意图只能从 pending 进入 resolved 或 quarantined 终态。"""
+    """创建意图状态。
+
+    ``recovering`` 是恢复器通过版本 CAS 取得的独占恢复权。正常 Worker 只能从
+    ``pending`` 解析意图；一旦恢复器完成 claim，旧 Worker 即使稍后从供应商返回，
+    也不能再以旧版本提交结果。
+    """
 
     PENDING = "pending"
+    RECOVERING = "recovering"
     RESOLVED = "resolved"
     QUARANTINED = "quarantined"
 
@@ -44,9 +50,12 @@ class WeaponryCreationIntent:
     parent_external_ref: str = ""
     document_key: str = ""
     call_id: str = ""
+    owner_instance_id: str = ""
     state: WeaponryCreationIntentState = WeaponryCreationIntentState.PENDING
     external_ref: str = ""
     error_code: str = ""
+    recovery_fencing_token: int = 0
+    recovery_lease_until: str = ""
     version: int = 0
 
     def __post_init__(self) -> None:
@@ -69,12 +78,18 @@ class WeaponryCreationIntent:
             "parent_external_ref",
             "document_key",
             "call_id",
+            "owner_instance_id",
             "external_ref",
             "error_code",
+            "recovery_lease_until",
         ):
             object.__setattr__(self, name, optional_text(getattr(self, name), name=name))
         if not isinstance(self.state, WeaponryCreationIntentState):
             raise TypeError("state 必须是 WeaponryCreationIntentState")
+        non_negative_int(
+            self.recovery_fencing_token,
+            name="recovery_fencing_token",
+        )
         non_negative_int(self.version, name="version")
         if self.kind is WeaponryCreationIntentKind.SOURCE_THREAD:
             if not self.parent_external_ref or not self.call_id:
@@ -82,12 +97,30 @@ class WeaponryCreationIntent:
         elif self.parent_external_ref:
             raise ValueError("workspace 创建意图不得携带 parent_external_ref")
         if self.state is WeaponryCreationIntentState.PENDING:
-            if self.external_ref or self.error_code:
-                raise ValueError("pending 创建意图不得携带 external_ref 或 error_code")
+            if (
+                self.external_ref
+                or self.error_code
+                or self.recovery_fencing_token != 0
+                or self.recovery_lease_until
+            ):
+                raise ValueError(
+                    "pending 创建意图不得携带恢复权、external_ref 或 error_code"
+                )
+        elif self.state is WeaponryCreationIntentState.RECOVERING:
+            if (
+                not self.owner_instance_id
+                or self.recovery_fencing_token < 1
+                or not self.recovery_lease_until
+                or self.external_ref
+                or self.error_code
+            ):
+                raise ValueError(
+                    "recovering 创建意图必须且只能携带恢复所有者、租约和 fencing token"
+                )
         elif self.state is WeaponryCreationIntentState.RESOLVED:
-            if not self.external_ref or self.error_code:
+            if not self.external_ref or self.error_code or self.recovery_lease_until:
                 raise ValueError("resolved 创建意图必须且只能携带 external_ref")
-        elif not self.error_code or self.external_ref:
+        elif not self.error_code or self.external_ref or self.recovery_lease_until:
             raise ValueError("quarantined 创建意图必须且只能携带 error_code")
 
 
@@ -148,6 +181,110 @@ class QuarantineWeaponryCreationIntent:
         )
 
 
+@dataclass(frozen=True)
+class ClaimWeaponryCreationIntentRecovery:
+    """以版本 CAS 取得一个遗留创建意图的恢复权。"""
+
+    task_id: TaskId
+    intent_id: str
+    expected_version: int
+    recovery_owner_id: str
+    observed_at: str
+    lease_until: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        object.__setattr__(
+            self,
+            "intent_id",
+            required_text(self.intent_id, name="intent_id"),
+        )
+        non_negative_int(self.expected_version, name="expected_version")
+        for name in ("recovery_owner_id", "observed_at", "lease_until"):
+            object.__setattr__(
+                self,
+                name,
+                required_text(getattr(self, name), name=name),
+            )
+
+
+@dataclass(frozen=True)
+class CompleteWeaponryCreationIntentRecovery:
+    """由持有有效 fencing token 的恢复器提交唯一查回结果。"""
+
+    task_id: TaskId
+    intent_id: str
+    expected_version: int
+    recovery_owner_id: str
+    recovery_fencing_token: int
+    external_ref: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        object.__setattr__(
+            self,
+            "intent_id",
+            required_text(self.intent_id, name="intent_id"),
+        )
+        non_negative_int(self.expected_version, name="expected_version")
+        object.__setattr__(
+            self,
+            "recovery_owner_id",
+            required_text(self.recovery_owner_id, name="recovery_owner_id"),
+        )
+        if (
+            isinstance(self.recovery_fencing_token, bool)
+            or not isinstance(self.recovery_fencing_token, int)
+            or self.recovery_fencing_token < 1
+        ):
+            raise ValueError("recovery_fencing_token 必须是正整数")
+        object.__setattr__(
+            self,
+            "external_ref",
+            required_text(self.external_ref, name="external_ref"),
+        )
+
+
+@dataclass(frozen=True)
+class QuarantineWeaponryCreationIntentRecovery:
+    """由持有有效 fencing token 的恢复器冻结无法唯一查回的意图。"""
+
+    task_id: TaskId
+    intent_id: str
+    expected_version: int
+    recovery_owner_id: str
+    recovery_fencing_token: int
+    error_code: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        object.__setattr__(
+            self,
+            "intent_id",
+            required_text(self.intent_id, name="intent_id"),
+        )
+        non_negative_int(self.expected_version, name="expected_version")
+        object.__setattr__(
+            self,
+            "recovery_owner_id",
+            required_text(self.recovery_owner_id, name="recovery_owner_id"),
+        )
+        if (
+            isinstance(self.recovery_fencing_token, bool)
+            or not isinstance(self.recovery_fencing_token, int)
+            or self.recovery_fencing_token < 1
+        ):
+            raise ValueError("recovery_fencing_token 必须是正整数")
+        object.__setattr__(
+            self,
+            "error_code",
+            required_text(self.error_code, name="error_code"),
+        )
+
+
 @runtime_checkable
 class WeaponryCreationIntentStorePort(Protocol):
     """创建意图 Store；实现只能执行短事务，不得在事务中访问供应商。"""
@@ -170,12 +307,39 @@ class WeaponryCreationIntentStorePort(Protocol):
     ) -> WeaponryCreationIntent:
         ...
 
+    def claim_recovery(
+        self, command: ClaimWeaponryCreationIntentRecovery
+    ) -> WeaponryCreationIntent:
+        ...
+
+    def complete_recovery(
+        self, command: CompleteWeaponryCreationIntentRecovery
+    ) -> WeaponryCreationIntent:
+        ...
+
+    def quarantine_recovery(
+        self, command: QuarantineWeaponryCreationIntentRecovery
+    ) -> WeaponryCreationIntent:
+        ...
+
     def list_pending(self, *, limit: int) -> tuple[WeaponryCreationIntent, ...]:
+        ...
+
+    def list_recovery_candidates(
+        self,
+        *,
+        active_instance_id: str,
+        observed_at: str,
+        limit: int,
+    ) -> tuple[WeaponryCreationIntent, ...]:
         ...
 
 
 __all__ = [
+    "ClaimWeaponryCreationIntentRecovery",
+    "CompleteWeaponryCreationIntentRecovery",
     "QuarantineWeaponryCreationIntent",
+    "QuarantineWeaponryCreationIntentRecovery",
     "ResolveWeaponryCreationIntent",
     "WeaponryCreationIntent",
     "WeaponryCreationIntentKind",

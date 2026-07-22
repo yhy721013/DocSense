@@ -7,6 +7,7 @@ I/O Adapter 不应了解资源记录的 JSON 或数据库实现，但资源一�
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from typing import Protocol, runtime_checkable
 
@@ -85,12 +86,16 @@ class StoreBackedWeaponryResourceRegistrar:
         store: WeaponryResourceStorePort,
         creation_intents: WeaponryCreationIntentStorePort,
         *,
+        instance_id: str,
         max_cas_attempts: int = 8,
     ) -> None:
         if not isinstance(store, WeaponryResourceStorePort):
             raise TypeError("store 必须实现 WeaponryResourceStorePort")
         if not isinstance(creation_intents, WeaponryCreationIntentStorePort):
             raise TypeError("creation_intents 必须实现 WeaponryCreationIntentStorePort")
+        normalized_instance_id = str(instance_id or "").strip()
+        if not normalized_instance_id:
+            raise ValueError("instance_id 不能为空")
         if (
             isinstance(max_cas_attempts, bool)
             or not isinstance(max_cas_attempts, int)
@@ -99,6 +104,7 @@ class StoreBackedWeaponryResourceRegistrar:
             raise ValueError("max_cas_attempts 必须是正整数")
         self._store = store
         self._creation_intents = creation_intents
+        self._instance_id = normalized_instance_id
         self._max_cas_attempts = max_cas_attempts
 
     def ensure_ready(self, task_id: TaskId) -> None:
@@ -179,15 +185,18 @@ class StoreBackedWeaponryResourceRegistrar:
     def reserve_creation(
         self, intent: WeaponryCreationIntent
     ) -> WeaponryCreationIntentReserveResult:
-        result = self._creation_intents.reserve(intent)
+        # 归属实例必须在 create 外部副作用发生前，与 pending 意图一并原子落库。
+        # 恢复器据此跳过本进程仍在执行的创建窗口，避免把活跃 Worker 误判为崩溃现场。
+        owned_intent = replace(intent, owner_instance_id=self._instance_id)
+        result = self._creation_intents.reserve(owned_intent)
         if not isinstance(result, WeaponryCreationIntentReserveResult):
             raise TypeError("Creation Intent reserve 返回类型错误")
         logger.info(
             "武器谱外部创建意图已持久化: task_id=%s intent_id=%s kind=%s "
             "created=%s state=%s",
-            intent.task_id.value,
-            intent.intent_id,
-            intent.kind.value,
+            owned_intent.task_id.value,
+            owned_intent.intent_id,
+            owned_intent.kind.value,
             result.created,
             result.intent.state.value,
         )

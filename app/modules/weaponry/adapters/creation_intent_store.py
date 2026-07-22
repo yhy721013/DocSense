@@ -5,12 +5,16 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing, contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 from app.modules.tasks.domain import TaskId
 from app.modules.weaponry.ports import (
+    ClaimWeaponryCreationIntentRecovery,
+    CompleteWeaponryCreationIntentRecovery,
     QuarantineWeaponryCreationIntent,
+    QuarantineWeaponryCreationIntentRecovery,
     ResolveWeaponryCreationIntent,
     WeaponryCreationIntent,
     WeaponryCreationIntentKind,
@@ -61,9 +65,10 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
                 """
                 INSERT INTO weaponry_creation_intents (
                     task_id, intent_id, kind, expected_name, identity_digest,
-                    parent_external_ref, document_key, call_id, state,
-                    external_ref, error_code, version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_external_ref, document_key, call_id,
+                    owner_instance_id, state, external_ref, error_code,
+                    recovery_fencing_token, recovery_lease_until, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._values(intent),
             )
@@ -85,6 +90,11 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         with self._transaction() as connection:
             current = self._require(connection, command.task_id, command.intent_id)
             if current.state is WeaponryCreationIntentState.RESOLVED:
+                if current.recovery_fencing_token > 0:
+                    raise WeaponryPortStateError(
+                        "creation_intent_recovery_fenced",
+                        "创建意图已由恢复器终结，旧 Worker 不得重复提交",
+                    )
                 if current.external_ref != command.external_ref:
                     raise WeaponryPortStateError(
                         "creation_intent_external_ref_conflict",
@@ -109,6 +119,11 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         with self._transaction() as connection:
             current = self._require(connection, command.task_id, command.intent_id)
             if current.state is WeaponryCreationIntentState.QUARANTINED:
+                if current.recovery_fencing_token > 0:
+                    raise WeaponryPortStateError(
+                        "creation_intent_recovery_fenced",
+                        "创建意图已由恢复器终结，旧 Worker 不得重复提交",
+                    )
                 if current.error_code == command.error_code:
                     return current
                 raise WeaponryPortStateError(
@@ -120,6 +135,136 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
                 current,
                 state=WeaponryCreationIntentState.QUARANTINED,
                 error_code=command.error_code,
+                version=current.version + 1,
+            )
+            self._save(connection, updated, expected_version=current.version)
+            return updated
+
+    def claim_recovery(
+        self,
+        command: ClaimWeaponryCreationIntentRecovery,
+    ) -> WeaponryCreationIntent:
+        """原子取得遗留意图恢复权；当前进程创建中的 pending 不允许自我接管。"""
+
+        if not isinstance(command, ClaimWeaponryCreationIntentRecovery):
+            raise TypeError("command 必须是 ClaimWeaponryCreationIntentRecovery")
+        observed_at = self._parse_timestamp(command.observed_at)
+        lease_until = self._parse_timestamp(command.lease_until)
+        if lease_until <= observed_at:
+            raise ValueError("恢复租约截止时间必须晚于 observed_at")
+
+        with self._transaction() as connection:
+            current = self._require(
+                connection,
+                command.task_id,
+                command.intent_id,
+            )
+            self._require_version(current, command.expected_version)
+            if current.state is WeaponryCreationIntentState.PENDING:
+                if current.owner_instance_id == command.recovery_owner_id:
+                    raise WeaponryPortStateError(
+                        "creation_intent_owned_by_active_instance",
+                        "当前进程不得恢复自己仍在创建的意图",
+                    )
+                fencing_token = current.recovery_fencing_token + 1
+            elif current.state is WeaponryCreationIntentState.RECOVERING:
+                lease_is_active = (
+                    self._parse_timestamp(current.recovery_lease_until)
+                    > observed_at
+                )
+                if (
+                    current.owner_instance_id != command.recovery_owner_id
+                    and lease_is_active
+                ):
+                    raise WeaponryPortStateError(
+                        "creation_intent_recovery_lease_active",
+                        "创建意图恢复租约仍由其他实例持有",
+                    )
+                fencing_token = current.recovery_fencing_token
+                if current.owner_instance_id != command.recovery_owner_id:
+                    fencing_token += 1
+            else:
+                raise WeaponryPortStateError(
+                    "creation_intent_not_recoverable",
+                    "创建意图已经离开可恢复状态",
+                )
+
+            updated = replace(
+                current,
+                owner_instance_id=command.recovery_owner_id,
+                state=WeaponryCreationIntentState.RECOVERING,
+                recovery_fencing_token=fencing_token,
+                recovery_lease_until=lease_until.astimezone(timezone.utc).isoformat(),
+                version=current.version + 1,
+            )
+            self._save(connection, updated, expected_version=current.version)
+            return updated
+
+    def complete_recovery(
+        self,
+        command: CompleteWeaponryCreationIntentRecovery,
+    ) -> WeaponryCreationIntent:
+        """只允许有效恢复所有者提交唯一查回的 workspace 标识。"""
+
+        if not isinstance(command, CompleteWeaponryCreationIntentRecovery):
+            raise TypeError(
+                "command 必须是 CompleteWeaponryCreationIntentRecovery"
+            )
+        with self._transaction() as connection:
+            current = self._require(
+                connection,
+                command.task_id,
+                command.intent_id,
+            )
+            if current.state is WeaponryCreationIntentState.RESOLVED:
+                self._require_recovery_identity(current, command)
+                if current.external_ref != command.external_ref:
+                    raise WeaponryPortStateError(
+                        "creation_intent_external_ref_conflict",
+                        "恢复结果已经解析为其他外部资源",
+                    )
+                return current
+            self._require_recovery_authority(current, command)
+            updated = replace(
+                current,
+                state=WeaponryCreationIntentState.RESOLVED,
+                external_ref=command.external_ref,
+                recovery_lease_until="",
+                version=current.version + 1,
+            )
+            self._save(connection, updated, expected_version=current.version)
+            return updated
+
+    def quarantine_recovery(
+        self,
+        command: QuarantineWeaponryCreationIntentRecovery,
+    ) -> WeaponryCreationIntent:
+        """只允许有效恢复所有者冻结无法唯一查回的创建现场。"""
+
+        if not isinstance(command, QuarantineWeaponryCreationIntentRecovery):
+            raise TypeError(
+                "command 必须是 QuarantineWeaponryCreationIntentRecovery"
+            )
+        with self._transaction() as connection:
+            current = self._require(
+                connection,
+                command.task_id,
+                command.intent_id,
+            )
+            if current.state is WeaponryCreationIntentState.QUARANTINED:
+                self._require_recovery_identity(current, command)
+                if current.error_code != command.error_code:
+                    raise WeaponryPortStateError(
+                        "creation_intent_quarantine_conflict",
+                        "恢复意图已经按其他原因隔离",
+                    )
+                return current
+            self._require_recovery_authority(current, command)
+            updated = replace(
+                current,
+                state=WeaponryCreationIntentState.QUARANTINED,
+                error_code=command.error_code,
+                recovery_lease_until="",
                 version=current.version + 1,
             )
             self._save(connection, updated, expected_version=current.version)
@@ -140,6 +285,50 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
             ).fetchall()
         return tuple(self._decode(row) for row in rows)
 
+    def list_recovery_candidates(
+        self,
+        *,
+        active_instance_id: str,
+        observed_at: str,
+        limit: int,
+    ) -> tuple[WeaponryCreationIntent, ...]:
+        """列出非本实例 pending 或可续租的 recovering 意图。"""
+
+        normalized_instance_id = str(active_instance_id or "").strip()
+        if not normalized_instance_id:
+            raise ValueError("active_instance_id 不能为空")
+        normalized_observed_at = self._parse_timestamp(observed_at).isoformat()
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit 必须是正整数")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM weaponry_creation_intents
+                WHERE (
+                    state = 'pending'
+                    AND (
+                        owner_instance_id = ''
+                        OR owner_instance_id != ?
+                    )
+                ) OR (
+                    state = 'recovering'
+                    AND (
+                        owner_instance_id = ?
+                        OR recovery_lease_until <= ?
+                    )
+                )
+                ORDER BY task_id, intent_id
+                LIMIT ?
+                """,
+                (
+                    normalized_instance_id,
+                    normalized_instance_id,
+                    normalized_observed_at,
+                    limit,
+                ),
+            ).fetchall()
+        return tuple(self._decode(row) for row in rows)
+
     def _initialize_schema(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
@@ -154,15 +343,33 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
                     parent_external_ref TEXT NOT NULL,
                     document_key TEXT NOT NULL,
                     call_id TEXT NOT NULL,
+                    owner_instance_id TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL,
                     external_ref TEXT NOT NULL,
                     error_code TEXT NOT NULL,
+                    recovery_fencing_token INTEGER NOT NULL DEFAULT 0,
+                    recovery_lease_until TEXT NOT NULL DEFAULT '',
                     version INTEGER NOT NULL,
                     PRIMARY KEY (task_id, intent_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_weaponry_creation_intents_pending
                 ON weaponry_creation_intents (state, task_id, intent_id);
                 """
+            )
+            self._ensure_column(
+                connection,
+                "owner_instance_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                connection,
+                "recovery_fencing_token",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                connection,
+                "recovery_lease_until",
+                "TEXT NOT NULL DEFAULT ''",
             )
 
     @contextmanager
@@ -215,13 +422,18 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         updated = connection.execute(
             """
             UPDATE weaponry_creation_intents
-            SET state = ?, external_ref = ?, error_code = ?, version = ?
+            SET owner_instance_id = ?, state = ?, external_ref = ?,
+                error_code = ?, recovery_fencing_token = ?,
+                recovery_lease_until = ?, version = ?
             WHERE task_id = ? AND intent_id = ? AND version = ?
             """,
             (
+                intent.owner_instance_id,
                 intent.state.value,
                 intent.external_ref,
                 intent.error_code,
+                intent.recovery_fencing_token,
+                intent.recovery_lease_until,
                 intent.version,
                 intent.task_id.value,
                 intent.intent_id,
@@ -244,6 +456,39 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         if intent.state is not WeaponryCreationIntentState.PENDING:
             raise WeaponryPortStateError(
                 "creation_intent_not_pending", "创建意图已经离开 pending 状态"
+            )
+
+    @staticmethod
+    def _require_version(
+        intent: WeaponryCreationIntent,
+        expected_version: int,
+    ) -> None:
+        if intent.version != expected_version:
+            raise WeaponryPortStateError(
+                "creation_intent_version_conflict",
+                "创建意图版本不一致",
+            )
+
+    @classmethod
+    def _require_recovery_authority(cls, intent, command) -> None:
+        if intent.state is not WeaponryCreationIntentState.RECOVERING:
+            raise WeaponryPortStateError(
+                "creation_intent_not_recovering",
+                "创建意图已经离开 recovering 状态",
+            )
+        cls._require_recovery_identity(intent, command)
+        cls._require_version(intent, command.expected_version)
+
+    @staticmethod
+    def _require_recovery_identity(intent, command) -> None:
+        if (
+            intent.owner_instance_id != command.recovery_owner_id
+            or intent.recovery_fencing_token
+            != command.recovery_fencing_token
+        ):
+            raise WeaponryPortStateError(
+                "creation_intent_recovery_fenced",
+                "创建意图恢复所有者或 fencing token 已失效",
             )
 
     @staticmethod
@@ -270,9 +515,12 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
             intent.parent_external_ref,
             intent.document_key,
             intent.call_id,
+            intent.owner_instance_id,
             intent.state.value,
             intent.external_ref,
             intent.error_code,
+            intent.recovery_fencing_token,
+            intent.recovery_lease_until,
             intent.version,
         )
 
@@ -288,15 +536,48 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
                 parent_external_ref=str(row["parent_external_ref"]),
                 document_key=str(row["document_key"]),
                 call_id=str(row["call_id"]),
+                owner_instance_id=str(row["owner_instance_id"]),
                 state=WeaponryCreationIntentState(str(row["state"])),
                 external_ref=str(row["external_ref"]),
                 error_code=str(row["error_code"]),
+                recovery_fencing_token=int(row["recovery_fencing_token"]),
+                recovery_lease_until=str(row["recovery_lease_until"]),
                 version=int(row["version"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise WeaponryPortStateError(
                 "creation_intent_payload_invalid", "创建意图持久化字段无效"
             ) from exc
+
+    @staticmethod
+    def _ensure_column(
+        connection: sqlite3.Connection,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(weaponry_creation_intents)"
+            ).fetchall()
+        }
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE weaponry_creation_intents ADD COLUMN {column} {definition}"
+            )
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("时间戳不能为空")
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("时间戳必须是 ISO-8601 格式") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("时间戳必须包含时区")
+        return parsed.astimezone(timezone.utc)
 
 
 __all__ = ["SQLiteWeaponryCreationIntentStoreAdapter"]

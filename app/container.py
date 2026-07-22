@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
+from uuid import uuid4
 
 from flask import current_app
 
@@ -673,9 +674,13 @@ def create_application_services() -> ApplicationServices:
     weaponry_creation_intents = SQLiteWeaponryCreationIntentStoreAdapter(
         llm_config.task_db_path
     )
+    # 同一容器内的 Worker 与维护器共享运行实例标识。新 pending 意图带上该归属后，
+    # 维护器会跳过本实例仍在执行的创建窗口；进程重启则生成新标识，遗留意图可被接管。
+    weaponry_instance_id = uuid4().hex
     weaponry_resource_registrar = StoreBackedWeaponryResourceRegistrar(
         weaponry_resources,
         weaponry_creation_intents,
+        instance_id=weaponry_instance_id,
     )
     weaponry_client_factory = AnythingLLMWeaponryClientFactory(anythingllm_config)
     weaponry_cleanup_client_factory = AnythingLLMWeaponryClientFactory(
@@ -776,9 +781,13 @@ def create_application_services() -> ApplicationServices:
         ),
         creation_intent_recovery=(
             AnythingLLMWeaponryCreationIntentRecoveryAdapter(
-                weaponry_client_factory,
+                weaponry_cleanup_client_factory,
                 weaponry_creation_intents,
                 weaponry_resources,
+                instance_id=weaponry_instance_id,
+                lease_seconds=(
+                    weaponry_infrastructure_config.cleanup_lease_seconds
+                ),
             )
         ),
     )

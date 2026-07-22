@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import logging
+from typing import Callable
 
 from app.integrations.anythingllm.models import AnythingLLMWorkspace
 
 from app.modules.weaponry.ports import (
-    QuarantineWeaponryCreationIntent,
+    ClaimWeaponryCreationIntentRecovery,
+    CompleteWeaponryCreationIntentRecovery,
     QuarantineWeaponryResources,
+    QuarantineWeaponryCreationIntentRecovery,
     RegisterWeaponryResource,
-    ResolveWeaponryCreationIntent,
     WeaponryCreationIntent,
     WeaponryCreationIntentKind,
+    WeaponryCreationIntentState,
     WeaponryCreationIntentStorePort,
+    WeaponryPortStateError,
     WeaponryResourceKind,
     WeaponryResourceOwnership,
     WeaponryResourceRecordState,
@@ -53,7 +58,10 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
         intents: WeaponryCreationIntentStorePort,
         resources: WeaponryResourceStorePort,
         *,
+        instance_id: str,
+        lease_seconds: float,
         user_id: int | None = 1,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(client_factory, WeaponryAnythingLLMClientFactoryProtocol):
             raise TypeError("client_factory 必须实现 Weaponry AnythingLLM 工厂契约")
@@ -61,18 +69,80 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
             raise TypeError("intents 必须实现 WeaponryCreationIntentStorePort")
         if not isinstance(resources, WeaponryResourceStorePort):
             raise TypeError("resources 必须实现 WeaponryResourceStorePort")
+        normalized_instance_id = str(instance_id or "").strip()
+        if not normalized_instance_id:
+            raise ValueError("instance_id 不能为空")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, (int, float))
+            or lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds 必须是正数")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock 必须可调用")
         self._client_factory = client_factory
         self._intents = intents
         self._resources = resources
+        self._instance_id = normalized_instance_id
+        self._lease_seconds = float(lease_seconds)
         self._user_id = user_id
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def run_once(self, *, limit: int) -> WeaponryCreationIntentRecoveryResult:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
-        pending = self._intents.list_pending(limit=limit)
+        observed_at = self._utc_now()
+        candidates = self._intents.list_recovery_candidates(
+            active_instance_id=self._instance_id,
+            observed_at=observed_at.isoformat(),
+            limit=limit,
+        )
         reconciled = 0
         quarantined = 0
         deferred = 0
+
+        # 候选清单只是只读快照。必须逐条 CAS 取得恢复租约后，才能读取远端清单或
+        # 改写资源事实；这样正常 Worker 在快照读取后完成 resolve 时，会使 claim
+        # 因版本冲突而失败，维护线程不会再隔离已经成功创建的活跃任务。
+        claimed: list[WeaponryCreationIntent] = []
+        lease_until = observed_at + timedelta(seconds=self._lease_seconds)
+        for candidate in candidates:
+            try:
+                claimed_intent = self._intents.claim_recovery(
+                    ClaimWeaponryCreationIntentRecovery(
+                        task_id=candidate.task_id,
+                        intent_id=candidate.intent_id,
+                        expected_version=candidate.version,
+                        recovery_owner_id=self._instance_id,
+                        observed_at=observed_at.isoformat(),
+                        lease_until=lease_until.isoformat(),
+                    )
+                )
+                claimed.append(claimed_intent)
+                logger.info(
+                    "武器谱创建意图恢复权已取得: task_id=%s intent_id=%s "
+                    "fencing_token=%d",
+                    candidate.task_id.value,
+                    candidate.intent_id,
+                    claimed_intent.recovery_fencing_token,
+                )
+            except WeaponryPortStateError as exc:
+                deferred += 1
+                logger.info(
+                    "武器谱创建意图恢复 claim 未取得，跳过资源变更: "
+                    "task_id=%s intent_id=%s error_code=%s",
+                    candidate.task_id.value,
+                    candidate.intent_id,
+                    exc.error_code,
+                )
+            except Exception:
+                deferred += 1
+                logger.exception(
+                    "武器谱创建意图恢复 claim 异常，跳过资源变更: "
+                    "task_id=%s intent_id=%s",
+                    candidate.task_id.value,
+                    candidate.intent_id,
+                )
 
         # workspace 清单属于远端只读快照。同一轮最多会处理 ``limit`` 条创建意图，
         # 因此只拉取一次并按精确名称建索引，避免 50 条积压触发 50 次相同 HTTP 请求。
@@ -81,7 +151,7 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
         workspaces_by_name: Mapping[str, tuple[AnythingLLMWorkspace, ...]] | None = {}
         if any(
             item.kind is not WeaponryCreationIntentKind.SOURCE_THREAD
-            for item in pending
+            for item in claimed
         ):
             try:
                 workspaces_by_name = self._load_workspaces_by_name()
@@ -89,10 +159,10 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
                 workspaces_by_name = None
                 logger.exception(
                     "武器谱创建意图 workspace 清单读取失败，本轮仅暂缓 workspace 意图: "
-                    "pending_count=%d",
-                    len(pending),
+                    "claimed_count=%d",
+                    len(claimed),
                 )
-        for intent in pending:
+        for intent in claimed:
             if (
                 intent.kind is not WeaponryCreationIntentKind.SOURCE_THREAD
                 and workspaces_by_name is None
@@ -114,15 +184,17 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
                 continue
             if outcome == "reconciled":
                 reconciled += 1
-            else:
+            elif outcome == "quarantined":
                 quarantined += 1
+            else:
+                deferred += 1
         result = WeaponryCreationIntentRecoveryResult(
-            scanned_count=len(pending),
+            scanned_count=len(candidates),
             reconciled_count=reconciled,
             quarantined_count=quarantined,
             deferred_count=deferred,
         )
-        if pending:
+        if candidates:
             logger.info(
                 "武器谱创建意图有界恢复完成: scanned=%d reconciled=%d "
                 "quarantined=%d deferred=%d",
@@ -138,6 +210,7 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
         intent: WeaponryCreationIntent,
         workspaces_by_name: Mapping[str, tuple[AnythingLLMWorkspace, ...]],
     ) -> str:
+        self._require_current_claim(intent)
         if intent.kind is WeaponryCreationIntentKind.SOURCE_THREAD:
             self._quarantine_scene(
                 intent,
@@ -158,6 +231,7 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
             return "quarantined"
 
         workspace = matches[0]
+        self._require_current_claim(intent)
         current = self._required_resource_record(intent)
         tracked = self._tracked_workspace(intent, workspace.slug)
         current = self._resources.register(
@@ -168,6 +242,7 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
             )
         )
         if current.state is not WeaponryResourceRecordState.QUARANTINED:
+            self._require_current_claim(intent)
             current = self._resources.quarantine(
                 QuarantineWeaponryResources(
                     intent.task_id,
@@ -176,12 +251,14 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
                     "已查回崩溃窗口创建的 workspace，保留现场等待人工对账",
                 )
             )
-        self._intents.resolve(
-            ResolveWeaponryCreationIntent(
-                intent.task_id,
-                intent.intent_id,
-                intent.version,
-                workspace.slug,
+        self._intents.complete_recovery(
+            CompleteWeaponryCreationIntentRecovery(
+                task_id=intent.task_id,
+                intent_id=intent.intent_id,
+                expected_version=intent.version,
+                recovery_owner_id=self._instance_id,
+                recovery_fencing_token=intent.recovery_fencing_token,
+                external_ref=workspace.slug,
             )
         )
         logger.critical(
@@ -214,6 +291,7 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
         error_code: str,
         reason: str,
     ) -> None:
+        self._require_current_claim(intent)
         current = self._required_resource_record(intent)
         if current.state is not WeaponryResourceRecordState.QUARANTINED:
             self._resources.quarantine(
@@ -224,12 +302,14 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
                     reason,
                 )
             )
-        self._intents.quarantine(
-            QuarantineWeaponryCreationIntent(
-                intent.task_id,
-                intent.intent_id,
-                intent.version,
-                error_code,
+        self._intents.quarantine_recovery(
+            QuarantineWeaponryCreationIntentRecovery(
+                task_id=intent.task_id,
+                intent_id=intent.intent_id,
+                expected_version=intent.version,
+                recovery_owner_id=self._instance_id,
+                recovery_fencing_token=intent.recovery_fencing_token,
+                error_code=error_code,
             )
         )
         logger.critical(
@@ -244,6 +324,34 @@ class AnythingLLMWeaponryCreationIntentRecoveryAdapter:
         if record is None:
             raise RuntimeError("创建意图找不到任务资源记录")
         return record
+
+    def _require_current_claim(self, intent: WeaponryCreationIntent) -> None:
+        """在每次资源变更前确认恢复权仍未被续租或接管。"""
+
+        current = self._intents.get(intent.task_id, intent.intent_id)
+        if current is None:
+            raise WeaponryPortStateError(
+                "creation_intent_not_found",
+                "恢复中的创建意图不存在",
+            )
+        if (
+            current.state is not WeaponryCreationIntentState.RECOVERING
+            or current.version != intent.version
+            or current.owner_instance_id != self._instance_id
+            or current.recovery_fencing_token != intent.recovery_fencing_token
+        ):
+            raise WeaponryPortStateError(
+                "creation_intent_recovery_fenced",
+                "创建意图恢复权已经失效，禁止继续修改资源现场",
+            )
+
+    def _utc_now(self) -> datetime:
+        current = self._clock()
+        if not isinstance(current, datetime):
+            raise TypeError("clock 必须返回 datetime")
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise ValueError("clock 返回值必须包含时区")
+        return current.astimezone(timezone.utc)
 
     @staticmethod
     def _tracked_workspace(

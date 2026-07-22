@@ -118,6 +118,11 @@ class AnythingLLMProvidedEvidenceExtractionAdapter:
                         "extraction_workspace_creation_resolved",
                         "抽取 workspace 创建意图已经完成，禁止重复执行",
                     )
+                if workspace_intent.state is WeaponryCreationIntentState.RECOVERING:
+                    raise WeaponryPortStateError(
+                        "extraction_workspace_creation_recovering",
+                        "抽取 workspace 创建意图正由恢复器接管，禁止 Worker 继续修改现场",
+                    )
                 # 供应商写请求从发出前即进入可能不确定区间；不能依赖响应中的 slug 才
                 # 标记副作用开始，否则创建超时会被错误归为“明确未创建”。
                 if workspace_reservation.created:
