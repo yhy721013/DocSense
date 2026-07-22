@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from app.services.core.prompts import (
     ANALYSIS_ENUM_FIELD_MAX_ITEMS,
     ANALYSIS_ENUM_ITEM_MAX_CHARS,
-    ANALYSIS_KEYWORD_COUNT,
+    ANALYSIS_COMPACT_OUTPUT_RULES,
+    ANALYSIS_KEYWORD_MAX_COUNT,
     ANALYSIS_KEYWORD_MAX_CHARS,
+    ANALYSIS_KEYWORD_MIN_COUNT,
     ANALYSIS_RESPONSE_MAX_CHARS,
     ANALYSIS_SUMMARY_MAX_CHARS,
     build_architecture_classification_prompt,
@@ -243,19 +245,25 @@ class AnalysisPromptSplitTests(unittest.TestCase):
             },
             resolved_architecture_id=101,
             resolved_architecture_path_name="海军装备/CVN-78/基础数据",
+            resolved_architecture_path_node_names=(
+                "基础数据",
+                "CVN-78",
+                "海军装备",
+            ),
             resolved_architecture_node_type="leaf",
         )
 
         self.assertIn(
             '已确认领域分类（只读，不得修改或写入输出）: {"id":101,'
-            '"pathName":"海军装备/CVN-78/基础数据","nodeType":"leaf"}',
+            '"pathName":"海军装备/CVN-78/基础数据","pathNodeNames":'
+            '["基础数据","CVN-78","海军装备"],"nodeType":"leaf"}',
             prompt,
         )
         self.assertIn('"country": ""', prompt)
         self.assertIn('"fileDataItem"', prompt)
         self.assertIn('"美国"', prompt)
         self.assertIn('"文档类"', prompt)
-        self.assertNotIn("architectureList", prompt)
+        self.assertNotIn('"architectureList":', prompt)
         self.assertNotIn('"architectureId"', prompt)
         self.assertNotIn("不得进入抽取提示词", prompt)
         self.assertNotIn("同样不得决定扩展字段", prompt)
@@ -271,28 +279,13 @@ class AnalysisPromptSplitTests(unittest.TestCase):
 
         for prompt in (legacy_prompt, extraction_prompt):
             with self.subTest(prompt_kind=prompt.splitlines()[0]):
-                self.assertIn(
-                    f"keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个关键词",
-                    prompt,
-                )
-                self.assertIn(
-                    "关键词之间允许语义相近、同义或内容重叠",
-                    prompt,
-                )
-                self.assertIn(
-                    "每一项都必须与文档主题、主要对象或关键内容有明确且较强的相关性",
-                    prompt,
-                )
-                self.assertIn(
-                    "不得为凑数量添加与文档相关性不大的词",
-                    prompt,
-                )
+                self.assertIn(ANALYSIS_COMPACT_OUTPUT_RULES, prompt)
                 self.assertIn(
                     f"每个关键词不超过 {ANALYSIS_KEYWORD_MAX_CHARS} 个字符",
                     prompt,
                 )
                 self.assertIn(
-                    "associatedEquipment、relatedTechnology、equipmentModel",
+                    "associatedEquipment、equipmentModel",
                     prompt,
                 )
                 self.assertIn(
@@ -304,7 +297,7 @@ class AnalysisPromptSplitTests(unittest.TestCase):
                     prompt,
                 )
                 self.assertIn(
-                    f"summary 不超过 {ANALYSIS_SUMMARY_MAX_CHARS} 个字符",
+                    f"不得超过 {ANALYSIS_SUMMARY_MAX_CHARS} 个字符",
                     prompt,
                 )
                 self.assertIn(
@@ -324,8 +317,34 @@ class AnalysisPromptSplitTests(unittest.TestCase):
                     prompt,
                 )
                 self.assertIn("禁止循环枚举或按编号规律补造实体", prompt)
+                self.assertIn(
+                    f"keyword 必须输出 {ANALYSIS_KEYWORD_MIN_COUNT} 至 "
+                    f"{ANALYSIS_KEYWORD_MAX_COUNT} 个关键词",
+                    prompt,
+                )
+                self.assertIn("分类路径关键词排在前面，内容关键词排在后面", prompt)
+                self.assertIn("已验证 parentId 祖先链中各节点的 name 原值", prompt)
+                self.assertIn("pathName 是不透明的展示文本", prompt)
+                self.assertIn("内容关键词数量不得少于 max(2, 5-C)", prompt)
+                self.assertIn("允许从正文明确出现的标准编号", prompt)
+                self.assertIn("最终总数为 5 至 10 个", prompt)
+                self.assertIn("标准、规范、手册、目录、表格等不属于上述三类", prompt)
+                self.assertIn("优先写到 350 至 450 个字符", prompt)
+                self.assertIn("必须输出中文规范名称", prompt)
+                self.assertIn("relatedTechnologyEvidence", prompt)
+                self.assertIn("sourceTerm 必须复制正文", prompt)
+                self.assertIn("没有合格技术时输出空字符串", prompt)
                 self.assertNotIn("至少 10 个关键词", prompt)
-                self.assertNotIn("互不重复的关键词", prompt)
+                self.assertNotIn("固定输出 10 个关键词", prompt)
+
+        for forbidden in (
+            "【材料类型：图片】",
+            "【材料类型：音频】",
+            "【材料类型：视频】",
+            "【材料类型：音视频】",
+            "【材料类型：其他】",
+        ):
+            self.assertNotIn(forbidden, ANALYSIS_COMPACT_OUTPUT_RULES)
 
     def test_extraction_standard_schema_is_controlled_only_by_boolean(self):
         params_with_standard_range = {

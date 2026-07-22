@@ -59,8 +59,13 @@ from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtm
 from app.services.utils.word_extractor import extract_text_from_word
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
-    ANALYSIS_KEYWORD_COUNT,
+    ANALYSIS_ENUM_FIELD_MAX_ITEMS,
+    ANALYSIS_ENUM_ITEM_MAX_CHARS,
+    ANALYSIS_KEYWORD_MAX_COUNT,
     ANALYSIS_KEYWORD_MAX_CHARS,
+    ANALYSIS_KEYWORD_MIN_COUNT,
+    ANALYSIS_SUMMARY_MAX_CHARS,
+    ANALYSIS_SUMMARY_TYPE_CHAR_RANGES,
     UNKNOWN_SOURCE_VALUE,
     build_architecture_classification_prompt,
     build_architecture_repair_prompt,
@@ -149,7 +154,8 @@ SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
 DATA_STANDARD_LEAF_NAMES = frozenset(
     {"建模与仿真", "军用软件", "目标特性", "术语与定义", "通用要求", "元数据"}
 )
-MAX_KEYWORD_COUNT = ANALYSIS_KEYWORD_COUNT
+MIN_KEYWORD_COUNT = ANALYSIS_KEYWORD_MIN_COUNT
+MAX_KEYWORD_COUNT = ANALYSIS_KEYWORD_MAX_COUNT
 MAX_KEYWORD_LENGTH = ANALYSIS_KEYWORD_MAX_CHARS
 DATA_STANDARD_FIELD_ALIASES = {
     "militaryName": ("militaryName", "国军标名称", "标准名称"),
@@ -754,48 +760,302 @@ def _resolve_field(parsed_result: Dict[str, Any], file_item: Dict[str, Any], *al
     return ""
 
 
-def _sanitize_keywords(raw_value: Any) -> str:
-    """对 LLM 返回的 keyword 字段做后处理：拆分、截断单条过长关键词、限制总数量。
-
-    小模型（如 4B）有时不遵守 prompt 约束，可能返回极长的单个关键词或过多关键词，
-    此函数在输出前统一做校验与截断，确保 keyword 字段始终为不超过 MAX_KEYWORD_COUNT
-    个、每个不超过 MAX_KEYWORD_LENGTH 字符的短词，以英文逗号+空格分隔。
-    """
+def _split_delimited_items(raw_value: Any) -> list[str]:
+    """把模型可能返回的数组或多种分隔字符串拆成保持顺序的条目。"""
     if raw_value in (None, "", [], {}):
-        return ""
-
-    # 模型可能返回列表形式的关键词
-    if isinstance(raw_value, list):
-        parts = [_as_text(item) for item in raw_value]
-    elif isinstance(raw_value, str):
+        return []
+    if isinstance(raw_value, (list, tuple)):
+        return [_scalar_text(item) for item in raw_value]
+    if isinstance(raw_value, str):
         text = raw_value.strip()
-        if not text:
-            return ""
-        # 按常见分隔符拆分（中英文逗号、顿号、分号、竖线、换行）
-        parts = re.split(r"[,，、;；|\n\r]+", text)
-    else:
-        parts = [str(raw_value)]
+        return re.split(r"[,，、;；|\n\r]+", text) if text else []
+    return [_scalar_text(raw_value)]
 
+
+def _sanitize_delimited_items(
+        raw_value: Any,
+        *,
+        field_name: str,
+        max_items: int,
+        max_item_chars: int,
+) -> list[str]:
+    """规范化字符串枚举字段，不做任何业务语义补全。"""
     cleaned: list[str] = []
     seen: set[str] = set()
-    for part in parts:
-        kw = part.strip().strip("\"'“”‘’").strip()
-        if not kw or kw in seen:
+    for part in _split_delimited_items(raw_value):
+        item = re.sub(
+            r"^\s*(?:[-*•]|\d+[.、])\s*",
+            "",
+            _as_text(part),
+        ).strip().strip("\"'“”‘’").strip()
+        if not item:
             continue
-        seen.add(kw)
-        # 单个关键词过长时截断
-        if len(kw) > MAX_KEYWORD_LENGTH:
+        if len(item) > max_item_chars:
             logger.warning(
-                "关键词长度超过上限，已截断: original_chars=%d limit=%d",
-                len(kw),
-                MAX_KEYWORD_LENGTH,
+                "文件分析枚举条目长度超过上限，已丢弃: field=%s "
+                "original_chars=%d limit=%d",
+                field_name,
+                len(item),
+                max_item_chars,
             )
-            kw = kw[:MAX_KEYWORD_LENGTH]
-        cleaned.append(kw)
-        if len(cleaned) >= MAX_KEYWORD_COUNT:
+            continue
+        dedupe_key = unicodedata.normalize("NFKC", item).casefold()
+        if not item or dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(item)
+        if len(cleaned) >= max_items:
             break
+    return cleaned
 
-    return ", ".join(cleaned)
+
+def _sanitize_keyword_items(raw_value: Any) -> list[str]:
+    return _sanitize_delimited_items(
+        raw_value,
+        field_name="keyword",
+        # 先保留有限数量的模型候选供分类去重和正文证据筛选，最终输出仍限制为 10 项。
+        max_items=MAX_KEYWORD_COUNT * 3,
+        max_item_chars=MAX_KEYWORD_LENGTH,
+    )
+
+
+def _sanitize_keywords(raw_value: Any) -> str:
+    """保留给既有调用方的 keyword 字符串规范化入口。"""
+    return ", ".join(_sanitize_keyword_items(raw_value)[:MAX_KEYWORD_COUNT])
+
+
+def _architecture_path_keyword_names(
+        tree_index: ArchitectureTreeIndex,
+        architecture_id: int,
+) -> list[str]:
+    """沿已验证父链返回最多四个叶到根的节点原名。"""
+    if tree_index.get(architecture_id) is None:
+        return []
+    node_ids = (
+        architecture_id,
+        *reversed(tree_index.ancestors_by_id.get(architecture_id, ())),
+    )
+    return [tree_index.require(node_id).name for node_id in node_ids[:4]]
+
+
+def _bounded_unique_exact_items(
+        items: Iterable[str],
+        *,
+        field_name: str,
+        max_items: int,
+        max_item_chars: int,
+) -> list[str]:
+    """保留服务端可信原值，仅执行空值、长度、去重和数量门禁。"""
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw_item in items:
+        item = _as_text(raw_item)
+        if not item:
+            continue
+        if len(item) > max_item_chars:
+            logger.warning(
+                "文件分析可信条目长度超过上限，已丢弃: field=%s "
+                "original_chars=%d limit=%d",
+                field_name,
+                len(item),
+                max_item_chars,
+            )
+            continue
+        dedupe_key = unicodedata.normalize("NFKC", item).casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        result.append(item)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def _normalize_evidence_text(value: Any) -> str:
+    """生成仅用于证据匹配和去重的宽松文本，不改写正式回调值。"""
+    normalized = unicodedata.normalize("NFKC", _as_text(value)).casefold()
+    compact = "".join(
+        char
+        for char in normalized
+        if not char.isspace() and not unicodedata.category(char).startswith("P")
+    )
+    return compact or normalized.strip()
+
+
+def _has_normalized_text_evidence(value: Any, evidence_text: str) -> bool:
+    normalized_value = _normalize_evidence_text(value)
+    return bool(
+        normalized_value
+        and normalized_value in _normalize_evidence_text(evidence_text)
+    )
+
+
+def _classification_keyword_items(
+        architecture_id: Any,
+        candidates: Iterable[Dict[str, Any]],
+) -> list[str]:
+    """从已验证 parentId 祖先链提取最多四个由具体到一般的节点原名。"""
+    normalized_id = _coerce_int(architecture_id)
+    if normalized_id is None:
+        return []
+    candidate_list = [item for item in candidates if isinstance(item, dict)]
+    try:
+        tree_index = _ARCHITECTURE_TREE_INDEX_CACHE.get_or_build(candidate_list)
+        node_names = _architecture_path_keyword_names(tree_index, normalized_id)
+    except ArchitectureTreeValidationError:
+        logger.warning(
+            "文件分析分类关键词无法建立领域树索引，退回最终节点原名: "
+            "architecture_id=%s",
+            normalized_id,
+        )
+        node_names = [
+            _as_text(item.get("name"))
+            for item in candidate_list
+            if _coerce_int(item.get("id")) == normalized_id
+        ][:1]
+    return _bounded_unique_exact_items(
+        node_names,
+        field_name="keyword.classification",
+        max_items=4,
+        max_item_chars=MAX_KEYWORD_LENGTH,
+    )
+
+
+def _compose_analysis_keywords(
+        raw_keyword_items: Sequence[str],
+        *,
+        summary: str,
+        original_text: str,
+        architecture_id: Any,
+        candidates: Iterable[Dict[str, Any]],
+) -> str:
+    """按“分类路径在前、内容关键词在后”组成正式 keyword 字符串。"""
+    classification_items = _classification_keyword_items(architecture_id, candidates)
+    classification_keys = {
+        _normalize_evidence_text(item)
+        for item in classification_items
+    }
+    summary_items: list[str] = []
+    source_fallback_items: list[str] = []
+    content_seen: set[str] = set()
+    summary_limit = min(7, max(0, MAX_KEYWORD_COUNT - len(classification_items)))
+    for item in raw_keyword_items:
+        dedupe_key = _normalize_evidence_text(item)
+        if not dedupe_key or dedupe_key in classification_keys or dedupe_key in content_seen:
+            continue
+        if _has_normalized_text_evidence(item, summary):
+            content_seen.add(dedupe_key)
+            summary_items.append(item)
+        elif _has_normalized_text_evidence(item, original_text):
+            content_seen.add(dedupe_key)
+            source_fallback_items.append(item)
+
+    accepted_content_items = summary_items[:summary_limit]
+    minimum_content_count = max(
+        2,
+        MIN_KEYWORD_COUNT - len(classification_items),
+    )
+    fallback_slots = max(
+        0,
+        min(
+            summary_limit - len(accepted_content_items),
+            minimum_content_count - len(accepted_content_items),
+        ),
+    )
+    if fallback_slots:
+        accepted_content_items.extend(source_fallback_items[:fallback_slots])
+    return ", ".join(classification_items + accepted_content_items)
+
+
+def _related_technology_evidence_map(raw_value: Any) -> dict[str, str]:
+    if isinstance(raw_value, Mapping):
+        raw_entries: Sequence[Any] = [raw_value]
+    elif isinstance(raw_value, (list, tuple)):
+        raw_entries = raw_value
+    else:
+        return {}
+
+    evidence_by_name: dict[str, str] = {}
+    for entry in raw_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        name = _as_text(
+            entry.get("nameZh")
+            or entry.get("name")
+            or entry.get("中文名称")
+        )
+        source_term = _as_text(
+            entry.get("sourceTerm")
+            or entry.get("evidence")
+            or entry.get("原文证据")
+        )
+        normalized_name = _normalize_evidence_text(name)
+        if normalized_name and source_term and normalized_name not in evidence_by_name:
+            evidence_by_name[normalized_name] = source_term
+    return evidence_by_name
+
+
+def _sanitize_related_technologies(
+        raw_value: Any,
+        *,
+        raw_evidence: Any = None,
+        original_text: str,
+) -> str:
+    raw_items = _split_delimited_items(raw_value)
+    items = _sanitize_delimited_items(
+        raw_items,
+        field_name="relatedTechnology",
+        # 先完成正文证据过滤，再执行最多 10 项的业务上限，避免前置幻觉项挤掉后续有效项。
+        max_items=max(ANALYSIS_ENUM_FIELD_MAX_ITEMS, len(raw_items)),
+        max_item_chars=ANALYSIS_ENUM_ITEM_MAX_CHARS,
+    )
+    if not items:
+        return ""
+    chinese_items = [item for item in items if re.search(r"[\u3400-\u9fff]", item)]
+    non_chinese_count = len(items) - len(chinese_items)
+    if non_chinese_count:
+        logger.warning(
+            "文件分析所属技术不是中文名称，已丢弃并继续成功: rejected_count=%d",
+            non_chinese_count,
+        )
+    if not chinese_items:
+        return ""
+    evidence_text = _as_text(original_text)
+    if not evidence_text:
+        logger.warning(
+            "文件分析所属技术缺少可核验正文，已保留规范化结果并继续成功: "
+            "retained_count=%d",
+            len(chinese_items),
+        )
+        return ", ".join(chinese_items[:ANALYSIS_ENUM_FIELD_MAX_ITEMS])
+
+    evidence_by_name = _related_technology_evidence_map(raw_evidence)
+    evidence_items: list[str] = []
+    for item in chinese_items:
+        if _has_normalized_text_evidence(item, evidence_text):
+            evidence_items.append(item)
+            continue
+        source_term = evidence_by_name.get(_normalize_evidence_text(item), "")
+        if source_term and _has_normalized_text_evidence(source_term, evidence_text):
+            evidence_items.append(item)
+
+    rejected_count = len(chinese_items) - len(evidence_items)
+    if rejected_count:
+        logger.warning(
+            "文件分析所属技术缺少可核验原文术语映射，已丢弃并继续成功: "
+            "rejected_count=%d accepted_count=%d",
+            rejected_count,
+            len(evidence_items),
+        )
+    if len(evidence_items) > ANALYSIS_ENUM_FIELD_MAX_ITEMS:
+        logger.warning(
+            "文件分析所属技术数量超过上限，已保留前序合格项并继续成功: "
+            "actual=%d maximum=%d",
+            len(evidence_items),
+            ANALYSIS_ENUM_FIELD_MAX_ITEMS,
+        )
+    accepted = evidence_items[:ANALYSIS_ENUM_FIELD_MAX_ITEMS]
+    return ", ".join(accepted)
 
 
 def _extract_original_link(original_text: str) -> str:
@@ -1101,9 +1361,33 @@ def map_analysis_result(
     normalized_original_text = _as_text(
         original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
     extracted_title = _extract_title(normalized_original_text)
-    resolved_keyword = _sanitize_keywords(
+    resolved_summary_from_model = _resolve_field(
+        parsed_result,
+        file_item,
+        "summary",
+        "摘要",
+    )
+    resolved_summary = resolved_summary_from_model or extracted_title
+    raw_keyword_items = _sanitize_keyword_items(
         _first_non_empty_value(file_item, "keyword", "keywords", "关键词")
         or _first_non_empty_value(parsed_result, "keyword", "keywords", "关键词")
+    )
+    preliminary_keyword = ", ".join(raw_keyword_items)
+    raw_related_technology = (
+        _first_non_empty_value(file_item, "relatedTechnology", "所属技术")
+        or _first_non_empty_value(parsed_result, "relatedTechnology", "所属技术")
+    )
+    raw_related_technology_evidence = (
+        _first_non_empty_value(
+            file_item,
+            "relatedTechnologyEvidence",
+            "所属技术证据",
+        )
+        or _first_non_empty_value(
+            parsed_result,
+            "relatedTechnologyEvidence",
+            "所属技术证据",
+        )
     )
     resolved_source = (
         _resolve_field(parsed_result, file_item, "source", "资料来源", "来源")
@@ -1120,18 +1404,25 @@ def map_analysis_result(
                 ranges["architectureList"],
                 normalized_original_text,
                 request_params.get("originalFileName"),
-                _resolve_field(parsed_result, file_item, "summary", "摘要"),
-                resolved_keyword,
+                resolved_summary_from_model,
+                preliminary_keyword,
                 _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
             )
             or _match_architecture_id(parsed_result, ranges["architectureList"])
         )
+    resolved_keyword = _compose_analysis_keywords(
+        raw_keyword_items,
+        summary=resolved_summary,
+        original_text=normalized_original_text,
+        architecture_id=architecture_id,
+        candidates=ranges["architectureList"],
+    )
 
     file_data_item = {
         "fileName": file_name,
         "dataTime": resolved_date or _extract_date(normalized_original_text),
         "keyword": resolved_keyword,
-        "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
+        "summary": resolved_summary,
         "score": normalized_score,
         "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
         "source": resolved_source,
@@ -1139,7 +1430,11 @@ def map_analysis_result(
         "language": resolved_language or _infer_language(normalized_original_text),
         "dataFormat": resolved_format,
         "associatedEquipment": _resolve_field(parsed_result, file_item, "associatedEquipment", "所属装备"),
-        "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
+        "relatedTechnology": _sanitize_related_technologies(
+            raw_related_technology,
+            raw_evidence=raw_related_technology_evidence,
+            original_text=normalized_original_text,
+        ),
         "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),
         "documentOverview": _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述")
                             or extracted_title,
@@ -1168,6 +1463,70 @@ def map_analysis_result(
         "architectureId": architecture_id,
         "fileDataItem": file_data_item,
     }
+
+
+def _log_analysis_content_warnings(
+        parsed_result: Dict[str, Any],
+        mapped_result: Dict[str, Any],
+        *,
+        file_name: str,
+) -> None:
+    """记录普通内容字段违约，但不改变文件任务的成功状态。"""
+    parsed_file_item = parsed_result.get("fileDataItem")
+    if not isinstance(parsed_file_item, dict):
+        parsed_file_item = parsed_result.get("文件解析详细数据")
+    if not isinstance(parsed_file_item, dict):
+        parsed_file_item = {}
+    mapped_file_item = mapped_result.get("fileDataItem")
+    if not isinstance(mapped_file_item, dict):
+        mapped_file_item = {}
+
+    model_summary = _resolve_field(
+        parsed_result,
+        parsed_file_item,
+        "summary",
+        "摘要",
+    )
+    summary = _as_text(mapped_file_item.get("summary"))
+    if not model_summary:
+        logger.warning(
+            "文件分析摘要未生成合格内容，已保留标题回退并继续成功: "
+            "file_name=%s fallback_chars=%d",
+            file_name,
+            len(summary),
+        )
+    if len(summary) > ANALYSIS_SUMMARY_MAX_CHARS:
+        logger.warning(
+            "文件分析摘要超过通用长度上限，任务继续成功: "
+            "file_name=%s actual_chars=%d maximum=%d",
+            file_name,
+            len(summary),
+            ANALYSIS_SUMMARY_MAX_CHARS,
+        )
+    for prefix, (minimum, maximum) in ANALYSIS_SUMMARY_TYPE_CHAR_RANGES.items():
+        if not summary.startswith(prefix):
+            continue
+        if len(summary) < minimum or len(summary) > maximum:
+            logger.warning(
+                "文件分析摘要未满足材料类型长度范围，任务继续成功: "
+                "file_name=%s material_prefix=%s actual_chars=%d minimum=%d maximum=%d",
+                file_name,
+                prefix,
+                len(summary),
+                minimum,
+                maximum,
+            )
+        break
+
+    keyword_count = len(_split_delimited_items(mapped_file_item.get("keyword")))
+    if keyword_count < MIN_KEYWORD_COUNT:
+        logger.warning(
+            "文件分析关键词数量不足，任务继续成功: "
+            "file_name=%s actual=%d minimum=%d",
+            file_name,
+            keyword_count,
+            MIN_KEYWORD_COUNT,
+        )
 
 
 def enrich_with_translations(
@@ -3944,6 +4303,12 @@ def _execute_file_analysis_task(
                         params,
                         resolved_architecture_id=resolved_direct_architecture_id,
                         resolved_architecture_path_name=direct_node.semantic_path,
+                        resolved_architecture_path_node_names=(
+                            _architecture_path_keyword_names(
+                                tree_index,
+                                resolved_direct_architecture_id,
+                            )
+                        ),
                         resolved_architecture_node_type=(
                             "leaf" if direct_node.is_leaf else "parent"
                         ),
@@ -4564,6 +4929,12 @@ def _execute_file_analysis_task(
                         params,
                         resolved_architecture_id=architecture_id,
                         resolved_architecture_path_name=selected_node.semantic_path,
+                        resolved_architecture_path_node_names=(
+                            _architecture_path_keyword_names(
+                                tree_index,
+                                architecture_id,
+                            )
+                        ),
                         resolved_architecture_node_type=(
                             "leaf" if selected_node.is_leaf else "parent"
                         ),
@@ -4871,6 +5242,11 @@ def _execute_file_analysis_task(
                 params,
                 original_text=original_text,
                 resolved_architecture_id=architecture_id,
+            )
+            _log_analysis_content_warnings(
+                parsed_result,
+                mapped_result,
+                file_name=file_name,
             )
             returned_rank = next(
                 index + 1

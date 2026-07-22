@@ -11,8 +11,14 @@ MAX_REPAIR_CONTEXT_CHARS = 20_000
 审计字段上限。该限制只截断修复上下文，不修改首次回答在 RagAttempt 中保存的原始证据。
 """
 
-ANALYSIS_KEYWORD_COUNT = 10
-"""文件分析 keyword 字段必须输出的关键词数量。"""
+ANALYSIS_KEYWORD_MIN_COUNT = 5
+"""文件分析 keyword 字段要求的最少关键词数量。"""
+
+ANALYSIS_KEYWORD_MAX_COUNT = 10
+"""文件分析 keyword 字段允许的最多关键词数量。"""
+
+# 保留旧名称，避免既有调用方把原先的固定数量常量当作输出上限使用时失效。
+ANALYSIS_KEYWORD_COUNT = ANALYSIS_KEYWORD_MAX_COUNT
 
 ANALYSIS_KEYWORD_MAX_CHARS = 30
 """文件分析单个关键词允许的最大字符数。"""
@@ -32,21 +38,102 @@ ANALYSIS_RESPONSE_MAX_CHARS = 6_000
 UNKNOWN_SOURCE_VALUE = "未明确数据来源"
 """文件内容未提供具体来源出处时使用的唯一 source 占位值。"""
 
+ANALYSIS_SUMMARY_TYPE_CHAR_RANGES = {
+    "【材料类型：新闻】": (100, 300),
+    "【材料类型：报告】": (300, 500),
+    "【材料类型：科普资讯文稿】": (100, 300),
+}
+"""已确认材料类型的 summary 字符数范围，固定前缀计入长度。"""
+
+ANALYSIS_SUMMARY_RULES = (
+    "【summary 摘要生成规则】\n"
+    "1. 每份文件只生成一篇独立中文摘要，仅使用当前文档证据，不得混入其他材料内容；"
+    "全程客观中立，不添加主观评价、褒贬、猜测或引申，过滤广告、推广和与正文无关的"
+    "外链描述，但不得影响 originalLink、source 等其他字段的独立抽取。\n"
+    "2. 先判断全文材料类型。仅当文档内容能够明确识别为新闻、报告或科普资讯文稿时，"
+    "应用对应的类型专属规则；标准、规范、手册、目录、表格等不属于上述三类，不得添加"
+    "任何材料类型前缀，只遵守通用的客观、非空和最多 500 字要求。不得根据文件名或局部"
+    "词语强行判型，也不得创建新的材料类型标签。固定材料类型前缀计入下述字符数。\n"
+    "3. 新闻：以“【材料类型：新闻】”开头，全文 100 至 300 个字符，使用单段连贯表述，"
+    "按原文叙事顺序提炼原文明示的时间、地点、主体、事件、起因、进展和各方表态；原文"
+    "缺少的要素不补造，区分事实与评论，不把评论当作核心事实，不放大冲突。\n"
+    "4. 报告：以“【材料类型：报告】”开头，全文必须为 300 至 500 个字符，优先写到 "
+    "350 至 450 个字符，避免贴近下限。先从全文整理至少 6 个互不重复的有效信息点，再按"
+    "原文逻辑写成摘要。调研、政策或评估报告按原文明示内容提炼发布主体、调研范围、核心"
+    "量化数据、现存问题、结论和对策；装备、工程或技术报告按原文明示内容提炼介绍对象、"
+    "关键规格、系统组成、项目进度、现代化改进、运用情况、风险或估算信息。某类要素原文"
+    "没有时不得补造，应改用其他有证据的信息点补足长度。不得篡改、简化或夸大数据，"
+    "专业术语沿用原文，完整保留风险、短板和局限性，并明确标注预测、预估或估算内容。\n"
+    "5. 科普资讯文稿：以“【材料类型：科普资讯文稿】”开头，全文 100 至 300 个字符，"
+    "使用单段客观说明，按原文信息顺序提炼发布或编撰时间、介绍对象，以及原文明示的"
+    "尺寸、性能和配套硬件参数；不得推测原文未提及的性能或背景，不评价介绍对象优劣。\n"
+    "6. 写完 summary 后必须在输出 JSON 前进行一次字符数自检，汉字、字母、数字、标点和"
+    "固定前缀均按字符计数，换行不作为补字手段。若低于当前材料类型下限，必须补入尚未"
+    "覆盖的原文事实、数据、系统、进展或限制；若超过上限，必须合并重复信息并压缩表述；"
+    "完成修正并重新检查后才能输出，不要把字符数或自检过程写入 JSON。\n"
+    f"7. summary 在任何情况下都不得超过 {ANALYSIS_SUMMARY_MAX_CHARS} 个字符；不得照抄"
+    "规则说明、示例占位内容或通过重复句子凑字数。\n"
+)
+
+ANALYSIS_KEYWORD_RULES = (
+    "【keyword 关键词生成规则】\n"
+    f"1. keyword 必须输出 {ANALYSIS_KEYWORD_MIN_COUNT} 至 {ANALYSIS_KEYWORD_MAX_COUNT} 个"
+    "关键词，不得少于 5 个；保持一个字符串，使用英文逗号分隔，不加编号、分组标签或"
+    "解释。分类路径关键词排在前面，内容关键词排在后面，同一组内按与文档的相关性从高"
+    "到低排列。\n"
+    "2. 分类路径关键词只能使用最终分类节点及其已验证 parentId 祖先链中各节点的 name 原值；"
+    "pathName 是不透明的展示文本，不得按“/”或其他符号拆分、改写或反推树层级。两阶段抽取"
+    "优先使用已确认领域分类中的 pathNodeNames，兼容模式根据最终 architectureId 和"
+    "architectureList 的 parentId 链确定。优先选择 3 至 4 个与全文最相关的节点；当前有限树"
+    "不足 3 个可见节点时如实使用全部已有节点，不得自行创造或补造分类词。将实际采用的"
+    "分类路径关键词数量记为 C。\n"
+    "3. 内容关键词数量不得少于 max(2, 5-C)，不得多于 min(7, 10-C)。必须先完成本次输出"
+    "中的 summary，优先从 summary 明确出现的原词或原短语中选择；若与分类路径关键词合计"
+    "仍不足 5 个，允许从正文明确出现的标准编号、装备名称、技术名称或其他核心名词短语中"
+    "补足。不得进行没有正文证据的同义替换、拼接或编造。\n"
+    "4. 优先选择不可替代的名词或名词短语，必要时可选个别核心动词；重点保留装备、系统、"
+    "作战样式、关键要素和场景标识等专有名词。排除虚词、连接词、评价性形容词和“分析”、"
+    "“研究”、“问题”等单独使用时过于宽泛的词。\n"
+    "5. 分类路径关键词与内容关键词可以语义相关，但不得完全重复同一词项；不得循环输出、"
+    "使用连续编号补造或添加与文档相关性不大的词凑数。"
+    f"每个关键词不超过 {ANALYSIS_KEYWORD_MAX_CHARS} 个字符。\n"
+    "6. 输出 JSON 前必须按英文逗号重新拆分并计数 keyword：最终总数少于 5 个时，继续从"
+    "summary 或正文中补入有明确证据的核心词；超过 10 个时删除相关性最低的内容关键词。"
+    "确认最终总数为 5 至 10 个后才能输出，不要把计数过程写入 JSON。\n"
+)
+
+ANALYSIS_RELATED_TECHNOLOGY_RULES = (
+    "【relatedTechnology 所属技术生成规则】\n"
+    "1. relatedTechnology 表示支撑文中核心装备、作战或保障活动的专业技术门类或能力域。"
+    "必须输出中文规范名称。中文正文可使用正文技术原词或不改变含义的规范化名称；外文"
+    "正文允许把原文技术术语准确翻译为中文，不要求中文名称在外文正文中逐字出现。\n"
+    "2. 正文明示介绍、列举或用于说明核心装备性能、系统构成、作战能力或保障能力的技术"
+    "可以入选；仅偶然出现、与文档主题无关或只能依靠常识推断的技术不选。\n"
+    "3. 不得把装备名称或型号、部队番号或建制、地理名称、作战概念、单次战术动作、"
+    "评价性形容词及过于宽泛的概括词当作所属技术。\n"
+    "4. relatedTechnology 非空时，必须同时输出仅供服务端核验的 relatedTechnologyEvidence "
+    "数组，并与技术名称按顺序一一对应。数组每项只能包含 nameZh 和 sourceTerm：nameZh "
+    "必须与 relatedTechnology 中的中文名称完全一致；sourceTerm 必须复制正文中能够直接"
+    "支持该中文名称的最短原文技术词或短语，保持原文语言，不得翻译、概括或填写整句。"
+    "无法给出直接证据词的技术必须删除。没有合格技术时，relatedTechnology 输出空字符串，"
+    "relatedTechnologyEvidence 输出空数组。\n"
+    f"5. 最多输出 {ANALYSIS_ENUM_FIELD_MAX_ITEMS} 个互不重复的技术名称，每项不超过 "
+    f"{ANALYSIS_ENUM_ITEM_MAX_CHARS} 个字符，按相关性从高到低排列，使用英文逗号分隔，"
+    "不加编号或解释；没有合格技术时输出空字符串，不得凑数。\n"
+)
+
 ANALYSIS_COMPACT_OUTPUT_RULES = (
-    "【输出长度、相关性与去重硬约束】\n"
-    f"1. keyword 必须固定输出 {ANALYSIS_KEYWORD_COUNT} 个关键词，每个关键词不超过 "
-    f"{ANALYSIS_KEYWORD_MAX_CHARS} 个字符；关键词之间允许语义相近、同义或内容重叠，"
-    "但每一项都必须与文档主题、主要对象或关键内容有明确且较强的相关性；不得为凑数量"
-    "添加与文档相关性不大的词，也不得完全重复同一词项、循环输出或使用连续编号补造"
-    "关键词。\n"
-    "2. associatedEquipment、relatedTechnology、equipmentModel 使用英文逗号分隔；"
+    ANALYSIS_SUMMARY_RULES
+    + ANALYSIS_KEYWORD_RULES
+    + ANALYSIS_RELATED_TECHNOLOGY_RULES
+    + "【其他输出长度与去重约束】\n"
+    "1. associatedEquipment、equipmentModel 使用英文逗号分隔；"
     f"每个字段最多 {ANALYSIS_ENUM_FIELD_MAX_ITEMS} 个互不重复的条目，每个条目不超过 "
     f"{ANALYSIS_ENUM_ITEM_MAX_CHARS} 个字符；只保留文档有明确证据的主体实体，禁止循环"
     "枚举或按编号规律补造实体。\n"
-    f"3. summary 不超过 {ANALYSIS_SUMMARY_MAX_CHARS} 个字符；documentOverview 继续遵守"
-    "不超过 1000 个字符的限制。除 keyword 允许语义相近、同义或内容重叠外，任何字段"
-    "都不得完全重复同一词项、实体、短语或句子。\n"
-    f"4. 完整 JSON 对象不超过 {ANALYSIS_RESPONSE_MAX_CHARS} 个字符。接近上限时优先压缩"
+    "2. documentOverview 继续遵守不超过 1000 个字符的限制；任何字段都不得完全重复"
+    "同一词项、实体、短语或句子。\n"
+    f"3. 完整 JSON 对象不超过 {ANALYSIS_RESPONSE_MAX_CHARS} 个字符。接近上限时优先压缩"
     "自由文本和枚举字段，但必须保留完整 JSON 结构、闭合全部引号与括号，并在对象结束后"
     "立即停止输出。\n"
 )
@@ -407,6 +494,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
             "dataFormat": "",
             "associatedEquipment": "",
             "relatedTechnology": "",
+            "relatedTechnologyEvidence": [],
             "equipmentModel": "",
             "documentOverview": "",
             "originalText": "",
@@ -455,7 +543,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         "6. fileDataItem.fileName 必须与请求中的 fileName 一致。\n"
         "7. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "8. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
-        "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断；source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
+        "9. fileDataItem 中的 summary, keyword, score, source, fileNo, dataFormat 字段不允许留空，必须根据文档内容推断；relatedTechnologyEvidence 只用于所属技术证据核验，不属于最终回调字段。source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
         "10. documentOverview 字段为文件概述，必须按资料原有目录、章节或标题层级进行概述，全文不超过 1000 字。优先说明全文整体结构，例如全文共多少章、核心内容集中在哪些章节；再按章节顺序概述各章主题、关键对象、重要结论或核心信息。不要机械复述目录，不要编造原文不存在的章节或内容；若资料无清晰目录结构，则按可识别的标题层级或内容模块进行概述。示例1：全文共 8 个章节。第一章主要包括 a、b、c 等内容；第二章主要描述……；第三章围绕 d、e 等内容展开；其余章节分别介绍……。示例2：全文共 8 个章节，核心内容集中在第 3 至第 7 章。第 1、2 章介绍基本概念和背景，第 8 章为结束语。第 3 章包括 a、b 等内容；第 4 章主要描述……；第 5 章主要描述……。\n"
         "11. fileDataItem.dataTime 必须输出文档中明确提到的资料年代，输出格式为 yyyy-MM-dd，找不到时输出空字符串。\n"
         "12. channel 字段表示“资料来源机构”，当 channel 候选为空时，channel 输出空字符串；当 channel 候选不为空时，必须从候选中选择一个 value 输出，不能输出 key，也不能输出对象。\n"
@@ -481,7 +569,7 @@ def build_file_analysis_prompt(request_params: dict) -> str:
         + _format_options("格式候选", ranges["format"])
         + "【抽取优先级】请优先抽取：密级、资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + data_standard_priority
-        + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；优先依据文档开头内容判断，文档没有密级/保密说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value。keyword：文档中提到的关键信息或主题，固定输出 10 个关键词并按占比从高到低排列，单项长度遵守上方硬约束；允许关键词语义相近、同义或内容重叠，但每项必须与文档主题、主要对象或关键内容有明确且较强的相关性，不得添加与文档相关性不大的词凑数；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
+        + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；优先依据文档开头内容判断，文档没有密级/保密说明时：若密级候选包含“公开”则输出“公开”，否则输出密级候选中的第一个 value。summary、keyword、relatedTechnology：严格按上方三个专用规则块生成；score：资料来源权威性评分；source：文档中提到的具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         + "【输出前自检清单】\n"
         + "1. country/channel/maturity/security/format 是否都为候选 value 或空字符串；security 缺少文档开头密级说明时是否已按默认规则输出（候选包含“公开”则输出“公开”，否则输出候选第一个 value）；fileDataItem.dataFormat 是否与顶层 format 完全一致。\n"
         + "2. architectureId 是否为有文档证据支持的候选叶子 id；不得使用候选外 ID 或默认值。\n"
@@ -516,6 +604,7 @@ def build_file_extraction_prompt(
     *,
     resolved_architecture_id: int,
     resolved_architecture_path_name: str = "",
+    resolved_architecture_path_node_names: Sequence[str] | None = None,
     resolved_architecture_node_type: str = "",
     include_data_standard_fields: bool = False,
 ) -> str:
@@ -530,6 +619,11 @@ def build_file_extraction_prompt(
     classification_context = {
         "id": _normalize_confirmed_architecture_id(resolved_architecture_id),
         "pathName": str(resolved_architecture_path_name or ""),
+        "pathNodeNames": [
+            str(name).strip()
+            for name in (resolved_architecture_path_node_names or ())
+            if str(name).strip()
+        ],
         "nodeType": str(resolved_architecture_node_type or ""),
     }
     schema = {
@@ -551,6 +645,7 @@ def build_file_extraction_prompt(
             "dataFormat": "",
             "associatedEquipment": "",
             "relatedTechnology": "",
+            "relatedTechnologyEvidence": [],
             "equipmentModel": "",
             "documentOverview": "",
             "originalText": "",
@@ -603,6 +698,7 @@ def build_file_extraction_prompt(
         "6. documentTranslationOne 和 documentTranslationTwo 固定输出空字符串。\n"
         "7. originalText 当前由服务端回填，输出空字符串即可，不要编造长段原文。\n"
         "8. fileDataItem 中的 summary、keyword、score、source、fileNo、dataFormat 字段不允许留空，必须根据文档内容推断；"
+        "relatedTechnologyEvidence 只用于所属技术证据核验，不属于最终回调字段；"
         "source 必须是具体数据来源出处，找不到明确出处时输出“未明确数据来源”。score 必须按下方评分规则输出 95、85、75、65、55 之一。\n"
         "9. documentOverview 字段为文件概述，必须按资料原有目录、章节或标题层级进行概述，全文不超过 1000 字。"
         "优先说明全文整体结构，再按章节顺序概述主题、关键对象、重要结论或核心信息；不得机械复述目录或编造原文不存在的内容。\n"
@@ -623,9 +719,7 @@ def build_file_extraction_prompt(
         + "【抽取优先级】请优先抽取：密级、资料年代、关键词、摘要、文件编号、资料来源、原文链接、语种、资料格式、所属装备、所属技术、装备型号、文件概述。\n"
         + standard_priority
         + "【抽取字段解释】security：文件密级，只能从密级候选 value 中选取；"
-        "keyword：固定输出 10 个关键词并按占比从高到低排列，单项长度遵守上方硬约束；"
-        "允许关键词语义相近、同义或内容重叠，但每项必须与文档主题、主要对象或关键内容有明确且较强的相关性，"
-        "不得添加与文档相关性不大的词凑数；score：资料来源权威性评分；"
+        "summary、keyword、relatedTechnology：严格按上方三个专用规则块生成；score：资料来源权威性评分；"
         "source：具体数据来源出处，缺少明确出处时输出“未明确数据来源”；fileNo：文件编号；"
         "dataFormat：资料格式，必须与顶层 format 完全一致，并且只能使用格式候选中的 value。\n"
         "【输出前自检清单】\n"

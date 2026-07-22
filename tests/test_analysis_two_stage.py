@@ -143,7 +143,13 @@ class AnalysisTwoStageTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _extraction(file_name: str, *, architecture_id: int = 999999) -> str:
+    def _extraction(
+            file_name: str,
+            *,
+            architecture_id: int = 999999,
+            summary: str = "两阶段抽取摘要：航母、CVN-78、基础数据、舰载机、核动力。",
+            keyword: str = "航母, CVN-78, 基础数据, 舰载机, 核动力",
+    ) -> str:
         return json.dumps(
             {
                 # 抽取阶段即使越权输出分类，mapper 也必须由已确认 ID 覆盖。
@@ -155,8 +161,8 @@ class AnalysisTwoStageTests(unittest.TestCase):
                 "format": "",
                 "fileDataItem": {
                     "fileName": file_name,
-                    "summary": "两阶段抽取摘要",
-                    "keyword": "航母, CVN-78",
+                    "summary": summary,
+                    "keyword": keyword,
                     "score": 55,
                     "source": "未明确数据来源",
                     "dataFormat": "",
@@ -303,6 +309,52 @@ class AnalysisTwoStageTests(unittest.TestCase):
         self.assertEqual(recall["returned_architecture_id"], 11)
         self.assertEqual(recall["returned_rank"], 1)
         self.assertEqual(len(rag_factory.ports[0].sessions[0].trace.attempts), 1)
+
+    def test_unqualified_content_warns_but_task_still_succeeds(self):
+        with workspace_tempdir() as tmp:
+            file_name = "content-warning.txt"
+            request = self._request(
+                file_name,
+                [{"id": 11, "name": "CVN-78-基础数据", "parentId": 10}],
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._extraction(
+                            file_name,
+                            summary="",
+                            keyword="航母, CVN-78",
+                        ),
+                        sources=(self.SOURCE,),
+                    )
+                ]
+            )
+
+            with self.assertLogs(
+                    "app.services.llm_service.analysis_service",
+                    level="WARNING",
+            ) as logs:
+                task_service, task, _recall, _rag, _knowledge = self._run(
+                    tmp=tmp,
+                    request=request,
+                    rag_factory=rag_factory,
+                )
+            interaction = task_service.get_llm_interactions("file", file_name)[0]
+            attempts = task_service.get_llm_interaction_attempts(interaction["id"])
+
+        data = task["result_payload"]["data"]["fileDataItem"]
+        log_text = "\n".join(logs.output)
+        self.assertEqual(task["status"], "2")
+        self.assertEqual(data["summary"], "CVN-78 航空母舰")
+        self.assertLess(len(data["keyword"].split(", ")), 5)
+        self.assertIn("摘要未生成合格内容", log_text)
+        self.assertIn("已保留标题回退并继续成功", log_text)
+        self.assertIn("关键词数量不足", log_text)
+        self.assertIn("minimum=5", log_text)
+        self.assertEqual(
+            [item["prompt_kind"] for item in attempts],
+            ["analysis_extraction"],
+        )
 
     def test_single_candidate_accepts_root_and_finite_boundary_shapes(self):
         """唯一候选沿既有合同直返，不因本次有限树缺少父节点而被拒绝。"""

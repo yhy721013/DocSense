@@ -518,6 +518,186 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["fileDataItem"]["score"], 85)
 
+    def test_map_analysis_result_composes_path_and_summary_keywords(self):
+        summary = (
+            "该报告介绍航空母舰的核动力推进、飞行甲板、舰载机运用和数据链技术。"
+        )
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "summary": summary,
+                    "keyword": (
+                        "海军装备, 航空母舰, CVN-78, 基础数据, "
+                        "核动力推进, 飞行甲板, 舰载机运用, 数据链技术, 摘要外词"
+                    ),
+                }
+            },
+            {
+                "fileName": "sample.txt",
+                "architectureList": [
+                    {
+                        "id": 1,
+                        "name": "装备/体系",
+                    },
+                    {
+                        "id": 2,
+                        "parentId": 1,
+                        "name": "海军装备",
+                    },
+                    {
+                        "id": 3,
+                        "parentId": 2,
+                        "name": "航空母舰",
+                    },
+                    {
+                        "id": 10,
+                        "parentId": 3,
+                        "name": "CVN-78",
+                        "pathName": "甲方不透明展示/不得拆分",
+                    }
+                ],
+            },
+            resolved_architecture_id=10,
+        )
+
+        self.assertEqual(
+            result["fileDataItem"]["keyword"],
+            (
+                "CVN-78, 航空母舰, 海军装备, 装备/体系, "
+                "核动力推进, 飞行甲板, 舰载机运用, 数据链技术"
+            ),
+        )
+        self.assertNotIn("不得拆分", result["fileDataItem"]["keyword"])
+        self.assertNotIn("摘要外词", result["fileDataItem"]["keyword"])
+        self.assertNotIn("基础数据", result["fileDataItem"]["keyword"])
+
+    def test_map_analysis_result_uses_source_backed_keyword_to_reach_minimum(self):
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "summary": "本标准规定质量管理体系和装备质量相关要求。",
+                    "keyword": (
+                        "质量管理体系, 军用标准, GJB 9001C, 装备质量, 产品设计"
+                    ),
+                }
+            },
+            {
+                "fileName": "gjb.pdf",
+                "architectureList": [
+                    {"id": 1, "name": "数据标准"},
+                    {"id": 2, "parentId": 1, "name": "军用软件"},
+                ],
+            },
+            original_text=(
+                "本文件为国家军用标准 GJB 9001C―2017，规定质量管理体系要求。"
+            ),
+            resolved_architecture_id=2,
+        )
+
+        self.assertEqual(
+            result["fileDataItem"]["keyword"],
+            "军用软件, 数据标准, 质量管理体系, 装备质量, 军用标准",
+        )
+
+    def test_map_analysis_result_normalizes_related_technology_string(self):
+        with self.assertLogs(
+                "app.services.llm_service.analysis_service",
+                level="WARNING",
+        ) as logs:
+            result = map_analysis_result(
+                {
+                    "fileDataItem": {
+                        "relatedTechnology": [
+                            "雷达技术",
+                            "数据融合",
+                            "雷达技术",
+                            "卫星通信",
+                            "数据链技术",
+                            "量子通信",
+                        ],
+                    }
+                },
+                {
+                    "fileName": "sample.txt",
+                    "architectureList": [{"id": 10, "name": "测试"}],
+                },
+                original_text=(
+                    "正文明确介绍雷达技术、数据融合、卫星通信和数据链技术。"
+                ),
+            )
+
+        self.assertEqual(
+            result["fileDataItem"]["relatedTechnology"],
+            "雷达技术, 数据融合, 卫星通信, 数据链技术",
+        )
+        self.assertNotIn("量子通信", result["fileDataItem"]["relatedTechnology"])
+        self.assertIn("所属技术缺少可核验原文术语映射", "\n".join(logs.output))
+
+    def test_map_analysis_result_accepts_chinese_technology_with_english_evidence(self):
+        with self.assertLogs(
+                "app.services.llm_service.analysis_service",
+                level="WARNING",
+        ) as logs:
+            result = map_analysis_result(
+                {
+                    "fileDataItem": {
+                        "relatedTechnology": (
+                            "电磁弹射系统, 先进拦阻系统, 分布式孔径系统"
+                        ),
+                        "relatedTechnologyEvidence": [
+                            {
+                                "nameZh": "电磁弹射系统",
+                                "sourceTerm": (
+                                    "Electromagnetic Aircraft Launch Systems (EMALS)"
+                                ),
+                            },
+                            {
+                                "nameZh": "先进拦阻系统",
+                                "sourceTerm": "Advanced Arresting Gear (AAG)",
+                            },
+                            {
+                                "nameZh": "分布式孔径系统",
+                                "sourceTerm": "Distributed Aperture System",
+                            },
+                        ],
+                    }
+                },
+                {
+                    "fileName": "ford.pdf",
+                    "architectureList": [{"id": 10, "name": "测试"}],
+                },
+                original_text=(
+                    "The ship uses Electromagnetic Aircraft Launch Systems (EMALS) "
+                    "and Advanced Arresting Gear (AAG)."
+                ),
+            )
+
+        self.assertEqual(
+            result["fileDataItem"]["relatedTechnology"],
+            "电磁弹射系统, 先进拦阻系统",
+        )
+        self.assertNotIn(
+            "relatedTechnologyEvidence",
+            result["fileDataItem"],
+        )
+        self.assertIn("缺少可核验原文术语映射", "\n".join(logs.output))
+
+    def test_map_analysis_result_retains_related_technology_without_evidence_text(self):
+        with self.assertLogs(
+                "app.services.llm_service.analysis_service",
+                level="WARNING",
+        ) as logs:
+            result = map_analysis_result(
+                {"fileDataItem": {"relatedTechnology": "雷达技术"}},
+                {
+                    "fileName": "sample.bin",
+                    "architectureList": [{"id": 10, "name": "测试"}],
+                },
+            )
+
+        self.assertEqual(result["fileDataItem"]["relatedTechnology"], "雷达技术")
+        self.assertIn("所属技术缺少可核验正文", "\n".join(logs.output))
+
     def test_map_analysis_result_forces_score_55_when_source_is_unknown(self):
         request_params = {
             "fileName": "sample.txt",
@@ -705,10 +885,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("source 为“未明确数据来源”时，score 必须且只能输出 55", prompt)
         self.assertIn("禁止在这种情况下输出 95、85、75 或 65", prompt)
         self.assertIn("候选包含“公开”则输出“公开”", prompt)
-        self.assertIn("固定输出 10 个关键词", prompt)
-        self.assertIn("关键词之间允许语义相近、同义或内容重叠", prompt)
-        self.assertIn("不得为凑数量添加与文档相关性不大的词", prompt)
-        self.assertNotIn("互不重复的关键词", prompt)
+        self.assertIn("keyword 必须输出 5 至 10 个关键词", prompt)
+        self.assertIn("分类路径关键词排在前面，内容关键词排在后面", prompt)
+        self.assertIn("内容关键词数量不得少于 max(2, 5-C)", prompt)
+        self.assertIn("relatedTechnologyEvidence", prompt)
+        self.assertIn("没有合格技术时输出空字符串", prompt)
+        self.assertNotIn("固定输出 10 个关键词", prompt)
         self.assertNotIn("至少 10 个关键词", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
@@ -1116,8 +1298,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "fileDataItem": {
                     "fileName": file_name,
                     "dataFormat": "",
-                    "summary": "阶段 9 测试摘要",
-                    "keyword": "测试",
+                    "summary": "阶段 9 测试摘要包含分类、装备、参数、来源和标准信息。",
+                    "keyword": "分类, 装备, 参数, 来源, 标准",
                     "score": 55,
                     "source": "未明确数据来源",
                 },
