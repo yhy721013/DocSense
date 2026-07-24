@@ -300,7 +300,7 @@ class ReportResourceRecoveryService:
             failed_task_ids=tuple(failed),
         )
         logger.log(
-            logging.ERROR if failed else logging.INFO,
+            logging.ERROR if failed else logging.DEBUG,
             "报告资源有界恢复扫描完成: requested_limit=%d scanned=%d cleaned=%d "
             "pending=%d quarantined=%d not_ready=%d missing=%d failed=%d",
             limit,

@@ -123,7 +123,8 @@ class FreezeExpiredWeaponryCallbackGuards:
 
     def run_once(self, *, limit: int) -> object:
         result = self._callbacks.freeze_expired(limit=limit)
-        logger.info(
+        logger.log(
+            logging.WARNING if result.frozen_count else logging.DEBUG,
             "武器谱 Callback Guard 有界扫描完成: limit=%d scanned=%d frozen=%d",
             limit,
             result.scanned_count,

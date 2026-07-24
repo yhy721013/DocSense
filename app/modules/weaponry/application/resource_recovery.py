@@ -188,7 +188,8 @@ class WeaponryResourceRecoveryService:
             missing_count=count(WeaponryResourceRecoveryOutcome.MISSING),
             failed_count=count(WeaponryResourceRecoveryOutcome.FAILED),
         )
-        logger.info(
+        logger.log(
+            logging.ERROR if sweep.failed_count else logging.DEBUG,
             "武器谱资源有界恢复扫描完成: requested_limit=%d scanned=%d cleaned=%d "
             "pending=%d quarantined=%d not_ready=%d missing=%d failed=%d",
             sweep.requested_limit,

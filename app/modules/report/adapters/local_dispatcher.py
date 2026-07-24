@@ -222,7 +222,7 @@ class LocalReportTaskDispatcher:
                 raise TypeError("资源恢复 sweep 必须返回 ReportResourceSweepResult")
             with self._business_state_lock:
                 self._resource_sweep_count += 1
-            logger.info(
+            logger.debug(
                 "报告 Dispatcher 资源恢复轮询完成: scanned=%d cleaned=%d "
                 "pending=%d quarantined=%d not_ready=%d missing=%d failed=%d",
                 result.scanned_count,
