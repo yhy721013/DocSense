@@ -18,6 +18,7 @@ from app import create_app
 from app.blueprints.llm import llm_weaponry
 from app.adapters.web.flask.weaponry_requests import parse_weaponry_request
 from app.integrations.anythingllm import AnythingLLMHTTPError, AnythingLLMTimeoutError
+from app.integrations.anythingllm.models import AnythingLLMWorkspace
 from app.modules.tasks.adapters import LegacyTaskCommandAdapter
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.modules.tasks.ports import (
@@ -812,6 +813,48 @@ class AnythingLLMWeaponryResourceCleanupAdapterTests(unittest.TestCase):
                     resource.external_ref,
                     user_id=1,
                 )
+                factory.workspaces.list_workspaces.assert_not_called()
+
+    def test_workspace_delete_400_requires_authoritative_absence_readback(self) -> None:
+        task_id = TaskId("weaponry-cleanup-http-400")
+        resource = _owned_workspace(task_id, suffix="http-400")
+        delete_error = AnythingLLMHTTPError("bad request", status_code=400)
+
+        cases = (
+            ("absent", [], None, WeaponryResourceCleanupOutcome.SUCCEEDED),
+            (
+                "still-present",
+                [
+                    AnythingLLMWorkspace(
+                        id=resource.external_ref,
+                        slug=resource.external_ref,
+                        name=resource.external_ref,
+                    )
+                ],
+                None,
+                WeaponryResourceCleanupOutcome.FAILED,
+            ),
+            (
+                "readback-failed",
+                [],
+                AnythingLLMTimeoutError("injected readback timeout"),
+                WeaponryResourceCleanupOutcome.FAILED,
+            ),
+        )
+        for name, workspaces, readback_error, expected in cases:
+            with self.subTest(name=name):
+                factory = _CleanupClientFactory()
+                factory.workspaces.delete_workspace.side_effect = delete_error
+                factory.workspaces.list_workspaces.return_value = workspaces
+                factory.workspaces.list_workspaces.side_effect = readback_error
+                adapter = AnythingLLMWeaponryResourceCleanupAdapter(factory)
+
+                result = adapter.cleanup(
+                    CleanupWeaponryExternalResource(task_id, resource)
+                )
+
+                self.assertEqual(expected, result.outcome)
+                factory.workspaces.list_workspaces.assert_called_once_with(user_id=1)
 
 
 class WeaponryProductionCompositionTests(unittest.TestCase):

@@ -16,7 +16,10 @@ from app.modules.weaponry.ports import (
     WeaponryResourceKind,
 )
 
-from .anythingllm_clients import WeaponryAnythingLLMClientFactoryProtocol
+from .anythingllm_clients import (
+    WeaponryAnythingLLMClientFactoryProtocol,
+    workspace_slug_is_absent,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -40,8 +43,9 @@ class AnythingLLMWeaponryResourceCleanupAdapter:
     """按资源类型执行一次删除，不持有 Store、lease 或跨任务网络 Session。
 
     Workspace 的 DELETE 会连同绑定文档和 embedding 一起收敛，因此子资源只提交本地
-    ``succeeded``。404 证明目标已不存在，也按幂等成功处理；超时、断连等不能证明远端
-    是否已经删除的异常返回 ``outcome_unknown``，由 Application 立即隔离。
+    ``succeeded``。404 证明目标已不存在，也按幂等成功处理；workspace DELETE 返回 400
+    时必须重新读取完整清单，只有确认精确 slug 已不存在才提交成功。超时、断连等不能证明
+    远端是否已经删除的异常返回 ``outcome_unknown``，由 Application 立即隔离。
     """
 
     def __init__(
@@ -125,6 +129,21 @@ class AnythingLLMWeaponryResourceCleanupAdapter:
                 return WeaponryExternalResourceCleanupResult(
                     WeaponryResourceCleanupOutcome.SUCCEEDED
                 )
+            if (
+                exc.status_code == 400
+                and resource.kind in _WORKSPACE_RESOURCE_KINDS
+                and self._confirm_workspace_absent(command)
+            ):
+                logger.info(
+                    "武器谱 workspace 删除返回 400，但查回确认资源已不存在，"
+                    "按幂等删除成功处理: task_id=%s resource_id=%s kind=%s",
+                    command.task_id.value,
+                    resource.resource_id,
+                    resource.kind.value,
+                )
+                return WeaponryExternalResourceCleanupResult(
+                    WeaponryResourceCleanupOutcome.SUCCEEDED
+                )
             return self._failed_result(exc, mutation_started=mutation_started)
         except AnythingLLMTransportError as exc:
             return self._failed_result(exc, mutation_started=mutation_started)
@@ -169,6 +188,55 @@ class AnythingLLMWeaponryResourceCleanupAdapter:
         return WeaponryExternalResourceCleanupResult(
             WeaponryResourceCleanupOutcome.SUCCEEDED
         )
+
+    def _confirm_workspace_absent(
+        self,
+        command: CleanupWeaponryExternalResource,
+    ) -> bool:
+        """在独立只读租约中核对 workspace 是否确实不存在。
+
+        DELETE 抛出异常后，原 ``with`` 租约已经退出并关闭 Transport，因此不能复用旧
+        Client。查回使用全新的短租约；任何网络、协议或关闭异常都不能证明目标不存在，
+        一律返回 ``False``，让原始 HTTP 400 保持 ``failed`` 并进入既有冷却重试链。
+        """
+
+        resource = command.resource
+        try:
+            with self._client_factory.create() as clients:
+                workspaces = clients.workspaces.list_workspaces(
+                    user_id=self._user_id,
+                )
+                absent = workspace_slug_is_absent(
+                    workspaces,
+                    resource.external_ref,
+                )
+        except AnythingLLMTransportError as exc:
+            logger.warning(
+                "武器谱 workspace 删除 400 后查回失败，保留清理重试: "
+                "task_id=%s resource_id=%s external_error_code=%s",
+                command.task_id.value,
+                resource.resource_id,
+                exc.code,
+            )
+            return False
+        except Exception as exc:
+            logger.exception(
+                "武器谱 workspace 删除 400 后查回发生未分类异常，保留清理重试: "
+                "task_id=%s resource_id=%s error_type=%s",
+                command.task_id.value,
+                resource.resource_id,
+                type(exc).__name__,
+            )
+            return False
+
+        if not absent:
+            logger.warning(
+                "武器谱 workspace 删除返回 400，且查回确认资源仍存在: "
+                "task_id=%s resource_id=%s",
+                command.task_id.value,
+                resource.resource_id,
+            )
+        return absent
 
     @staticmethod
     def _conversation_ref(value: str) -> tuple[str, str]:

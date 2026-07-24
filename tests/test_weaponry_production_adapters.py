@@ -195,6 +195,8 @@ class _FakeWorkspaceClient:
 
     def list_workspaces(self, *, user_id=None):
         self.runtime.list_workspaces_calls += 1
+        if self.runtime.list_workspaces_error is not None:
+            raise self.runtime.list_workspaces_error
         return [
             AnythingLLMWorkspace(id=name, slug=name, name=name)
             for name in self.runtime.workspace_locations
@@ -316,6 +318,7 @@ class _FakeAnythingRuntime:
         self.delete_error: Exception | None = None
         self.create_workspace_error: Exception | None = None
         self.create_workspace_commits_before_error = False
+        self.list_workspaces_error: Exception | None = None
 
     @contextmanager
     def create(self):
@@ -476,6 +479,79 @@ class WeaponryAnythingLLMRetrievalAdapterTests(unittest.TestCase):
 
             self.assertEqual(1, len(runtime.created_workspaces))
             adapter.close_scope(scope)
+
+    def test_close_scope_accepts_400_only_after_confirming_workspace_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            task_id = TaskId("retrieval-close-400-absent")
+            runtime = _FakeAnythingRuntime()
+            adapter, _ = self._adapter(
+                str(Path(directory) / "tasks.sqlite3"),
+                runtime,
+                task_id,
+            )
+            scope = adapter.open_scope(
+                OpenTargetEvidenceScope(
+                    task_id,
+                    _scope(_document(1, "a")),
+                    _policy(),
+                )
+            )
+            # 模拟上一次清理已经删除远端资源，而 AnythingLLM 对重复 DELETE 返回 400。
+            runtime.workspace_locations.pop(scope.scope_ref)
+            runtime.delete_error = AnythingLLMHTTPError(
+                "workspace not found",
+                status_code=400,
+            )
+
+            result = adapter.close_scope(scope)
+
+            self.assertTrue(result.success)
+            self.assertEqual(1, runtime.list_workspaces_calls)
+            self.assertEqual(0, runtime.active_leases)
+
+    def test_close_scope_400_keeps_scope_when_workspace_exists_or_readback_fails(
+        self,
+    ) -> None:
+        cases = (
+            ("still-present", None),
+            ("readback-failed", RuntimeError("injected list failure")),
+        )
+        for index, (name, readback_error) in enumerate(cases, start=1):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                task_id = TaskId(f"retrieval-close-400-failed-{index}")
+                runtime = _FakeAnythingRuntime()
+                adapter, _ = self._adapter(
+                    str(Path(directory) / "tasks.sqlite3"),
+                    runtime,
+                    task_id,
+                )
+                scope = adapter.open_scope(
+                    OpenTargetEvidenceScope(
+                        task_id,
+                        _scope(_document(1, "a")),
+                        _policy(),
+                    )
+                )
+                runtime.delete_error = AnythingLLMHTTPError(
+                    "bad request",
+                    status_code=400,
+                )
+                runtime.list_workspaces_error = readback_error
+
+                with self.assertRaises(WeaponryExternalOperationError) as captured:
+                    adapter.close_scope(scope)
+
+                self.assertEqual(
+                    WeaponryExternalOutcome.DEFINITELY_FAILED,
+                    captured.exception.outcome,
+                )
+                self.assertEqual(1, runtime.list_workspaces_calls)
+                self.assertEqual(1, runtime.active_leases)
+
+                # 清除故障注入，证明失败后保留的 scope 仍可由既有流程重试关闭。
+                runtime.delete_error = None
+                runtime.list_workspaces_error = None
+                self.assertTrue(adapter.close_scope(scope).success)
 
     def test_registration_failure_compensates_or_reports_unknown(self) -> None:
         task_id = TaskId("retrieval-registration-failure")

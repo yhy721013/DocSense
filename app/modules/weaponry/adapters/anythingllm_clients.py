@@ -10,18 +10,42 @@ from __future__ import annotations
 import logging
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import Callable, Iterator, Protocol, runtime_checkable
+from typing import Callable, Iterable, Iterator, Protocol, runtime_checkable
 
 from app.integrations.anythingllm import (
     AnythingLLMDocumentClient,
     AnythingLLMThreadClient,
     AnythingLLMTransport,
+    AnythingLLMWorkspace,
     AnythingLLMWorkspaceClient,
 )
 from app.services.core.config import AnythingLLMConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+def workspace_slug_is_absent(
+    workspaces: Iterable[AnythingLLMWorkspace],
+    target_slug: str,
+) -> bool:
+    """根据完整 workspace 清单判断目标 slug 是否不存在。
+
+    AnythingLLM 的 workspace DELETE 在“目标已经不存在”时可能返回 HTTP 400，不能仅凭
+    状态码把所有 400 都视为幂等成功。该函数集中维护严格的精确匹配规则：忽略首尾空白和
+    大小写差异，但不接受前缀、后缀或模糊匹配；响应对象不符合集成层模型时直接抛错，要求
+    调用方保守地把查回视为失败，避免误删或错误提交本地清理事实。
+    """
+
+    if not isinstance(target_slug, str) or not target_slug.strip():
+        raise ValueError("target_slug 必须是非空 str")
+    target_key = target_slug.strip().casefold()
+    for workspace in workspaces:
+        if not isinstance(workspace, AnythingLLMWorkspace):
+            raise TypeError("workspace 清单包含非法对象")
+        if workspace.slug.strip().casefold() == target_key:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -98,4 +122,5 @@ __all__ = [
     "AnythingLLMWeaponryClientFactory",
     "WeaponryAnythingLLMClientFactoryProtocol",
     "WeaponryAnythingLLMClients",
+    "workspace_slug_is_absent",
 ]

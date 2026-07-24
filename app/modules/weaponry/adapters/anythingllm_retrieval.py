@@ -51,6 +51,7 @@ from app.modules.weaponry.ports import (
 from .anythingllm_clients import (
     WeaponryAnythingLLMClientFactoryProtocol,
     WeaponryAnythingLLMClients,
+    workspace_slug_is_absent,
 )
 from .resource_registration import WeaponryCreatedResourceRegistrarProtocol
 
@@ -504,7 +505,46 @@ class AnythingLLMTargetEvidenceRetrievalAdapter:
                     user_id=self._user_id,
                 )
             except AnythingLLMHTTPError as exc:
-                if exc.status_code != 404:
+                if exc.status_code == 400:
+                    try:
+                        workspaces = state.clients.workspaces.list_workspaces(
+                            user_id=self._user_id,
+                        )
+                        absent = workspace_slug_is_absent(
+                            workspaces,
+                            scope.scope_ref,
+                        )
+                    except Exception as verification_error:
+                        # DELETE 已收到明确 400，但只读查回失败，不能据此推断资源已经
+                        # 消失。保留 scope 与租约，使上层按“明确失败”进入后续清理链。
+                        logger.warning(
+                            "武器谱检索 workspace 删除 400 后查回失败: "
+                            "task_id=%s error_type=%s",
+                            scope.task_id.value,
+                            type(verification_error).__name__,
+                        )
+                        raise self._external_error(
+                            exc,
+                            error_code="retrieval_scope_close_failed",
+                            mutation_started=True,
+                        ) from verification_error
+                    if not absent:
+                        logger.warning(
+                            "武器谱检索 workspace 删除返回 400，且查回确认资源仍存在: "
+                            "task_id=%s",
+                            scope.task_id.value,
+                        )
+                        raise self._external_error(
+                            exc,
+                            error_code="retrieval_scope_close_failed",
+                            mutation_started=True,
+                        ) from exc
+                    logger.info(
+                        "武器谱检索 workspace 删除返回 400，但查回确认资源已不存在，"
+                        "按幂等关闭处理: task_id=%s",
+                        scope.task_id.value,
+                    )
+                elif exc.status_code != 404:
                     raise self._external_error(
                         exc,
                         error_code="retrieval_scope_close_failed",
