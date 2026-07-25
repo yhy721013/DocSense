@@ -10,7 +10,7 @@
 | 第二父基线 | `refactor/concurrency@d2228ef9d6dd4d860bf74ad726340904ab40ecc9` |
 | 共同基点 | `0023c4726b49791728a30b053e9da772f005e178` |
 | 对应计划 | `../重构记录/260725-main与refactor并发重构分支集成实施计划.md` |
-| 执行状态 | 已完成；已创建保留 main/refactor 双父关系的本地 merge commit |
+| 执行状态 | M0～M9 的工程交接已完成；PR #79 已创建并等待独立审核和维护者合入，尚未合入 `main` |
 | 接口依据 | `docs/接口文档/` |
 | 生产结论 | 未部署、未启动真实后台服务；当前仍为单实例兼容实现 |
 
@@ -86,10 +86,86 @@
 
 ---
 
-## 5. 回滚与后续
+## 5. M9：PR 审核交接与主线漂移复核
 
-如需回滚，应使用
+### 5.1 PR 状态
+
+截至 2026-07-25 的 M9 复核，已创建 [PR #79](https://github.com/yhy721013/DocSense/pull/79)：
+
+| 项目 | 结果 |
+| --- | --- |
+| 源分支 | `refactor/integration` |
+| 待审核的集成 merge commit | `efa7a49baf4cde375f7dbd72573733a7c60128d9` |
+| 目标分支 | `main` |
+| PR 状态 | 已打开，等待独立审核；尚无审核结论 |
+| 合入状态 | 未合入；本记录不把“已创建 PR”表述为“已部署”或“已在 main 生效” |
+
+M9 不创建新的代码提交、不改写共享历史，也不执行自动合入。审核人和维护者仍须按本节清单完成
+人工审查并决定合入。
+
+### 5.2 主线漂移复核
+
+M9 使用如下只读命令复核远端引用：
+
+```powershell
+git fetch origin main refactor/integration
+git rev-parse origin/main
+git rev-parse origin/refactor/integration
+git show -s --format='commit=%H%nparents=%P%nsubject=%s' origin/refactor/integration
+git merge-base --is-ancestor origin/main origin/refactor/integration
+```
+
+复核结果如下：
+
+| 检查项 | 结果 |
+| --- | --- |
+| `origin/main` | `4472065a44cfd6e049f8fbe46cfc728ab26d3e58` |
+| 复核时的 `origin/refactor/integration` | `efa7a49baf4cde375f7dbd72573733a7c60128d9` |
+| merge commit 第一父 | `4472065a44cfd6e049f8fbe46cfc728ab26d3e58`（与当前 `origin/main` 一致） |
+| merge commit 第二父 | `d2228ef9d6dd4d860bf74ad726340904ab40ecc9`（`refactor/concurrency`） |
+| 祖先关系 | `origin/main` 是集成提交的祖先；本次复核未发现 main 基线漂移 |
+
+因此，M8 的代码、迁移和离线测试证据仍可作为当前 PR 的审查输入；M9 未修改代码，未重复运行
+全仓测试。若 PR 审核期间 `main` 出现新提交，维护者必须重新执行本节复核；若漂移涉及
+`llm.py`、`container.py`、`task_service.py`、Analysis 主链、数据库迁移或接口文档，必须重新
+生成虚拟合并和受影响测试证据，不能仅凭本次结果直接合入。
+
+### 5.3 公开契约复核
+
+相对 `main`，集成分支修改的权威接口文档仅为以下四份：
+
+1. `docs/接口文档/README.md`；
+2. `docs/接口文档/文件处理和报告生成.md`；
+3. `docs/接口文档/知识谱系解析.md`；
+4. `docs/接口文档/分类节点变更.md`。
+
+这些修改记录的是负责人已确认并已在集成分支实现的既有语义：Analysis 的 `202` 空响应体、
+check-task 的 `200` 空响应体与严格对象数组校验、批量缺失项的恢复处理，以及 weaponry
+Progress 的数值 `architectureId`。M9 复核结论是：**没有增加、删除或重命名 HTTP 请求参数、
+响应字段、Callback 字段、Header、SSE 事件或 WebSocket 消息字段**；内部 execution、租约、
+fencing 和回调投递结果不通过成功响应公开。
+
+后续 1F 及任何审核修正如可能改变上述参数、字段、状态码或消息结构，必须先重新取得接口确认，
+不得借由本次已批准的语义变更扩大范围。
+
+### 5.4 审核与合入清单
+
+审核人应至少确认：
+
+1. `efa7a49` 的双父关系、8 个文件/22 个冲突块处理依据，以及 main 的 Analysis 功能和
+   `refactor/concurrency` 的模块边界均被保留；
+2. 四份接口文档与路由/Presenter 的空响应体、严格校验和 Progress 数值 ID 一致，且不存在字段集合扩张；
+3. SQLite 增量初始化、Callback Guard、资源恢复和单实例 Dispatcher 的离线测试证据与 M8 记录一致；
+4. PR 不把 SQLite、进程锁或进程内 Progress Hub 宣称为多实例可靠队列、跨进程高可用或生产容量验收；
+5. 若审核期间 main 漂移，按 5.2 的规则重新评估，而不 rebase 或改写已共享的集成历史。
+
+## 6. 回滚、合入后动作与下一阶段
+
+如需回滚已合入的 merge commit，应使用
 `git revert -m 1 <merge-commit>`，保留两个原始分支历史。不得 rebase 或重写共享分支。
 
-后续仅 M9：在 `origin/main` 未漂移前由负责人决定是否创建 PR、推送或发布。真实供应商协议、
-生产 Callback、容量压测、可靠队列和多实例数据库一致性仍是独立的后续验收项。
+PR 经审核并实际合入 `main` 后，下一项开发工作为阶段 1F“Analysis 二次高内聚收口”。开工前
+必须先冻结合入后的 `main` 提交、重新核对 `docs/接口文档/`、编写 1F 文件级设计和当前实现
+负向架构基线；不得在 `refactor/integration` 尚未实际合入时把它当作新的主线开发基线。
+
+真实供应商协议、生产 Callback、容量压测、可靠队列和多实例数据库一致性仍是独立的后续验收项。

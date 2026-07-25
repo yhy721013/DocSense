@@ -62,7 +62,7 @@
 | `260725-阶段1E-6R分类节点变更全面审查修复执行记录.md` | 1E 全面审查后的有界同步补偿、目标 ID 有限兼容白名单、结果/message 不变量、Operation 历史外键迁移、文档删除事务门禁、单实例 fail-fast、故障矩阵消费和 1E-7 恢复实现下沉前置计划；经确认同步接口文档文案，不增删字段或状态码。 |
 | `260725-阶段1E-7分类节点变更恢复实现下沉执行记录.md` | 1E-7 将恢复实际算法下沉到 Observer、Checkpoint Reconciler、Compensator、Finalizer 独立文件，保留 Facade/导入兼容，新增协作器直测与 callback-wrapper、最小 Port、Facade 规模/复杂度 AST 门禁；未修改公开接口文档或 Operation/Step/Event Schema。 |
 | `260725-阶段1E整体审查修复执行记录.md` | 1E 整体审查后的提交确认丢失终态协调、Application 入口远端预算、事务内 lease 计时、活动状态单源与数据库等价门禁，以及数据库权威时间/可取消截止的未来计划修正；211 项 1E 回归和 1,358 项安全全仓回归通过，未修改接口文档，未处理明确排除的 Git 原子纳入事项。 |
-| `260725-main与refactor并发重构分支集成执行记录.md` | 最新 main 与 `refactor/concurrency` 在 `refactor/integration` 的实际合并记录：8 文件、22 冲突块基线，保留双父关系的 merge commit，已确认的 Analysis/check-task 空响应体及 weaponry Progress 数值 ID，127 项定向和 1,612 项安全全仓离线回归，以及单实例与生产验证边界。 |
+| `260725-main与refactor并发重构分支集成执行记录.md` | 最新 main 与 `refactor/concurrency` 在 `refactor/integration` 的实际合并记录：8 文件、22 冲突块基线、保留双父关系的 merge commit、已确认的 Analysis/check-task 空响应体及 weaponry Progress 数值 ID、127 项定向和 1,612 项安全全仓离线回归；M9 已记录 PR #79、main 漂移复核和审核交接，PR 尚未合入，下一开发阶段为合入后的 1F。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 
