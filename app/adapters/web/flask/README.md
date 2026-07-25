@@ -19,4 +19,9 @@ error 并保持连接。HTTP 报告生成与旧 check-task 路由也复用同一
 check-task 当前只完成框架无关 typed request、可靠命令服务和 Presenter；其生产解析器
 随阶段 6 可靠链路一次性切换，本目录不提供同步回调恢复 Adapter。
 
+阶段 1E-6 新增 `reassign_requests.py`。它逐项复刻 `/llm/reassign` 已冻结的入站兼容边界：
+原始新旧 ID 比较、旧 ID 的 `int(...)` 转换时点、非严格的新 ID 以及既有 400 文案。解析器不访问
+Repository、AnythingLLM、Flask 全局对象或线程；非空非对象 JSON 和旧 ID 转换异常仍由路由保留原有
+500 边界，不能被适配器擅自收紧为新 400。
+
 这里不得访问 SQLite、调用 Callback、操作进度 Hub 或创建后台线程；解析后的输入交给框架无关应用服务，输出通过 Presenter 映射回已确认契约。

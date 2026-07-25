@@ -74,6 +74,8 @@ _DOMAIN_STDLIB_ROOTS = frozenset(
     {
         "__future__",
         "dataclasses",
+        # 领域层只允许对已传入时间做格式与时区规范化，不在此读取系统时钟。
+        "datetime",
         "decimal",
         "enum",
         "hashlib",

@@ -35,7 +35,7 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> web adapter/application/presenter`：报告和武器谱路由已经是 Parser → Submit → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，`/llm/reassign` 的同步编排及部分文件对话协议桥接仍位于蓝图中。
+1. `blueprints -> web adapter/application/presenter`：报告、武器谱和分类节点变更路由均已遵循 Parser → Application → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，部分文件对话协议桥接仍位于蓝图中。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
@@ -244,7 +244,25 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 7. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
    - 安全方面要求调用前必须传输且一致匹配底库中存证的 `oldArchitectureId`。
-   - 当前实现会尝试从旧 workspace 删除文档、加入新 workspace，再更新本地分类；但尚未校验 AnythingLLM 删除/添加操作返回的布尔结果，`doc_path` 为空时也会跳过远端迁移。因此接口返回成功不等于远端 embedding 必然迁移成功，验收时还需核对 workspace 与本地映射。
+   - 2026-07-24 的 1E-6 已将公开执行链切换为 `Parser → DocumentReassignmentService → Presenter`。
+     路由不再直接构造 AnythingLLM Client、执行 SQL 或编排本地/远端写；Container 只装配一次
+     `ReassignApplicationServices`，每次需要远端操作时仍由请求级 Knowledge Factory 创建隔离的
+     Transport 与 deadline。
+   - 同步 Saga 先以短事务保存 Operation/Step 写意图和 lease/fencing 事实，再在 UoW 外执行旧绑定
+     解绑、目标 workspace 准备/复用、新绑定、Pin 与本地条件 CAS。`false`、缺少必要目标引用、CAS
+     冲突和结果未知都不会伪装成功；远端明确失败或 CAS 冲突后会在同一有限请求预算内优先执行
+     “解绑目标、恢复来源”的同步补偿，可证明的路径按五类固定文案返回，无法证明一致性时保留
+     `recovery_required` 现场并返回既有 HTTP 500 结构。
+   - `doc_path` 为空仍保持历史 local-only 兼容分支：不创建远端客户端，只执行同一条件本地更新。
+     请求原始 ID 比较、旧 ID `int(...)` 转换时点保持不变；新 ID 只保留已冻结的 JSON `false`、
+     有符号 64 位整数和十进制整数字符串兼容，其他值在创建 Operation 前沿用未包装 HTTP 500 边界拒绝。
+    - 恢复仍是显式、精确 Operation 的内部能力。2026-07-25 的 1E-7 已将 Observer、Checkpoint
+      Reconciler、Compensator 和 Finalizer 的实际算法拆入独立文件：Facade 只做命令校验、过期 lease
+      接管与流程选择，四个协作器分别执行观察、检查点收敛、有序补偿及终态收口/隔离；不启动后台
+      恢复线程。诊断脚本默认只读，真正恢复需要显式 `--apply` 与完整审计/lease 参数。
+   - 本次未增删请求参数、响应字段、状态码、Header 或同步语义，也不向前端暴露 operation、lease、
+     fencing、步骤或恢复事实。真实 AnythingLLM 故障演练、生产预算校准、可靠任务队列和多实例容量
+     验收仍未完成，因此不得据此标记 production ready。
 
 ## 6. 快速启动
 
@@ -293,6 +311,13 @@ python -m pip install -r requirements.txt
 - `DOCSENSE_REPORT_*`：报告单实例 Dispatcher 的扫描批量、故障冷却、资源恢复、停机和
   cleanup 超时/租约配置；这些都是后端内部容量参数，不属于公开接口。默认值及约束见
   `.env.example`，其中清理租约必须严格大于清理 HTTP 超时。
+- `DOCSENSE_REASSIGN_HTTP_TIMEOUT_SECONDS`、`DOCSENSE_REASSIGN_TOTAL_TIMEOUT_SECONDS`、
+  `DOCSENSE_REASSIGN_COMPENSATION_RESERVE_SECONDS`：分类节点变更同步 Saga 的内部预算配置。Container
+  在启动装配时读取并拒绝空值、非有限值、非正数或不能预留补偿窗口的组合；它们不属于公开接口参数。
+  当前值仅完成离线边界验证，真实环境秒数仍须通过隔离供应商故障演练与容量校准后冻结。
+- `DOCSENSE_REASSIGN_RUNTIME_MODE`：分类节点变更运行模式，当前唯一允许值为 `single_instance`。
+  SQLite lease 使用进程本地时钟，配置为其他值会在装配阶段 fail-fast；迁移到数据库权威时间并完成
+  跨实例 fencing 验证前，不得把该模块作为多实例运行链启用。
 
 在 macOS 上复制 `.env.example` 后，必须将其中启用的 Windows 路径 `DOCSENSE_RUNTIME_DIR=C:/DocSenseRuntime` 改为 macOS 绝对路径，或注释/删除该行以使用仓库根目录 `.runtime`；其他平台相关路径也应按实际环境调整。
 

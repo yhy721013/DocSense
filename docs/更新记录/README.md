@@ -47,6 +47,21 @@
 | `260720-阶段1D全面审查修复与真实门禁补强执行记录.md` | 1D 关闭后全面审查修复：真实 Source URL/入库文件身份、FIFO 共享限流、Schema v2 有时效证明、生产 fail-fast、Callback/资源人工处置审计、真实只读 8/8 验证及 1165 项安全回归。 |
 | `260722-武器谱创建意图恢复竞态修复执行记录.md` | 修复 `/llm/weaponry` 活跃 Worker 与创建意图维护器竞态：运行实例归属、恢复 claim/租约/fencing、旧 SQLite 表原位迁移、回归证据与多实例剩余边界。 |
 | `260723-武器谱AnythingLLM删除400幂等清理修复执行记录.md` | 修复 AnythingLLM 对缺失 workspace 返回 400 导致资源长期 `cleanup_pending`：仅在完整清单确认精确 slug 不存在时幂等成功，并覆盖任务内关闭、后台恢复、查回失败和既有重试边界。 |
+| `260724-阶段1E-0分类节点变更契约与故障资产执行记录.md` | 阶段 1E-0 的 `/llm/reassign` 当前/已批准目标双基线、400/500/200 黄金样例、显式 `false`/缺 slug/CAS 0 行/补偿失败矩阵、离线预算及安全全仓回归；未切换生产路由或修改接口文档。 |
+| `260724-阶段1E-1分类节点变更领域模型与纯规则执行记录.md` | 阶段 1E-1 的 `reassign` 四层骨架、原始 ID 深冻结、Operation/Step 状态机、步骤幂等键、补偿决策、错误分类、架构门禁和 1,208 项安全离线回归；未定义 Port/Schema/Adapter 或切换公开路由。 |
+| `260724-阶段1E-1R分类节点变更领域一致性修正执行记录.md` | 1E-1 全面审查后的终态证据、目标绑定一致性、独立补偿 Step、UTC lease、诊断字段上限、稳定公开 message、远端异常脱敏和契约资产补强；经确认修改接口文档文案，不增删字段或状态码。 |
+| `260724-阶段1E-2分类节点变更Port严格Fake与SQLite事实执行记录.md` | 阶段 1E-2 的 Repository/UoW/Knowledge Port、严格 Fake、SQLite Operation/Step/Event、活动文档部分唯一索引、lease/fencing、条件 CAS、追加审计、50 并发和故障注入验收；未接入 AnythingLLM、Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-2R分类节点变更持久化一致性修正执行记录.md` | 1E-2 全面审查后的恢复 fencing、终态/成功事实门禁、Step 探测一致性、只读稳定游标扫描、恢复审计、Fake/SQLite 线程事务边界、workspace 查回和既有 Schema/索引升级修正；165 项联合回归通过，未修改接口文档。 |
+| `260724-阶段1E-3分类节点变更AnythingLLM适配与目标准备执行记录.md` | 阶段 1E-3 的请求级 AnythingLLM Client Factory、有限 HTTP/总预算/补偿预留、单调 deadline、目标 workspace 精确查回/创建、完整 doc_path 探测、解绑/挂载/Pin 四分类和离线验证；未接入 Application、Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-3R分类节点变更适配一致性修正执行记录.md` | 1E-3 全面审查后的步骤驱动预算、请求级 Knowledge Factory、生产步骤门禁、workspace 三态归属、模糊 4xx 查回、双异常日志脱敏及 SQLite/Fake 加法兼容修正；未修改接口文档。 |
+| `260724-阶段1E-4分类节点变更Application成功路径执行记录.md` | 阶段 1E-4 的 Application 前向成功路径、目标 workspace 持久化准备 claim/独立 fencing、无副作用失败专用收口、条件 CAS 和 SQLite/严格 Fake 离线组合验证；未接入 Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-4R分类节点变更Application一致性修正执行记录.md` | 1E-4 全面审查后的 claim 恢复保护、远端准备事实、local-only 分流、既有 slug 查回、严格 Step DTO、reserve 异常收口、lease 预算/续租和 Pin 审计修正；156 项联合及 1,314 项安全全仓回归通过，未修改接口文档。 |
+| `260724-阶段1E-5分类节点变更补偿恢复与诊断执行记录.md` | 阶段 1E-5 的显式恢复、过期 lease/fencing 接管、恢复观测、写后检查点收敛、固定补偿顺序、SQLite 原子终态/claim 释放和默认只读诊断脚本；未接入 Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-5R分类节点变更恢复契约与运维语义修正执行记录.md` | 1E-5 全面审查后的恢复 workspace 身份绑定、接管/续租/claim 强类型校验、数据库读取失败分类和未收口恢复非零 CLI 退出码修正；未接入 Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-6分类节点变更组合根与公开路由切换执行记录.md` | 1E-6 的生产组合根、恢复四协作器、`/llm/reassign` Parser → Application → Presenter 切换、字节级公开契约回归和永久 AST 门禁；仅同步接口文档中的非契约实现状态，不增删参数、字段、状态码或 Header，真实供应商演练与生产校准仍未完成。 |
+| `260725-阶段1E-6R分类节点变更全面审查修复执行记录.md` | 1E 全面审查后的有界同步补偿、目标 ID 有限兼容白名单、结果/message 不变量、Operation 历史外键迁移、文档删除事务门禁、单实例 fail-fast、故障矩阵消费和 1E-7 恢复实现下沉前置计划；经确认同步接口文档文案，不增删字段或状态码。 |
+| `260725-阶段1E-7分类节点变更恢复实现下沉执行记录.md` | 1E-7 将恢复实际算法下沉到 Observer、Checkpoint Reconciler、Compensator、Finalizer 独立文件，保留 Facade/导入兼容，新增协作器直测与 callback-wrapper、最小 Port、Facade 规模/复杂度 AST 门禁；未修改公开接口文档或 Operation/Step/Event Schema。 |
+| `260725-阶段1E整体审查修复执行记录.md` | 1E 整体审查后的提交确认丢失终态协调、Application 入口远端预算、事务内 lease 计时、活动状态单源与数据库等价门禁，以及数据库权威时间/可取消截止的未来计划修正；211 项 1E 回归和 1,358 项安全全仓回归通过，未修改接口文档，未处理明确排除的 Git 原子纳入事项。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 

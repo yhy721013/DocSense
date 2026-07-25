@@ -44,6 +44,17 @@ from app.modules.report.ports import (
     ReportTaskDispatcherLifecyclePort,
     ReportTaskDispatcherPort,
 )
+from app.modules.reassign.adapters import (
+    AnythingLLMReassignmentClientFactory,
+    AnythingLLMReassignmentKnowledgeAdapterFactory,
+    SQLiteReassignmentRepository,
+    load_reassignment_infrastructure_config,
+)
+from app.modules.reassign.application import ReassignmentExecutionSettings
+from app.modules.reassign.composition import (
+    ReassignApplicationServices,
+    compose_reassign_application_services,
+)
 from app.modules.tasks.adapters import (
     FileProcessSingletonGuard as GenericFileProcessSingletonGuard,
     InMemoryProgressAdapter,
@@ -180,6 +191,9 @@ class ApplicationServices:
     # 生产工厂在 1D-6 必须装配完整新链。``None`` 仅保留给不覆盖 weaponry 路由的旧式
     # 单元测试夹具；公开路由遇到 None 会明确失败，绝不会回退到遗留线程。
     weaponry_services: WeaponryApplicationServices | None = None
+    # 1E-6 的同步 Saga 生产链。None 仅用于不覆盖 reassign 路由的旧测试夹具；公开路由
+    # 必须 fail fast，绝不能回退到已删除的蓝图数据库/AnythingLLM 编排。
+    reassign_services: ReassignApplicationServices | None = None
 
     def __post_init__(self) -> None:
         """在应用启动时拒绝缺失关键依赖，避免请求到达后才出现空引用错误。"""
@@ -299,6 +313,13 @@ class ApplicationServices:
                 raise ValueError(
                     "Weaponry 必须与 Report/Analysis 共享同一重型任务 limiter"
                 )
+        if self.reassign_services is not None and not isinstance(
+            self.reassign_services,
+            ReassignApplicationServices,
+        ):
+            raise TypeError(
+                "reassign_services 必须是 ReassignApplicationServices 或 None"
+            )
         self._validate_chat_infrastructure_capabilities()
         self._validate_report_infrastructure_capabilities()
         self._validate_weaponry_infrastructure_capabilities()
@@ -520,12 +541,16 @@ def create_application_services() -> ApplicationServices:
     chat_infrastructure_config = load_chat_infrastructure_config()
     report_infrastructure_config = load_report_infrastructure_config()
     weaponry_infrastructure_config = load_weaponry_infrastructure_config()
+    reassign_infrastructure_config = load_reassignment_infrastructure_config()
     logger.info(
         "已读取单实例基础设施配置: chat_runtime_mode=%s report_runtime_mode=%s "
-        "weaponry_runtime_mode=%s",
+        "weaponry_runtime_mode=%s reassign_runtime_mode=%s "
+        "reassign_total_timeout_seconds=%.3f",
         chat_infrastructure_config.runtime_mode,
         report_infrastructure_config.runtime_mode,
         weaponry_infrastructure_config.runtime_mode,
+        reassign_infrastructure_config.runtime_mode,
+        reassign_infrastructure_config.total_timeout_seconds,
     )
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
@@ -564,6 +589,36 @@ def create_application_services() -> ApplicationServices:
         task_reader=LegacyTaskReadAdapter(task_service),
     )
     upload_task_limiter = UploadTaskLimiter(max_concurrency=1)
+
+    # 分类节点变更仍是同步接口，但其跨系统写入已经由 Application 的持久化 Saga 管理。
+    # Container 只构造无状态 Factory 和单一应用外观：没有共享 HTTP Session，没有后台线程，也
+    # 不直接调用任何 Repository 的终态收口接口。每个请求由 Knowledge Factory 创建独立 deadline
+    # 与 Transport，实例 owner 仅用于 SQLite lease/fencing，绝不进入公开响应。
+    reassign_instance_id = f"reassign-{uuid4().hex}"
+    reassign_settings = ReassignmentExecutionSettings(
+        lease_owner=reassign_instance_id,
+        lease_duration_seconds=(
+            reassign_infrastructure_config.total_timeout_seconds
+            + reassign_infrastructure_config.compensation_reserve_seconds
+        ),
+        remote_total_timeout_seconds=(
+            reassign_infrastructure_config.total_timeout_seconds
+        ),
+        # 同步总预算后仍保留补偿窗口，作为显式非零 lease 安全余量；真实环境校准前不把
+        # 默认数值描述为容量结论。
+        lease_safety_margin_seconds=(
+            reassign_infrastructure_config.compensation_reserve_seconds
+        ),
+    )
+    reassign_services = compose_reassign_application_services(
+        repository=SQLiteReassignmentRepository(str(KNOWLEDGE_BASE_DB_PATH)),
+        knowledge_factory=AnythingLLMReassignmentKnowledgeAdapterFactory(
+            AnythingLLMReassignmentClientFactory(anythingllm_config),
+            reassign_infrastructure_config,
+        ),
+        settings=reassign_settings,
+        infrastructure_config=reassign_infrastructure_config,
+    )
 
     # Report 组合根只共享无网络 Session 的工厂、线程安全 Port 和 SQLite Service。
     # 生成与清理使用两个独立 Client Factory：前者保留 ANYTHINGLLM_TIMEOUT 的既有
@@ -840,16 +895,18 @@ def create_application_services() -> ApplicationServices:
         report_infrastructure_config=report_infrastructure_config,
         chat_infrastructure_config=chat_infrastructure_config,
         weaponry_services=weaponry_services,
+        reassign_services=reassign_services,
     )
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "
         "upload_max_concurrency=%d chat_runtime_mode=%s report_runtime_mode=%s "
-        "weaponry_runtime_bound=%s",
+        "weaponry_runtime_bound=%s reassign_runtime_bound=%s",
         services.knowledge_index_factory is not None,
         services.upload_task_limiter.max_concurrency,
         services.chat_infrastructure_config.runtime_mode,
         services.report_infrastructure_config.runtime_mode,
         services.weaponry_services is not None,
+        services.reassign_services is not None,
     )
     return services
 

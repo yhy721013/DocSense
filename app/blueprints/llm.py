@@ -19,9 +19,11 @@ from app.adapters.web.flask import (
     ReportRequestValidationError,
     ProgressConnectionRegistry,
     ProgressRequestValidationError,
+    ReassignRequestValidationError,
     WeaponryRequestValidationError,
     parse_report_request,
     parse_progress_subscription,
+    parse_reassign_request,
     parse_weaponry_request,
 )
 from app.container import ApplicationServices, get_application_services
@@ -40,6 +42,10 @@ from app.presenters.task_progress import ProgressWebSocketPresenter
 from app.presenters.report_submission import (
     ReportSubmissionHttpPresentation,
     ReportSubmissionResponsePresenter,
+)
+from app.presenters.reassign_result import (
+    ReassignHttpPresentation,
+    ReassignResponsePresenter,
 )
 from app.presenters.weaponry_submission import (
     WeaponrySubmissionHttpPresentation,
@@ -69,7 +75,6 @@ from app.services.llm_service.analysis_service import (
     run_file_analysis_batch_task,
     run_file_analysis_task,
 )
-from app.services.utils.anythingllm_client import AnythingLLMClient
 
 
 llm_bp = Blueprint("llm", __name__)
@@ -121,6 +126,21 @@ def _weaponry_http_response(
         response.headers.pop("Content-Type", None)
     else:
         response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _reassign_http_response(
+    presentation: ReassignHttpPresentation,
+) -> Response:
+    """把框架无关分类节点变更展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, ReassignHttpPresentation):
+        raise TypeError("presentation 必须是 ReassignHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    response.headers["Content-Type"] = presentation.content_type
     return response
 
 
@@ -565,154 +585,46 @@ def llm_check_task():
 
 @llm_bp.post("/llm/reassign")
 def llm_reassign():
+    """执行冻结同步契约下的 Parser → Application → Presenter 薄路由。"""
+
     services = _services()
-    kb_service = services.kb_service
-    anythingllm_config = services.anythingllm_config
-    payload = request.get_json(silent=True) or {}
-    logger.info("收到文档分类变更请求: payload_keys=%s", list(payload.keys()))
-
-    if payload.get("businessType") != "reassign":
-        logger.warning(
-            "文档分类变更请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为reassign"}), 400
-
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        logger.warning(
-            "文档分类变更请求被拒绝: params无效 params_type=%s",
-            type(params).__name__,
-        )
-        return jsonify({"error": "params不能为空"}), 400
-
-    file_name = params.get("fileName")
-    if not isinstance(file_name, str) or not file_name.strip():
-        logger.warning("文档分类变更请求被拒绝: fileName为空")
-        return jsonify({"error": "fileName不能为空"}), 400
-    file_name = file_name.strip()
-
-    old_architecture_id = params.get("oldArchitectureId")
-    if old_architecture_id is None:
-        logger.warning(
-            "文档分类变更请求被拒绝: oldArchitectureId为空 fileName=%s",
-            file_name,
-        )
-        return jsonify({"error": "oldArchitectureId不能为空"}), 400
-
-    new_architecture_id = params.get("newArchitectureId")
-    if new_architecture_id is None:
-        logger.warning(
-            "文档分类变更请求被拒绝: newArchitectureId为空 fileName=%s oldArchitectureId=%s",
-            file_name,
-            old_architecture_id,
-        )
-        return jsonify({"error": "newArchitectureId不能为空"}), 400
-
-    if old_architecture_id == new_architecture_id:
-        logger.warning(
-            "文档分类变更请求被拒绝: 新旧分类相同 fileName=%s architectureId=%s",
-            file_name,
-            old_architecture_id,
-        )
-        return jsonify({"error": "oldArchitectureId与newArchitectureId不能相同"}), 400
-
-    doc_record = kb_service.get_document_record(
-        file_name,
-        architecture_id=int(old_architecture_id),
+    presenter = ReassignResponsePresenter()
+    raw_payload = request.get_json(silent=True)
+    logger.info(
+        "收到文档分类变更请求: payload_type=%s",
+        type(raw_payload).__name__,
     )
-    if not doc_record:
-        logger.warning(
-            "文档分类变更失败: 文档记录不存在 fileName=%s oldArchitectureId=%s newArchitectureId=%s",
-            file_name,
-            old_architecture_id,
-            new_architecture_id,
-        )
-        return jsonify({
-            "businessType": "reassign",
-            "msg": "变更失败",
-            "data": {
-                "fileName": file_name,
-                "oldArchitectureId": old_architecture_id,
-                "newArchitectureId": new_architecture_id,
-                "success": False,
-                "message": "文档记录不存在"
-            }
-        }), 500
-
-    actual_old_id = doc_record["architecture_id"]
-    if str(actual_old_id) != str(old_architecture_id):
-        logger.warning(
-            "变更分类请求与现有记录不一致: 记录中 architecture_id=%s, 请求 oldArchitectureId=%s",
-            actual_old_id, old_architecture_id
-        )
-        return jsonify({
-            "businessType": "reassign",
-            "msg": "变更失败",
-            "data": {
-                "fileName": file_name,
-                "oldArchitectureId": old_architecture_id,
-                "newArchitectureId": new_architecture_id,
-                "success": False,
-                "message": "分类不一致，变更失败"
-            }
-        }), 500
-
-    client = AnythingLLMClient(anythingllm_config)
-    doc_path = doc_record.get("doc_path")
-
     try:
-        if doc_path:
-            old_workspace_slug = kb_service.get_workspace_slug(int(actual_old_id))
-            if old_workspace_slug:
-                client.update_embeddings_batch(old_workspace_slug, deletes=[doc_path], user_id=1)
-
-            new_workspace_slug = kb_service.get_workspace_slug(new_architecture_id)
-            if not new_workspace_slug:
-                workspace_name = f"architectureId-{new_architecture_id}"
-                ws_info = client.create_rag_workspace(workspace_name, user_id=1)
-                if ws_info and ws_info.get("slug"):
-                    new_workspace_slug = ws_info["slug"]
-                    kb_service.add_workspace(new_architecture_id, new_workspace_slug)
-
-            if new_workspace_slug:
-                metadata = {"file_name": file_name, "architecture_id": new_architecture_id}
-                client.update_embeddings(doc_path, new_workspace_slug, user_id=1, metadata=metadata)
-    except Exception as e:
-        logger.error(
-            "调整文档知识库关联失败: file_name=%s error_type=%s",
-            file_name,
-            type(e).__name__,
+        parsed_request = parse_reassign_request(raw_payload)
+    except ReassignRequestValidationError as exc:
+        logger.warning(
+            "文档分类变更请求被拒绝: validation_error=%s payload_type=%s",
+            str(exc),
+            type(raw_payload).__name__,
         )
-        return jsonify({
-            "businessType": "reassign",
-            "msg": "变更失败",
-            "data": {
-                "fileName": file_name,
-                "oldArchitectureId": old_architecture_id,
-                "newArchitectureId": new_architecture_id,
-                "success": False,
-                "message": f"处理知识库节点映射报错: {str(e)}"
-            }
-        }), 500
+        return _reassign_http_response(presenter.present_bad_request(str(exc)))
 
-    kb_service.update_document_architecture(
-        file_name,
-        new_architecture_id,
-        current_architecture_id=int(old_architecture_id),
+    reassign_services = services.reassign_services
+    if reassign_services is None:
+        # 参数校验属于公开契约，必须优先返回既有 400；只有合法请求才要求运行链已完成装配。
+        # 绝不以旧的蓝图直连编排作为兜底，避免静默绕过持久化意图、fencing 与补偿状态机。
+        raise RuntimeError("应用容器未装配分类节点变更运行链")
+
+    result = reassign_services.document_reassignment.execute(
+        parsed_request.command
     )
-
-    return jsonify({
-        "businessType": "reassign",
-        "msg": "变更成功",
-        "data": {
-            "fileName": file_name,
-            "oldArchitectureId": old_architecture_id,
-            "newArchitectureId": new_architecture_id,
-            "success": True,
-            "message": "变更成功"
-        }
-    }), 200
+    logger.info(
+        "文档分类变更同步 Saga 已结束: result_category=%s",
+        result.category.value,
+    )
+    return _reassign_http_response(
+        presenter.present_result(
+            file_name=parsed_request.file_name,
+            old_architecture_id=parsed_request.old_architecture_id,
+            new_architecture_id=parsed_request.new_architecture_id,
+            result=result,
+        )
+    )
 
 
 @sock.route("/llm/progress")

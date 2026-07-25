@@ -12,6 +12,13 @@ from .rag import (
     FakeDocumentRagSession,
     FakeRagOutcome,
 )
+from .reassign import (
+    FakeReassignmentKnowledgePort,
+    FakeReassignmentKnowledgePortFactory,
+    FakeReassignmentRepository,
+    FakeReassignmentUnitOfWork,
+    PostCommitFailureReassignmentRepository,
+)
 from .report import (
     FakeProgressPublisherPort,
     FakeReportArtifactPort,
@@ -59,6 +66,11 @@ __all__ = [
     "FakeKnowledgeIndexFactory",
     "FakeKnowledgeIndexPort",
     "FakeRagOutcome",
+    "FakeReassignmentKnowledgePort",
+    "FakeReassignmentKnowledgePortFactory",
+    "FakeReassignmentRepository",
+    "FakeReassignmentUnitOfWork",
+    "PostCommitFailureReassignmentRepository",
     "FakeProgressPublisherPort",
     "FakeReportArtifactPort",
     "FakeReportAuditPort",

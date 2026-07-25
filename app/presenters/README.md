@@ -11,6 +11,7 @@
 | `task_status.py` | 将 `RequestCallbackRecoveryResult` 映射为 HTTP 状态、零字节成功体或既有 JSON 错误体；不创建 Flask/FastAPI Response。 |
 | `task_progress.py` | 将类型化当前项/快照映射为既有 Progress WebSocket 数据消息或 `error` 消息，并负责严格 JSON 序列化；不持有连接。 |
 | `report_submission.py` | 将报告提交结果映射为严格 HTTP 202 零字节体、既有 400/409 单字段 JSON；隐藏 TaskId 和内部通知结果，不创建 Flask/FastAPI Response。 |
+| `reassign_result.py` | 将分类节点变更的最小 `ReassignmentResult` 映射为冻结的 200/400/500 JSON 字节体；隐藏 Operation、lease、fencing、步骤和恢复事实，不创建 Flask Response。 |
 
 ## 工作流程
 
@@ -30,6 +31,10 @@ sequence、订阅令牌和连接 ID 均不会进入公开消息。
 Report Submission Presenter 已在阶段 1C-6 接入当前 Flask 报告路由：成功严格输出 202
 零字节体且移除 Content-Type，活动任务、callback sending/outcome unknown 均输出既有
 409 `{"error":"任务正在处理中"}`。没有新增、删除或泄漏任何接口参数。
+
+Reassign Presenter 已在阶段 1E-6 接入 `/llm/reassign`：它显式复刻原 Flask `jsonify` 的键排序、
+ASCII 转义、紧凑分隔符和末尾换行，以逐字节保持已确认的公开响应。它只接受 Parser 已验证的请求快照
+和 Application 的稳定公开消息，绝不根据内部错误码自由拼接文案。
 
 ## 维护规则
 

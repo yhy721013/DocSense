@@ -17,7 +17,7 @@
 | `260716-阶段1C至11滚动实施计划.md` | L2/L2.5 滚动计划：细化 1C～11 子波次、依赖、门禁、回滚、无业务积压数量上限、同步 Repository、测试 Compose、callback Guard 和保留周期延期。 |
 | `260716-阶段1C报告生成文件级实施设计.md` | L3 文件级设计：报告原子 409、追加式 execution、按 task ID 恢复、持久化积压/有界唤醒、多文档 RAG/File/Artifact/Callback Port、latest-wins 和完整验收矩阵；1C-0～1C-7 已完成并关闭阶段。 |
 | `260717-阶段1D武器谱文件级实施设计.md` | L3 文件级设计：1D-0/0R～1D-7 的开发分支代码与离线验收已关闭；公开路由、永久 AST/配置门禁、I01～I07 证据和遗留引用清单均已完成。localhost 实例已完成只读 score 与来源身份 8/8 复核；有时效 production attestation 仍因四类生产指纹未冻结而待生成，未通过前不得标记为 production ready。 |
-| `260724-阶段1E分类节点变更同步Saga文件级实施设计.md` | L3 文件级设计：保持 `/llm/reassign` 同步契约，通过持久化 Operation/Step/Event、Knowledge Port、SQLite Unit of Work、条件 CAS、写后探测、反向补偿和恢复审计完成 1E；当前仅完成计划，尚未实施。 |
+| `260724-阶段1E分类节点变更同步Saga文件级实施设计.md` | L3 文件级设计：保持 `/llm/reassign` 同步契约，通过持久化 Operation/Step/Event/恢复观测、Knowledge Port、SQLite Unit of Work、条件 CAS、写后探测、反向补偿和恢复审计完成 1E 功能闭环；1E-0～1E-7 已完成，真实供应商演练与生产容量校准仍是后续启用门禁。 |
 | `260718-阶段1H共享文档处理模块文件级实施设计.md` | L3 文件级设计：与 1D 平级的共享文档处理阶段；把 MHTML/MinerU/OCR/Office、Artifact/Profile/Lineage 和任务级资源从 Translator/utils 抽离，阶段 3 再切换 MinIO。当前仅完成计划，尚未实施。 |
 | `../更新记录/260716-阶段0与1A审查修正记录.md` | 阶段 0/1A 全面审查后的实现修正、验证结果、生产边界及 TASK-09 latest-wins 决策和后置门禁。 |
 | `../更新记录/260716-阶段1B-1可靠恢复命令边界执行记录.md` | 阶段 1B-1 的批量原子 Command Port、应用服务、Presenter、Fake、测试结果和生产未切换边界。 |
@@ -66,9 +66,14 @@
    localhost 已完成只读 score 与来源身份复核；完整 AnythingLLM production attestation 仍因四类
    生产指纹未冻结而是生产启用硬门禁，但不阻塞后续阶段继续开发。原始文件处理与
    Translator 解耦已移入平级 `260718-阶段1H共享文档处理模块文件级实施设计.md`，不再作为
-   1D 的高精度门禁；阶段 1E 按
-   `260724-阶段1E分类节点变更同步Saga文件级实施设计.md` 推进同步 Saga、条件 CAS 和补偿恢复；
-   真实供应商能力和容量仍须在可用集成环境验收。
+   1D 的高精度门禁；阶段 1E 的 1E-0 已完成当前/目标双基线与故障资产，1E-1 已完成四层
+   骨架、领域 DTO、状态机与补偿纯规则，1E-2 已完成 Port、严格 Fake 与 SQLite 本地事实，
+   1E-3 已完成请求级 AnythingLLM Adapter、有限预算和目标 workspace 准备，1E-4/1E-4R 已完成
+   Application 前向成功路径、目标 workspace 持久化 claim、恢复现场保留、步骤续租与条件 CAS，1E-5
+   已完成显式恢复、补偿、过期 lease 接管、恢复观测和只读诊断脚本；1E-6 已完成组合根、
+   公开薄路由、契约黄金回归和永久 AST 门禁，1E-7 已完成四个恢复协作器的实际实现下沉、直接单测
+   与 callback-wrapper/规模复杂度门禁。真实供应商能力、预算校准和容量仍须在可用集成环境验收，未通过前
+   不得标记 production ready。
 
 ## 已实施记录
 
@@ -130,6 +135,57 @@
 - 阶段 1D-5 的通用持久扫描 Dispatcher/进程锁、Report 薄包装、Weaponry 严格配置、固定策略、
   单执行 Worker、隔离维护任务、离线组合根、203+40 项定向与 1116 项安全全仓回归见
   `../更新记录/260719-阶段1D-5通用Dispatcher配置与离线组合根执行记录.md`。
+- 阶段 1E-0 的 `/llm/reassign` 当前/目标双基线、400/500/200 黄金样例、显式 `false`、缺 slug、
+  CAS 0 行和补偿失败目标矩阵、离线预算边界与接口文档/代码观测区分见
+  `../更新记录/260724-阶段1E-0分类节点变更契约与故障资产执行记录.md`；该波次未切换公开路由。
+- 阶段 1E-1 的 `reassign` 四层骨架、原始 ID 深冻结、Operation/Step 状态机、幂等键、补偿
+  决策、错误分类、AST 门禁与完整离线回归见
+  `../更新记录/260724-阶段1E-1分类节点变更领域模型与纯规则执行记录.md`；该波次仍未定义
+  Port、SQLite Schema 或公开路由接线。
+- 阶段 1E-1R 的终态证据、目标绑定一致性、独立补偿 Step、UTC lease、诊断上限、稳定公开
+  message、远端异常脱敏和契约补强见
+  `../更新记录/260724-阶段1E-1R分类节点变更领域一致性修正执行记录.md`；经确认仅修改公开
+  文案，不增删接口字段或状态码。
+- 阶段 1E-2 的 Repository/UoW/Knowledge Port、严格 Fake、SQLite Operation/Step/Event、活动文档
+  部分唯一保护、lease/fencing、条件 CAS、追加审计与离线并发/故障注入验收见
+  `../更新记录/260724-阶段1E-2分类节点变更Port严格Fake与SQLite事实执行记录.md`；该波次未接入
+  AnythingLLM、Container 或公开路由，也未修改接口文档。
+- 阶段 1E-2R 的恢复 fencing、终态/成功事实门禁、Step 探测一致性、只读稳定游标恢复扫描、
+  审计补强、Fake 线程事务隔离、workspace 无副作用查回和既有 Schema/索引升级修正见
+  `../更新记录/260724-阶段1E-2R分类节点变更持久化一致性修正执行记录.md`；该审查修正仍未接入
+  AnythingLLM、Application、Container 或公开路由，也未修改接口文档。
+- 阶段 1E-3 的请求级 AnythingLLM Client Factory、有限 HTTP/总预算/补偿预留、单调 deadline、
+  目标 workspace 精确查回/创建、完整 doc_path 成员探测、解绑/挂载/Pin 四分类及离线 Fake 见
+  `../更新记录/260724-阶段1E-3分类节点变更AnythingLLM适配与目标准备执行记录.md`；该波次尚未
+  实现 Application Saga、步骤/映射持久化接线、本地 CAS、补偿恢复、Container 或公开路由，也未
+  修改接口文档。
+- 阶段 1E-3R 的步骤驱动预算、请求级 Knowledge Factory、生产动作门禁、workspace 三态归属、
+  模糊 4xx 查回和日志脱敏修正见
+  `../更新记录/260724-阶段1E-3R分类节点变更适配一致性修正执行记录.md`；其中“目标 workspace
+  持久化准备权”作为 1E-4 前置约束。
+- 阶段 1E-4 的 `DocumentReassignmentService` 前向成功路径、目标 workspace 持久化
+  preparation claim/独立 fencing、无副作用失败专用收口、条件 CAS 和 SQLite/严格 Fake 组合验证见
+  `../更新记录/260724-阶段1E-4分类节点变更Application成功路径执行记录.md`；该波次尚未实现
+  补偿恢复、Container 或公开路由切换，也未修改接口文档。
+- 阶段 1E-5 的 `RecoverReassignmentOperation`、过期 lease/fencing 接管、恢复观测、写后检查点
+  收敛、固定补偿顺序、SQLite 原子终态/claim 释放和默认只读诊断脚本见
+  `../更新记录/260724-阶段1E-5分类节点变更补偿恢复与诊断执行记录.md`；该波次仍未接入
+  Container 或公开路由，也未修改接口文档。
+- 阶段 1E-5R 的恢复 workspace 身份绑定、接管/续租/claim 强类型校验、数据库读取失败分类和
+  机器可判定恢复退出码见
+  `../更新记录/260724-阶段1E-5R分类节点变更恢复契约与运维语义修正执行记录.md`。
+- 阶段 1E-6 的 `ReassignApplicationServices` 组合根、恢复四类职责接缝、`/llm/reassign` 薄路由、
+  Parser/Presenter、接口契约字节级回归和永久 AST 门禁见
+  `../更新记录/260724-阶段1E-6分类节点变更组合根与公开路由切换执行记录.md`；本波次仅同步接口
+   文档中的非契约实现状态，不增删公开参数、字段、状态码或 Header。全面审查修正及 1E-7 前置门禁
+   见 `../更新记录/260725-阶段1E-6R分类节点变更全面审查修复执行记录.md`。
+- 阶段 1E-7 的 Observer、Checkpoint Reconciler、Compensator、Finalizer 实际算法下沉、兼容导出、
+  协作器直接单测和永久结构门禁见
+  `../更新记录/260725-阶段1E-7分类节点变更恢复实现下沉执行记录.md`；未修改公开接口文档。
+- 阶段 1E 整体审查后的提交确认丢失终态协调、Application 入口远端预算、事务内 lease 计时、活动
+  状态单源与数据库等价门禁，以及数据库权威时间和可取消数据库截止的未来计划修正见
+  `../更新记录/260725-阶段1E整体审查修复执行记录.md`；未修改公开接口文档，也未处理负责人明确
+  排除的 Git 原子纳入事项。
 
 ## 与其他文档目录的边界
 

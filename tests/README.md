@@ -254,6 +254,141 @@ production attestation v1 和人工处置缺口。localhost 只读探测已确�
 证明仍等待四类能力指纹冻结。新增后 `test_weaponry*.py` 251 项、`test_stage1d*.py` 40 项通过；
 全仓动态发现 1181 项，排除同一 13 项后 1168 项分成两个等量批次全部通过。
 
+## 阶段 1E-0 分类节点变更契约与故障资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `contracts/stage1e0_reassign_contracts.json` | 1E-0 历史遗留基线与 1E-6 已接线同步 Saga 的目标基线；400/500/200 黄金 JSON、原始 ID 比较、旧 ID 未包装转换失败、新 ID 冻结兼容白名单、空 `doc_path`、缺失旧 workspace 映射、`false`/缺 slug/CAS 0 行/补偿失败矩阵，以及仅供离线注入的有限预算。 |
+| `test_stage1e0_reassign_contract_assets.py` | 显式注入离线容器，验证切换后的 Parser → Application → Presenter 路由字节级契约、内部字段隐藏和实际组合根 local-only 兼容路径；不启动 `run.py`、不连接真实 AnythingLLM。 |
+
+1E-0 自身只建立后续重构的可执行验收边界，当时未创建 `app/modules/reassign/`、未切换 Flask 路由，也不修改
+`docs/接口文档/分类节点变更.md`。1E-6 已将同一资产升级为切换后路由的黑盒回归；两个 `null` ID 的精确 400 文案仍被记录为代码观测，
+但接口文档未逐字列出它们；因此资产明确标注其非权威状态，不能反向把代码细节升级为接口文档契约。
+目标中的远端 `false`、缺 slug、CAS 0 行和补偿失败均要求既有 500 结构，但具体新增错误文案未被
+本波次擅自冻结。
+
+## 阶段 1E-1 分类节点变更领域模型与纯规则
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_reassign_domain.py` | 原始 ArchitectureId 深冻结、旧 ID 查询值保留、空 `doc_path` 兼容、Operation/Step/Result 不变量、全部普通合法/非法状态转换、受控恢复出边、64 组补偿事实决策、步骤幂等键与稳定错误类别。 |
+| `test_architecture_boundaries.py` | `reassign` 四层目录必须同时具备包标识和职责 README，并静态验证 Domain/Application/Ports 的正向依赖白名单。 |
+
+1E-1 只创建无 I/O 的领域层和分层边界：不定义 Repository/Knowledge Port、严格 Fake、SQLite
+Operation/Step/Event 表或 AnythingLLM Adapter，不启动 `run.py`，也不切换 `/llm/reassign` 路由。
+领域代码不把 `1`、`"1"` 或 `false` 重新解释成同一 ID；未来 Web Parser 仍须保持接口文档锁定的
+原始值比较、旧 ID `int(...)` 时点，以及新 ID 已冻结的 `false`、整数、整数字符串兼容行为。
+
+## 阶段 1E-1R 分类节点变更领域一致性修正
+
+| 文件 | 新增门禁 |
+| --- | --- |
+| `test_reassign_domain.py` | 释放保护的终态证据、目标绑定与本地 CAS 一致性、本地-only路径、独立补偿 Step、已知失败受控重试、UTC lease、原始/查询 ID 一致性和诊断字段长度上限。 |
+| `test_stage1e0_reassign_contract_assets.py` | 五类稳定失败 message、远端异常脱敏、正常远端迁移精确 200、JSON Content-Type、扩充后的 8 类目标故障和公开字段禁止清单。 |
+
+1E-1R 经确认修改了 `docs/接口文档/分类节点变更.md` 中的稳定 `data.message` 对照表，但没有
+增删接口参数、JSON 字段、状态码或同步语义。当前遗留路由的远端异常分支不再透传 `str(e)`；
+在 1E-1R 完成时，其余同步 Saga、真实外部写、补偿恢复和路由切换仍等待 1E-3～1E-6。
+
+## 阶段 1E-2 分类节点变更 Port、严格 Fake 与 SQLite 事实
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_reassign_ports.py` | 端口 DTO 不变量、运行时 Protocol、Port 依赖束，以及 SQLite Adapter 不导入网络/AnythingLLM Client 的静态门禁。 |
+| `test_reassign_fake_repository.py` | Repository Fake 的重复 operation ID 拒绝、旧 ID 原始字符串到整数 source workspace 查询，以及 `"12"`/`false` 新 ID 的 SQLite 存储兼容。 |
+| `test_reassign_strict_fakes.py` | 未声明调用、事务内外部调用、错误顺序、重复副作用，以及 workspace 创建结果未知后的盲重放 fail-fast。 |
+| `test_reassign_sqlite_adapter.py` | 三表初始化、append-only 审计、50 同文档唯一 owner、50 不同文档保留、跨分类同名隔离、workspace 创建归属、lease/fencing、CAS 成功/冲突/回滚和原始新 ID 兼容。 |
+
+1E-2 只新增尚未接线的内部 Port、Fake 与 SQLite Adapter。每个 UoW 使用独立短事务，Adapter 不创建
+HTTP Client、不调用 Knowledge Port；测试全部使用临时数据库和离线替身，不启动 `run.py`、不连接
+AnythingLLM 或其他后台服务。当前 `/llm/reassign` 仍是遗留同步路由，接口参数、JSON 字段、HTTP
+状态码、同步语义和 `docs/接口文档/` 均未在本波次修改。
+
+## 阶段 1E-2R 分类节点变更持久化一致性修正
+
+1E-2R 在不接线生产路由的前提下补齐以下回归门禁：
+
+- 恢复隔离必须由更大 fencing 的过期接管者解除；同一 lease/fencing 不能重试已知失败步骤；
+- 终态 Operation 禁止续租或启动新步骤，通用状态转换禁止直接进入任一释放保护的终态；
+- 本地成功提交必须验证目标准备、源解绑和目标挂载等必要事实；本地-only 文档不得伪造远端步骤；
+- Step 状态与探测结论严格匹配，重试清除旧探测结果；SQLite 与 Fake 对重复 ID、原始目标值、
+  事务上下文和失败类型保持一致；
+- 恢复扫描使用只读 UoW、显式上限和稳定游标；审计保存 fencing、尝试次数、探测结论、
+  脱敏操作者和原因码；
+- 早期 1E-2 Schema 使用加列回填升级，活动文档部分唯一索引的谓词会被核验并按需重建；
+  存在 `reassign_*` 事实时禁止 `DatabaseService` 单独重建 `documents` 并改变冻结行 ID；
+- Knowledge Port 增加无副作用目标 workspace 查回，为 1E-3 的“调用完成但检查点未提交”窗口提供
+  探测能力。
+
+所有新增测试仍只使用临时 SQLite 与严格 Fake，不启动 `run.py`、不连接真实 AnythingLLM。
+本波次没有修改 `docs/接口文档/`，也没有增删接口参数或响应字段。
+
+## 阶段 1E-3 分类节点变更 AnythingLLM 适配与目标准备
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_reassign_anythingllm_adapter.py` | 内部预算拒绝与环境加载、单调 deadline 裁剪、请求级 Transport 正常/异常关闭、workspace 精确复用/创建/多重冲突/缺 slug/超时查回、完整 doc_path 成员探测、解绑/挂载写后探测、false、4xx、断连、协议异常、Pin best-effort 与 Adapter Factory 隔离。 |
+
+测试只替换原子 Workspace Client 和 Transport，不访问真实 AnythingLLM。它确认每个原子调用使用独立
+Transport，任何写后未知状态只查回而不盲目重发，并确认读到的 workspace 不能在缺少可验证创建归属时
+标记为当前 Operation 的可删除资源。1E-3 尚未创建 Application Saga、写意图/步骤持久化接线、
+本地 workspace 映射提交、Container 或公开路由；接口参数、JSON 字段、HTTP 状态码、同步语义和
+docs/接口文档均未修改。
+
+## 阶段 1E-4 分类节点变更 Application 成功路径
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_reassign_application.py` | `DocumentReassignmentService` 的远端完整成功、Factory 故障下 local-only、按既有 slug 复用、reserve 异常稳定收口、非法 Step DTO fail-closed、未知 prepare claim 保留、mapping 冲突恢复事实、Pin 审计、lease 预算门禁，以及真实 SQLite 组合提交。 |
+| `test_reassign_sqlite_adapter.py` | 新 mapping preparation claim、同目标竞争/过期接管、步骤续租同步延长 claim，以及 mapping 冲突后的准确远端准备事实持久化。 |
+
+1E-4/1E-4R 的 Application 只依赖 Domain、Port、显式执行设置和请求级 Knowledge Factory。测试验证所有
+AnythingLLM 调用均发生在 UoW 外，mapping、prepare Step 与 claim 释放原子提交，成功结果不携带
+Operation/lease/fencing；不确定目标准备保留 claim，mapping 写失败保留准确远端事实，步骤边界
+续租同时延长活动 claim。该执行记录当时尚未在当前请求内补偿；1E-6 全面审查修正已对远端明确
+失败和 CAS 冲突增加有界同步补偿，未知结果仍保持 `recovery_required` 且不盲重放。当前记录所述
+波次当时未接入 Container、Flask 路由或真实 AnythingLLM；接口参数、JSON
+字段、HTTP 状态码、同步语义和 `docs/接口文档/` 均未修改。
+
+## 阶段 1E-5 分类节点变更补偿、恢复与诊断
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_reassign_recovery.py` | 过期 lease 接管、local-only 无网络恢复、前向未知写的探测与固定补偿顺序、目标解绑/来源恢复两个写后检查点、workspace 创建后 mapping 丢失、写意图但 HTTP 未执行、成功持久事实门禁、补偿失败隔离、同 Operation fencing 竞争，以及错误 workspace 引用、非法接管/续租 DTO 和数据库读取异常的 fail-closed 回归。 |
+| `test_reassign_recovery_sqlite.py` | `reassign_recovery_observations` 追加事实、接管时 claim 转移、最新观测和 claim 原子释放、SQLite 本地状态探测、运行中 Operation 先进入 `compensating` 再补偿、恢复 prepare 事实的新 fencing 门禁，以及成功终态拒绝缺失前向事实。 |
+| `test_reassign_diagnostic_script.py` | 默认 dry-run 不追加事件、不修改 Operation、不初始化缺失 Schema；`--apply` 在缺少 operation ID、预期 fencing、操作者、原因或 lease 参数时提前拒绝；已收口、未找到、未接管和仍待恢复具有稳定进程退出码。 |
+
+恢复测试只使用严格 Fake 和临时 SQLite。严格 Fake 会拒绝 UoW 内的外部调用，因此同时证明探测、
+补偿与写后复核均发生在短事务外。脚本默认不创建 HTTP Client、不读取运行配置，也不对数据库执行
+DDL；真正恢复必须由人工显式指定单个 Operation。当前仍未启动 `run.py`、未连接真实 AnythingLLM、
+未接入 Container 或 Flask 路由，接口参数、JSON 字段、HTTP 状态码、同步语义和
+`docs/接口文档/` 均未修改。
+
+1E-5R 进一步要求恢复 Reference Probe 的返回 slug 与持久化引用一致，并对接管、续租、
+Operation 重读及 preparation claim 执行完整身份复核。读取异常不得伪装成 Operation 不存在；
+诊断脚本只有三个已收口结果返回退出码 0。
+
+## 阶段 1E-6/1E-7 分类节点变更组合根、公开路由与恢复实现下沉
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_stage1e0_reassign_contract_assets.py` | 真实 Flask 路由的 400/500/200 字节级黄金响应、原始 ID 兼容、稳定公开 message、内部字段禁止清单、蓝图薄路由，以及实际组合根下 `doc_path=""` 不创建远端 Port 的 local-only 回归。 |
+| `test_reassign_recovery.py`、`test_reassign_recovery_sqlite.py` | 拆分前后的恢复状态机、固定补偿顺序、fencing、观测和 SQLite 事实仍由既有故障矩阵覆盖。 |
+| `test_reassign_recovery_collaborators.py` | 不经恢复 Facade 直接验证 Observer 的续租/远端观察/观察事实、Checkpoint Reconciler 的探测事实写入、Compensator 的补偿阶段转换、Finalizer 的隔离收口。 |
+| `test_architecture_boundaries.py` | 长期 AST 门禁：路由不得构造 AnythingLLM/SQLite/线程，Container 必须经唯一组合根接线且不得绕过 Application；四个恢复协作器必须直接调用最小 Port，禁止 callback-wrapper，并锁定 Facade 行数/圈复杂度基线。 |
+| `test_reassign_application.py`、`test_reassign_recovery_collaborators.py` | 模拟“事务已经提交，但提交确认异常”的故障，验证 Application 与 Finalizer 会先重读终态并返回已经持久化的真实结果，避免错误补偿或覆盖终态。 |
+| `test_reassign_anythingllm_adapter.py`、`test_reassign_sqlite_adapter.py` | 验证同步远端预算从 Application 命令入口累计扣减，以及领域文档保护状态与 SQLite 删除保护状态持续一致。 |
+
+1E-6/1E-7 只使用离线容器、临时 SQLite 和严格 Fake，不启动 `run.py`、不连接真实 AnythingLLM。公开请求/响应
+参数、JSON 字段、HTTP 状态码、Header 与同步语义均未改变；接口文档只同步非契约的实现状态。真实供应商
+故障演练、预算校准和多实例容量验证仍是 production ready 前置条件。
+
+阶段 1E 整体审查进一步冻结以下边界：远端调用总预算从 Application 命令入口开始计算，进入
+Repository/UoW 前的等待会占用后续远端预算；lease 过期时间必须在取得写事务后计算；事务提交确认
+丢失时必须先以持久化终态为准，只有无法证明预期终态时才进入补偿或隔离。当前 SQLite 仍无法中断
+已经进入的本地锁等待，因此“同步硬截止”和数据库权威时间属于后续多实例阶段，不能由本阶段离线
+测试宣称完成。
+
 ## 推荐验证流程
 
 1. 先运行文件对话范围测试：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_chat*.py" -q`。
@@ -276,7 +411,18 @@ production attestation v1 和人工处置缺口。localhost 只读探测已确�
 18. 运行阶段 1D-5 Dispatcher、配置与离线组合：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_dispatcher tests.test_dependency_container tests.test_report_dispatcher tests.test_architecture_boundaries -q`。
 19. 运行阶段 1D-6 Callback、资源恢复、生产组合和公开路由：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_stage1d6 tests.test_routes tests.test_dependency_container tests.test_architecture_boundaries -q`。
 20. 运行阶段 1D-7 永久关闭门禁：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_stage1d7 -q`。
-21. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
+21. 运行阶段 1E-0 契约与故障资产：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets -q`。
+22. 运行阶段 1E-1 领域模型与状态机：`venv\Scripts\python.exe -B -m unittest tests.test_reassign_domain tests.test_architecture_boundaries -q`。
+23. 运行阶段 1E-1R 契约与领域修正：`venv\Scripts\python.exe -B -m unittest tests.test_reassign_domain tests.test_stage1e0_reassign_contract_assets tests.test_routes tests.test_architecture_boundaries -q`。
+24. 运行阶段 1E-2 Port、严格 Fake 与 SQLite 事实：`venv\Scripts\python.exe -B -m unittest tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_architecture_boundaries -q`。
+25. 运行阶段 1E-2R 联合回归：`venv\Scripts\python.exe -B -m unittest -b tests.test_reassign_domain tests.test_stage1e0_reassign_contract_assets tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_routes tests.test_architecture_boundaries tests.test_dependency_container tests.test_database_service -q`。
+26. 运行阶段 1E-3 Adapter 联合回归：`venv\Scripts\python.exe -B -m unittest -b tests.test_reassign_domain tests.test_stage1e0_reassign_contract_assets tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_anythingllm_adapter tests.test_routes tests.test_architecture_boundaries tests.test_dependency_container tests.test_database_service -q`。
+27. 运行阶段 1E-4 Application 联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_domain tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_anythingllm_adapter tests.test_reassign_application tests.test_architecture_boundaries -q`。
+28. 运行阶段 1E-5 恢复与诊断联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_domain tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_anythingllm_adapter tests.test_reassign_application tests.test_reassign_recovery tests.test_reassign_recovery_sqlite tests.test_reassign_diagnostic_script tests.test_architecture_boundaries -q`。
+29. 运行阶段 1E-6 组合根、公开路由与关闭联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_domain tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_anythingllm_adapter tests.test_reassign_application tests.test_reassign_recovery tests.test_reassign_recovery_sqlite tests.test_reassign_diagnostic_script tests.test_dependency_container tests.test_routes tests.test_architecture_boundaries tests.test_database_service -q`。
+30. 运行阶段 1E-7 恢复实现下沉联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_recovery tests.test_reassign_recovery_sqlite tests.test_reassign_recovery_collaborators tests.test_reassign_diagnostic_script tests.test_routes tests.test_architecture_boundaries -q`。
+31. 运行阶段 1E 整体审查修复回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_recovery_sqlite tests.test_reassign_recovery_collaborators tests.test_reassign_recovery tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_domain tests.test_reassign_diagnostic_script tests.test_reassign_application tests.test_reassign_anythingllm_adapter tests.test_database_service tests.test_architecture_boundaries -q`。
+32. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
 
 ## 执行限制
 

@@ -31,7 +31,70 @@ MODULES_ROOT = ROOT / "app" / "modules"
 TASKS_ROOT = MODULES_ROOT / "tasks"
 REPORT_ROOT = MODULES_ROOT / "report"
 WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
+REASSIGN_ROOT = MODULES_ROOT / "reassign"
 PRESENTERS_ROOT = ROOT / "app" / "presenters"
+LLM_ROUTE_PATH = ROOT / "app" / "blueprints" / "llm.py"
+REASSIGN_COMPOSITION_PATH = REASSIGN_ROOT / "composition.py"
+REASSIGN_RECOVERY_COMPATIBILITY_PATH = (
+    REASSIGN_ROOT / "application" / "recover_reassignment.py"
+)
+REASSIGN_RECOVERY_FACADE_PATH = REASSIGN_ROOT / "application" / "recovery_facade.py"
+REASSIGN_RECOVERY_COLLABORATOR_PATHS = {
+    "observer": REASSIGN_ROOT / "application" / "recovery_observer.py",
+    "checkpoints": REASSIGN_ROOT / "application" / "recovery_checkpoints.py",
+    "compensator": REASSIGN_ROOT / "application" / "recovery_compensator.py",
+    "finalizer": REASSIGN_ROOT / "application" / "recovery_finalizer.py",
+}
+# 1E-7 拆分后的基线：Facade 只负责编排分支，具体 Port 算法必须留在四个协作器中。数值
+# 来自首次拆分完成的源码 AST；后续功能若让该文件反向膨胀，应先重新评审职责归属。
+# 1E 全面审查修复后，Facade 新增“从恢复命令入口锚定远端预算”的纯编排代码；四个协作器
+# 的最小 Port 依赖和 callback-wrapper 禁令仍由下方独立门禁锁定，因此只更新精确规模基线。
+REASSIGN_RECOVERY_FACADE_MAX_LINES = 746
+REASSIGN_RECOVERY_FACADE_MAX_COMPLEXITY = 24
+CONTAINER_PATH = ROOT / "app" / "container.py"
+
+
+def _method_cyclomatic_complexity(node: ast.FunctionDef) -> int:
+    """计算足以识别恢复 Facade 分支反弹的保守圈复杂度近似值。"""
+
+    decision_nodes = (
+        ast.If,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.ExceptHandler,
+        ast.IfExp,
+    )
+    decisions = sum(
+        1 for child in ast.walk(node) if isinstance(child, decision_nodes)
+    )
+    decisions += sum(
+        max(len(child.values) - 1, 0)
+        for child in ast.walk(node)
+        if isinstance(child, ast.BoolOp)
+    )
+    return decisions + 1
+
+
+def _is_single_private_forwarder(node: ast.FunctionDef) -> bool:
+    """识别 ``return self._callback(...)`` 形式的协作器空转发方法。"""
+
+    statements = [
+        statement
+        for statement in node.body
+        if not (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str)
+        )
+    ]
+    if len(statements) != 1 or not isinstance(statements[0], ast.Return):
+        return False
+    returned = statements[0].value
+    if not isinstance(returned, ast.Call) or not isinstance(returned.func, ast.Attribute):
+        return False
+    receiver = returned.func.value
+    return isinstance(receiver, ast.Name) and receiver.id == "self" and returned.func.attr.startswith("_")
 
 
 def _module_layer_dirs(layer_name: str) -> tuple[Path, ...]:
@@ -83,6 +146,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             WEAPONRY_ROOT / "application",
             WEAPONRY_ROOT / "ports",
             WEAPONRY_ROOT / "adapters",
+            REASSIGN_ROOT,
+            REASSIGN_ROOT / "domain",
+            REASSIGN_ROOT / "application",
+            REASSIGN_ROOT / "ports",
+            REASSIGN_ROOT / "adapters",
             ROOT / "app" / "adapters",
             ROOT / "app" / "adapters" / "web",
             ROOT / "app" / "adapters" / "web" / "flask",
@@ -106,6 +174,263 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
 
     def test_presenters_do_not_read_database_or_anythingllm_client(self) -> None:
         self.assert_rule_clean((PRESENTERS_ROOT,), PRESENTER_RULE)
+
+    def test_reassign_route_and_composition_root_keep_saga_boundaries(self) -> None:
+        """长期锁定 1E-6 的薄路由和唯一 Application 组合根边界。
+
+        该测试只解析源码，不导入生产模块，因此不会构造 Container、SQLite 或 AnythingLLM
+        Client。它防止后续为“方便”把 SQL、供应商客户端或终态收口重新塞回公开路由/Container。
+        """
+
+        route_source = LLM_ROUTE_PATH.read_text(encoding="utf-8")
+        route_tree = ast.parse(route_source, filename=str(LLM_ROUTE_PATH))
+        route = next(
+            node
+            for node in route_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "llm_reassign"
+        )
+        route_text = ast.get_source_segment(route_source, route) or ""
+        for forbidden in (
+            "AnythingLLMClient",
+            "SQLiteReassignmentRepository",
+            "update_document_architecture",
+            "update_embeddings",
+            "update_embeddings_batch",
+            "threading.Thread",
+            "sqlite3",
+        ):
+            with self.subTest(route_forbidden=forbidden):
+                self.assertNotIn(forbidden, route_text)
+        for required in (
+            "parse_reassign_request",
+            "document_reassignment.execute",
+            "presenter.present_bad_request",
+            "presenter.present_result",
+        ):
+            with self.subTest(route_required=required):
+                self.assertIn(required, route_text)
+
+        composition_source = REASSIGN_COMPOSITION_PATH.read_text(encoding="utf-8")
+        composition_tree = ast.parse(
+            composition_source,
+            filename=str(REASSIGN_COMPOSITION_PATH),
+        )
+        composition_function = next(
+            node
+            for node in composition_tree.body
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "compose_reassign_application_services"
+            )
+        )
+        composition_text = (
+            ast.get_source_segment(composition_source, composition_function) or ""
+        )
+        for required in (
+            "DocumentReassignmentService(",
+            "RecoverReassignmentOperation(",
+            "ReassignApplicationServices(",
+        ):
+            with self.subTest(composition_required=required):
+                self.assertIn(required, composition_text)
+
+        services_class = next(
+            node
+            for node in composition_tree.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "ReassignApplicationServices"
+            )
+        )
+        public_fields = {
+            node.target.id
+            for node in services_class.body
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+            )
+        }
+        self.assertEqual(
+            {"document_reassignment", "recovery"},
+            public_fields,
+            "Application 外观不得公开 Repository、Port Bundle 或基础设施配置",
+        )
+
+        container_source = CONTAINER_PATH.read_text(encoding="utf-8")
+        container_tree = ast.parse(container_source, filename=str(CONTAINER_PATH))
+        container_function = next(
+            node
+            for node in container_tree.body
+            if (
+                isinstance(node, ast.FunctionDef)
+                and node.name == "create_application_services"
+            )
+        )
+        container_text = (
+            ast.get_source_segment(container_source, container_function) or ""
+        )
+        self.assertIn("compose_reassign_application_services(", container_text)
+        for forbidden in (
+            "DocumentReassignmentService(",
+            "RecoverReassignmentOperation(",
+            "transition_operation(",
+            "finalize_recovery_operation(",
+        ):
+            with self.subTest(container_forbidden=forbidden):
+                self.assertNotIn(forbidden, container_text)
+
+    def test_reassign_recovery_facade_delegates_to_four_internal_collaborators(self) -> None:
+        """Facade 只能装配协作器并选择流程，兼容模块只保留既有导入路径。"""
+
+        source = REASSIGN_RECOVERY_FACADE_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(REASSIGN_RECOVERY_FACADE_PATH))
+        recovery_class = next(
+            node
+            for node in tree.body
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "RecoverReassignmentOperation"
+            )
+        )
+        methods = {
+            node.name: ast.get_source_segment(source, node) or ""
+            for node in recovery_class.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        initializer = methods["__init__"]
+        for collaborator in (
+            "ReassignmentRecoveryObserver(",
+            "ReassignmentRecoveryCheckpointReconciler(",
+            "ReassignmentRecoveryCompensator(",
+            "ReassignmentRecoveryFinalizer(",
+        ):
+            with self.subTest(collaborator=collaborator):
+                self.assertIn(collaborator, initializer)
+
+        expected_usage = {
+            "recover": ("self._observer.", "self._finalizer."),
+            "_recover_local_only": (
+                "self._checkpoints.",
+                "self._observer.",
+                "self._finalizer.",
+            ),
+            "_recover_remote": (
+                "self._observer.",
+                "self._checkpoints.",
+                "self._compensator.",
+                "self._finalizer.",
+            ),
+        }
+        for method_name, collaborators in expected_usage.items():
+            method_text = methods[method_name]
+            for collaborator in collaborators:
+                with self.subTest(method=method_name, collaborator=collaborator):
+                    self.assertIn(collaborator, method_text)
+
+        compatibility_source = REASSIGN_RECOVERY_COMPATIBILITY_PATH.read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("from .recovery_facade import", compatibility_source)
+        self.assertNotIn("class RecoverReassignmentOperation", compatibility_source)
+
+    def test_reassign_recovery_collaborators_own_real_algorithms(self) -> None:
+        """四个协作器必须直接调用其最小 Port，禁止退化为 Facade callback wrapper。"""
+
+        expected_port_calls = {
+            "observer": (
+                "probe_local_commit_state(",
+                "renew_lease(",
+                "probe_workspace_reference(",
+                "record_recovery_observation(",
+            ),
+            "checkpoints": (
+                "complete_step(",
+                "record_workspace_preparation_fact(",
+                "decide_compensation(",
+            ),
+            "compensator": (
+                "begin_step_mutation(",
+                "transition_operation(",
+                "detach_document(",
+                "attach_document(",
+            ),
+            "finalizer": (
+                "finalize_recovery_operation(",
+                "transition_operation(",
+            ),
+        }
+        forbidden_dependencies = {
+            "observer": ("ReassignmentKnowledgePortFactory",),
+            "checkpoints": (
+                "ReassignmentKnowledgePort",
+                "ReassignmentKnowledgePortFactory",
+                "ReassignmentExecutionSettings",
+            ),
+            "compensator": (
+                "ReassignmentKnowledgePortFactory",
+                "ReassignmentExecutionSettings",
+            ),
+            "finalizer": (
+                "ReassignmentKnowledgePort",
+                "ReassignmentKnowledgePortFactory",
+                "ReassignmentExecutionSettings",
+            ),
+        }
+        for role, path in REASSIGN_RECOVERY_COLLABORATOR_PATHS.items():
+            with self.subTest(collaborator=role):
+                source = path.read_text(encoding="utf-8")
+                tree = ast.parse(source, filename=str(path))
+                class_node = next(
+                    node
+                    for node in tree.body
+                    if isinstance(node, ast.ClassDef)
+                    and node.name.startswith("ReassignmentRecovery")
+                )
+                public_methods = [
+                    node
+                    for node in class_node.body
+                    if isinstance(node, ast.FunctionDef)
+                    and not node.name.startswith("_")
+                ]
+                self.assertTrue(public_methods, "协作器必须暴露可直接测试的职责方法")
+                self.assertNotIn("Callable", source)
+                self.assertNotIn("_callback", source)
+                for method in public_methods:
+                    self.assertFalse(
+                        _is_single_private_forwarder(method),
+                        f"{role}.{method.name} 不能只转发私有 callback",
+                    )
+                for expected in expected_port_calls[role]:
+                    self.assertIn(expected, source)
+                for forbidden in forbidden_dependencies[role]:
+                    self.assertNotIn(forbidden, source)
+
+    def test_reassign_recovery_facade_size_and_complexity_do_not_regress(self) -> None:
+        """锁定 1E-7 Facade 文件规模和最高圈复杂度，防止算法重新回迁。"""
+
+        source = REASSIGN_RECOVERY_FACADE_PATH.read_text(encoding="utf-8")
+        source_lines = source.splitlines()
+        self.assertLessEqual(
+            len(source_lines),
+            REASSIGN_RECOVERY_FACADE_MAX_LINES,
+            "恢复 Facade 超出 1E-7 基线；请把具体 Port 算法下沉到对应协作器",
+        )
+        tree = ast.parse(source, filename=str(REASSIGN_RECOVERY_FACADE_PATH))
+        facade = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "RecoverReassignmentOperation"
+        )
+        for method in (
+            node for node in facade.body if isinstance(node, ast.FunctionDef)
+        ):
+            with self.subTest(method=method.name):
+                self.assertLessEqual(
+                    _method_cyclomatic_complexity(method),
+                    REASSIGN_RECOVERY_FACADE_MAX_COMPLEXITY,
+                    "恢复 Facade 分支复杂度反弹；请先评估是否应归属到独立协作器",
+                )
 
     def test_route_tests_do_not_construct_uninjected_production_applications(self) -> None:
         """只有显式生命周期用例可以调用无参 create_app，其他测试必须注入离线容器。"""
@@ -340,6 +665,11 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
             (
                 "app/modules/tasks/domain/models.py",
                 "from dataclasses import dataclass\n",
+                DOMAIN_RULE,
+            ),
+            (
+                "app/modules/reassign/domain/models.py",
+                "from datetime import datetime, timezone\n",
                 DOMAIN_RULE,
             ),
             (

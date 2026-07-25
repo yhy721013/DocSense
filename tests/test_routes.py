@@ -4,6 +4,18 @@ from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from app import create_app
+from app.modules.reassign.application import (
+    DocumentReassignmentService,
+    RecoverReassignmentOperation,
+    ReassignmentExecutionSettings,
+)
+from app.modules.reassign.composition import ReassignApplicationServices
+from app.modules.reassign.domain import (
+    ReassignDocumentCommand,
+    ReassignmentPublicMessage,
+    ReassignmentResult,
+    ReassignmentResultCategory,
+)
 from app.modules.weaponry.domain import (
     DOCUMENT_SCOPE_CATEGORY,
     DOCUMENT_SCOPE_EXPLICIT,
@@ -16,7 +28,33 @@ from app.modules.weaponry.ports import (
 )
 from tests import workspace_tempdir
 from tests.fakes import FakeWeaponryDocumentScopePort
+from tests.fakes.reassign import (
+    FakeReassignmentKnowledgePortFactory,
+    FakeReassignmentRepository,
+)
 from tests.offline_application import build_offline_application_services
+
+
+class _RouteReassignResultService(DocumentReassignmentService):
+    """为通用路由回归注入强类型 Application 结果，不保留遗留蓝图 Mock。"""
+
+    def __init__(
+        self,
+        repository: FakeReassignmentRepository,
+        knowledge_factory: FakeReassignmentKnowledgePortFactory,
+        settings: ReassignmentExecutionSettings,
+        *,
+        result: ReassignmentResult,
+    ) -> None:
+        super().__init__(repository, knowledge_factory, settings)
+        self.result = result
+        self.commands: list[ReassignDocumentCommand] = []
+
+    def execute(self, command: ReassignDocumentCommand) -> ReassignmentResult:
+        if not isinstance(command, ReassignDocumentCommand):
+            raise TypeError("command 必须是 ReassignDocumentCommand")
+        self.commands.append(command)
+        return self.result
 
 
 class LLMRouteValidationTests(unittest.TestCase):
@@ -65,6 +103,47 @@ class LLMRouteValidationTests(unittest.TestCase):
 
     def tearDown(self):
         self._tempdir.__exit__(None, None, None)
+
+    def _configure_reassign_result(
+        self,
+        category: ReassignmentResultCategory,
+        message: ReassignmentPublicMessage,
+    ) -> _RouteReassignResultService:
+        """以强类型 Application 外观重新构造本测试的离线 Flask 容器。
+
+        分类节点变更已不允许路由直接 mock 数据库或 AnythingLLM Client。这里仅替换
+        ``execute()`` 的确定结果，仍让路由经过真实 Parser、Application 类型门禁和 Presenter。
+        """
+
+        repository = FakeReassignmentRepository()
+        knowledge_factory = FakeReassignmentKnowledgePortFactory()
+        settings = ReassignmentExecutionSettings(
+            lease_owner="route-test-reassign",
+            lease_duration_seconds=1.2,
+            remote_total_timeout_seconds=1.0,
+            lease_safety_margin_seconds=0.2,
+        )
+        document_reassignment = _RouteReassignResultService(
+            repository,
+            knowledge_factory,
+            settings,
+            result=ReassignmentResult(category=category, public_message=message),
+        )
+        reassign_services = ReassignApplicationServices(
+            document_reassignment=document_reassignment,
+            recovery=RecoverReassignmentOperation(
+                repository,
+                knowledge_factory,
+                settings,
+            ),
+        )
+        self.services = replace(
+            self.services,
+            reassign_services=reassign_services,
+        )
+        self.app = create_app(services=self.services)
+        self.client = self.app.test_client()
+        return document_reassignment
 
     def test_analysis_rejects_invalid_business_type(self):
         response = self.client.post("/llm/analysis", json={"businessType": "wrong", "params": [{}]})
@@ -584,7 +663,10 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_reassign_returns_error_when_record_not_found(self):
-        self.kb_service.get_document_record.return_value = None
+        self._configure_reassign_result(
+            ReassignmentResultCategory.FAILED,
+            ReassignmentPublicMessage.DOCUMENT_NOT_FOUND,
+        )
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -600,9 +682,13 @@ class LLMRouteValidationTests(unittest.TestCase):
         data = response.get_json()
         self.assertFalse(data["data"]["success"])
         self.assertEqual(data["data"]["message"], "文档记录不存在")
+        self.assertEqual([], self.kb_service.mock_calls)
 
     def test_reassign_returns_error_when_inconsistent(self):
-        self.kb_service.get_document_record.return_value = {"architecture_id": 3}
+        self._configure_reassign_result(
+            ReassignmentResultCategory.FAILED,
+            ReassignmentPublicMessage.ARCHITECTURE_MISMATCH,
+        )
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -618,20 +704,13 @@ class LLMRouteValidationTests(unittest.TestCase):
         data = response.get_json()
         self.assertFalse(data["data"]["success"])
         self.assertIn("分类不一致", data["data"]["message"])
-        self.kb_service.update_document_architecture.assert_not_called()
+        self.assertEqual([], self.kb_service.mock_calls)
 
-    @patch("app.blueprints.llm.AnythingLLMClient")
-    def test_reassign_success(self, MockClient):
-        self.kb_service.get_document_record.return_value = {
-            "architecture_id": 1,
-            "doc_path": "custom-documents/test.pdf"
-        }
-        self.kb_service.get_workspace_slug.side_effect = (
-            lambda value: "ws_old" if value == 1 else "ws_new"
+    def test_reassign_success_uses_application_without_legacy_database_access(self):
+        application = self._configure_reassign_result(
+            ReassignmentResultCategory.SUCCEEDED,
+            ReassignmentPublicMessage.SUCCEEDED,
         )
-        
-        mock_client_instance = MockClient.return_value
-        
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -646,27 +725,16 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["data"]["success"])
-        self.kb_service.update_document_architecture.assert_called_once_with(
-            "a.pdf",
-            2,
-            current_architecture_id=1,
-        )
-        mock_client_instance.update_embeddings_batch.assert_called_once_with("ws_old", deletes=["custom-documents/test.pdf"], user_id=1)
-        mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_new", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
+        self.assertEqual(1, len(application.commands))
+        self.assertEqual("a.pdf", application.commands[0].file_name)
+        self.assertEqual(1, application.commands[0].old_architecture_id_query_value)
+        self.assertEqual([], self.kb_service.mock_calls)
 
-    @patch("app.blueprints.llm.AnythingLLMClient")
-    def test_reassign_creates_workspace_if_missing(self, MockClient):
-        self.kb_service.get_document_record.return_value = {
-            "architecture_id": 1,
-            "doc_path": "custom-documents/test.pdf"
-        }
-        self.kb_service.get_workspace_slug.side_effect = (
-            lambda value: "ws_old" if value == 1 else None
+    def test_reassign_preserves_non_strict_new_id_through_application_and_presenter(self):
+        application = self._configure_reassign_result(
+            ReassignmentResultCategory.SUCCEEDED,
+            ReassignmentPublicMessage.SUCCEEDED,
         )
-        
-        mock_client_instance = MockClient.return_value
-        mock_client_instance.create_rag_workspace.return_value = {"slug": "ws_created"}
-        
         response = self.client.post(
             "/llm/reassign",
             json={
@@ -674,20 +742,14 @@ class LLMRouteValidationTests(unittest.TestCase):
                 "params": {
                     "fileName": "a.pdf",
                     "oldArchitectureId": 1,
-                    "newArchitectureId": 2
+                    "newArchitectureId": False,
                 }
             }
         )
         self.assertEqual(response.status_code, 200)
         data = response.get_json()
         self.assertTrue(data["data"]["success"])
-        self.kb_service.update_document_architecture.assert_called_once_with(
-            "a.pdf",
-            2,
-            current_architecture_id=1,
-        )
-        mock_client_instance.update_embeddings_batch.assert_called_once_with("ws_old", deletes=["custom-documents/test.pdf"], user_id=1)
-        mock_client_instance.create_rag_workspace.assert_called_once_with("architectureId-2", user_id=1)
-        self.kb_service.add_workspace.assert_called_once_with(2, "ws_created")
-        mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_created", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
+        self.assertIs(False, data["data"]["newArchitectureId"])
+        self.assertIs(False, application.commands[0].new_architecture_id_raw.to_python())
+        self.kb_service.add_workspace.assert_not_called()
 
