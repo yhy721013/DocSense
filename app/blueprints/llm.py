@@ -3,16 +3,53 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import PurePosixPath
-from typing import Any, Dict, List, Optional
-from urllib.parse import unquote, urlparse
+from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
+from app.adapters.web import (
+    ArchitectureIdValidationError,
+    ReportIdValidationError,
+    normalize_architecture_id,
+    normalize_report_id,
+)
+from app.adapters.web.flask import (
+    ReportRequestValidationError,
+    ProgressConnectionRegistry,
+    ProgressRequestValidationError,
+    ReassignRequestValidationError,
+    WeaponryRequestValidationError,
+    parse_report_request,
+    parse_progress_subscription,
+    parse_reassign_request,
+    parse_weaponry_request,
+)
 from app.container import ApplicationServices, get_application_services
+from app.modules.report.domain import ReportId, ReportTaskConflictError
+from app.modules.tasks.application import ProgressSubscriptionRollbackError
+from app.modules.weaponry.application import WeaponryTaskConflictError
+from app.modules.weaponry.ports import (
+    WeaponryDocumentScopeAmbiguityError,
+    WeaponryDocumentScopeError,
+    WeaponryDocumentScopeNotFoundError,
+)
 from app.presenters.chat_stream import (
     finalize_chat_run_stream,
+)
+from app.presenters.task_progress import ProgressWebSocketPresenter
+from app.presenters.report_submission import (
+    ReportSubmissionHttpPresentation,
+    ReportSubmissionResponsePresenter,
+)
+from app.presenters.reassign_result import (
+    ReassignHttpPresentation,
+    ReassignResponsePresenter,
+)
+from app.presenters.weaponry_submission import (
+    WeaponrySubmissionHttpPresentation,
+    WeaponrySubmissionResponsePresenter,
 )
 from app.services.chat import (
     ChatDeleteBusyError,
@@ -30,7 +67,6 @@ from app.services.chat.domain.chat_id import (
     parse_query_chat_id,
     require_public_chat_id,
 )
-from app.services.core.progress import normalize_progress
 from app.services.core.architecture_tree import (
     ArchitectureTreeValidationError,
 )
@@ -45,20 +81,11 @@ from app.services.llm_service.analysis_service import (
     run_file_analysis_task,
     validate_analysis_architecture_ranges,
 )
-from app.services.llm_service.report_service import run_report_task
 from app.services.llm_service.task_service import (
     TaskAdmissionBusyError,
     TaskAlreadyProcessingError,
     file_task_admission_block_reason,
 )
-from app.services.llm_service.weaponry_service import (
-    WeaponrySelectedDocumentAmbiguityError,
-    WeaponrySelectedDocumentError,
-    WeaponrySelectedDocumentNotFoundError,
-    resolve_weaponry_selected_documents,
-    run_weaponry_task,
-)
-from app.services.utils.anythingllm_client import AnythingLLMClient
 
 
 llm_bp = Blueprint("llm", __name__)
@@ -66,10 +93,85 @@ sock = Sock()
 
 logger = logging.getLogger(__name__)
 
+_PROGRESS_RECEIVE_POLL_SECONDS = 0.1
+_PROGRESS_RELEASE_ATTEMPTS = 3
+
 
 def _services() -> ApplicationServices:
     """读取当前 Flask 应用的依赖容器，禁止路由使用模块级可变服务单例。"""
     return get_application_services()
+
+
+def _report_http_response(
+    presentation: ReportSubmissionHttpPresentation,
+) -> Response:
+    """把框架无关报告展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, ReportSubmissionHttpPresentation):
+        raise TypeError("presentation 必须是 ReportSubmissionHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    if presentation.content_type is None:
+        # 202 成功体严格为零字节，也不暗示存在可解析的 JSON/文本实体。
+        response.headers.pop("Content-Type", None)
+    else:
+        response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _weaponry_http_response(
+    presentation: WeaponrySubmissionHttpPresentation,
+) -> Response:
+    """把框架无关武器谱展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, WeaponrySubmissionHttpPresentation):
+        raise TypeError("presentation 必须是 WeaponrySubmissionHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    if presentation.content_type is None:
+        # 已批准的成功响应必须严格为零字节，且不能暗示 JSON 实体。
+        response.headers.pop("Content-Type", None)
+    else:
+        response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _reassign_http_response(
+    presentation: ReassignHttpPresentation,
+) -> Response:
+    """把框架无关分类节点变更展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, ReassignHttpPresentation):
+        raise TypeError("presentation 必须是 ReassignHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _empty_http_response(status_code: int) -> Response:
+    """构造不携带公开业务数据的严格空 HTTP 响应。
+
+    文件解析、报告、武器谱提交以及 ``check-task`` 的成功响应均不能泄露内部
+    ``execution_id``、回调状态或调度细节。调用方应使用既有业务键通过 Progress、
+    ``check-task`` 的副作用和最终 Callback 跟踪结果，而不是依赖受理响应体。
+    """
+
+    if isinstance(status_code, bool) or not isinstance(status_code, int):
+        raise TypeError("status_code 必须是 HTTP 状态整数")
+    if not 100 <= status_code <= 599:
+        raise ValueError("status_code 必须在 100 到 599 之间")
+
+    response = Response(response=b"", status=status_code)
+    # Flask 默认会附加 text/html Content-Type。严格空成功体不应暗示存在可解析实体。
+    response.headers.pop("Content-Type", None)
+    return response
 
 
 def _read_json_chat_id(
@@ -120,205 +222,28 @@ def _read_query_chat_id(
     return public_chat_id, chat_id_storage_key(public_chat_id)
 
 
-def _normalize_weaponry_file_path_list(value: Any) -> List[str]:
-    """将 weaponry filePathList 中的 URL/裸文件名归一化为哈希文件名。"""
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("filePathList必须为数组")
-
-    normalized: List[str] = []
-    seen = set()
-    for index, item in enumerate(value):
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(f"filePathList中第{index + 1}项不是有效字符串")
-
-        raw_value = item.strip()
-        parsed = urlparse(raw_value)
-        decoded_path = unquote(parsed.path or raw_value).replace("\\", "/")
-        file_name = PurePosixPath(decoded_path).name.strip()
-        if not file_name or file_name in {".", ".."}:
-            raise ValueError(f"filePathList中第{index + 1}项无法提取文件名")
-
-        key = file_name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(file_name)
-
-    return normalized
-
-
 def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """校验 check-task 的完整参数数组，禁止静默过滤非法元素。
+
+    已批准契约要求 ``params`` 中任一元素不是对象时拒绝整次请求。此前的过滤式
+    解析会让调用方误以为无效项已被检查，且与 Progress/Report 的原子校验不一致。
+    """
+
     params = payload.get("params")
     if not isinstance(params, list) or not params:
         return []
-    return [item for item in params if isinstance(item, dict)]
+
+    validated_params: list[Dict[str, Any]] = []
+    for item in params:
+        if not isinstance(item, dict):
+            return []
+        validated_params.append(item)
+    return validated_params
 
 
 def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     params = _get_params(payload)
     return params[0] if params else None
-
-
-def _extract_progress_key(payload: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    business_type = payload.get("businessType")
-    if business_type not in {"file", "report", "weaponry"}:
-        return None, None
-
-    params = _get_first_param(payload)
-    if params is None:
-        return None, None
-
-    if business_type == "file":
-        file_name = params.get("fileName")
-        if not isinstance(file_name, str) or not file_name.strip():
-            return None, None
-        return business_type, file_name.strip()
-
-    if business_type == "weaponry":
-        architecture_id = params.get("architectureId")
-        if architecture_id is None:
-            return None, None
-        return business_type, str(architecture_id)
-
-    report_id = params.get("reportId")
-    if report_id is None:
-        return None, None
-    return business_type, str(report_id)
-
-
-def _parse_progress_command(payload: Dict[str, Any]) -> Dict[str, Any]:
-    action = payload.get("action") or "subscribe"
-    if action not in {"subscribe", "unsubscribe", "query"}:
-        raise ValueError("不支持的action")
-
-    business_type = payload.get("businessType")
-    if business_type not in {"file", "report", "weaponry"}:
-        raise ValueError("businessType无效")
-
-    params_list = _get_params(payload)
-    if not params_list:
-        raise ValueError("params不能为空")
-
-    keys = []
-    for params in params_list:
-        if business_type == "file":
-            file_name = params.get("fileName")
-            if not isinstance(file_name, str) or not file_name.strip():
-                raise ValueError("fileName不能为空")
-            keys.append((business_type, file_name.strip()))
-        elif business_type == "weaponry":
-            architecture_id = params.get("architectureId")
-            if architecture_id is None:
-                raise ValueError("architectureId不能为空")
-            keys.append((business_type, str(architecture_id)))
-        else:
-            report_id = params.get("reportId")
-            if report_id is None:
-                raise ValueError("reportId不能为空")
-            keys.append((business_type, str(report_id)))
-
-    return {"action": action, "business_type": business_type, "keys": keys}
-
-
-def _build_progress_snapshot(business_type: str, business_key: str, task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    data: Dict[str, Any] = {
-        "progress": 0.0,
-    }
-    if business_type == "file":
-        data["fileName"] = business_key
-    elif business_type == "report":
-        data["reportId"] = int(business_key)
-    elif business_type == "weaponry":
-        data["architectureId"] = business_key
-
-    if task is not None:
-        data["progress"] = normalize_progress(task["progress"])
-    else:
-        data["exists"] = False
-
-    return {"businessType": business_type, "data": data}
-
-
-def _send_latest_progress(
-    send_message,
-    business_type: str,
-    business_key: str,
-    *,
-    services: ApplicationServices,
-) -> None:
-    """从显式应用依赖读取并发送任务最新进度或数据库快照。"""
-    latest = services.progress_hub.get_latest(business_type, business_key)
-    if latest is not None:
-        send_message(latest)
-        return
-
-    current_task = services.task_service.get_task(business_type, business_key)
-    send_message(_build_progress_snapshot(business_type, business_key, current_task))
-
-
-def _handle_progress_command(
-    send_message,
-    subscriptions: dict[tuple[str, str], Any],
-    command: Dict[str, Any],
-    *,
-    emit_ack: bool,
-    services: Optional[ApplicationServices] = None,
-) -> None:
-    """执行进度订阅命令，并允许纯函数测试显式注入应用依赖。"""
-    resolved_services = services or _services()
-    progress_hub = resolved_services.progress_hub
-    task_service = resolved_services.task_service
-    action = command["action"]
-    keys = command["keys"]
-
-    if action == "subscribe":
-        for business_type, business_key in keys:
-            key = (business_type, business_key)
-            if key not in subscriptions:
-                def _forward(message: Dict[str, Any]) -> None:
-                    send_message(message)
-
-                subscriptions[key] = _forward
-                progress_hub.subscribe(business_type, business_key, _forward)
-
-                if progress_hub.get_latest(business_type, business_key) is None:
-                    current_task = task_service.get_task(business_type, business_key)
-                    send_message(_build_progress_snapshot(business_type, business_key, current_task))
-                continue
-
-            _send_latest_progress(
-                send_message,
-                business_type,
-                business_key,
-                services=resolved_services,
-            )
-
-        if emit_ack:
-            send_message({"type": "ack", "action": action, "count": len(keys)})
-        return
-
-    if action == "query":
-        for business_type, business_key in keys:
-            _send_latest_progress(
-                send_message,
-                business_type,
-                business_key,
-                services=resolved_services,
-            )
-
-        if emit_ack:
-            send_message({"type": "ack", "action": action, "count": len(keys)})
-        return
-
-    for business_type, business_key in keys:
-        callback = subscriptions.pop((business_type, business_key), None)
-        if callback is not None:
-            progress_hub.unsubscribe(business_type, business_key, callback)
-
-    if emit_ack:
-        send_message({"type": "ack", "action": action, "count": len(keys)})
 
 
 @llm_bp.post("/llm/analysis")
@@ -518,8 +443,9 @@ def llm_analysis():
         file_name = task["business_key"]
         progress_hub.publish(
             "file",
-            file_name,
-            {"businessType": "file", "data": {"fileName": file_name, "progress": 0.0}},
+            file_name.strip(),
+            {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
+            task_id=task["execution_id"],
         )
 
     _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
@@ -561,222 +487,155 @@ def llm_analysis():
     )
     worker.start()
     logger.info("已启动后台文件分析线程: task_count=%d", len(tasks))
-    if len(tasks) == 1:
-        return jsonify({"message": "accepted", "businessType": "file", "task": tasks[0]}), 202
-    return jsonify({"message": "accepted", "businessType": "file", "tasks": tasks}), 202
+    logger.info(
+        "文件分析任务已受理并返回严格空响应: task_count=%d status_code=202",
+        len(tasks),
+    )
+    # 不再将 task/execution_id 暴露给调用方；既有业务 fileName 是唯一公开关联键。
+    return _empty_http_response(202)
 
 
 @llm_bp.post("/llm/generate-report")
 def llm_generate_report():
     services = _services()
-    task_service = services.task_service
-    progress_hub = services.progress_hub
-    llm_config = services.llm_config
-    payload = request.get_json(silent=True) or {}
-    logger.info("收到报告生成请求: payload_keys=%s", list(payload.keys()))
-    if payload.get("businessType") != "report":
-        logger.warning(
-            "报告生成请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为report"}), 400
-
-    params = _get_first_param(payload)
-    if params is None:
-        logger.warning("报告生成请求被拒绝: params为空或格式无效")
-        return jsonify({"error": "params不能为空"}), 400
-    report_id = params.get("reportId")
-    if report_id is None:
-        logger.warning("报告生成请求被拒绝: reportId为空")
-        return jsonify({"error": "reportId不能为空"}), 400
-    file_path_list = params.get("filePathList")
-    if not isinstance(file_path_list, list) or not file_path_list:
-        logger.warning(
-            "报告生成请求被拒绝: filePathList无效 reportId=%s file_path_list_type=%s file_count=%s",
-            report_id,
-            type(file_path_list).__name__,
-            len(file_path_list) if isinstance(file_path_list, list) else "n/a",
-        )
-        return jsonify({"error": "filePathList不能为空"}), 400
-    template_outline = params.get("templateOutline")
-    if not isinstance(template_outline, str) or not template_outline.strip():
-        logger.warning("报告生成请求被拒绝: templateOutline为空 reportId=%s", report_id)
-        return jsonify({"error": "templateOutline不能为空"}), 400
-
-    task = task_service.create_report_task(report_id=int(report_id), request_payload=payload)
-    progress_hub.publish(
-        "report",
-        str(report_id),
-        {"businessType": "report", "data": {"reportId": int(report_id), "progress": 0.0}},
+    presenter = ReportSubmissionResponsePresenter()
+    raw_payload = request.get_json(silent=True)
+    logger.info(
+        "收到报告生成请求: payload_type=%s",
+        type(raw_payload).__name__,
     )
+    try:
+        parsed_request = parse_report_request(raw_payload)
+    except ReportRequestValidationError as exc:
+        # 公开错误体只包含已确认的 error 字段；日志记录类型和原因即可定位问题，不能输出
+        # 文件 URL、模板内容或完整请求，避免调试日志泄漏业务数据。
+        logger.warning(
+            "报告生成请求被拒绝: payload_type=%s validation_error=%s",
+            type(raw_payload).__name__,
+            str(exc),
+        )
+        return _report_http_response(presenter.present_bad_request(str(exc)))
 
-    _report_kwargs = {
-        "task_service": task_service,
-        "progress_hub": progress_hub,
-        "request_payload": payload,
-        "download_root": llm_config.download_dir,
-        "callback_url": llm_config.callback_url or "",
-        "callback_timeout": llm_config.callback_timeout,
-    }
-    worker = threading.Thread(
-        target=services.upload_task_limiter.run,
-        args=(run_report_task,),
-        kwargs=_report_kwargs,
-        daemon=True,
+    normalized_report_id = parsed_request.report_id
+    trace_id = uuid4().hex
+    logger.info(
+        "报告生成请求参数校验通过: report_id=%s file_count=%s trace_id=%s",
+        normalized_report_id.business_key,
+        len(parsed_request.params["filePathList"]),
+        trace_id,
     )
-    worker.start()
-    logger.info("已启动后台报告生成线程: report_id=%s", report_id)
-    return jsonify({"message": "accepted", "businessType": "report", "task": task}), 202
+    submission = parsed_request.to_submission(trace_id=trace_id)
+    try:
+        result = services.report_submit.execute(submission)
+    except ReportTaskConflictError:
+        logger.info(
+            "报告生成请求因活动任务或回调Guard被拒绝: report_id=%s trace_id=%s",
+            normalized_report_id.business_key,
+            trace_id,
+        )
+        return _report_http_response(presenter.present_conflict())
+    except Exception:
+        # 受理事务失败不能伪装成 202。异常交给 Flask 统一 500 边界，同时日志只记录
+        # reportId/trace，不输出 URL、模板文本或完整请求。
+        logger.exception(
+            "报告生成受理失败: report_id=%s trace_id=%s",
+            normalized_report_id.business_key,
+            trace_id,
+        )
+        raise
+
+    logger.info(
+        "报告生成请求已可靠受理: report_id=%s task_id=%s trace_id=%s",
+        normalized_report_id.business_key,
+        result.task_id,
+        trace_id,
+    )
+    return _report_http_response(presenter.present_success(result))
 
 
 @llm_bp.post("/llm/weaponry")
 def llm_weaponry():
     services = _services()
-    task_service = services.task_service
-    kb_service = services.kb_service
-    progress_hub = services.progress_hub
-    llm_config = services.llm_config
-    payload = request.get_json(silent=True) or {}
-    logger.info("收到武器装备提取请求: payload_keys=%s", list(payload.keys()))
-    if payload.get("businessType") != "weaponry":
-        logger.warning(
-            "武器装备提取请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为weaponry"}), 400
-
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        logger.warning(
-            "武器装备提取请求被拒绝: params无效 params_type=%s",
-            type(params).__name__,
-        )
-        return jsonify({"error": "params不能为空"}), 400
-
-    architecture_id = params.get("architectureId")
-    if architecture_id is None:
-        logger.warning("武器装备提取请求被拒绝: architectureId为空")
-        return jsonify({"error": "architectureId不能为空"}), 400
-
+    weaponry_services = services.weaponry_services
+    if weaponry_services is None:
+        # 生产组合根在 1D-6 后必须提供该能力。测试夹具若遗漏依赖也应明确失败，禁止
+        # 静默回退到已经删除的路由线程与遗留 Service。
+        raise RuntimeError("应用容器未装配武器谱运行链")
+    presenter = WeaponrySubmissionResponsePresenter()
+    raw_payload = request.get_json(silent=True)
+    logger.info(
+        "收到武器装备提取请求: payload_type=%s",
+        type(raw_payload).__name__,
+    )
     try:
-        selected_file_names = _normalize_weaponry_file_path_list(params.get("filePathList"))
-    except ValueError as exc:
+        parsed_request = parse_weaponry_request(raw_payload)
+    except WeaponryRequestValidationError as exc:
         logger.warning(
-            "武器装备提取请求被拒绝: filePathList无效 architectureId=%s error_type=%s",
-            architecture_id,
+            "武器装备提取请求被拒绝: validation_error=%s payload_type=%s",
+            str(exc),
+            type(raw_payload).__name__,
+        )
+        return _weaponry_http_response(presenter.present_bad_request(str(exc)))
+
+    trace_id = uuid4().hex
+    try:
+        document_scope = weaponry_services.document_scope.resolve(
+            architecture_id=parsed_request.architecture_id,
+            requested_file_names=parsed_request.selected_file_names,
+        )
+    except WeaponryDocumentScopeNotFoundError as exc:
+        logger.warning(
+            "武器装备提取请求引用未解析文档: architecture_id=%s file_count=%d",
+            parsed_request.architecture_id,
+            len(parsed_request.selected_file_names),
+        )
+        return _weaponry_http_response(presenter.present_not_found(str(exc)))
+    except (WeaponryDocumentScopeAmbiguityError, WeaponryDocumentScopeError) as exc:
+        logger.warning(
+            "武器装备提取请求文档范围不确定: architecture_id=%s file_count=%d "
+            "error_type=%s",
+            parsed_request.architecture_id,
+            len(parsed_request.selected_file_names),
             type(exc).__name__,
         )
-        return jsonify({"error": str(exc)}), 400
+        return _weaponry_http_response(presenter.present_bad_request(str(exc)))
 
-    # 非空 filePathList 可引用任意已入库分类的文档。路由受理时一次性解析为不可变
-    # 快照，后续后台线程和未来可靠任务队列都不再按当前 architectureId 重新查找，
-    # 避免同名文件或文档重分类导致任务检索范围漂移。
-    selected_documents = ()
-    if selected_file_names:
-        try:
-            selected_documents = resolve_weaponry_selected_documents(
-                kb_service,
-                selected_file_names,
-            )
-        except WeaponrySelectedDocumentNotFoundError as exc:
-            logger.warning(
-                "武器装备提取请求被拒绝: 选中文件尚未解析 architectureId=%s error=%s",
-                architecture_id,
-                str(exc),
-            )
-            return jsonify({"error": str(exc)}), 404
-        except (
-            WeaponrySelectedDocumentAmbiguityError,
-            WeaponrySelectedDocumentError,
-        ) as exc:
-            logger.warning(
-                "武器装备提取请求被拒绝: 选中文件无法唯一解析 "
-                "architectureId=%s error_type=%s error=%s",
-                architecture_id,
-                type(exc).__name__,
-                str(exc),
-            )
-            return jsonify({"error": str(exc)}), 400
-
-    field_list = params.get("weaponryTemplateFieldList")
-    if not isinstance(field_list, list) or not field_list:
-        logger.warning(
-            "武器装备提取请求被拒绝: weaponryTemplateFieldList无效 architectureId=%s field_list_type=%s field_count=%s",
-            architecture_id,
-            type(field_list).__name__,
-            len(field_list) if isinstance(field_list, list) else "n/a",
+    policies = weaponry_services.policies
+    submission = parsed_request.to_submission(
+        document_scope=document_scope,
+        evidence_selection_policy=policies.evidence_selection,
+        execution_policy=policies.execution,
+        auxiliary_guidance_policy=policies.auxiliary_guidance,
+        trace_id=trace_id,
+    )
+    try:
+        result = weaponry_services.submit.execute(submission)
+    except WeaponryTaskConflictError:
+        logger.info(
+            "武器装备提取请求因活动任务或回调 Guard 被拒绝: "
+            "architecture_id=%s trace_id=%s",
+            parsed_request.architecture_id,
+            trace_id,
         )
-        return jsonify({"error": "weaponryTemplateFieldList不能为空"}), 400
-
-    # 校验 analyseData / analyseDataSource 必须为空
-    for field_index, field in enumerate(field_list):
-        if field.get("analyseData") or field.get("analyseDataSource"):
-            logger.warning(
-                "武器装备提取请求被拒绝: 字段解析结果未清空 architectureId=%s field_index=%s fieldName=%s",
-                architecture_id,
-                field_index,
-                field.get("fieldName"),
-            )
-            return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
-        if field.get("fieldType") == "TABLE":
-            for row_index, row in enumerate(field.get("tableFieldList") or []):
-                if isinstance(row, list):
-                    for cell_index, cell in enumerate(row):
-                        if isinstance(cell, dict) and (cell.get("analyseData") or cell.get("analyseDataSource")):
-                            logger.warning(
-                                "武器装备提取请求被拒绝: 表格单元格解析结果未清空 architectureId=%s field_index=%s fieldName=%s row_index=%s cell_index=%s cellFieldName=%s",
-                                architecture_id,
-                                field_index,
-                                field.get("fieldName"),
-                                row_index,
-                                cell_index,
-                                cell.get("fieldName"),
-                            )
-                            return jsonify({"error": "analyseData和analyseDataSource必须清空"}), 400
-
-    architecture_id_str = str(architecture_id)
-    existing_task = task_service.get_task("weaponry", architecture_id_str)
-    if existing_task and existing_task["status"] in {"0", "1"}:
-        logger.warning(
-            "武器装备提取请求被拒绝: 任务正在处理中 architectureId=%s status=%s",
-            architecture_id,
-            existing_task["status"],
+        return _weaponry_http_response(presenter.present_conflict())
+    except Exception:
+        logger.exception(
+            "武器装备提取受理失败: architecture_id=%s trace_id=%s",
+            parsed_request.architecture_id,
+            trace_id,
         )
-        return jsonify({"error": "任务正在处理中"}), 409
+        raise
 
-    task = task_service.create_weaponry_task(
-        architecture_id=architecture_id,
-        request_payload=payload,
-        selected_documents=tuple(
-            document.to_task_snapshot()
-            for document in selected_documents
-        ),
+    logger.info(
+        "武器装备提取请求已可靠受理: architecture_id=%s task_id=%s "
+        "document_count=%d field_count=%d trace_id=%s",
+        parsed_request.architecture_id,
+        result.task_id.value,
+        len(document_scope.documents),
+        len(parsed_request.fields),
+        trace_id,
     )
-    progress_hub.publish(
-        "weaponry",
-        architecture_id_str,
-        {"businessType": "weaponry", "data": {"architectureId": architecture_id_str, "progress": 0.0}},
-    )
-
-    worker = threading.Thread(
-        target=run_weaponry_task,
-        kwargs={
-            "task_service": task_service,
-            "kb_service": kb_service,
-            "progress_hub": progress_hub,
-            "request_payload": payload,
-            # 仅作为进程内工作线程的不可变输入；可靠队列恢复时会按 execution_id 从
-            # 任务库读取同一份内部快照。该参数不会进入对外 HTTP 契约。
-            "selected_documents": selected_documents,
-            "execution_id": task["execution_id"],
-            "callback_url": llm_config.callback_url or "",
-            "callback_timeout": llm_config.callback_timeout,
-        },
-        daemon=True,
-    )
-    worker.start()
-    logger.info("已启动后台武器装备提取线程: architectureId=%s", architecture_id)
-    return jsonify({"message": "accepted", "businessType": "weaponry", "task": task}), 202
+    return _weaponry_http_response(presenter.present_success())
 
 
 @llm_bp.post("/llm/check-task")
@@ -801,7 +660,8 @@ def llm_check_task():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    items = []
+    missing_count = 0
+    callback_replayed_count = 0
     for index, params in enumerate(params_list):
         if business_type == "file":
             business_key = params.get("fileName")
@@ -811,9 +671,7 @@ def llm_check_task():
                     index,
                 )
                 return jsonify({"error": "fileName不能为空"}), 400
-            response_key = "fileName"
             normalized_key = business_key.strip()
-            response_value: Any = normalized_key
         elif business_type == "weaponry":
             architecture_id = params.get("architectureId")
             if architecture_id is None:
@@ -822,9 +680,19 @@ def llm_check_task():
                     index,
                 )
                 return jsonify({"error": "architectureId不能为空"}), 400
-            response_key = "architectureId"
-            normalized_key = str(architecture_id)
-            response_value = architecture_id
+            try:
+                normalized_architecture_id = normalize_architecture_id(
+                    architecture_id
+                )
+            except ArchitectureIdValidationError as exc:
+                logger.warning(
+                    "任务查询请求被拒绝: architectureId格式无效 index=%s "
+                    "architecture_id_type=%s",
+                    index,
+                    type(architecture_id).__name__,
+                )
+                return jsonify({"error": str(exc)}), 400
+            normalized_key = normalized_architecture_id.business_key
         else:
             report_id = params.get("reportId")
             if report_id is None:
@@ -833,9 +701,17 @@ def llm_check_task():
                     index,
                 )
                 return jsonify({"error": "reportId不能为空"}), 400
-            response_key = "reportId"
-            normalized_key = str(report_id)
-            response_value = int(normalized_key)
+            try:
+                normalized_report_id = normalize_report_id(report_id)
+            except ReportIdValidationError as exc:
+                logger.warning(
+                    "任务查询请求被拒绝: reportId格式无效 index=%s "
+                    "report_id_type=%s",
+                    index,
+                    type(report_id).__name__,
+                )
+                return jsonify({"error": str(exc)}), 400
+            normalized_key = normalized_report_id.business_key
 
         task = task_service.get_task(business_type, normalized_key)
         if not task:
@@ -852,229 +728,215 @@ def llm_check_task():
                 normalized_key,
                 index,
             )
-            items.append({response_key: response_value, "exists": False, "message": "任务不存在"})
+            # 批量缺失项不终止其余项的回调恢复；成功体不再公开占位任务快照。
+            missing_count += 1
             continue
 
-        replayed = task_service.replay_callback_if_needed(
-            business_type,
-            normalized_key,
-            callback_url=llm_config.callback_url or "",
-            timeout=llm_config.callback_timeout,
-        )
-        task = task_service.get_task(business_type, normalized_key)
-        assert task is not None
+        if business_type == "report":
+            # 甲方规定 check-task 必须在本次请求内触发报告回调恢复。报告链路不能再走
+            # 遗留直发方法，而是与正常 Worker 共用 execution 级 latest-wins、Guard 和
+            # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
+            replayed = services.report_callback_recovery.execute(
+                ReportId.from_public_value(normalized_report_id.value)
+            )
+        elif business_type == "weaponry":
+            weaponry_services = services.weaponry_services
+            if weaponry_services is None:
+                raise RuntimeError("应用容器未装配武器谱运行链")
+            replayed = weaponry_services.callback_recovery.execute(
+                normalized_architecture_id.value
+            )
+        else:
+            replayed = task_service.replay_callback_if_needed(
+                business_type,
+                normalized_key,
+                callback_url=llm_config.callback_url or "",
+                timeout=llm_config.callback_timeout,
+            )
+        # 保持原有“恢复后重读”的一致性门禁，但不再把内部状态投影到 HTTP 响应。
+        refreshed_task = task_service.get_task(business_type, normalized_key)
+        if refreshed_task is None:
+            logger.error(
+                "任务回调恢复后重新读取失败: businessType=%s businessKey=%s index=%s",
+                business_type,
+                normalized_key,
+                index,
+            )
+            raise RuntimeError("任务回调恢复后不存在")
+        if replayed:
+            callback_replayed_count += 1
 
-        items.append(
-            {
-                response_key: response_value,
-                "status": task["status"],
-                "progress": task["progress"],
-                "callbackStatus": task["callback_status"],
-                "callbackReplayed": replayed,
-            }
-        )
-
-    if len(items) == 1:
-        item = items[0]
-        callback_replayed = bool(item.pop("callbackReplayed", False))
-        return jsonify({"businessType": business_type, "data": item, "callbackReplayed": callback_replayed})
-    return jsonify({"businessType": business_type, "data": items})
+    logger.info(
+        "任务检查与必要回调恢复已完成: businessType=%s requested_count=%d "
+        "missing_count=%d callback_replayed_count=%d status_code=200",
+        business_type,
+        len(params_list),
+        missing_count,
+        callback_replayed_count,
+    )
+    # 公开接口只承诺检查已完成；任务状态、进度、Callback 细节继续留在内部存储。
+    return _empty_http_response(200)
 
 
 @llm_bp.post("/llm/reassign")
 def llm_reassign():
+    """执行冻结同步契约下的 Parser → Application → Presenter 薄路由。"""
+
     services = _services()
-    kb_service = services.kb_service
-    anythingllm_config = services.anythingllm_config
-    payload = request.get_json(silent=True) or {}
-    logger.info("收到文档分类变更请求: payload_keys=%s", list(payload.keys()))
-
-    if payload.get("businessType") != "reassign":
-        logger.warning(
-            "文档分类变更请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为reassign"}), 400
-
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        logger.warning(
-            "文档分类变更请求被拒绝: params无效 params_type=%s",
-            type(params).__name__,
-        )
-        return jsonify({"error": "params不能为空"}), 400
-
-    file_name = params.get("fileName")
-    if not isinstance(file_name, str) or not file_name.strip():
-        logger.warning("文档分类变更请求被拒绝: fileName为空")
-        return jsonify({"error": "fileName不能为空"}), 400
-    file_name = file_name.strip()
-
-    old_architecture_id = params.get("oldArchitectureId")
-    if old_architecture_id is None:
-        logger.warning(
-            "文档分类变更请求被拒绝: oldArchitectureId为空 fileName=%s",
-            file_name,
-        )
-        return jsonify({"error": "oldArchitectureId不能为空"}), 400
-
-    new_architecture_id = params.get("newArchitectureId")
-    if new_architecture_id is None:
-        logger.warning(
-            "文档分类变更请求被拒绝: newArchitectureId为空 fileName=%s oldArchitectureId=%s",
-            file_name,
-            old_architecture_id,
-        )
-        return jsonify({"error": "newArchitectureId不能为空"}), 400
-
-    if old_architecture_id == new_architecture_id:
-        logger.warning(
-            "文档分类变更请求被拒绝: 新旧分类相同 fileName=%s architectureId=%s",
-            file_name,
-            old_architecture_id,
-        )
-        return jsonify({"error": "oldArchitectureId与newArchitectureId不能相同"}), 400
-
-    doc_record = kb_service.get_document_record(
-        file_name,
-        architecture_id=int(old_architecture_id),
+    presenter = ReassignResponsePresenter()
+    raw_payload = request.get_json(silent=True)
+    logger.info(
+        "收到文档分类变更请求: payload_type=%s",
+        type(raw_payload).__name__,
     )
-    if not doc_record:
-        logger.warning(
-            "文档分类变更失败: 文档记录不存在 fileName=%s oldArchitectureId=%s newArchitectureId=%s",
-            file_name,
-            old_architecture_id,
-            new_architecture_id,
-        )
-        return jsonify({
-            "businessType": "reassign",
-            "msg": "变更失败",
-            "data": {
-                "fileName": file_name,
-                "oldArchitectureId": old_architecture_id,
-                "newArchitectureId": new_architecture_id,
-                "success": False,
-                "message": "文档记录不存在"
-            }
-        }), 500
-
-    actual_old_id = doc_record["architecture_id"]
-    if str(actual_old_id) != str(old_architecture_id):
-        logger.warning(
-            "变更分类请求与现有记录不一致: 记录中 architecture_id=%s, 请求 oldArchitectureId=%s",
-            actual_old_id, old_architecture_id
-        )
-        return jsonify({
-            "businessType": "reassign",
-            "msg": "变更失败",
-            "data": {
-                "fileName": file_name,
-                "oldArchitectureId": old_architecture_id,
-                "newArchitectureId": new_architecture_id,
-                "success": False,
-                "message": "分类不一致，变更失败"
-            }
-        }), 500
-
-    client = AnythingLLMClient(anythingllm_config)
-    doc_path = doc_record.get("doc_path")
-
     try:
-        if doc_path:
-            old_workspace_slug = kb_service.get_workspace_slug(int(actual_old_id))
-            if old_workspace_slug:
-                client.update_embeddings_batch(old_workspace_slug, deletes=[doc_path], user_id=1)
-
-            new_workspace_slug = kb_service.get_workspace_slug(new_architecture_id)
-            if not new_workspace_slug:
-                workspace_name = f"architectureId-{new_architecture_id}"
-                ws_info = client.create_rag_workspace(workspace_name, user_id=1)
-                if ws_info and ws_info.get("slug"):
-                    new_workspace_slug = ws_info["slug"]
-                    kb_service.add_workspace(new_architecture_id, new_workspace_slug)
-
-            if new_workspace_slug:
-                metadata = {"file_name": file_name, "architecture_id": new_architecture_id}
-                client.update_embeddings(doc_path, new_workspace_slug, user_id=1, metadata=metadata)
-    except Exception as e:
-        logger.error(
-            "调整文档知识库关联失败: file_name=%s error_type=%s",
-            file_name,
-            type(e).__name__,
+        parsed_request = parse_reassign_request(raw_payload)
+    except ReassignRequestValidationError as exc:
+        logger.warning(
+            "文档分类变更请求被拒绝: validation_error=%s payload_type=%s",
+            str(exc),
+            type(raw_payload).__name__,
         )
-        return jsonify({
-            "businessType": "reassign",
-            "msg": "变更失败",
-            "data": {
-                "fileName": file_name,
-                "oldArchitectureId": old_architecture_id,
-                "newArchitectureId": new_architecture_id,
-                "success": False,
-                "message": f"处理知识库节点映射报错: {str(e)}"
-            }
-        }), 500
+        return _reassign_http_response(presenter.present_bad_request(str(exc)))
 
-    kb_service.update_document_architecture(
-        file_name,
-        new_architecture_id,
-        current_architecture_id=int(old_architecture_id),
+    reassign_services = services.reassign_services
+    if reassign_services is None:
+        # 参数校验属于公开契约，必须优先返回既有 400；只有合法请求才要求运行链已完成装配。
+        # 绝不以旧的蓝图直连编排作为兜底，避免静默绕过持久化意图、fencing 与补偿状态机。
+        raise RuntimeError("应用容器未装配分类节点变更运行链")
+
+    result = reassign_services.document_reassignment.execute(
+        parsed_request.command
     )
-
-    return jsonify({
-        "businessType": "reassign",
-        "msg": "变更成功",
-        "data": {
-            "fileName": file_name,
-            "oldArchitectureId": old_architecture_id,
-            "newArchitectureId": new_architecture_id,
-            "success": True,
-            "message": "变更成功"
-        }
-    }), 200
+    logger.info(
+        "文档分类变更同步 Saga 已结束: result_category=%s",
+        result.category.value,
+    )
+    return _reassign_http_response(
+        presenter.present_result(
+            file_name=parsed_request.file_name,
+            old_architecture_id=parsed_request.old_architecture_id,
+            new_architecture_id=parsed_request.new_architecture_id,
+            result=result,
+        )
+    )
 
 
 @sock.route("/llm/progress")
 def llm_progress(ws):
     services = _services()
-    progress_hub = services.progress_hub
-    subscriptions: dict[tuple[str, str], Any] = {}
+    subscription_service = services.progress_subscription_service
+    presenter = ProgressWebSocketPresenter()
+    registry = ProgressConnectionRegistry(
+        connection_id=f"progress-{uuid4().hex}",
+    )
+    logger.info(
+        "Progress WebSocket 连接已建立: connection_id=%s",
+        registry.connection_id,
+    )
+
+    def _send(message: dict[str, Any]) -> None:
+        """本路由线程是当前连接唯一 WebSocket 写入者。"""
+
+        ws.send(presenter.serialize(message))
+
+    def _flush_notifications() -> None:
+        """从连接有界缓冲取出通知；业务发布线程绝不执行网络 I/O。"""
+
+        for snapshot in registry.delivery.drain():
+            _send(presenter.present_snapshot(snapshot))
+
     try:
         while True:
-            raw_message = ws.receive()
+            # ``simple-websocket`` 的超时返回 None；连接仍处于 connected 时继续轮询，
+            # 让同一线程能够在没有新客户端帧时发送后台任务产生的进度通知。
+            _flush_notifications()
+            raw_message = ws.receive(timeout=_PROGRESS_RECEIVE_POLL_SECONDS)
             if raw_message is None:
+                if bool(getattr(ws, "connected", False)):
+                    continue
                 break
 
             try:
                 payload = json.loads(raw_message)
-            except json.JSONDecodeError:
-                logger.warning("进度订阅消息被拒绝: 非法JSON")
-                ws.send(json.dumps({"type": "error", "message": "订阅消息不是合法JSON"}, ensure_ascii=False))
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                logger.warning(
+                    "Progress 订阅消息被拒绝: connection_id=%s reason=invalid_json",
+                    registry.connection_id,
+                )
+                _send(presenter.present_error("订阅消息不是合法JSON"))
                 continue
 
             try:
-                command = _parse_progress_command(payload)
-            except ValueError as exc:
+                request_model = parse_progress_subscription(payload)
+            except ProgressRequestValidationError as exc:
                 logger.warning(
-                    "进度订阅消息被拒绝: error_type=%s payload_keys=%s",
+                    "Progress 订阅消息被拒绝: connection_id=%s error_type=%s "
+                    "payload_keys=%s",
+                    registry.connection_id,
                     type(exc).__name__,
                     list(payload.keys()) if isinstance(payload, dict) else "n/a",
                 )
-                ws.send(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
+                _send(presenter.present_error(str(exc)))
                 continue
 
-            def _send_message(message: Dict[str, Any]) -> None:
-                ws.send(json.dumps(message, ensure_ascii=False))
+            try:
+                result = subscription_service.subscribe(
+                    request_model,
+                    delivery=registry.delivery,
+                    existing_subscriptions=registry.subscriptions,
+                    connection_id=registry.connection_id,
+                )
+            except ProgressSubscriptionRollbackError as exc:
+                # 应用服务已经尽力补偿；未释放令牌必须进入连接 Registry，finally
+                # 才能再次重试，而不是仅记录异常后遗失。
+                registry.retain(exc.failed_subscriptions)
+                raise
 
-            _handle_progress_command(
-                _send_message,
-                subscriptions,
-                command,
-                emit_ack="action" in payload,
-                services=services,
+            try:
+                # 必须在首条网络写入前登记令牌；若 send 失败，finally 仍能释放。
+                registry.register_result(result)
+                for item in result.current_items:
+                    _send(presenter.present_current(item))
+                result.complete_initial_delivery()
+            except Exception:
+                if registry.delivery.buffering_initial_batch:
+                    try:
+                        result.abort_initial_delivery()
+                    except Exception:
+                        logger.exception(
+                            "Progress 初始快照屏障撤销失败: connection_id=%s",
+                            registry.connection_id,
+                        )
+                raise
+
+            logger.info(
+                "Progress 订阅消息处理完成: connection_id=%s business_type=%s "
+                "key_count=%s active_subscription_count=%s",
+                registry.connection_id,
+                request_model.business_type,
+                len(request_model.ordered_keys),
+                registry.active_count,
             )
+            _flush_notifications()
     finally:
-        for (business_type, business_key), callback in list(subscriptions.items()):
-            progress_hub.unsubscribe(business_type, business_key, callback)
+        remaining = registry.close_and_release(
+            subscription_service,
+            max_attempts=_PROGRESS_RELEASE_ATTEMPTS,
+        )
+        if remaining:
+            logger.error(
+                "Progress WebSocket 关闭后仍有订阅释放失败: connection_id=%s "
+                "remaining_count=%s subscription_ids=%s",
+                registry.connection_id,
+                len(remaining),
+                ",".join(item.subscription_id for item in remaining),
+            )
+        logger.info(
+            "Progress WebSocket 连接已关闭: connection_id=%s remaining_count=%s",
+            registry.connection_id,
+            len(remaining),
+        )
 
 
 # ══════════════════════════════════════════════════════════════

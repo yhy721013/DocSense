@@ -1,5 +1,12 @@
 # AnythingLLM 低耦合与文件解析改造总计划
 
+> 契约更新提示（2026-07-15）：本文 13.3 节记录的是该专项形成时的兼容基线。后续阶段 0 已批准 analysis/report/weaponry 成功受理改为 HTTP 202 空响应体、check-task 成功改为 HTTP 200 空响应体、report 活动任务返回 409、check-task/Progress 严格校验 `params` 元素，以及 Progress 显式 action 改为 error 后保持连接且无 ack；以 `docs/接口文档/` 和 `260715-阶段0契约容量与基础设施决策清单.md` 为准，请勿按旧行为恢复已批准删除的协议。
+
+> 实施顺序最终更新（2026-07-17）：甲方规定 check-task 必须保留请求内同步回调恢复，
+> 因此取代 2026-07-16 的“阶段 6 异步替换”方案。报告类型已通过 report 模块应用服务与
+> 正常 Worker 共用 latest-wins、lease/fencing 和 Callback Guard；未来 MySQL Outbox +
+> RabbitMQ + callback Worker 只增加后台可靠兜底，不改变同步返回时点或任何接口参数。
+
 **日期：** 2026-07-03
 
 **适用仓库：** DocSense
@@ -1480,9 +1487,8 @@ anythingllm.session.cleanup
 ### 13.3 API兼容
 
 - `/llm/analysis` 请求/回调结构不变；
-- `/llm/check-task`、`/llm/progress` 不变；
-- `/llm/check-task` 的 `callbackStatus` 增加 `skipped` 值表示未配置回调；字段结构不变，调用方
-  应把该值视为终态而不是失败或待重试；
+- （本专项完成时的历史基线）`/llm/check-task`、`/llm/progress` 当时保持不变；后续阶段 0 已批准 check-task 成功响应改为空体、严格拒绝含非对象 params 元素的整次请求/消息，并将 Progress 显式 action 改为 error 后保持连接且无 ack。Progress 已在波次 1B 切换；2026-07-17 最终确认 check-task 永久保留请求内同步恢复，未来可靠队列只作后台兜底，并与同步入口共用同一 Guard。
+- `callbackStatus=skipped` 仍是内部回调事实，用于表示未配置回调；check-task 成功空响应实施后不再通过该接口公开，内部恢复与审计规则保持。
 - 失败状态仍按现有业务协议返回，但 message 应包含明确阶段；
 - 审计失败使用文件任务失败状态，不新增甲方协议状态码；失败 message 明确包含 `stage=audit`，且不得发送成功回调；
 - `architectureId=1` 仍支持，仅禁止“缺字段自动变 1”。

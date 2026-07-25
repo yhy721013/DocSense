@@ -7,6 +7,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()  # 加载 .env 文件到环境变量，但不覆盖已显式传入的值
 
+from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.services.core.settings import (
     LLM_DOWNLOAD_DIR,
     LLM_TASK_DB_PATH,
@@ -209,10 +210,15 @@ class AnalysisClassificationConfig:
 
 
 CHAT_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
+REPORT_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
 
 
 class ChatInfrastructureConfigurationError(RuntimeError):
     """文件对话部署模式与已安装基础设施能力不匹配时抛出。"""
+
+
+class ReportInfrastructureConfigurationError(RuntimeError):
+    """报告调度或资源恢复配置不满足当前单实例安全边界时抛出。"""
 
 
 @dataclass(frozen=True)
@@ -239,6 +245,101 @@ class ChatInfrastructureConfig:
     def single_instance(cls) -> "ChatInfrastructureConfig":
         """创建不依赖环境变量的单实例配置，供显式注入的离线测试使用。"""
         return cls(runtime_mode=CHAT_RUNTIME_MODE_SINGLE_INSTANCE)
+
+
+@dataclass(frozen=True)
+class ReportInfrastructureConfig:
+    """阶段 1C 报告本地调度器与资源恢复的内部配置。
+
+    当前 Dispatcher 依赖 SQLite 作为持久积压事实，并使用一条报告执行线程、两条隔离
+    维护线程和 ``threading.Event`` 常量空间唤醒，因此只允许 ``single_instance``。
+    报告生成继续沿用 ``ANYTHINGLLM_TIMEOUT``；``cleanup_http_timeout_seconds`` 仅用于
+    幂等 DELETE 清理租约，必须是有限值，才能在 Worker 失联后安全判断租约是否过期。
+    """
+
+    runtime_mode: str = REPORT_RUNTIME_MODE_SINGLE_INSTANCE
+    scan_interval_seconds: float = 1.0
+    accepted_batch_size: int = 50
+    dispatch_failure_retry_seconds: float = 30.0
+    resource_sweep_interval_seconds: float = 30.0
+    resource_sweep_limit: int = 50
+    running_sample_limit: int = 20
+    stop_timeout_seconds: float = 5.0
+    cleanup_http_timeout_seconds: float = 60.0
+    cleanup_lease_seconds: float = 130.0
+    max_download_bytes: int = 512 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        mode = str(self.runtime_mode or "").strip().lower()
+        if mode != REPORT_RUNTIME_MODE_SINGLE_INSTANCE:
+            raise ReportInfrastructureConfigurationError(
+                "当前仅安装 single_instance 报告调度基础设施；"
+                "多实例模式必须等待共享数据库、可靠队列和分布式租约完成"
+            )
+        object.__setattr__(self, "runtime_mode", mode)
+
+        for name in (
+            "scan_interval_seconds",
+            "dispatch_failure_retry_seconds",
+            "resource_sweep_interval_seconds",
+            "stop_timeout_seconds",
+            "cleanup_http_timeout_seconds",
+            "cleanup_lease_seconds",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ReportInfrastructureConfigurationError(
+                    f"{name} 必须是正有限数字"
+                )
+            normalized = float(value)
+            if (
+                normalized != normalized
+                or normalized in (float("inf"), float("-inf"))
+                or normalized <= 0.0
+            ):
+                raise ReportInfrastructureConfigurationError(
+                    f"{name} 必须是正有限数字"
+                )
+            object.__setattr__(self, name, normalized)
+
+        for name in (
+            "accepted_batch_size",
+            "resource_sweep_limit",
+            "running_sample_limit",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ReportInfrastructureConfigurationError(
+                    f"{name} 必须是 1~1000 的整数"
+                )
+            if value < 1 or value > 1000:
+                raise ReportInfrastructureConfigurationError(
+                    f"{name} 必须是 1~1000 的整数"
+                )
+
+        required_lease = required_http_lease_seconds(
+            self.cleanup_http_timeout_seconds
+        )
+        if self.cleanup_lease_seconds < required_lease:
+            raise ReportInfrastructureConfigurationError(
+                "cleanup_lease_seconds 必须覆盖连接、响应读取和安全余量，"
+                f"当前至少需要 {required_lease:.3f} 秒"
+            )
+        if (
+            isinstance(self.max_download_bytes, bool)
+            or not isinstance(self.max_download_bytes, int)
+            or self.max_download_bytes < 1
+            or self.max_download_bytes > 10 * 1024**4
+        ):
+            raise ReportInfrastructureConfigurationError(
+                "max_download_bytes 必须是 1 字节到 10 TiB 的整数"
+            )
+
+    @classmethod
+    def single_instance(cls) -> "ReportInfrastructureConfig":
+        """创建不读取环境变量的安全默认配置，供离线组合测试显式注入。"""
+
+        return cls(runtime_mode=REPORT_RUNTIME_MODE_SINGLE_INSTANCE)
 
 
 def _parse_timeout(raw_value: Optional[str]) -> Optional[float]:
@@ -384,3 +485,95 @@ def load_chat_infrastructure_config() -> ChatInfrastructureConfig:
         CHAT_RUNTIME_MODE_SINGLE_INSTANCE,
     )
     return ChatInfrastructureConfig(runtime_mode=raw_mode)
+
+
+def _strict_report_float(name: str, default: float) -> float:
+    """读取报告内部浮点配置；误配时拒绝启动而不是静默回退。"""
+
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ReportInfrastructureConfigurationError(
+            f"{name} 必须是正有限数字"
+        ) from exc
+
+
+def _strict_report_int(name: str, default: int) -> int:
+    """读取报告有界批量配置；布尔文本和小数均不得被宽松转换。"""
+
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ReportInfrastructureConfigurationError(
+            f"{name} 必须是 1~1000 的整数"
+        ) from exc
+
+
+def _strict_report_bytes(name: str, default: int) -> int:
+    """读取报告单文件字节上限；具体安全范围由配置对象统一校验。"""
+
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ReportInfrastructureConfigurationError(
+            f"{name} 必须是正整数字节数"
+        ) from exc
+
+
+def load_report_infrastructure_config() -> ReportInfrastructureConfig:
+    """读取并严格校验阶段 1C 报告 Dispatcher/清理恢复配置。
+
+    这些值全部是后端内部容量与租约参数，不属于甲方 HTTP/WebSocket 契约。清理
+    HTTP 超时与租约分离，避免全局 ``ANYTHINGLLM_TIMEOUT`` 为空时让幂等删除永久
+    占用恢复权；报告生成和模型查询仍继续使用原全局超时口径。
+    """
+
+    return ReportInfrastructureConfig(
+        runtime_mode=os.getenv(
+            "DOCSENSE_REPORT_RUNTIME_MODE",
+            REPORT_RUNTIME_MODE_SINGLE_INSTANCE,
+        ),
+        scan_interval_seconds=_strict_report_float(
+            "DOCSENSE_REPORT_SCAN_INTERVAL_SECONDS",
+            1.0,
+        ),
+        accepted_batch_size=_strict_report_int(
+            "DOCSENSE_REPORT_ACCEPTED_BATCH_SIZE",
+            50,
+        ),
+        dispatch_failure_retry_seconds=_strict_report_float(
+            "DOCSENSE_REPORT_DISPATCH_FAILURE_RETRY_SECONDS",
+            30.0,
+        ),
+        resource_sweep_interval_seconds=_strict_report_float(
+            "DOCSENSE_REPORT_RESOURCE_SWEEP_INTERVAL_SECONDS",
+            30.0,
+        ),
+        resource_sweep_limit=_strict_report_int(
+            "DOCSENSE_REPORT_RESOURCE_SWEEP_LIMIT",
+            50,
+        ),
+        running_sample_limit=_strict_report_int(
+            "DOCSENSE_REPORT_RUNNING_SAMPLE_LIMIT",
+            20,
+        ),
+        stop_timeout_seconds=_strict_report_float(
+            "DOCSENSE_REPORT_STOP_TIMEOUT_SECONDS",
+            5.0,
+        ),
+        cleanup_http_timeout_seconds=_strict_report_float(
+            "DOCSENSE_REPORT_CLEANUP_HTTP_TIMEOUT_SECONDS",
+            60.0,
+        ),
+        cleanup_lease_seconds=_strict_report_float(
+            "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS",
+            130.0,
+        ),
+        max_download_bytes=_strict_report_bytes(
+            "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES",
+            512 * 1024 * 1024,
+        ),
+    )

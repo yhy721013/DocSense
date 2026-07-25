@@ -14,19 +14,66 @@
 | `260523-对话历史文件原名支持.md` | 历史消息中文件原名支持说明。 |
 | `260603-AnythingLLM并发过载问题修复.md` | AnythingLLM 并发问题的修复记录。 |
 | `260705-文件对话新增接口实现计划.md` | 新增标题/中断等接口的实现计划。 |
-| `260707-文件对话功能改造计划.md` | 阶段 1～12 的主改造计划、冻结契约和未来基础设施边界。 |
+| `260715-阶段1A-1接口契约基线执行记录.md` | check-task/Progress 当前与目标契约分层、离线测试结果，以及已确认的严格 params/action 错误连接策略。 |
+| `260715-阶段1A-2模块骨架与架构边界执行记录.md` | tasks/Flask Adapter 包骨架、AST 导入门禁、规则自证、完整回归结果与 1A-3 后续边界。 |
+| `260716-阶段1A-3内部任务契约执行记录.md` | 不可变 Task/Progress DTO、三类 Port、两个应用服务、Fake 契约测试、波次 1A 门禁与完整回归。 |
+| `260716-阶段0与1A审查修正记录.md` | WebSocket/SQLite 基线工具修正、回调持久化一致性、连接有界缓冲、正向架构白名单、latest-wins TASK-09，以及当时的 TASK-10 异步方案；该方案已被 2026-07-17 的甲方同步保留口径取代。 |
+| `260716-阶段1B-1可靠恢复命令边界执行记录.md` | check-task 共享请求 DTO、批量原子可靠命令 Port/Application、空响应 Presenter、活动命令复用、Fake 故障测试和未切生产边界。 |
+| `260716-阶段1B-2Progress控制面迁移执行记录.md` | `/llm/progress` 无 action 契约切换、类型化应用服务、线程安全 Hub/Adapter、连接级有界缓冲与单写入；并记录全面审查后的同任务 sequence 水位、reportId 统一入站规范化、Barrier 50 线程纠偏与扩大回归。 |
+| `260716-阶段1C-0与1C-1报告契约及领域层执行记录.md` | report 当前/目标双基线、不可变 Domain/DTO、HTML/回调/名称纯规则、三项已确认严格 HTTP 400 入站校验、遗留兼容转发、完整离线验证及尚未切换生产执行链的边界。 |
+| `260716-阶段1C-2报告应用端口与严格Fake执行记录.md` | Task Command/Progress 与 Report File/Artifact/RAG/Audit/Callback/Dispatcher Port、Submit/Run 无框架 Application、严格 Fake、故障矩阵、完整回归和生产未切换边界。 |
+| `260716-阶段1C-3SQLite任务事实与原子受理执行记录.md` | 追加式 execution、Callback Guard 表、SQLite 原子受理/领取/expected TaskId 条件写、report Codec、50 线程 Barrier、事务回滚和生产路由未切换边界。 |
+| `260716-阶段1C全面审查修复与并发补强执行记录.md` | 1C-0～1C-3 全面审查后的 128 位 reportId、可选文本兼容、完整 RAG trace、结果投影隔离、stale 收敛、Callback Guard latest/fencing/HTTP 分类、226 项回归和生产未切换边界。 |
+| `260716-阶段1C-4报告生产IO与审计Adapter执行记录.md` | 任务级 Artifact、执行时文件处理、多文档 AnythingLLM RAG、审计 Schema v3、原子审计门禁、组合故障注入、扩大回归和生产未切换边界。 |
+| `260716-阶段1C-5Callback Guard与资源恢复闭环执行记录.md` | Callback Guard 人工解除追加审计、精确 HTTP outcome、终态权威 Artifact 所有权、CAS cleanup/quarantine 恢复、并发/崩溃故障测试、825 项安全回归和生产未切换边界。 |
+| `260716-阶段1C第二轮全面审查风险修复执行记录.md` | 1C-0～1C-5 第二轮审查后的发送前权威复核、即时 409、Artifact 完整性、AnythingLLM 未知副作用隔离、逐事件清理恢复、有界扫描、836 项安全回归及后续硬门禁。 |
+| `260717-阶段1C-6Dispatcher组合根与路由切换执行记录.md` | SQLite accepted 持久积压、Event 常量空间唤醒的报告执行 Worker、启动/周期资源恢复、60/90 秒清理边界、组合根生命周期、报告 202/409 薄路由切换、Progress 原子 latest Guard 及生产未部署边界。 |
+| `260717-阶段1C-6全面审查风险修复执行记录.md` | 1C-6 全面审查后的真实关闭语义、许可等待停机取消、稳定 FIFO、毒任务/坏资源冷却、隔离维护线程、按键 Progress 锁、跨进程单实例门禁、测试离线隔离和 871 项安全回归。 |
+| `260717-阶段1C-7阶段关闭验收执行记录.md` | 阶段 1C 最终契约/并发/故障/架构验收、遗留 Report Worker 三类引用证据、永久 AST 隔离门禁、358 项定向及 872 项安全回归，以及阶段 2～6 输入清单。 |
+| `260717-阶段1C全面审查问题修复与同步回调加固执行记录.md` | 阶段关闭后全面审查修复：同步 check-task 与主链共用 Callback Guard、过期扫描、严格 2xx、下载/审计/资源/Dispatcher 补强、验证结果及生产边界。 |
+| `260718-阶段1D-0契约资产与Evidence校准执行记录.md` | 阶段 1D-0 的契约、黄金资产、只读分数校准和生产阈值停止门禁。 |
+| `260718-阶段1D-0R检索质量修复执行记录.md` | 纠正两项校准地面真值，落地专用 Query、MHTML/Chunk 去噪、额外信号 Selection，并完成随机临时资源的真实嵌入、复校准、补偿清理和生产停止门禁。 |
+| `260718-阶段1D-1武器谱领域模型与纯规则执行记录.md` | weaponry 四层骨架、深冻结 DTO、Query/Candidate/Selected Evidence/Prompt 类型隔离、来源/TABLE/Callback 纯规则、模式 1 删除、遗留模式 2 兼容转发、969 项安全回归及生产未切换边界。 |
+| `260718-阶段1D-2请求适配文档范围与任务Codec执行记录.md` | 未绑定路由的请求 Parser/Presenter、只读 Document Scope Port/Adapter/严格 Fake、不可变 execution 输入、Schema v1 Codec、原子受理、50 同键/不同键隔离、1002 项安全回归及生产未切换边界。 |
+| `260718-阶段1D全面审查问题修复执行记录.md` | Evidence 全量保留、TABLE 强行身份、完整 Schema v1、ArchitectureId 单一规范化、成功终态 CAS 前完整性、接口/计划同步及 1014 项安全回归。 |
+| `260718-阶段1D-3A供应商无关端口与严格Fake执行记录.md` | Retrieval/Extraction/Auxiliary/Translation/Audit/Callback/Resource/Dispatcher 供应商无关 Port、稳定调用身份、严格故障 Fake、50 线程结构隔离、190 项定向和 1034 项安全回归。 |
+| `260718-阶段1D-3B生产IO适配与Schema-v2执行记录.md` | 唯一 Schema v2、score/rank Selection、任务级 AnythingLLM Retrieval、Provided-Evidence Extraction、可拔除术语、Translation、SQLite Audit/Resource、创建后登记补偿、结果未知、50 任务隔离及生产未切换边界。 |
+| `260718-阶段1D-4应用用例与严格Fake执行记录.md` | 原子 Submit、只按 TaskId 的 Run、字段/来源编排、expected TaskId 单终态、资源现场保护、严格 Task/Progress Fake、INPUT/TABLE/失败黄金 Callback、50 个在途任务及慢 I/O 隔离、1086 项安全回归与生产未切换边界。 |
+| `260719-阶段1D-4全面审查问题修复执行记录.md` | 1D-4 完成后的 Query 隐藏限制、精确“未找到”哨兵、Audit 三态防重放、清理意图先行、终态 tracking 恢复、AnythingLLM 409 unknown、文档身份一致性补强，183+40 项定向及 1095 项安全全仓回归。 |
+| `260719-阶段1D-5通用Dispatcher配置与离线组合根执行记录.md` | 业务无关持久扫描 Dispatcher/进程锁、Report 薄包装、Weaponry 单执行 Worker、严格配置、固定策略、隔离维护线程、内部错误分类、离线组合根、203+40 项定向及 1116 项安全全仓回归。 |
+| `260719-阶段1D-6CallbackGuard资源恢复与公开路由切换执行记录.md` | Weaponry 真实 Callback Guard、同步 check-task 恢复、资源有界恢复、生产组合根、公开 202 空体薄路由、50 并发、215+40 项定向和 1130 项安全全仓回归；真实 AnythingLLM 运行门禁因环境不可用待补测。 |
+| `260720-阶段1D-7前直接阻塞项修复执行记录.md` | 只处理 1D-7 直接前置：持久 Creation Intent 与崩溃隔离、HTTP 租约预算、readiness/production attestation 门禁、降级诊断、缺失 execution 资源隔离；file 运行时未改，仅同步 1F/1H 计划。 |
+| `260720-阶段1D-7关闭验收执行记录.md` | 阶段 1D 的开发分支代码与离线关闭验收：永久 AST/配置门禁、I01～I07 证据、遗留 Worker 与 Terms 三类引用清单、完整安全回归，以及真实 AnythingLLM 生产证明仍待实机补齐的边界。 |
+| `260720-阶段1D全面审查修复与真实门禁补强执行记录.md` | 1D 关闭后全面审查修复：真实 Source URL/入库文件身份、FIFO 共享限流、Schema v2 有时效证明、生产 fail-fast、Callback/资源人工处置审计、真实只读 8/8 验证及 1165 项安全回归。 |
+| `260722-武器谱创建意图恢复竞态修复执行记录.md` | 修复 `/llm/weaponry` 活跃 Worker 与创建意图维护器竞态：运行实例归属、恢复 claim/租约/fencing、旧 SQLite 表原位迁移、回归证据与多实例剩余边界。 |
+| `260723-武器谱AnythingLLM删除400幂等清理修复执行记录.md` | 修复 AnythingLLM 对缺失 workspace 返回 400 导致资源长期 `cleanup_pending`：仅在完整清单确认精确 slug 不存在时幂等成功，并覆盖任务内关闭、后台恢复、查回失败和既有重试边界。 |
+| `260724-阶段1E-0分类节点变更契约与故障资产执行记录.md` | 阶段 1E-0 的 `/llm/reassign` 当前/已批准目标双基线、400/500/200 黄金样例、显式 `false`/缺 slug/CAS 0 行/补偿失败矩阵、离线预算及安全全仓回归；未切换生产路由或修改接口文档。 |
+| `260724-阶段1E-1分类节点变更领域模型与纯规则执行记录.md` | 阶段 1E-1 的 `reassign` 四层骨架、原始 ID 深冻结、Operation/Step 状态机、步骤幂等键、补偿决策、错误分类、架构门禁和 1,208 项安全离线回归；未定义 Port/Schema/Adapter 或切换公开路由。 |
+| `260724-阶段1E-1R分类节点变更领域一致性修正执行记录.md` | 1E-1 全面审查后的终态证据、目标绑定一致性、独立补偿 Step、UTC lease、诊断字段上限、稳定公开 message、远端异常脱敏和契约资产补强；经确认修改接口文档文案，不增删字段或状态码。 |
+| `260724-阶段1E-2分类节点变更Port严格Fake与SQLite事实执行记录.md` | 阶段 1E-2 的 Repository/UoW/Knowledge Port、严格 Fake、SQLite Operation/Step/Event、活动文档部分唯一索引、lease/fencing、条件 CAS、追加审计、50 并发和故障注入验收；未接入 AnythingLLM、Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-2R分类节点变更持久化一致性修正执行记录.md` | 1E-2 全面审查后的恢复 fencing、终态/成功事实门禁、Step 探测一致性、只读稳定游标扫描、恢复审计、Fake/SQLite 线程事务边界、workspace 查回和既有 Schema/索引升级修正；165 项联合回归通过，未修改接口文档。 |
+| `260724-阶段1E-3分类节点变更AnythingLLM适配与目标准备执行记录.md` | 阶段 1E-3 的请求级 AnythingLLM Client Factory、有限 HTTP/总预算/补偿预留、单调 deadline、目标 workspace 精确查回/创建、完整 doc_path 探测、解绑/挂载/Pin 四分类和离线验证；未接入 Application、Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-3R分类节点变更适配一致性修正执行记录.md` | 1E-3 全面审查后的步骤驱动预算、请求级 Knowledge Factory、生产步骤门禁、workspace 三态归属、模糊 4xx 查回、双异常日志脱敏及 SQLite/Fake 加法兼容修正；未修改接口文档。 |
+| `260724-阶段1E-4分类节点变更Application成功路径执行记录.md` | 阶段 1E-4 的 Application 前向成功路径、目标 workspace 持久化准备 claim/独立 fencing、无副作用失败专用收口、条件 CAS 和 SQLite/严格 Fake 离线组合验证；未接入 Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-4R分类节点变更Application一致性修正执行记录.md` | 1E-4 全面审查后的 claim 恢复保护、远端准备事实、local-only 分流、既有 slug 查回、严格 Step DTO、reserve 异常收口、lease 预算/续租和 Pin 审计修正；156 项联合及 1,314 项安全全仓回归通过，未修改接口文档。 |
+| `260724-阶段1E-5分类节点变更补偿恢复与诊断执行记录.md` | 阶段 1E-5 的显式恢复、过期 lease/fencing 接管、恢复观测、写后检查点收敛、固定补偿顺序、SQLite 原子终态/claim 释放和默认只读诊断脚本；未接入 Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-5R分类节点变更恢复契约与运维语义修正执行记录.md` | 1E-5 全面审查后的恢复 workspace 身份绑定、接管/续租/claim 强类型校验、数据库读取失败分类和未收口恢复非零 CLI 退出码修正；未接入 Container 或公开路由，未修改接口文档。 |
+| `260724-阶段1E-6分类节点变更组合根与公开路由切换执行记录.md` | 1E-6 的生产组合根、恢复四协作器、`/llm/reassign` Parser → Application → Presenter 切换、字节级公开契约回归和永久 AST 门禁；仅同步接口文档中的非契约实现状态，不增删参数、字段、状态码或 Header，真实供应商演练与生产校准仍未完成。 |
+| `260725-阶段1E-6R分类节点变更全面审查修复执行记录.md` | 1E 全面审查后的有界同步补偿、目标 ID 有限兼容白名单、结果/message 不变量、Operation 历史外键迁移、文档删除事务门禁、单实例 fail-fast、故障矩阵消费和 1E-7 恢复实现下沉前置计划；经确认同步接口文档文案，不增删字段或状态码。 |
+| `260725-阶段1E-7分类节点变更恢复实现下沉执行记录.md` | 1E-7 将恢复实际算法下沉到 Observer、Checkpoint Reconciler、Compensator、Finalizer 独立文件，保留 Facade/导入兼容，新增协作器直测与 callback-wrapper、最小 Port、Facade 规模/复杂度 AST 门禁；未修改公开接口文档或 Operation/Step/Event Schema。 |
+| `260725-阶段1E整体审查修复执行记录.md` | 1E 整体审查后的提交确认丢失终态协调、Application 入口远端预算、事务内 lease 计时、活动状态单源与数据库等价门禁，以及数据库权威时间/可取消截止的未来计划修正；211 项 1E 回归和 1,358 项安全全仓回归通过，未修改接口文档，未处理明确排除的 Git 原子纳入事项。 |
+| `260725-main与refactor并发重构分支集成执行记录.md` | 最新 main 与 `refactor/concurrency` 在 `refactor/integration` 的实际合并记录：8 文件、22 冲突块基线、保留双父关系的 merge commit、已确认的 Analysis/check-task 空响应体及 weaponry Progress 数值 ID、127 项定向和 1,612 项安全全仓离线回归；M9 已记录 PR #79、main 漂移复核和审核交接，PR 尚未合入，下一开发阶段为合入后的 1F。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 
-## 阶段计划阅读流程
+## 与重构记录的关系
 
-1. 先以接口文档确定不可改变的公开行为。
-2. 在 `260707-文件对话功能改造计划.md` 中查看目标结构、阶段目标和实施记录。
-3. 对照每个阶段的修改文件、测试结果和风险说明，确认代码落点。
-4. 计划中涉及共享数据库、可靠队列、任务通知和多实例的内容，除非另有实施记录和部署验证，否则仅表示未来边界，不代表当前能力。
+当前有效的 AnythingLLM、文件对话、低耦合、高并发、任务隔离和可靠队列重构计划已迁移至 `docs/重构记录/`，统一索引与阅读顺序见 `docs/重构记录/README.md`。本目录继续保存已经实施的功能变更、问题修复和历史演进记录。
+
+重构计划落地后，应在本目录新增实施记录，写明实际修改文件、测试结果、发布/回滚过程和剩余风险，并回链对应的 `docs/重构记录/` 文档。
 
 ## 维护规则
 
 - 新记录应写明日期、范围、影响接口、数据迁移策略、验证命令和未解决风险。
 - 旧数据处理策略必须明确；开发阶段若允许清空旧数据，也应在记录中说明。
-- 不得以更新记录替代接口确认流程，特别是不得擅自增删 `/llm/chat*` 参数。
+- 不得以更新记录替代接口确认流程，不得擅自增删任何前后端接口参数，尤其不得改变已经冻结的 `/llm/chat*` 契约。

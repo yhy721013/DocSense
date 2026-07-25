@@ -1,0 +1,338 @@
+{
+  "schemaVersion": 3,
+  "frozenAt": "2026-07-15",
+  "updatedAt": "2026-07-25",
+  "authority": "docs/接口文档",
+  "contractState": "approved-and-implemented-in-integration-branch",
+  "reportIdInputPolicy": {
+    "acceptedJsonTypes": [
+      "integer",
+      "string"
+    ],
+    "stringFormat": "optional_sign_and_decimal_digits_after_trim",
+    "businessRange": "absolute_value_less_than_10_power_128",
+    "maxDecimalDigits": 128,
+    "digitCountIncludesLeadingZeros": true,
+    "digitCountExcludesOptionalSign": true,
+    "canonicalization": "same_integer_value_is_same_business_key",
+    "invalidHttpStatus": 400,
+    "invalidProgressBehavior": "error_message_and_keep_connection",
+    "serverOutputType": "json_number"
+  },
+  "reportGenerationBaseline": {
+    "current": {
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "activeDuplicate": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        },
+        "behavior": "reject_without_new_execution_or_wakeup"
+      },
+      "dispatch": "persistent_backlog_and_bounded_wakeup",
+      "taskStorage": "append_only_execution_and_latest_projection",
+      "progressValues": [
+        0.0,
+        0.15,
+        0.25,
+        0.35,
+        1.0
+      ],
+      "resultWriteIdentity": "expected_task_id",
+      "ragClientLifecycle": "task_scoped_transport_with_explicit_close",
+      "ragResourceCleanup": "audited_recoverable_idempotent_cleanup",
+      "mhtmlNormalizationFailure": "continue_with_original_downloaded_file",
+      "wordTemplateWithoutText": "task_failure_without_rag_call",
+      "emptyRagResult": {
+        "status": "1",
+        "details": "<div class=\"report-content\"><pre></pre></div>",
+        "message": "生成成功"
+      },
+      "paramsPolicy": {
+        "container": "non_empty_array",
+        "nonObjectElements": "reject_entire_request_http_400",
+        "topLevelNonObject": "reject_http_400",
+        "filePathListElementTypes": "non_empty_strings_or_reject_http_400",
+        "filePathListElementErrorTemplate": "filePathList中第{index}项不是有效字符串",
+        "templateDescAndRequirement": "legacy_compatible_string_conversion"
+      },
+      "validationErrors": {
+        "requestBody": "请求体必须是JSON对象",
+        "businessType": "businessType必须为report",
+        "params": "params不能为空",
+        "paramsElement": "params元素必须是对象",
+        "reportId": "reportId不能为空",
+        "reportIdType": "reportId必须是整数或整数字符串",
+        "reportIdLength": "reportId不能超过128位十进制数字",
+        "filePathList": "filePathList不能为空",
+        "templateOutline": "templateOutline不能为空"
+      },
+      "implementationWave": "1C-3_to_1C-6"
+    },
+    "target": {
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "activeDuplicate": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        }
+      },
+      "dispatch": "persistent_backlog_and_bounded_wakeup",
+      "taskStorage": "append_only_execution_and_latest_projection",
+      "resultWriteIdentity": "expected_task_id",
+      "implementationWave": "1C-3_to_1C-6"
+    }
+  },
+  "taskSubmissions": [
+    {
+      "name": "analysis",
+      "method": "POST",
+      "path": "/llm/analysis",
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "implementationStatus": "implemented",
+      "implementationWave": "1F"
+    },
+    {
+      "name": "report",
+      "method": "POST",
+      "path": "/llm/generate-report",
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "activeDuplicate": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        }
+      },
+      "implementationStatus": "implemented",
+      "implementationWave": "1C"
+    },
+    {
+      "name": "weaponry",
+      "method": "POST",
+      "path": "/llm/weaponry",
+      "success": {
+        "status": 202,
+        "body": ""
+      },
+      "implementationStatus": "implemented",
+      "implementationWave": "1D"
+    }
+  ],
+  "checkTask": {
+    "method": "POST",
+    "path": "/llm/check-task",
+    "documentedBusinessTypes": [
+      "file",
+      "report",
+      "weaponry"
+    ],
+    "currentInternalExtension": "weaponry is an approved public request contract",
+    "success": {
+      "status": 200,
+      "body": "",
+      "sideEffect": "may_recover_terminal_callback"
+    },
+    "singleMissing": {
+      "status": 404,
+      "body": {
+        "error": "任务不存在"
+      }
+    },
+    "invalidRequestStatus": 400,
+    "paramsElementPolicy": {
+      "requiredType": "object",
+      "onInvalid": "reject_entire_request",
+      "status": 400
+    },
+    "batchMissingPolicy": "continue_existing_items_and_return_empty_success",
+    "implementationStatus": "implemented",
+    "implementationWave": "1B"
+  },
+  "progress": {
+    "transport": "WebSocket",
+    "path": "/llm/progress",
+    "publicBusinessTypes": [
+      "file",
+      "report",
+      "weaponry"
+    ],
+    "requestExamples": [
+      {
+        "businessType": "file",
+        "params": [
+          {
+            "fileName": "示例资料.pdf"
+          }
+        ]
+      },
+      {
+        "businessType": "report",
+        "params": [
+          {
+            "reportId": 132
+          },
+          {
+            "reportId": "00133"
+          }
+        ]
+      },
+      {
+        "businessType": "weaponry",
+        "params": [
+          {
+            "architectureId": "00010502"
+          }
+        ]
+      }
+    ],
+    "serverMessageExamples": [
+      {
+        "businessType": "file",
+        "data": {
+          "fileName": "示例资料.pdf",
+          "progress": 0.35
+        }
+      },
+      {
+        "businessType": "report",
+        "data": {
+          "reportId": 132,
+          "progress": 1.0
+        }
+      },
+      {
+        "businessType": "weaponry",
+        "data": {
+          "architectureId": 10502,
+          "progress": 0.42
+        }
+      }
+    ],
+    "ackMessages": false,
+    "explicitActions": false,
+    "paramsElementPolicy": {
+      "requiredType": "object",
+      "onInvalid": "reject_entire_message",
+      "response": "error_message",
+      "connection": "keep_open"
+    },
+    "explicitActionPolicy": {
+      "onPresent": "reject_entire_message",
+      "response": "error_message",
+      "connection": "keep_open",
+      "ack": false
+    },
+    "closeBehavior": "release_all_connection_subscriptions",
+    "weaponryProgressStatus": "public_contract_active",
+    "implementationStatus": "implemented",
+    "implementationWave": "1B-2"
+  },
+  "callbacks": {
+    "fileFailure": {
+      "businessType": "file",
+      "data": {
+        "fileName": "示例资料.pdf",
+        "status": "3"
+      },
+      "msg": "解析失败"
+    },
+    "reportFailure": {
+      "businessType": "report",
+      "data": {
+        "reportId": 132,
+        "status": "2",
+        "details": ""
+      },
+      "msg": "生成失败"
+    },
+    "reportSuccess": {
+      "businessType": "report",
+      "data": {
+        "reportId": 132,
+        "status": "1",
+        "details": "<div>报告内容</div>"
+      },
+      "msg": "生成成功"
+    },
+    "reportEmptySuccess": {
+      "businessType": "report",
+      "data": {
+        "reportId": 132,
+        "status": "1",
+        "details": "<div class=\"report-content\"><pre></pre></div>"
+      },
+      "msg": "生成成功"
+    },
+    "weaponryFailure": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "3",
+        "architectureId": 132
+      },
+      "msg": "解析失败"
+    }
+  },
+  "chatSseFrames": [
+    {
+      "eventType": "chatInfo",
+      "data": {
+        "chatId": 10001,
+        "isNewChat": true
+      },
+      "wire": "event: chatInfo\ndata: {\"chatId\": 10001, \"isNewChat\": true}\n\n"
+    },
+    {
+      "eventType": "textChunk",
+      "data": {
+        "content": "你好"
+      },
+      "wire": "event: textChunk\ndata: {\"content\": \"你好\"}\n\n"
+    },
+    {
+      "eventType": "done",
+      "data": {
+        "chatId": 10001
+      },
+      "wire": "event: done\ndata: {\"chatId\": 10001}\n\n"
+    }
+  ],
+  "currentImplementationDifferences": [
+    {
+      "scope": "analysis and weaponry submission success responses",
+      "current": "JSON task snapshot; report is already empty in 1C-6",
+      "target": "empty body",
+      "scheduledWaves": [
+        "1D",
+        "1F"
+      ]
+    },
+    {
+      "scope": "/llm/check-task success response",
+      "current": "JSON task and callback replay result",
+      "target": "empty body",
+      "scheduledWaves": [
+        "1B"
+      ]
+    },
+        {
+            "scope": "/llm/check-task mixed params elements",
+            "current": "non-object elements are silently filtered when valid object elements remain; Progress has implemented strict rejection in 1B-2",
+            "target": "any non-object element rejects the entire HTTP request",
+            "scheduledWaves": [
+                "6"
+            ]
+        }
+  ]
+}

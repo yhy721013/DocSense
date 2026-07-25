@@ -1,4 +1,4 @@
-# 文件对话测试替身目录说明
+# 测试替身目录说明
 
 本目录保存离线测试使用的端口替身。替身模拟供应商无关协议，而不是复制 AnythingLLM 的 HTTP 细节；这样应用服务、路由和状态机测试无需启动任何后台服务。
 
@@ -10,6 +10,12 @@
 | `chat.py` | 文件对话替身：共享内存后端、任务级对话工厂和对话端口，模拟工作区/线程、文档绑定、流消息、临时回复、历史和幂等删除。 |
 | `knowledge_index.py` | 知识索引端口替身。 |
 | `rag.py` | RAG 端口替身。 |
+| `tasks.py` | Task Read、同步 Callback Recovery 原型、批量原子 Callback Recovery Command、Progress Snapshot/Subscription 可编程替身。 |
+| `report.py` | Report Task Command、Progress Publisher、File、Artifact、RAG、Interaction Audit、Callback、Resource Store 和 Dispatcher 严格 Fake；共享全局调用记录，支持逐步骤/任务事实写入故障、CAS、Artifact 身份与类别错误注入。 |
+| `weaponry.py` | Weaponry Fake 稳定聚合导出面，以及线程安全 Document Scope 严格 Fake。 |
+| `weaponry_support.py` | 不记录正文、URL、Prompt 或 Token 的线程安全调用轨迹。 |
+| `weaponry_processing.py` | Retrieval、Extraction、Auxiliary Guidance、Translation、Interaction Audit 严格 Fake；验证审计/资源前置、task/call/document 身份、Evidence/来源边界和故障分类。 |
+| `weaponry_control.py` | Task 原子受理/领取/expected 条件写、Progress Publisher、Callback latest/Guard、Resource ownership/CAS/cleanup lease/fencing 和 Dispatcher 生命周期严格 Fake。 |
 
 ## 文件对话替身工作流程
 
@@ -23,3 +29,17 @@
 - 替身必须满足 `app.ports.chat` 的运行期协议，不能将供应商私有字段引入应用服务测试。
 - 不要在替身中隐藏生产问题：资源创建、流关闭、失败和幂等删除都应可显式配置和断言。
 - 替身只用于测试，生产包的公开导出不能依赖或暴露这些对象。
+- 任务替身必须按 TaskId 保存历史执行、按业务引用保存最新投影；故障注入和调用记录必须显式，不能自动吞掉端口契约错误。
+- 可靠命令替身必须在锁保护下先于局部副本计算整批结果，全部成功后才提交活动命令
+  状态；串行或并发重复 TaskId 均复用同一 recovery request ID，事务故障不得留下部分状态。
+- 报告替身不得访问真实文件或“自动完成”Application 应负责的补偿；跨 TaskId、trace、
+  Artifact 和 Receipt 身份错误必须原样返回，让应用层门禁测试能够确定性失败。
+- 武器谱严格 Fake 不得猜测未配置结果、回退到共享会话或把跨文档来源当作成功；目标检索和
+  模型调用前必须存在成功审计预留，检索资源创建后必须完成正确类别的资源登记。
+- 武器谱 Task Fake 必须按真实 Repository 状态自动区分 accepted、already-running、terminal
+  与 stale；同一业务键存在活动 execution 时默认冲突，不能让重复提交或重复派发在测试中
+  产生第二终态、第二回调或第二套外部资源。
+- `none` 辅助策略的 Provider I/O 计数必须严格为零；Extraction 每个 attempt 使用独立虚拟会话，
+  相同回答文本不能替代 document/evidence 身份校验。
+- Resource Fake 必须用锁、expected version、cleanup lease 和 fencing token 模拟并发；shared
+  资源永不进入清理状态，unknown 清理在对账或隔离前不得直接重试。
