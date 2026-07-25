@@ -23,9 +23,10 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
-| 接口层 | `app/blueprints/` | HTTP/WS/SSE 入参校验、任务受理、线程派发、协议流式及常态响应、本地调试入口 | `llm.py` `debug.py` |
+| 接口层 | `app/blueprints/`、`app/adapters/web/`、`app/presenters/` | HTTP/WS/SSE 入参解析、框架映射、协议流式与响应展示、本地调试入口 | `llm.py` `report_requests.py` `report_submission.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 业务层 | `app/services/llm_service/`、`app/services/chat/` | 文件解析、报告生成、谱系提取、任务状态管理、翻译编排，以及文件对话应用服务与本地持久化/锁实现 | `analysis_service.py` `report_service.py` `weaponry_service.py` `task_service.py` `chat/application/` `chat/persistence/` |
+| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；报告、武器谱和统一任务边界已迁入，其他业务按阶段继续迁移 | `report/` `weaponry/` `tasks/` |
+| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 尚未完成统一分层的文件解析、任务兼容存储、翻译编排，以及文件对话应用服务与本地持久化/锁实现；旧武器谱 Service 仅保留兼容与回归证据 | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
@@ -34,25 +35,30 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> llm_service/chat application`：大部分后台长流程已下沉至服务层；`/llm/reassign` 的同步编排及部分文件对话协议桥接仍位于蓝图中。
+1. `blueprints -> web adapter/application/presenter`：报告、武器谱和分类节点变更路由均已遵循 Parser → Application → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，部分文件对话协议桥接仍位于蓝图中。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
-4. `integrations.anythingllm -> ports`：Gateway 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，legacy report/weaponry 链路不经过该 Factory。
+4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
 5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
 6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
-7. `check-task -> task_service.replay_callback_if_needed`：用于成功/失败任务的回调补发。
+7. `check-task -> report/weaponry application / legacy task service`：报告和武器谱分别通过
+   `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously` 与正常 Worker
+   共用 execution 级 Callback Guard；file 暂走兼容 Task Service。三类业务均保留甲方规定的
+   请求内同步恢复副作用。
 
 ### 2.3 analysis/report/weaponry 请求到回调的链路
 
 ```text
 Client Request
   -> app/blueprints/llm.py
-    -> LLMTaskService 创建/更新任务
-    -> 后台线程执行 llm_service 任务
-      -> ports/integrations 或迁移期 utils 下载、预处理并调用 AnythingLLM
-      -> core.progress_hub 推送 WS 进度
-      -> 组装业务结果并写入任务库
-      -> utils.callback_client 回调业务系统
+    -> report：Parser -> SubmitReportTask -> SQLite accepted -> Event 唤醒
+       -> 单报告执行 Worker -> RunReportTask(task_id) -> Report Ports/Adapters
+       -> 两条独立维护线程执行资源恢复和队列诊断
+    -> weaponry：Parser -> 文档范围冻结 -> SubmitWeaponryTask -> SQLite accepted -> Event 唤醒
+       -> 单武器谱执行 Worker -> RunWeaponryTask(task_id) -> Weaponry Ports/Adapters
+       -> 两条独立维护线程执行资源恢复和 Callback Guard 过期扫描
+    -> analysis：当前仍由遗留 Service/后台线程执行
+    -> 写入任务/进度事实并按各业务 Callback Guard/兼容链回调
 ```
 
 ## 3. 当前目录（关键部分）
@@ -61,6 +67,9 @@ Client Request
 app/
   __init__.py                       # Flask App 工厂，安装依赖容器并注册蓝图
   container.py                      # 应用装配根、ApplicationServices 与 analysis/report 任务限制器
+  modules/
+    tasks/                          # 统一任务 Domain/Application/Ports/兼容 Adapter
+    report/                         # 报告 Domain/Application/Ports/生产形态 Adapter
   ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
   integrations/
     anythingllm/                    # Transport、策略、原子 Client、Gateway 与任务级 Factory
@@ -79,8 +88,8 @@ app/
     llm_service/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
       architecture_recall_service.py # 本地 lexical/tree/rule 召回、RRF 融合与有界候选投影
-      report_service.py             # 报告生成主流程
-      weaponry_service.py           # 知识谱系字段提取主流程
+      report_service.py             # 报告遗留兼容实现；当前公开路由不再调用
+      weaponry_service.py           # 武器谱字段提取遗留兼容实现；当前公开路由不再调用
       task_service.py               # 任务状态、结果、回调状态与领域召回审计持久化
       translation_service.py        # 翻译服务编排层
     chat/
@@ -123,6 +132,11 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `report`：`reportId`
 - `weaponry`：`architectureId`
 
+`reportId` 的三个入站位置（`/llm/generate-report`、报告类型 `/llm/check-task` 和
+报告类型 `/llm/progress`）统一接受 JSON 整数或十进制整数字符串，不设置 32/64 位
+业务范围，并按整数值规范化为同一任务键；例如 `132` 与 `"00132"` 指向同一报告。
+公开响应与 Progress 推送中的 `reportId` 仍保持 JSON number。
+
 业务状态码：
 
 | businessType | 状态含义 |
@@ -138,7 +152,11 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
 - `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
-`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。`skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过 check-task 自动补发。
+`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。
+`skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过
+check-task 自动补发。报告类型每次实际外发前还会原子复核 latest execution 并取得 Callback
+Guard 租约：同一 execution 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
+HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 
 同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID 与租约 ID 双重 CAS 写回状态并释放租约，进程中断后过期租约可由后续补发接管。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
 
@@ -150,7 +168,7 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 | POST | `/llm/generate-report` | 报告生成，使用 `params[0]` |
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
-| WS | `/llm/progress` | 进度订阅/查询/取消订阅 |
+| WS | `/llm/progress` | 任务进度订阅（目标公开契约只保留无 action 格式） |
 | POST | `/llm/chat` | 基于指定文件内容发起对话请求（SSE 流式响应下发） |
 | POST | `/llm/chat/title` | 根据指定会话的本地已提交消息生成标题 |
 | GET | `/llm/chat/history` | 查询指定会话在本地持久化的已提交消息 |
@@ -203,30 +221,33 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
    - `filePathList` 支持多文件，统一汇总后生成 HTML 报告。
    - `mhtml/mht` 文件会先归一化再参与报告生成。
    - `templateOutline` 表示 Word 模板文件下载地址；服务端会下载 `.docx` 模板并提取其中的文字内容作为报告大纲要求，再进入原有报告生成流程。
-   - 当前仍使用 legacy RAG 链路：若底层返回 `None`，服务会把空内容包装为 HTML 并仍按 `status=1` 落库/回调，因此验收必须检查报告正文，不能只看任务状态；该链路当前也未清理临时 Workspace/Thread 或显式关闭 AnythingLLM Client。
+   - 当前公开路由已使用 `SubmitReportTask`/`RunReportTask(task_id)` 和任务级 Report RAG、
+     Audit、Callback、Artifact、Resource Adapter。RAG 空内容继续按已确认兼容契约生成空 HTML
+     并成功回调，但会记录内部可观测标记；临时 RAG 资源和本地产物均进入持久恢复闭环。
 
 3. `/llm/weaponry`
    - `params` 为对象（非数组）。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
    - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时可选择任意已进入知识库类别的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并要求每个文件名唯一对应一条本地文档记录。未解析文件返回 `404`；同名跨类别或多个选中文件对应同一外部文档位置时返回 `400`，不会随机选择文档。
-   - 指定文件范围时会在受理阶段冻结内部文档快照，并创建任务级临时 workspace，仅引用选中文档执行向量检索；任务结束时会在 `finally` 中尝试删除，失败只记录 warning，可能残留临时 workspace；任何来源类别 workspace 均不做选中文档增删。此模式不依赖目标 `architectureId` 的永久 workspace。
-   - `filePathList` 缺省或为空时，仍通过 `architectureId` 从知识库映射中定位永久 workspace，并解析该类别全部文件。
-   - 字段抽取默认采用“目标证据 + 术语规则”分池检索：普通 `INPUT` 字段的目标证据默认 `topN=8`，`TABLE` 字段默认 `topN=16`；术语规则 workspace 单独检索 `term_rule_*.md`，默认 `topN=3`。
+   - 显式文件范围和类别全量范围都会在受理阶段冻结为不可变文档快照；后台执行不会重新按类别选文档，也不会修改任何永久来源 workspace。每个 execution 使用任务级临时检索范围，资源创建后立即登记，终态后由持久清理意图和独立恢复线程收敛。
+   - 字段抽取使用“专用语义 Query → Candidate → 稳定 score-or-rank Selection → Provided-Evidence Extraction”链路。普通 `INPUT` 字段候选批次默认 `topN=8`，`TABLE` 字段默认 `topN=16`；这是供应商单次候选批次，不是 `rows` 内容截断配额。合法来源、正文和分数/排名协议通过后，Evidence 全文按稳定顺序进入抽取和回调 `rows`。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取。只有成功解析出有效行时，回调才扩展为多行二维 `tableFieldList`；否则保留原始列模板。
-   - 当目标 workspace 中混入 `term_rule_*.md` 术语文档时，任务开始会先把这些术语移入/复用术语规则 workspace，并从目标 workspace 临时移除；任务结束时会尝试恢复，失败只记录 warning，不能视为强恢复保证。
-   - 术语规则辅助上下文由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制；关闭时跳过字段阶段的术语向量检索和 Prompt 注入，但准备阶段仍可能上传或复用术语 workspace，并处理目标 workspace 中混入的术语文档。
-   - 开启时，术语规则只会作为 Prompt 中的字段口径、别名和单位参考，不进入 `analyseData` / `analyseDataSource`，也不得作为装备事实来源。
-   - `WEAPONRY_ANALYSE_MODE=2` 按文件聚合抽取时，回调 `analyseDataSource.source` 严格返回文件解析请求中 `originalFileName` 的原值（持久化为 `documents.original_name`），`fileName` 返回 `documents.file_name` 哈希文件名，`rows` 返回经过上下文限制后实际提交给模型的 Chunk 列表。MHTML/OCR 等预处理产生的实际上传文件名仅用于内部映射，绝不写入回调；缺少该内部谱系的开发数据必须重新解析，不做名称猜测或回退。
-   - 每次字段问答优先使用独立临时 Thread，并对空响应做一次重试，避免字段间历史污染和本地模型/嵌入服务短时无响应导致漏抽。
+   - 术语规则辅助由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制，默认关闭。关闭路径不读取术语目录/workspace 配置，也不产生术语文件、网络、workspace 或 embedding I/O；开启路径只读预先配置的独立术语 workspace，术语内容仅作为字段口径、别名和单位参考，不进入 `analyseDataSource`，也不得作为装备事实来源。
+   - 武器谱只保留按来源文件聚合 Evidence 后抽取的 `file_aggregate_v1` 策略。每个来源 attempt 使用全新、无历史的临时 workspace/thread，并且只接收最终 `rows` 对应的 Evidence；禁止访问任务或类别文档 workspace 做二次 RAG，也不存在共享父 Thread 回退。
+   - 回调 `analyseDataSource.source` 严格返回文件解析请求中 `originalFileName` 的原值，`fileName` 返回哈希文件名，`rows` 与实际进入该来源模型 Prompt 的完整 Evidence 逐项、同序一致。MHTML/OCR 等内部产物名不会写入回调；缺少来源谱系的数据必须重新解析，不做名称猜测。
+   - 公开路由不创建线程；请求可靠受理后返回 HTTP 202 严格空响应体。相同 `architectureId` 存在活动任务，或 Callback Guard 处于发送/结果未知状态时返回既有 HTTP 409。
 
 4. `/llm/check-task`
    - 支持 `file` / `report` / `weaponry`。
-   - 支持批量查询（`params` 多项）；单项与批量返回结构略有差异。
+   - 支持批量检查（`params` 多项）；`params` 必须为非空对象数组，任一非对象元素会使整次请求按既有 HTTP 400 错误体失败。
+   - 负责人于 2026-07-25 明确同意后，成功响应已统一为 HTTP 200 空响应体；内部仍执行必要的同步回调补发，批量缺失项不阻断其余存在项处理，400/404 错误体保持不变。
+   - 成功响应不公开任务状态、进度、回调状态、恢复结果或内部执行标识；调用方以既有业务键、Progress 与最终回调跟踪结果。
 
 5. `/llm/progress`（WebSocket）
-   - 支持动作：`subscribe`、`query`、`unsubscribe`。
-   - 未显式传 `action` 时默认按订阅处理。
-   - 单连接可管理多个任务订阅。
+   - 阶段 1B-2 已完成控制面切换：当前只接受不带 `action` 的订阅消息；只要出现显式 `action` 就返回既有 `error` 结构、保持连接且不发送 ack。
+   - `params` 中任一元素不是对象或任一业务键无效时，整条消息失败，不建立部分订阅；后续合法消息仍可继续使用同一连接。
+   - 单连接可管理多个任务订阅。每个连接拥有独立的有界合并缓冲，后台任务线程只入队，由该连接的路由线程唯一执行 WebSocket `send`，慢连接不会在 Hub 锁内阻塞其他发布者。
+   - 当前 Progress Hub/Adapter 仍是单实例内存实现，不提供跨进程广播、断线重放或可靠事件日志；50 条真实长连接和跨实例通知仍须在后续 Redis/MySQL 与集成压测阶段验收。
 
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
@@ -241,7 +262,25 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 7. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
    - 安全方面要求调用前必须传输且一致匹配底库中存证的 `oldArchitectureId`。
-   - 当前实现会尝试从旧 workspace 删除文档、加入新 workspace，再更新本地分类；但尚未校验 AnythingLLM 删除/添加操作返回的布尔结果，`doc_path` 为空时也会跳过远端迁移。因此接口返回成功不等于远端 embedding 必然迁移成功，验收时还需核对 workspace 与本地映射。
+   - 2026-07-24 的 1E-6 已将公开执行链切换为 `Parser → DocumentReassignmentService → Presenter`。
+     路由不再直接构造 AnythingLLM Client、执行 SQL 或编排本地/远端写；Container 只装配一次
+     `ReassignApplicationServices`，每次需要远端操作时仍由请求级 Knowledge Factory 创建隔离的
+     Transport 与 deadline。
+   - 同步 Saga 先以短事务保存 Operation/Step 写意图和 lease/fencing 事实，再在 UoW 外执行旧绑定
+     解绑、目标 workspace 准备/复用、新绑定、Pin 与本地条件 CAS。`false`、缺少必要目标引用、CAS
+     冲突和结果未知都不会伪装成功；远端明确失败或 CAS 冲突后会在同一有限请求预算内优先执行
+     “解绑目标、恢复来源”的同步补偿，可证明的路径按五类固定文案返回，无法证明一致性时保留
+     `recovery_required` 现场并返回既有 HTTP 500 结构。
+   - `doc_path` 为空仍保持历史 local-only 兼容分支：不创建远端客户端，只执行同一条件本地更新。
+     请求原始 ID 比较、旧 ID `int(...)` 转换时点保持不变；新 ID 只保留已冻结的 JSON `false`、
+     有符号 64 位整数和十进制整数字符串兼容，其他值在创建 Operation 前沿用未包装 HTTP 500 边界拒绝。
+    - 恢复仍是显式、精确 Operation 的内部能力。2026-07-25 的 1E-7 已将 Observer、Checkpoint
+      Reconciler、Compensator 和 Finalizer 的实际算法拆入独立文件：Facade 只做命令校验、过期 lease
+      接管与流程选择，四个协作器分别执行观察、检查点收敛、有序补偿及终态收口/隔离；不启动后台
+      恢复线程。诊断脚本默认只读，真正恢复需要显式 `--apply` 与完整审计/lease 参数。
+   - 本次未增删请求参数、响应字段、状态码、Header 或同步语义，也不向前端暴露 operation、lease、
+     fencing、步骤或恢复事实。真实 AnythingLLM 故障演练、生产预算校准、可靠任务队列和多实例容量
+     验收仍未完成，因此不得据此标记 production ready。
 
 ## 6. 快速启动
 
@@ -287,15 +326,31 @@ python -m pip install -r requirements.txt
 其他常用配置：
 
 - `CALLBACK_URL`（可选；不配置则不主动回调外部系统，并将已完成任务标记为 `callback_status=skipped`。`.env.example` 中的“必须填写”注释与当前代码不一致，以此处及代码行为为准）
+- `DOCSENSE_REPORT_*`：报告单实例 Dispatcher 的扫描批量、故障冷却、资源恢复、停机和
+  cleanup 超时/租约配置；这些都是后端内部容量参数，不属于公开接口。默认值及约束见
+  `.env.example`，其中清理租约必须严格大于清理 HTTP 超时。
+- `DOCSENSE_REASSIGN_HTTP_TIMEOUT_SECONDS`、`DOCSENSE_REASSIGN_TOTAL_TIMEOUT_SECONDS`、
+  `DOCSENSE_REASSIGN_COMPENSATION_RESERVE_SECONDS`：分类节点变更同步 Saga 的内部预算配置。Container
+  在启动装配时读取并拒绝空值、非有限值、非正数或不能预留补偿窗口的组合；它们不属于公开接口参数。
+  当前值仅完成离线边界验证，真实环境秒数仍须通过隔离供应商故障演练与容量校准后冻结。
+- `DOCSENSE_REASSIGN_RUNTIME_MODE`：分类节点变更运行模式，当前唯一允许值为 `single_instance`。
+  SQLite lease 使用进程本地时钟，配置为其他值会在装配阶段 fail-fast；迁移到数据库权威时间并完成
+  跨实例 fencing 验证前，不得把该模块作为多实例运行链启用。
 
 在 macOS 上复制 `.env.example` 后，必须将其中启用的 Windows 路径 `DOCSENSE_RUNTIME_DIR=C:/DocSenseRuntime` 改为 macOS 绝对路径，或注释/删除该行以使用仓库根目录 `.runtime`；其他平台相关路径也应按实际环境调整。
 
 Weaponry 可选配置：
 
-- `WEAPONRY_ANALYSE_MODE`：`/llm/weaponry` 字段抽取模式，`2` 表示按文件聚合多 Chunk 后抽取。
-- `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用术语规则辅助上下文，默认 `true`；设为 `false` 时不检索术语 workspace，也不向 Prompt 加入术语规则辅助信息。
+- `WEAPONRY_ANALYSE_MODE`：已删除的迁移期模式选择器。新链固定为 `file_aggregate_v1`；不配置或遗留值 `2` 可启动，旧值 `1` 及其他值会在应用装配阶段明确拒绝，不会切回遗留流程。
+- `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用可拔除的术语规则辅助上下文，默认 `false`；关闭时不读取其余术语专属配置，也不产生术语 Provider I/O。
 - `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
-- `WEAPONRY_TERMS_DIR`：本地术语规则 Markdown 目录，默认 `terms`；当目标 workspace 没有术语文档时，会从该目录上传 `*.md` 作为术语规则参考。
+- `WEAPONRY_TERMS_CATALOG_FINGERPRINT`：启用术语辅助时必填，用于把只读术语目录版本冻结到 execution 策略；当前新链不会自动上传、移动或删除术语文档。
+- `DOCSENSE_WEAPONRY_*`：武器谱单实例 Dispatcher、维护扫描、清理超时/租约、供应商能力指纹和固定 score/rank/Extraction 策略。默认值及必填项见 `.env.example`；这些变量均为内部运行配置，不属于公开接口。
+- 生产环境必须提供 provider、embedding、文档处理和 extraction model 四类真实能力指纹，配置
+  `DOCSENSE_WEAPONRY_PRODUCTION_ATTESTATION_PATH`，并将
+  `DOCSENSE_WEAPONRY_REQUIRE_PRODUCTION_GATE=true`。指纹或证明缺失、漂移、过期、被篡改时，
+  应用在生产必需模式下会于公开路由和后台线程启动前失败；开发环境默认只把 readiness 保持为
+  false。
 
 3. 启动服务
 
@@ -378,6 +433,13 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 
 为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
 
+报告 Dispatcher 当前同样只允许 `single_instance`，但会额外取得
+`${DOCSENSE_RUNTIME_DIR}/locks/report-dispatcher.lock` 的操作系统文件锁；第二个进程在公开
+应用创建完成前拒绝启动。当前模式禁止 preload/fork，`run.py` 已关闭 Werkzeug reloader。
+报告执行固定为一条重型 Worker，资源恢复与队列诊断各有一条固定维护线程；accepted 积压
+只保存在 SQLite，`Event` 不保存任务列表。领取前毒任务和坏资源记录使用持久冷却让出扫描
+首页，但不对正常积压设置数量上限。该实现仍不是 RabbitMQ 可靠队列，也不支持多实例。
+
 旧的组件级变量仍可作为兼容覆盖项，一旦配置就会优先于统一根目录。若希望全部内容位于同一目录，应删除这些覆盖项：
 
 - 任务库：`DOCSENSE_LLM_TASK_DB`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`
@@ -403,6 +465,42 @@ python scripts/inspect_llm_tasks.py
 
 - `metadata`：导出时间、来源数据库路径、输出文件路径、SQLite 版本、表数量和总行数
 - `tables`：每张表的表名、建表 SQL、列定义、行数和完整行数据
+
+Weaponry 生产能力证明只能在已配置四类真实指纹后生成。验证器使用两个随机临时 workspace 和
+一个临时 thread，复核真实 score/rank、来源身份、空 workspace Provided-Evidence 隔离与清理
+基线；它只把一份既有全局文档绑定到临时 workspace，不修改既有 workspace 或文档：
+
+```powershell
+venv\Scripts\python.exe -B scripts\verify_weaponry_production_readiness.py `
+  --environment production-local `
+  --output C:\DocSenseRuntime\weaponry-production-attestation.json
+venv\Scripts\python.exe -B scripts\check_weaponry_production_gate.py
+```
+
+证明默认 24 小时过期，最长不得超过 7 天；更新使用同目录原子替换。部署示例已把生产门禁设为
+必需，不能用手写布尔值、Fake 测试或进程存活替代该证明。
+
+Weaponry callback 投递结果未知或远端资源清理结果未知时，系统会保守冻结。人工对账使用内部
+命令，不新增 HTTP 接口；改变状态的命令必须显式提供操作者、原因和确认标志，并写追加审计：
+
+```powershell
+# 先脱敏查看资源状态和历史处置审计
+venv\Scripts\python.exe -B scripts\manage_weaponry_operations.py `
+  inspect-resources --task-id <task-id>
+
+# 已确认远端资源仍存在，允许恢复循环重试清理
+venv\Scripts\python.exe -B scripts\manage_weaponry_operations.py `
+  resolve-resources --task-id <task-id> --resolution retry_cleanup `
+  --operator <operator> --reason <reason> --external-state-confirmed
+
+# 已确认旧 Worker 停止或隔离，解除该 architectureId 的 callback unknown 提交门禁
+venv\Scripts\python.exe -B scripts\manage_weaponry_operations.py `
+  release-callback --architecture-id <id> --operator <operator> `
+  --reason <reason> --worker-stopped-confirmed
+```
+
+全局 `--db-path` 如需覆盖必须写在子命令之前。禁止直接改 SQLite 状态绕过活跃 execution、CAS、
+fencing 或审计检查。
 
 其中 `llm_tasks.rows[]` 的每一项对应一条 LLM 任务记录，常用字段包括 `business_type`、`business_key`、`request_payload`、`status`、`progress`、`result_payload`、`callback_status`、`callback_attempts`、`created_at` 和 `updated_at`。脚本会把 `request_payload`、`result_payload` 这类 JSON 字符串自动展开为对象，便于直接查看原始请求和最终结果。可通过 `--db-path` 和 `--output-dir` 指定其他 SQLite 文件或输出目录。
 
@@ -486,12 +584,11 @@ zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures
 
 ```bash
 # macOS / zsh
-APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py
+APP_DEBUG=false python run.py
 zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" --base-url http://127.0.0.1:5001
 
 # Windows / PowerShell
 $env:APP_DEBUG = "false"
-$env:WEAPONRY_ANALYSE_MODE = "2"
 python run.py
 pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-水面装备' --base-url http://127.0.0.1:5001"
 ```
@@ -519,11 +616,11 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
 
 测试文件批量武器装备字段抽取复现流程：
 
-1. 确认 AnythingLLM 可用并启动 DocSense，目录批跑建议使用 `APP_DEBUG=false WEAPONRY_ANALYSE_MODE=2 python run.py`。只有在 `.env` 配置了本地 mock 的 `CALLBACK_URL` 且需要核验真实回调时，才需要另行启动 `python scripts/mock_callback_server.py`。
+1. 确认 AnythingLLM 可用并启动 DocSense，目录批跑建议使用 `APP_DEBUG=false python run.py`。Weaponry 新链固定采用 `file_aggregate_v1`，无需再设置模式变量。只有在 `.env` 配置了本地 mock 的 `CALLBACK_URL` 且需要核验真实回调时，才需要另行启动 `python scripts/mock_callback_server.py`。
 2. 先执行带 `--dry-run` 的目录 wrapper，核对扫描文件、输出目录和临时 `architectureId`。runner 会读取知识库映射并自动避开已存在的 ID；如使用自定义 `--architecture-base`，仍应检查 dry-run manifest 是否符合预期。
 3. 去掉 `--dry-run` 执行目录 wrapper。未提供 `--static-base` 时，runner 会自动为目标目录启动临时静态文件服务；提供该参数时才复用调用方已有的文件服务。
 4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、轮询 `/llm/check-task`、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并轮询终态。请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造。
-5. 术语规则由 `/llm/weaponry` 服务自动处理：目标 workspace 没有术语文档时，会从 `WEAPONRY_TERMS_DIR` 指向的本地目录上传或复用规则，并加入独立的 `WEAPONRY_TERMS_WORKSPACE_NAME` workspace；如果目标 workspace 已混入术语文档，则任务期间临时移除并在结束后恢复。不要手工把术语规则加入目标 workspace。
+5. 术语规则辅助默认关闭。若联调时显式启用，需提前准备独立的只读术语 workspace，并配置 `WEAPONRY_TERMS_WORKSPACE_NAME` 与 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`；新链不会自动上传、移动或删除术语文档，也不会修改目标文档 workspace。
 6. runner 持续写出 `qwen3-4b-new.csv`、`qwen3-4b-new.md`、来源核验表、manifest 和逐文件快照；来源核验表用于确认装备事实来源不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。
@@ -543,7 +640,13 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
 ```
 
-当前完整测试集中有用例直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`；未准备这些本地请求文件时，完整发现命令会因 fixture 缺失失败。除此之外，当前分支的完整测试仍有其他既有失败，因此不能把上述命令当作全绿基线；应按实际运行结果区分通过项和失败项。核对 analysis 树索引、Top-K 召回、两阶段 Prompt、运行模式、字段合同、候选默认值、callback debug 路由和 security 迁移时，可运行不依赖这些本地请求文件的定向测试：
+完整发现命令不是当前开发环境的安全默认命令：其中部分环境测试可能启动本地 `run.py`/Shell，
+部分资产测试直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`，且 Windows 对个别
+POSIX 权限位断言没有等价表达。执行前应先核对 `tests/README.md` 中的排除清单和适用边界，
+并如实记录本次发现、排除与执行结果；不得将历史分支的通过数量视为当前集成基线。
+
+核对 Analysis 树索引、Top-K 召回、两阶段 Prompt、配置默认值、callback debug 路由和安全迁移时，
+可运行不依赖本地请求文件的定向测试：
 
 ```bash
 .venv/bin/python -m unittest \

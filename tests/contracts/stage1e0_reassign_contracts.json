@@ -1,0 +1,515 @@
+{
+  "schemaVersion": 1,
+  "stage": "1E-0",
+  "frozenAt": "2026-07-24",
+  "lastReviewedAt": "2026-07-25",
+  "authority": "docs/接口文档/分类节点变更.md",
+  "productionCodeSwitch": "synchronous-saga-route-active-1e6",
+  "interfaceParametersChanged": false,
+  "contractState": {
+    "current": "synchronous-saga-route-active",
+    "approvedTarget": "synchronous-saga-route-active"
+  },
+  "publicEndpoint": {
+    "method": "POST",
+    "path": "/llm/reassign",
+    "synchronous": true,
+    "forbiddenPublicFields": [
+      "operationId",
+      "operation_id",
+      "leaseToken",
+      "lease_token",
+      "fencingToken",
+      "fencing_token",
+      "step",
+      "recoveryRequired"
+    ]
+  },
+  "publicMessages": {
+    "success": "变更成功",
+    "documentNotFound": "文档记录不存在",
+    "architectureMismatch": "分类不一致，变更失败",
+    "remoteMigrationFailed": "知识库节点迁移失败",
+    "localStateConflict": "文档状态已变化，分类变更失败",
+    "concurrentOperation": "文档分类正在变更，请稍后重试",
+    "compensationFailed": "知识库关联恢复失败",
+    "recoveryPending": "变更结果暂无法确认，请稍后重试"
+  },
+  "goldenResponses": {
+    "http400": [
+      {
+        "case": "invalid-business-type",
+        "documentationStatus": "documented-exact",
+        "request": {
+          "businessType": "wrong",
+          "params": {}
+        },
+        "status": 400,
+        "body": {
+          "error": "businessType必须为reassign"
+        }
+      },
+      {
+        "case": "params-not-object",
+        "documentationStatus": "documented-exact",
+        "request": {
+          "businessType": "reassign"
+        },
+        "status": 400,
+        "body": {
+          "error": "params不能为空"
+        }
+      },
+      {
+        "case": "empty-file-name",
+        "documentationStatus": "documented-exact",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "  ",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 400,
+        "body": {
+          "error": "fileName不能为空"
+        }
+      },
+      {
+        "case": "missing-old-architecture-id",
+        "documentationStatus": "code-observed-not-explicitly-listed-in-interface-document",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": null,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 400,
+        "body": {
+          "error": "oldArchitectureId不能为空"
+        }
+      },
+      {
+        "case": "missing-new-architecture-id",
+        "documentationStatus": "code-observed-not-explicitly-listed-in-interface-document",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": null
+          }
+        },
+        "status": 400,
+        "body": {
+          "error": "newArchitectureId不能为空"
+        }
+      },
+      {
+        "case": "same-raw-architecture-id",
+        "documentationStatus": "documented-exact",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 11
+          }
+        },
+        "status": 400,
+        "body": {
+          "error": "oldArchitectureId与newArchitectureId不能相同"
+        }
+      }
+    ],
+    "http500": [
+      {
+        "case": "document-record-not-found",
+        "setup": "missing-record",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 500,
+        "body": {
+          "businessType": "reassign",
+          "msg": "变更失败",
+          "data": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12,
+            "success": false,
+            "message": "文档记录不存在"
+          }
+        }
+      },
+      {
+        "case": "defensive-architecture-mismatch",
+        "setup": "architecture-mismatch",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 500,
+        "body": {
+          "businessType": "reassign",
+          "msg": "变更失败",
+          "data": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12,
+            "success": false,
+            "message": "分类不一致，变更失败"
+          }
+        }
+      },
+      {
+        "case": "remote-provider-exception",
+        "setup": "remote-exception",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 500,
+        "body": {
+          "businessType": "reassign",
+          "msg": "变更失败",
+          "data": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12,
+            "success": false,
+            "message": "知识库节点迁移失败"
+          }
+        }
+      }
+    ],
+    "http200": [
+      {
+        "case": "empty-doc-path-local-only-success",
+        "setup": "empty-doc-path",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 200,
+        "body": {
+          "businessType": "reassign",
+          "msg": "变更成功",
+          "data": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12,
+            "success": true,
+            "message": "变更成功"
+          }
+        }
+      },
+      {
+        "case": "remote-membership-migration-success",
+        "setup": "existing-source-and-target-workspaces",
+        "request": {
+          "businessType": "reassign",
+          "params": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12
+          }
+        },
+        "status": 200,
+        "body": {
+          "businessType": "reassign",
+          "msg": "变更成功",
+          "data": {
+            "fileName": "example.pdf",
+            "oldArchitectureId": 11,
+            "newArchitectureId": 12,
+            "success": true,
+            "message": "变更成功"
+          }
+        }
+      }
+    ]
+  },
+  "legacyCompatibilityMatrix": [
+    {
+      "case": "raw-number-and-string-are-not-equal",
+      "request": {
+        "businessType": "reassign",
+        "params": {
+          "fileName": "example.pdf",
+          "oldArchitectureId": 11,
+          "newArchitectureId": "11"
+        }
+      },
+      "current": {
+        "status": 200,
+        "expectedNewArchitectureIdInResponse": "11",
+        "expectedLocalUpdateArguments": [
+          "example.pdf",
+          "11",
+          11
+        ]
+      },
+      "approvedTarget": {
+        "preserveRawComparison": true,
+        "status": 200
+      }
+    },
+    {
+      "case": "old-id-conversion-failure-is-unwrapped",
+      "request": {
+        "businessType": "reassign",
+        "params": {
+          "fileName": "example.pdf",
+          "oldArchitectureId": "abc",
+          "newArchitectureId": 12
+        }
+      },
+      "current": {
+        "status": 500,
+        "jsonBody": "not-guaranteed"
+      },
+      "approvedTarget": {
+        "preserveUnwrappedConversionTiming": true,
+        "status": 500
+      }
+    },
+    {
+      "case": "new-id-frozen-compatibility-whitelist",
+      "request": {
+        "businessType": "reassign",
+        "params": {
+          "fileName": "example.pdf",
+          "oldArchitectureId": 11,
+          "newArchitectureId": false
+        }
+      },
+      "current": {
+        "status": 200,
+        "expectedNewArchitectureIdInResponse": false,
+        "expectedLocalUpdateArguments": [
+          "example.pdf",
+          false,
+          11
+        ]
+      },
+      "approvedTarget": {
+        "acceptedCompatibilityValues": [
+          "json-false",
+          "signed-64-bit-integer",
+          "base-10-integer-string"
+        ],
+        "rejectBeforeSaga": [
+          "json-true",
+          "float",
+          "decimal-or-scientific-string",
+          "container",
+          "out-of-range-integer"
+        ],
+        "status": 200
+      }
+    },
+    {
+      "case": "empty-doc-path-skips-remote-migration",
+      "current": {
+        "remoteMutationCalls": 0,
+        "status": 200
+      },
+      "approvedTarget": {
+        "remoteMutationCalls": 0,
+        "status": 200
+      }
+    },
+    {
+      "case": "missing-source-workspace-mapping-is-compatible-skip",
+      "current": {
+        "sourceDetach": "skipped",
+        "targetAttach": "continues-when-target-slug-exists",
+        "status": 200
+      },
+      "approvedTarget": {
+        "sourceDetach": "skipped-with-audit-and-warning",
+        "status": 200
+      }
+    }
+  ],
+  "legacyFailureMaskingMatrix": [
+    {
+      "case": "source-detach-returns-false",
+      "current": {
+        "status": 200,
+        "targetAttachMayRun": true,
+        "localCommitMayRun": true,
+        "implementationStatus": "legacy-known-gap"
+      },
+      "approvedTarget": {
+        "status": 500,
+        "targetAttachMustNotStartBeforeProbe": true,
+        "localCommitMustNotStart": true,
+        "outcome": "known-failed-or-recovery-required"
+      }
+    },
+    {
+      "case": "target-workspace-create-has-no-slug",
+      "current": {
+        "status": 200,
+        "targetAttachMayBeSkipped": true,
+        "localCommitMayRun": true,
+        "implementationStatus": "legacy-known-gap"
+      },
+      "approvedTarget": {
+        "status": 500,
+        "targetAttachMustNotStart": true,
+        "localCommitMustNotStart": true,
+        "outcome": "restore-source-or-recovery-required"
+      }
+    },
+    {
+      "case": "local-cas-zero-row",
+      "current": {
+        "status": 200,
+        "implementationStatus": "legacy-known-gap"
+      },
+      "approvedTarget": {
+        "status": 500,
+        "localCommitMustRequireRowcount": 1,
+        "outcome": "compensate-target-and-restore-source-or-recovery-required"
+      }
+    }
+  ],
+  "approvedTargetFaultMatrix": [
+    {
+      "case": "source-detach-explicit-false",
+      "expectedStatus": 500,
+      "precondition": "source-member-probe-confirms-document-still-present",
+      "mustNotDo": [
+        "attach-target-document",
+        "commit-local-architecture"
+      ],
+      "terminalState": "failed",
+      "expectedMessageKey": "remoteMigrationFailed"
+    },
+    {
+      "case": "source-detach-outcome-unknown",
+      "expectedStatus": 500,
+      "precondition": "source-member-probe-cannot-confirm-membership",
+      "mustNotDo": [
+        "attach-target-document",
+        "commit-local-architecture",
+        "blindly-retry-source-detach"
+      ],
+      "terminalState": "recovery-required",
+      "expectedMessageKey": "recoveryPending"
+    },
+    {
+      "case": "target-workspace-created-without-slug",
+      "expectedStatus": 500,
+      "precondition": "source-detach-was-confirmed",
+      "mustDo": [
+        "probe-target-workspace-result",
+        "restore-source-document-or-mark-recovery-required"
+      ],
+      "terminalState": "compensated-or-recovery-required",
+      "expectedMessageKey": "remoteMigrationFailed"
+    },
+    {
+      "case": "target-attach-explicit-false",
+      "expectedStatus": 500,
+      "precondition": "target-member-probe-confirms-document-absent",
+      "mustDo": [
+        "restore-source-document-or-mark-recovery-required"
+      ],
+      "terminalState": "compensated-or-recovery-required",
+      "expectedMessageKey": "remoteMigrationFailed"
+    },
+    {
+      "case": "local-cas-affects-zero-rows",
+      "expectedStatus": 500,
+      "precondition": "target-attach-was-confirmed",
+      "mustDo": [
+        "detach-target-document",
+        "restore-source-document-or-mark-recovery-required"
+      ],
+      "terminalState": "compensated-or-recovery-required",
+      "expectedMessageKey": "localStateConflict"
+    },
+    {
+      "case": "same-document-operation-is-active",
+      "expectedStatus": 500,
+      "precondition": "another-operation-holds-active-document-protection",
+      "mustNotDo": [
+        "detach-source-document",
+        "attach-target-document",
+        "commit-local-architecture"
+      ],
+      "terminalState": "active-operation-preserved",
+      "expectedMessageKey": "concurrentOperation"
+    },
+    {
+      "case": "compensation-itself-fails",
+      "expectedStatus": 500,
+      "precondition": "a-forward-side-effect-is-confirmed",
+      "mustNotDo": [
+        "report-success",
+        "blindly-retry-unknown-write"
+      ],
+      "terminalState": "recovery-required",
+      "expectedMessageKey": "compensationFailed"
+    },
+    {
+      "case": "hard-budget-exhausted-with-unknown-result",
+      "expectedStatus": 500,
+      "precondition": "probe-or-compensation-cannot-finish-inside-hard-budget",
+      "mustNotDo": [
+        "report-success",
+        "start-new-forward-mutation"
+      ],
+      "terminalState": "recovery-required",
+      "expectedMessageKey": "recoveryPending"
+    }
+  ],
+  "targetFailureResponsePolicy": {
+    "status": 500,
+    "topLevelKeys": [
+      "businessType",
+      "msg",
+      "data"
+    ],
+    "dataRequiredKeys": [
+      "fileName",
+      "oldArchitectureId",
+      "newArchitectureId",
+      "success",
+      "message"
+    ],
+    "dataSuccess": false,
+    "messagePolicy": "只允许使用 publicMessages 中已经写入接口文档的稳定文案；不得泄露内部错误、操作标识、租约或步骤"
+  },
+  "offlineTimeoutBudget": {
+    "httpTimeoutSeconds": 0.25,
+    "totalTimeoutSeconds": 1.0,
+    "compensationReserveSeconds": 0.2,
+    "productionCalibrated": false,
+    "fakeDelayPolicy": "仅用于离线注入边界，不得据此推导生产秒数"
+  }
+}

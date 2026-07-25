@@ -1,13 +1,17 @@
 import unittest
-from dataclasses import replace
 from unittest.mock import patch
 
 from app import create_app
-from app.blueprints.llm import _handle_progress_command, _parse_progress_command
-from app.container import APPLICATION_SERVICES_EXTENSION
+from app.adapters.web.flask import (
+    ProgressRequestValidationError,
+    parse_progress_subscription,
+)
+from app.modules.tasks.application import ProgressDeliveryBuffer
+from app.presenters.task_progress import ProgressWebSocketPresenter
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.offline_application import build_offline_application_services
 
 
 class LLMProgressAndCheckTaskTests(unittest.TestCase):
@@ -43,72 +47,74 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
         self.assertEqual(hub.get_latest("file", "a.pdf")["data"]["fileName"], "a.pdf")
         self.assertEqual(hub.get_latest("file", "b.pdf")["data"]["fileName"], "b.pdf")
 
-    def test_parse_progress_command_supports_legacy_subscribe(self):
-        command = _parse_progress_command(
+    def test_parse_progress_request_supports_no_action_subscribe(self):
+        request_model = parse_progress_subscription(
             {
                 "businessType": "file",
                 "params": [{"fileName": "a.pdf"}],
             }
         )
 
-        self.assertEqual(command["action"], "subscribe")
-        self.assertEqual(command["business_type"], "file")
-        self.assertEqual(command["keys"], [("file", "a.pdf")])
-
-    def test_parse_progress_command_supports_query(self):
-        command = _parse_progress_command(
-            {
-                "action": "query",
-                "businessType": "file",
-                "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
-            }
+        self.assertEqual(request_model.business_type, "file")
+        self.assertEqual(
+            [(item.business_type, item.business_key) for item in request_model.ordered_keys],
+            [("file", "a.pdf")],
         )
 
-        self.assertEqual(command["action"], "query")
-        self.assertEqual(command["keys"], [("file", "a.pdf"), ("file", "b.pdf")])
+    def test_parse_progress_request_rejects_explicit_query(self):
+        with self.assertRaisesRegex(ProgressRequestValidationError, "action"):
+            parse_progress_subscription(
+                {
+                    "action": "query",
+                    "businessType": "file",
+                    "params": [{"fileName": "a.pdf"}, {"fileName": "b.pdf"}],
+                }
+            )
 
-    def test_legacy_progress_message_replays_snapshot_without_ack_when_repeated(self):
+    def test_no_action_progress_message_replays_snapshot_without_duplicate_subscription(self):
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            services = build_offline_application_services(tmp)
+            service = services.task_service
             service.create_file_task(
                 "demo.pdf",
                 {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
                 status="1",
             )
             service.update_task_progress("file", "demo.pdf", progress=0.65, message="处理中", status="1")
-            hub = LLMProgressHub()
-            sent_messages = []
-            subscriptions = {}
-            command = _parse_progress_command(
+            request_model = parse_progress_subscription(
                 {
                     "businessType": "file",
                     "params": [{"fileName": "demo.pdf"}],
                 }
             )
-
-            app = create_app()
-            services = replace(
-                app.extensions[APPLICATION_SERVICES_EXTENSION],
-                task_service=service,
-                progress_hub=hub,
+            presenter = ProgressWebSocketPresenter()
+            delivery = ProgressDeliveryBuffer(
+                delivery_id="repeated-progress-message",
+                capacity=16,
             )
-            _handle_progress_command(
-                sent_messages.append,
-                subscriptions,
-                command,
-                emit_ack=False,
-                services=services,
+            first = services.progress_subscription_service.subscribe(
+                request_model,
+                delivery=delivery,
             )
-            _handle_progress_command(
-                sent_messages.append,
-                subscriptions,
-                command,
-                emit_ack=False,
-                services=services,
+            first_messages = [
+                presenter.present_current(item) for item in first.current_items
+            ]
+            first.complete_initial_delivery()
+            second = services.progress_subscription_service.subscribe(
+                request_model,
+                delivery=delivery,
+                existing_subscriptions=first.active_subscriptions,
+            )
+            second_messages = [
+                presenter.present_current(item) for item in second.current_items
+            ]
+            second.complete_initial_delivery()
+            services.progress_subscription_service.release(
+                second.active_subscriptions,
             )
 
         self.assertEqual(
-            sent_messages,
+            first_messages + second_messages,
             [
                 {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
                 {"businessType": "file", "data": {"progress": 0.65, "fileName": "demo.pdf"}},
@@ -144,19 +150,16 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
             replayed = service.replay_callback_if_needed("file", "demo.pdf", callback_url="http://callback.test/llm/callback", timeout=5)
             self.assertTrue(replayed)
 
-    def test_batch_check_task_returns_data_array(self):
-        app = create_app()
-        client = app.test_client()
-
+    def test_batch_check_task_returns_empty_success_body(self):
+        """批量检查仍执行既有任务读取，但不再向调用方泄露状态快照。"""
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            services = build_offline_application_services(tmp)
+            service = services.task_service
             service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
             service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
 
-            app.extensions[APPLICATION_SERVICES_EXTENSION] = replace(
-                app.extensions[APPLICATION_SERVICES_EXTENSION],
-                task_service=service,
-            )
+            app = create_app(services=services)
+            client = app.test_client()
             response = client.post(
                 "/llm/check-task",
                 json={
@@ -166,6 +169,4 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertIsInstance(payload["data"], list)
-        self.assertEqual([item["fileName"] for item in payload["data"]], ["a.pdf", "b.pdf"])
+        self.assertEqual(response.data, b"")

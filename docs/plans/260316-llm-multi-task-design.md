@@ -1,5 +1,7 @@
 # LLM 多任务与进度扩展设计
 
+> 历史协议提示（2026-07-15）：本文记录当时引入多任务扩展的设计。文中的 check-task 成功 JSON，以及 Progress 显式 `subscribe/query/unsubscribe` 与 ack 已被当前目标契约取代；它们将在重构波次 1B 下线。当前权威口径以 `docs/接口文档/` 和 `docs/重构记录/260715-阶段0契约容量与基础设施决策清单.md` 为准。
+
 **日期：** 2026-03-16
 
 **目标：** 在继续以 [api-test.md](/e:/DocSense/api-test.md) 为最高优先级的前提下，为 `/llm/analysis`、`/llm/check-task`、`/llm/progress` 增加多文件任务、批量任务查询、单连接多订阅 WebSocket，并保持现有单任务调用方式兼容。

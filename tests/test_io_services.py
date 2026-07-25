@@ -1,4 +1,5 @@
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import json
 from http.server import HTTPServer
 from pathlib import Path
@@ -21,10 +22,71 @@ from tests import workspace_tempdir
 class LLMIOServicesTests(unittest.TestCase):
     @patch("app.services.utils.file_downloader.requests.get")
     def test_download_to_temp_file_saves_content(self, mock_get):
-        mock_get.return_value = Mock(ok=True, content=b"demo", headers={})
+        response = Mock(status_code=200, headers={})
+        response.iter_content.return_value = (b"de", b"mo")
+        mock_get.return_value = response
         with workspace_tempdir() as tmp:
             path = download_to_temp_file("http://example.test/file.pdf", "demo.pdf", tmp, timeout=10)
             self.assertTrue(path.endswith("demo.pdf"))
+            self.assertEqual(b"demo", Path(path).read_bytes())
+        response.close.assert_called_once_with()
+
+    @patch("app.services.utils.file_downloader.requests.get")
+    def test_download_rejects_declared_oversize_before_writing(self, mock_get):
+        response = Mock(status_code=200, headers={"Content-Length": "5"})
+        response.iter_content.return_value = (b"12345",)
+        mock_get.return_value = response
+
+        with workspace_tempdir() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "大小上限"):
+                download_to_temp_file(
+                    "http://example.test/file.pdf",
+                    "demo.pdf",
+                    tmp,
+                    timeout=10,
+                    max_bytes=4,
+                )
+            self.assertFalse((Path(tmp) / "demo.pdf").exists())
+            self.assertEqual([], list(Path(tmp).glob("*.part")))
+
+    @patch("app.services.utils.file_downloader.requests.get")
+    def test_download_rejects_streamed_oversize_without_content_length(self, mock_get):
+        response = Mock(status_code=200, headers={})
+        response.iter_content.return_value = (b"12", b"345")
+        mock_get.return_value = response
+
+        with workspace_tempdir() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "大小上限"):
+                download_to_temp_file(
+                    "http://example.test/file.pdf",
+                    "demo.pdf",
+                    tmp,
+                    timeout=10,
+                    max_bytes=4,
+                )
+            self.assertFalse((Path(tmp) / "demo.pdf").exists())
+            self.assertEqual([], list(Path(tmp).glob("*.part")))
+
+    @patch("app.services.utils.file_downloader.time.monotonic")
+    @patch("app.services.utils.file_downloader.requests.get")
+    def test_download_enforces_total_transfer_deadline(self, mock_get, monotonic):
+        response = Mock(status_code=200, headers={})
+        response.iter_content.return_value = (b"data",)
+        mock_get.return_value = response
+        # 启动、响应头检查、首个数据块检查；第三次已经超过 1 秒总期限。
+        monotonic.side_effect = (0.0, 0.1, 1.1)
+
+        with workspace_tempdir() as tmp:
+            with self.assertRaisesRegex(TimeoutError, "总传输时限"):
+                download_to_temp_file(
+                    "http://example.test/file.pdf",
+                    "demo.pdf",
+                    tmp,
+                    timeout=1,
+                    max_bytes=1024,
+                )
+            self.assertFalse((Path(tmp) / "demo.pdf").exists())
+            self.assertEqual([], list(Path(tmp).glob("*.part")))
 
     @patch("app.services.utils.callback_client.requests.post")
     def test_post_callback_payload_returns_true_on_200(self, mock_post):
@@ -58,6 +120,26 @@ class LLMIOServicesTests(unittest.TestCase):
             payload = json.loads(files[0].read_text(encoding="utf-8"))
             self.assertEqual(payload["msg"], "解析成功")
         mock_post.assert_called_once()
+        mock_post.return_value.close.assert_called_once_with()
+
+    @patch("app.services.utils.callback_client.requests.post")
+    def test_post_callback_payload_rejects_redirect_response(self, mock_post):
+        """3xx 不是甲方已接收回调的证据，不能使用 Response.ok 放宽。"""
+
+        mock_post.return_value = Mock(ok=True, status_code=302, text="redirect")
+        with workspace_tempdir() as tmp:
+            with patch(
+                "app.services.utils.callback_client.CALLBACK_HISTORY_DIR",
+                Path(tmp) / "callback",
+            ):
+                delivered = post_callback_payload(
+                    "http://callback.test/llm/callback",
+                    {"businessType": "file", "data": {}, "msg": "完成"},
+                    timeout=5,
+                )
+
+        self.assertFalse(delivered)
+        mock_post.return_value.close.assert_called_once_with()
 
     def test_build_callback_history_stem_uses_file_original_and_internal_names(self):
         stem = build_callback_history_stem(
@@ -108,6 +190,33 @@ class LLMIOServicesTests(unittest.TestCase):
             self.assertEqual(first.name, "report-7-20260622T120000123456.json")
             self.assertEqual(second.name, "report-7-20260622T120000123456-2.json")
             self.assertEqual(len(list(history_dir.glob("*.json"))), 2)
+
+    def test_concurrent_callback_history_writes_are_atomic_and_unique(self):
+        with workspace_tempdir() as tmp:
+            history_dir = Path(tmp) / "callback"
+            timestamp = datetime(2026, 6, 22, 12, 0, 0, 123456)
+
+            def save(index: int) -> Path:
+                return save_callback_history_payload(
+                    {
+                        "businessType": "report",
+                        "data": {"reportId": 0, "sequence": index},
+                    },
+                    history_dir=history_dir,
+                    timestamp=timestamp,
+                )
+
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                paths = tuple(executor.map(save, range(50)))
+
+            self.assertEqual(50, len(set(paths)))
+            self.assertEqual(50, len(tuple(history_dir.glob("*.json"))))
+            self.assertTrue(all(path.name.startswith("report-0-") for path in paths))
+            sequences = {
+                json.loads(path.read_text(encoding="utf-8"))["data"]["sequence"]
+                for path in paths
+            }
+            self.assertEqual(set(range(50)), sequences)
 
     def test_mock_callback_server_writes_callback_history_file(self):
         with workspace_tempdir() as tmp:

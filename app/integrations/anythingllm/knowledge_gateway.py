@@ -324,16 +324,9 @@ class AnythingLLMKnowledgeGateway:
                 known_collection.ref,
                 normalized_key,
             )
-            # 如果已存在且状态为 committed，直接复用，避免 document_ref/location 冲突
-            if existing is not None and existing.status == STATUS_COMMITTED:
-                logger.info(
-                    "永久知识库文档已提交，直接复用既有结果: architecture_id=%s "
-                    "idempotency_key=%s",
-                    known_collection.architecture_id,
-                    normalized_key,
-                )
-                return self._indexed_result(existing, created=False)
-            
+            # 即使记录已经 committed，也必须再次经过 begin 的不可变身份比较。直接返回会
+            # 让“同一幂等键 + 不同 metadata/文档位置”的后到请求绕过冲突校验，并把旧结果
+            # 误报成安全复用；begin 已负责精确重放和 last_execution_id 更新。
             record = self._operation_service.begin(
                 collection_ref=known_collection.ref,
                 idempotency_key=normalized_key,

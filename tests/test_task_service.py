@@ -824,6 +824,304 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertIn("finalization_digest", columns)
             self.assertEqual(foreign_keys, [])
 
+    def test_main_schema_database_keeps_file_claim_and_recall_when_refactor_tables_are_added(self):
+        """main 输入库升级时只能增建重构表，不能改写文件回调租约和召回审计。
+
+        该夹具先构造含 ``execution_id``、file callback claim 和领域召回审计的 main
+        数据，再移除仅由并发重构引入的表。最终服务重新初始化后，既要补齐这些新表，
+        也要保证 main 已持久化的任务身份、租约和审计记录保持不变。
+        """
+        with workspace_tempdir() as tmp:
+            db_path = f"{tmp}/tasks.sqlite3"
+            source_service = LLMTaskService(db_path=db_path)
+            original_task = source_service.create_file_task(
+                "main-migration.pdf",
+                {"businessType": "file"},
+            )
+            source_service.mark_business_completed(
+                "file",
+                "main-migration.pdf",
+                {"status": "2", "source": "main"},
+                status="2",
+                execution_id=original_task["execution_id"],
+            )
+            source_service.mark_callback_failed(
+                "file",
+                "main-migration.pdf",
+                "模拟首次回调失败",
+                execution_id=original_task["execution_id"],
+            )
+            claimed = source_service.claim_callback_delivery(
+                "file",
+                "main-migration.pdf",
+                timeout=5,
+                execution_id=original_task["execution_id"],
+            )
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            original_claim_id, _ = claimed
+            source_service.upsert_architecture_recall_decision(
+                **_recall_decision_args(original_task["execution_id"])
+            )
+
+            # 测试夹具使用临时库模拟 main 的表集合；生产迁移绝不执行删除或重建。
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("PRAGMA foreign_keys = OFF")
+                for table in (
+                    "weaponry_task_document_snapshots",
+                    "report_resource_records",
+                    "callback_guard_release_audits",
+                    "callback_delivery_guards",
+                    "llm_task_executions",
+                ):
+                    conn.execute(f"DROP TABLE {table}")
+
+            first_service = LLMTaskService(db_path=db_path)
+            first_task = first_service.get_task("file", "main-migration.pdf")
+            first_recall = first_service.get_architecture_recall_decision(
+                original_task["execution_id"]
+            )
+            with sqlite3.connect(db_path) as conn:
+                # get_task() 是公开投影，内部 file claim 只能在持久化层断言，
+                # 避免测试反向要求将租约标识泄漏到路由或 Callback DTO。
+                first_claim = conn.execute(
+                    """
+                    SELECT callback_claim_id, callback_claim_expires_at
+                    FROM llm_tasks
+                    WHERE business_type = 'file' AND business_key = ?
+                    """,
+                    ("main-migration.pdf",),
+                ).fetchone()
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+
+            second_service = LLMTaskService(db_path=db_path)
+            second_task = second_service.get_task("file", "main-migration.pdf")
+            with sqlite3.connect(db_path) as conn:
+                second_claim = conn.execute(
+                    """
+                    SELECT callback_claim_id, callback_claim_expires_at
+                    FROM llm_tasks
+                    WHERE business_type = 'file' AND business_key = ?
+                    """,
+                    ("main-migration.pdf",),
+                ).fetchone()
+
+        self.assertEqual(original_task["execution_id"], first_task["execution_id"])
+        self.assertEqual(original_claim_id, first_claim[0])
+        self.assertGreater(first_claim[1], 0)
+        self.assertEqual(original_task["execution_id"], first_recall["execution_id"])
+        self.assertTrue(
+            {
+                "llm_task_executions",
+                "callback_delivery_guards",
+                "callback_guard_release_audits",
+                "report_resource_records",
+                "weaponry_task_document_snapshots",
+            }.issubset(tables)
+        )
+        self.assertEqual(first_task["execution_id"], second_task["execution_id"])
+        self.assertEqual(first_claim, second_claim)
+
+    def test_refactor_schema_database_keeps_queue_guard_and_resource_rows_when_main_columns_are_added(self):
+        """重构输入库升级时只补 main 列和召回表，不得丢失队列/Guard/资源事实。
+
+        夹具保留阶段 1C/1D 已有的 execution、Callback Guard、报告资源和武器谱文档
+        快照，再将 ``llm_tasks`` 收敛为 refactor 当时不含 file callback claim 的列集合。
+        最终初始化必须以增量 ``ALTER`` 补列并创建召回表，不能重建任务表。
+        """
+        with workspace_tempdir() as tmp:
+            db_path = f"{tmp}/tasks.sqlite3"
+            source_service = LLMTaskService(db_path=db_path)
+            original_task = source_service.create_report_task(
+                report_id=132,
+                request_payload={"businessType": "report"},
+            )
+            report_execution_id = "refactor-report-execution"
+            weaponry_execution_id = "refactor-weaponry-execution"
+            fixture_time = "2026-07-25T00:00:00+00:00"
+
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("PRAGMA foreign_keys = OFF")
+                execution_rows = (
+                    (
+                        report_execution_id,
+                        "report",
+                        "132",
+                        "report-resource",
+                    ),
+                    (
+                        weaponry_execution_id,
+                        "weaponry",
+                        "10501",
+                        "weaponry-snapshot",
+                    ),
+                )
+                for execution_id, business_type, business_key, trace_id in execution_rows:
+                    conn.execute(
+                        """
+                        INSERT INTO llm_task_executions (
+                            execution_id, business_type, business_key,
+                            input_schema_version, input_payload, dispatch_sequence,
+                            dispatch_failure_count, next_dispatch_at,
+                            last_dispatch_error, execution_state, public_status,
+                            progress, message, result_payload, callback_status,
+                            callback_outcome, trace_id, created_at, started_at,
+                            completed_at, updated_at
+                        ) VALUES (?, ?, ?, 1, '{}', NULL, 0, NULL, '', 'accepted',
+                                  '0', 0, '', NULL, 'pending', '', ?, ?, NULL, NULL, ?)
+                        """,
+                        (
+                            execution_id,
+                            business_type,
+                            business_key,
+                            trace_id,
+                            fixture_time,
+                            fixture_time,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO callback_delivery_guards (
+                        business_type, business_key, owner_execution_id, state,
+                        lease_token, lease_version, lease_started_at, deadline_at,
+                        last_outcome, error_stage, released_at, released_by,
+                        release_reason, updated_at
+                    ) VALUES ('report', '132', ?, 'idle', '', 0, NULL, NULL,
+                              '', '', NULL, '', '', ?)
+                    """,
+                    (report_execution_id, fixture_time),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO report_resource_records (
+                        execution_id, business_type, business_key,
+                        artifact_namespace, state, record_payload, version,
+                        recovery_deferral_count, next_recovery_at,
+                        last_recovery_reason, created_at, updated_at
+                    ) VALUES (?, 'report', '132', 'report:132', 'tracking', '{}', 1,
+                              0, NULL, '', ?, ?)
+                    """,
+                    (report_execution_id, fixture_time, fixture_time),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO weaponry_task_document_snapshots (
+                        business_key, execution_id, sequence_no, file_name,
+                        original_name, ingested_file_name, source_architecture_id,
+                        doc_path, anything_doc_id
+                    ) VALUES ('10501', ?, 1, 'refactor.pdf', 'refactor.pdf',
+                              'refactor.pdf', 10501,
+                              'custom-documents/refactor.json', 'document-10501')
+                    """,
+                    (weaponry_execution_id,),
+                )
+                conn.execute("DROP TABLE llm_architecture_recall_decisions")
+                conn.execute("ALTER TABLE llm_tasks RENAME TO llm_tasks_current")
+                conn.execute(
+                    """
+                    CREATE TABLE llm_tasks (
+                        business_type TEXT NOT NULL,
+                        business_key TEXT NOT NULL,
+                        execution_id TEXT NOT NULL,
+                        request_payload TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        progress REAL NOT NULL DEFAULT 0,
+                        message TEXT NOT NULL DEFAULT '',
+                        result_payload TEXT,
+                        callback_status TEXT NOT NULL DEFAULT 'pending',
+                        callback_attempts INTEGER NOT NULL DEFAULT 0,
+                        last_callback_error TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (business_type, business_key)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO llm_tasks (
+                        business_type, business_key, execution_id, request_payload,
+                        status, progress, message, result_payload, callback_status,
+                        callback_attempts, last_callback_error, created_at, updated_at
+                    )
+                    SELECT business_type, business_key, execution_id, request_payload,
+                           status, progress, message, result_payload, callback_status,
+                           callback_attempts, last_callback_error, created_at, updated_at
+                    FROM llm_tasks_current
+                    """
+                )
+                conn.execute("DROP TABLE llm_tasks_current")
+
+            first_service = LLMTaskService(db_path=db_path)
+            first_task = first_service.get_task("report", "132")
+            with sqlite3.connect(db_path) as conn:
+                task_columns = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(llm_tasks)")
+                }
+                execution = conn.execute(
+                    """
+                    SELECT business_type, business_key, trace_id
+                    FROM llm_task_executions
+                    WHERE execution_id = ?
+                    """,
+                    (report_execution_id,),
+                ).fetchone()
+                guard = conn.execute(
+                    """
+                    SELECT owner_execution_id, state
+                    FROM callback_delivery_guards
+                    WHERE business_type = 'report' AND business_key = '132'
+                    """
+                ).fetchone()
+                resource = conn.execute(
+                    """
+                    SELECT execution_id, artifact_namespace, state
+                    FROM report_resource_records
+                    WHERE execution_id = ?
+                    """,
+                    (report_execution_id,),
+                ).fetchone()
+                snapshot = conn.execute(
+                    """
+                    SELECT execution_id, ingested_file_name, doc_path
+                    FROM weaponry_task_document_snapshots
+                    WHERE business_key = '10501' AND sequence_no = 1
+                    """
+                ).fetchone()
+                recall_table = conn.execute(
+                    """
+                    SELECT name FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'llm_architecture_recall_decisions'
+                    """
+                ).fetchone()
+
+            second_service = LLMTaskService(db_path=db_path)
+            second_task = second_service.get_task("report", "132")
+
+        self.assertEqual(original_task["execution_id"], first_task["execution_id"])
+        self.assertIn("callback_claim_id", task_columns)
+        self.assertIn("callback_claim_expires_at", task_columns)
+        self.assertEqual("report", execution[0])
+        self.assertEqual("132", execution[1])
+        self.assertEqual("report-resource", execution[2])
+        self.assertEqual(report_execution_id, guard[0])
+        self.assertEqual("idle", guard[1])
+        self.assertEqual(report_execution_id, resource[0])
+        self.assertEqual("report:132", resource[1])
+        self.assertEqual("tracking", resource[2])
+        self.assertEqual(weaponry_execution_id, snapshot[0])
+        self.assertEqual("refactor.pdf", snapshot[1])
+        self.assertEqual("custom-documents/refactor.json", snapshot[2])
+        self.assertIsNotNone(recall_table)
+        self.assertEqual(first_task["execution_id"], second_task["execution_id"])
+
     def test_recall_audit_upsert_finalize_and_get_preserve_initial_decision(self):
         """终结只补结果字段，模型候选、排名、分数和保护原因必须保持原值。"""
         with workspace_tempdir() as tmp:
@@ -1188,8 +1486,13 @@ class LLMTaskServiceTests(unittest.TestCase):
             service.mark_callback_failed("report", "7", "timeout")
             self.assertTrue(service.should_replay_callback("report", "7"))
 
-    def test_report_replay_does_not_claim_before_initial_callback_is_migrated(self):
-        """未迁移首次回调前，report 补发不得单边启用发送租约。"""
+    def test_report_replay_rejects_legacy_generic_entry(self):
+        """报告回调补偿必须拒绝遗留通用入口，避免绕过 Callback Guard。
+
+        报告模块已经以 execution 为粒度实现 latest-wins 与 fencing；若继续由
+        ``LLMTaskService`` 的通用补偿方法发送回调，就会绕过该保护。因此这里只
+        验证遗留入口 fail closed，实际补偿行为由报告模块的应用服务测试覆盖。
+        """
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             service.create_report_task(
@@ -1205,29 +1508,28 @@ class LLMTaskServiceTests(unittest.TestCase):
             service.mark_callback_failed("report", "7", "timeout")
 
             with (
-                patch.object(
-                    service,
-                    "claim_callback_delivery",
-                    side_effect=AssertionError("report 不应领取 file 回调租约"),
-                ) as claim_callback,
+                patch.object(service, "claim_callback_delivery") as claim_callback,
                 patch(
-                    "app.services.llm_service.task_service.post_callback_payload",
-                    return_value=True,
-                ),
+                    "app.services.llm_service.task_service.post_callback_payload"
+                ) as callback_post,
             ):
-                replayed = service.replay_callback_if_needed(
-                    "report",
-                    "7",
-                    callback_url="http://callback.test/llm/callback",
-                    timeout=5,
-                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "报告回调恢复必须通过 RecoverReportCallbackSynchronously",
+                ):
+                    service.replay_callback_if_needed(
+                        "report",
+                        "7",
+                        callback_url="http://callback.test/llm/callback",
+                        timeout=5,
+                    )
 
             current = service.get_task("report", "7")
 
-        self.assertTrue(replayed)
         claim_callback.assert_not_called()
-        self.assertEqual(current["callback_status"], "success")
-        self.assertEqual(current["callback_attempts"], 2)
+        callback_post.assert_not_called()
+        self.assertEqual(current["callback_status"], "failed")
+        self.assertEqual(current["callback_attempts"], 1)
 
     def test_atomic_audit_persists_main_attempts_and_lifecycle_events(self):
         """完整事务提交后才返回 succeeded 门禁结果，并保留全部审计明细。"""
@@ -1257,7 +1559,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertEqual(attempts[0]["query_mode"], "query")
             self.assertEqual(attempts[0]["source_marker_status"], "matched")
             self.assertEqual([item["sequence_no"] for item in events], [1, 2])
-            self.assertEqual(interactions[0]["audit_schema_version"], 2)
+            self.assertEqual(interactions[0]["audit_schema_version"], 3)
 
     def test_atomic_audit_uses_same_canonical_prompt_as_rag_attempt(self):
         """首尾换行和 CRLF 不得再次制造主审计与实际模型调用摘要不一致。"""
@@ -1634,10 +1936,13 @@ class LLMTaskServiceTests(unittest.TestCase):
             interaction_id = _create_audited_interaction(service)
             conflicting_event = RagLifecycleEvent(
                 sequence_no=2,
-                operation="document_upload",
+                # append 接口只接受包含删除事件的关闭批次。这里使用合法的
+                # context_delete，确保测试越过批次前置校验，真正命中“已存在
+                # sequence_no=2 但内容不同”的审计冲突分支。
+                operation="context_delete",
                 attempt=1,
                 success=True,
-                external_ref="document-001",
+                external_ref="context-001",
                 failure_stage=None,
                 error_message=None,
             )

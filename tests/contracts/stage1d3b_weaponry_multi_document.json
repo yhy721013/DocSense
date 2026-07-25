@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "stage": "1D-3B",
+  "purpose": "minimal-multi-document-structural-golden-corpus",
+  "precisionClaim": false,
+  "documents": [
+    {
+      "documentKey": "doc-a",
+      "fileName": "A.pdf",
+      "evidence": "A 文档记载该装备属于甲级舰艇，并给出完整来源事实。"
+    },
+    {
+      "documentKey": "doc-b",
+      "fileName": "B.pdf",
+      "evidence": "B 文档记载该装备属于乙级舰艇，并给出互斥来源事实。"
+    }
+  ],
+  "expected": {
+    "sourceCalls": 2,
+    "sameAnswerTextAllowed": true,
+    "documentKeysMustRemainDistinct": true,
+    "rowsMustEqualSelectedEvidence": true,
+    "crossDocumentEvidenceAllowed": false
+  }
+}
