@@ -17,8 +17,8 @@
 | `260716-阶段1C至11滚动实施计划.md` | L2/L2.5 滚动计划：细化 1C～11 子波次、依赖、门禁、回滚、无业务积压数量上限、同步 Repository、测试 Compose、callback Guard 和保留周期延期。 |
 | `260716-阶段1C报告生成文件级实施设计.md` | L3 文件级设计：报告原子 409、追加式 execution、按 task ID 恢复、持久化积压/有界唤醒、多文档 RAG/File/Artifact/Callback Port、latest-wins 和完整验收矩阵；1C-0～1C-7 已完成并关闭阶段。 |
 | `260717-阶段1D武器谱文件级实施设计.md` | L3 文件级设计：1D-0/0R～1D-7 的开发分支代码与离线验收已关闭；公开路由、永久 AST/配置门禁、I01～I07 证据和遗留引用清单均已完成。localhost 实例已完成只读 score 与来源身份 8/8 复核；有时效 production attestation 仍因四类生产指纹未冻结而待生成，未通过前不得标记为 production ready。 |
+| `260725-main与refactor并发重构分支集成实施计划.md` | L3 分支集成计划：以最新 `main` 为第一父基线，将 `refactor/concurrency` 阶段 0～1E 成果集成进主线；逐文件规定 8 个冲突文件、24 个冲突块、Analysis 最新功能保留、SQLite Schema 并集、里程碑、测试、回滚和完成定义。该计划取代 `260722-refactor与analysis优化分支合并实施计划.md` 的旧执行方向。 |
 | `260724-阶段1E分类节点变更同步Saga文件级实施设计.md` | L3 文件级设计：保持 `/llm/reassign` 同步契约，通过持久化 Operation/Step/Event/恢复观测、Knowledge Port、SQLite Unit of Work、条件 CAS、写后探测、反向补偿和恢复审计完成 1E 功能闭环；1E-0～1E-7 已完成，真实供应商演练与生产容量校准仍是后续启用门禁。 |
-| `260725-main与refactor并发重构分支集成实施计划.md` | L3 集成计划：以 `refactor/integration` 承接最新 main 与 `refactor/concurrency`，M2 以 8 文件、22 冲突块为实际基线；已确认的 Analysis/check-task 空响应体和 weaponry Progress 数值 ID 已落地，M8 已以 merge commit 完成。 |
 | `260718-阶段1H共享文档处理模块文件级实施设计.md` | L3 文件级设计：与 1D 平级的共享文档处理阶段；把 MHTML/MinerU/OCR/Office、Artifact/Profile/Lineage 和任务级资源从 Translator/utils 抽离，阶段 3 再切换 MinIO。当前仅完成计划，尚未实施。 |
 | `../更新记录/260716-阶段0与1A审查修正记录.md` | 阶段 0/1A 全面审查后的实现修正、验证结果、生产边界及 TASK-09 latest-wins 决策和后置门禁。 |
 | `../更新记录/260716-阶段1B-1可靠恢复命令边界执行记录.md` | 阶段 1B-1 的批量原子 Command Port、应用服务、Presenter、Fake、测试结果和生产未切换边界。 |
@@ -75,6 +75,10 @@
    公开薄路由、契约黄金回归和永久 AST 门禁，1E-7 已完成四个恢复协作器的实际实现下沉、直接单测
    与 callback-wrapper/规模复杂度门禁。真实供应商能力、预算校准和容量仍须在可用集成环境验收，未通过前
    不得标记 production ready。
+8. 将 `refactor/concurrency` 阶段 0～1E 成果集成到最新 `main` 前，必须阅读
+   `260725-main与refactor并发重构分支集成实施计划.md`，按其中固定提交、冲突文件、Schema 并集、
+   分阶段测试、停止条件和回滚门禁执行。`260722-refactor与analysis优化分支合并实施计划.md` 只作为
+   Analysis 语义移植的历史输入，不再作为当前 Git 合并方向。
 
 ## 已实施记录
 
