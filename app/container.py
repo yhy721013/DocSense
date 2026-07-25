@@ -19,7 +19,10 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMKnowledgeIndexFactory,
 )
 from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
-from app.integrations.anythingllm.policies import document_rag_workspace_settings
+from app.integrations.anythingllm.policies import (
+    analysis_rag_workspace_settings,
+    knowledge_index_workspace_settings,
+)
 from app.ports import (
     ChatConversationFactory,
     DocumentRagFactory,
@@ -42,9 +45,11 @@ from app.services.chat import (
     InlineChatCleanupDispatcher,
 )
 from app.services.core.config import (
+    AnalysisClassificationConfig,
     AnythingLLMConfig,
     ChatInfrastructureConfig,
     LLMIntegrationConfig,
+    load_analysis_classification_config,
     load_anythingllm_config,
     load_chat_infrastructure_config,
     load_llm_integration_config,
@@ -131,6 +136,9 @@ class ApplicationServices:
     upload_task_limiter: UploadTaskLimiter
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
+    analysis_classification_config: AnalysisClassificationConfig = field(
+        default_factory=AnalysisClassificationConfig.topk_two_stage
+    )
     chat_infrastructure_config: ChatInfrastructureConfig = field(
         default_factory=ChatInfrastructureConfig.single_instance
     )
@@ -156,6 +164,7 @@ class ApplicationServices:
             "upload_task_limiter": self.upload_task_limiter,
             "llm_config": self.llm_config,
             "anythingllm_config": self.anythingllm_config,
+            "analysis_classification_config": self.analysis_classification_config,
             "chat_infrastructure_config": self.chat_infrastructure_config,
         }
         missing = [name for name, value in required_dependencies.items() if value is None]
@@ -196,6 +205,13 @@ class ApplicationServices:
         if not isinstance(self.chat_infrastructure_config, ChatInfrastructureConfig):
             raise TypeError(
                 "chat_infrastructure_config must be ChatInfrastructureConfig"
+            )
+        if not isinstance(
+            self.analysis_classification_config,
+            AnalysisClassificationConfig,
+        ):
+            raise TypeError(
+                "analysis_classification_config must be AnalysisClassificationConfig"
             )
         self._validate_chat_infrastructure_capabilities()
 
@@ -249,9 +265,18 @@ def create_application_services() -> ApplicationServices:
     # 先校验部署模式，再读取任何外部集成配置或创建数据库文件。这样错误地把
     # SQLite 单实例模式配置成集群时，会在应用启动的最早阶段 fail fast。
     chat_infrastructure_config = load_chat_infrastructure_config()
+    analysis_classification_config = load_analysis_classification_config()
     logger.info(
-        "已读取文件对话基础设施配置: runtime_mode=%s",
+        "已读取运行模式配置: chat_runtime_mode=%s "
+        "analysis_classification_mode=%s "
+        "analysis_filename_constraint_mode=%s "
+        "analysis_data_standard_mode=%s "
+        "analysis_identity_reselect_mode=%s",
         chat_infrastructure_config.runtime_mode,
+        analysis_classification_config.mode,
+        analysis_classification_config.filename_constraint_mode,
+        analysis_classification_config.data_standard_mode,
+        analysis_classification_config.identity_reselect_mode,
     )
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
@@ -283,13 +308,13 @@ def create_application_services() -> ApplicationServices:
     services = ApplicationServices(
         document_rag_factory=AnythingLLMGatewayFactory(
             anythingllm_config,
-            workspace_settings=document_rag_workspace_settings(),
+            workspace_settings=analysis_rag_workspace_settings(),
         ),
         knowledge_index_factory=AnythingLLMKnowledgeIndexFactory(
             anythingllm_config,
             task_service.knowledge_index_operations,
             kb_service,
-            workspace_settings=document_rag_workspace_settings(),
+            workspace_settings=knowledge_index_workspace_settings(),
         ),
         chat_conversation_factory=chat_conversation_factory,
         task_service=task_service,
@@ -322,14 +347,23 @@ def create_application_services() -> ApplicationServices:
         upload_task_limiter=UploadTaskLimiter(max_concurrency=1),
         llm_config=llm_config,
         anythingllm_config=anythingllm_config,
+        analysis_classification_config=analysis_classification_config,
         chat_infrastructure_config=chat_infrastructure_config,
     )
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "
-        "upload_max_concurrency=%d chat_runtime_mode=%s",
+        "upload_max_concurrency=%d chat_runtime_mode=%s "
+        "analysis_classification_mode=%s "
+        "analysis_filename_constraint_mode=%s "
+        "analysis_data_standard_mode=%s "
+        "analysis_identity_reselect_mode=%s",
         services.knowledge_index_factory is not None,
         services.upload_task_limiter.max_concurrency,
         services.chat_infrastructure_config.runtime_mode,
+        services.analysis_classification_config.mode,
+        services.analysis_classification_config.filename_constraint_mode,
+        services.analysis_classification_config.data_standard_mode,
+        services.analysis_classification_config.identity_reselect_mode,
     )
     return services
 

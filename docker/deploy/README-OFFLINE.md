@@ -232,7 +232,42 @@ ANYTHINGLLM_API_KEY=你复制的API Key
 
 ```powershell
 cd D:\DocSense\docker
-docker compose up -d docsense
+docker compose up -d --force-recreate docsense
+```
+
+`.env.docker` 已显式固定 `/llm/analysis` 的生产模式：
+
+```ini
+DOCSENSE_ANALYSIS_CLASSIFICATION_MODE=topk_two_stage
+DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE=scope_guard
+DOCSENSE_ANALYSIS_DATA_STANDARD_MODE=scope_guard
+DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE=enforce
+```
+
+- `topk_two_stage`：先在完整领域树上本地召回有界候选，再分别执行分类和字段抽取。
+- 第一个 `scope_guard`：文件名可以参与召回，但不能作为普通资料最终分类的单一硬覆盖依据。
+- 第二个 `scope_guard`：仅对文件名与首页共同确认的数据标准正文启用六类叶子保护。
+- `enforce`：仅在原始文件名与文档开头双证据确认唯一装备身份后，对分支外或过粗的初次分类执行一次受限重选；失败时保留初次分类。
+
+需要紧急回滚时，优先只改动出现问题的开关：
+
+```ini
+# 保留 Top-K 候选，仅回滚为单阶段分类与抽取
+DOCSENSE_ANALYSIS_CLASSIFICATION_MODE=topk_single
+# 恢复旧文件名硬约束
+DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE=legacy
+# 关闭数据标准正文分类保护
+DOCSENSE_ANALYSIS_DATA_STANDARD_MODE=legacy
+# 关闭装备身份受限重选
+DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE=off
+```
+
+`DOCSENSE_ANALYSIS_CLASSIFICATION_MODE=legacy` 只适用于候选不超过 128 且完整 Prompt 不超过 32,000 字符的小树，不适用于正式完整领域树。修改任一环境变量后必须重新创建容器，单纯执行 `docker compose restart` 不会重新读取 `env_file`：
+
+```powershell
+cd D:\DocSense\docker
+docker compose up -d --force-recreate docsense
+docker compose logs --tail 100 docsense
 ```
 
 ### 2.7 验证

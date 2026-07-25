@@ -9,12 +9,16 @@ from app.ports import (
     RagPromptKind,
     RagSource,
 )
+from app.services.core.architecture_tree import build_architecture_tree_index
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.analysis_service import (
+    ArchitectureContractError,
     DataStandardParentContractError,
     DEFAULT_ARCHITECTURE_OPTIONS,
     _first_data_standard_leaf_id,
     _resolve_analysis_architecture_id,
+    _unique_visible_equipment_identifier_parent,
+    _validate_topk_architecture_id,
     build_file_callback_payload,
     map_analysis_result,
     resolve_storage_architecture_id,
@@ -232,7 +236,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
         self.assertEqual(result["architectureId"], 1)
 
-    def test_map_analysis_result_routes_gjb_content_to_ordered_data_standard_leaf(self):
+    def test_map_analysis_result_routes_gjb_content_to_general_requirement_leaf(self):
         request_params = {
             "fileName": "sample.txt",
             "originalFileName": "GJB 9001C-2017.pdf",
@@ -269,6 +273,14 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     "pathName": "数据标准/建模与仿真标准",
                     "remark": "建模与仿真相关标准。",
                 },
+                {
+                    "id": 205,
+                    "name": "通用要求标准",
+                    "parentId": 202,
+                    "path": "202/205",
+                    "pathName": "数据标准/通用要求标准",
+                    "remark": "质量管理及综合性标准要求。",
+                },
             ],
         }
 
@@ -278,8 +290,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             original_text="本文档为 GJB 9001C-2017 质量管理体系要求，属于国家军用标准。",
         )
 
-        # GJB 兜底必须跳过“数据标准”父节点，并保留前端候选原始顺序。
-        self.assertEqual(result["architectureId"], 203)
+        # GJB 兜底必须跳过父节点并定向选择“通用要求”，不再依赖请求顺序。
+        self.assertEqual(result["architectureId"], 205)
 
     def test_resolve_architecture_keeps_normal_parent_but_rejects_data_standard_parent(self):
         """普通父节点可用，数据标准父节点必须转入叶子兜底路径。"""
@@ -289,6 +301,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 {"id": 212, "name": "普通子节点", "parentId": 211},
                 {"id": 213, "name": "数据标准", "parentId": None},
                 {"id": 214, "name": "军用软件标准", "parentId": 213},
+                {"id": 215, "name": "通用要求标准", "parentId": 213},
             ]
         }
 
@@ -296,7 +309,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             _resolve_analysis_architecture_id({"architectureId": 211}, request_params),
             211,
         )
-        self.assertEqual(_first_data_standard_leaf_id(request_params["architectureList"]), 214)
+        self.assertEqual(_first_data_standard_leaf_id(request_params["architectureList"]), 215)
         with self.assertRaises(DataStandardParentContractError):
             _resolve_analysis_architecture_id({"architectureId": 213}, request_params)
 
@@ -497,12 +510,226 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             {
                 "fileDataItem": {
                     "score": "85",
+                    "source": "简氏防务",
                 }
             },
             request_params,
         )
 
         self.assertEqual(result["fileDataItem"]["score"], 85)
+
+    def test_map_analysis_result_composes_path_and_summary_keywords(self):
+        summary = (
+            "该报告介绍航空母舰的核动力推进、飞行甲板、舰载机运用和数据链技术。"
+        )
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "summary": summary,
+                    "keyword": (
+                        "海军装备, 航空母舰, CVN-78, 基础数据, "
+                        "核动力推进, 飞行甲板, 舰载机运用, 数据链技术, 摘要外词"
+                    ),
+                }
+            },
+            {
+                "fileName": "sample.txt",
+                "architectureList": [
+                    {
+                        "id": 1,
+                        "name": "装备/体系",
+                    },
+                    {
+                        "id": 2,
+                        "parentId": 1,
+                        "name": "海军装备",
+                    },
+                    {
+                        "id": 3,
+                        "parentId": 2,
+                        "name": "航空母舰",
+                    },
+                    {
+                        "id": 10,
+                        "parentId": 3,
+                        "name": "CVN-78",
+                        "pathName": "甲方不透明展示/不得拆分",
+                    }
+                ],
+            },
+            resolved_architecture_id=10,
+        )
+
+        self.assertEqual(
+            result["fileDataItem"]["keyword"],
+            (
+                "CVN-78, 航空母舰, 海军装备, 装备/体系, "
+                "核动力推进, 飞行甲板, 舰载机运用, 数据链技术"
+            ),
+        )
+        self.assertNotIn("不得拆分", result["fileDataItem"]["keyword"])
+        self.assertNotIn("摘要外词", result["fileDataItem"]["keyword"])
+        self.assertNotIn("基础数据", result["fileDataItem"]["keyword"])
+
+    def test_map_analysis_result_uses_source_backed_keyword_to_reach_minimum(self):
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "summary": "本标准规定质量管理体系和装备质量相关要求。",
+                    "keyword": (
+                        "质量管理体系, 军用标准, GJB 9001C, 装备质量, 产品设计"
+                    ),
+                }
+            },
+            {
+                "fileName": "gjb.pdf",
+                "architectureList": [
+                    {"id": 1, "name": "数据标准"},
+                    {"id": 2, "parentId": 1, "name": "军用软件"},
+                ],
+            },
+            original_text=(
+                "本文件为国家军用标准 GJB 9001C―2017，规定质量管理体系要求。"
+            ),
+            resolved_architecture_id=2,
+        )
+
+        self.assertEqual(
+            result["fileDataItem"]["keyword"],
+            "军用软件, 数据标准, 质量管理体系, 装备质量, 军用标准",
+        )
+
+    def test_map_analysis_result_normalizes_related_technology_string(self):
+        with self.assertLogs(
+                "app.services.llm_service.analysis_service",
+                level="WARNING",
+        ) as logs:
+            result = map_analysis_result(
+                {
+                    "fileDataItem": {
+                        "relatedTechnology": [
+                            "雷达技术",
+                            "数据融合",
+                            "雷达技术",
+                            "卫星通信",
+                            "数据链技术",
+                            "量子通信",
+                        ],
+                    }
+                },
+                {
+                    "fileName": "sample.txt",
+                    "architectureList": [{"id": 10, "name": "测试"}],
+                },
+                original_text=(
+                    "正文明确介绍雷达技术、数据融合、卫星通信和数据链技术。"
+                ),
+            )
+
+        self.assertEqual(
+            result["fileDataItem"]["relatedTechnology"],
+            "雷达技术, 数据融合, 卫星通信, 数据链技术",
+        )
+        self.assertNotIn("量子通信", result["fileDataItem"]["relatedTechnology"])
+        self.assertIn("所属技术缺少可核验原文术语映射", "\n".join(logs.output))
+
+    def test_map_analysis_result_accepts_chinese_technology_with_english_evidence(self):
+        with self.assertLogs(
+                "app.services.llm_service.analysis_service",
+                level="WARNING",
+        ) as logs:
+            result = map_analysis_result(
+                {
+                    "fileDataItem": {
+                        "relatedTechnology": (
+                            "电磁弹射系统, 先进拦阻系统, 分布式孔径系统"
+                        ),
+                        "relatedTechnologyEvidence": [
+                            {
+                                "nameZh": "电磁弹射系统",
+                                "sourceTerm": (
+                                    "Electromagnetic Aircraft Launch Systems (EMALS)"
+                                ),
+                            },
+                            {
+                                "nameZh": "先进拦阻系统",
+                                "sourceTerm": "Advanced Arresting Gear (AAG)",
+                            },
+                            {
+                                "nameZh": "分布式孔径系统",
+                                "sourceTerm": "Distributed Aperture System",
+                            },
+                        ],
+                    }
+                },
+                {
+                    "fileName": "ford.pdf",
+                    "architectureList": [{"id": 10, "name": "测试"}],
+                },
+                original_text=(
+                    "The ship uses Electromagnetic Aircraft Launch Systems (EMALS) "
+                    "and Advanced Arresting Gear (AAG)."
+                ),
+            )
+
+        self.assertEqual(
+            result["fileDataItem"]["relatedTechnology"],
+            "电磁弹射系统, 先进拦阻系统",
+        )
+        self.assertNotIn(
+            "relatedTechnologyEvidence",
+            result["fileDataItem"],
+        )
+        self.assertIn("缺少可核验原文术语映射", "\n".join(logs.output))
+
+    def test_map_analysis_result_retains_related_technology_without_evidence_text(self):
+        with self.assertLogs(
+                "app.services.llm_service.analysis_service",
+                level="WARNING",
+        ) as logs:
+            result = map_analysis_result(
+                {"fileDataItem": {"relatedTechnology": "雷达技术"}},
+                {
+                    "fileName": "sample.bin",
+                    "architectureList": [{"id": 10, "name": "测试"}],
+                },
+            )
+
+        self.assertEqual(result["fileDataItem"]["relatedTechnology"], "雷达技术")
+        self.assertIn("所属技术缺少可核验正文", "\n".join(logs.output))
+
+    def test_map_analysis_result_forces_score_55_when_source_is_unknown(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 10, "name": "测试"}],
+        }
+
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "score": 95,
+                    "source": "未明确数据来源",
+                }
+            },
+            request_params,
+        )
+
+        self.assertEqual(result["fileDataItem"]["source"], "未明确数据来源")
+        self.assertEqual(result["fileDataItem"]["score"], 55)
+
+    def test_map_analysis_result_defaults_missing_source_to_unknown_and_forces_score_55(self):
+        request_params = {
+            "fileName": "sample.txt",
+            "architectureList": [{"id": 10, "name": "测试"}],
+        }
+
+        result = map_analysis_result(
+            {"fileDataItem": {"score": 85}},
+            request_params,
+        )
+
+        self.assertEqual(result["fileDataItem"]["source"], "未明确数据来源")
+        self.assertEqual(result["fileDataItem"]["score"], 55)
 
     def test_map_analysis_result_falls_back_score_to_55_when_missing_or_invalid(self):
         request_params = {
@@ -655,8 +882,16 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertIn("分类到最底层的叶子节点", prompt)
         self.assertIn("不得默认选择「战技指标」", prompt)
         self.assertIn("score 必须且只能输出以下 5 个整数值", prompt)
+        self.assertIn("source 为“未明确数据来源”时，score 必须且只能输出 55", prompt)
+        self.assertIn("禁止在这种情况下输出 95、85、75 或 65", prompt)
         self.assertIn("候选包含“公开”则输出“公开”", prompt)
-        self.assertIn("由至少 10 个关键词构成", prompt)
+        self.assertIn("keyword 必须输出 5 至 10 个关键词", prompt)
+        self.assertIn("分类路径关键词排在前面，内容关键词排在后面", prompt)
+        self.assertIn("内容关键词数量不得少于 max(2, 5-C)", prompt)
+        self.assertIn("relatedTechnologyEvidence", prompt)
+        self.assertIn("没有合格技术时输出空字符串", prompt)
+        self.assertNotIn("固定输出 10 个关键词", prompt)
+        self.assertNotIn("至少 10 个关键词", prompt)
         self.assertIn("GJB", prompt)
         self.assertIn("数据标准", prompt)
 
@@ -776,6 +1011,83 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(resolve_storage_architecture_id(6801, missing_parent_id), 6801)
         self.assertEqual(resolve_storage_architecture_id(6801, mismatched_parent), 6801)
 
+    def test_topk_contract_accepts_finite_boundary_parent_but_rejects_true_root(self):
+        finite_tree = [
+            {"id": 10, "name": "有限边界父节点", "parentId": 999},
+            {"id": 11, "name": "边界叶甲", "parentId": 10},
+            {"id": 12, "name": "边界叶乙", "parentId": 10},
+        ]
+        finite_index = build_architecture_tree_index(finite_tree)
+
+        self.assertEqual(
+            _validate_topk_architecture_id(
+                10,
+                visible_ids={10, 11, 12},
+                tree_index=finite_index,
+                architecture_list=finite_tree,
+            ),
+            10,
+        )
+
+        true_root_tree = [
+            {"id": 20, "name": "真实根", "parentId": None},
+            {"id": 21, "name": "根下叶子", "parentId": 20},
+        ]
+        with self.assertRaisesRegex(ArchitectureContractError, "根节点"):
+            _validate_topk_architecture_id(
+                20,
+                visible_ids={20, 21},
+                tree_index=build_architecture_tree_index(true_root_tree),
+                architecture_list=true_root_tree,
+            )
+
+    def test_finite_boundary_data_standard_parent_remains_forbidden(self):
+        architecture_list = [
+            {"id": 30, "name": "数据标准", "parentId": 999},
+            {"id": 31, "name": "通用要求", "parentId": 30},
+        ]
+        with self.assertRaises(DataStandardParentContractError):
+            _validate_topk_architecture_id(
+                30,
+                visible_ids={30, 31},
+                tree_index=build_architecture_tree_index(architecture_list),
+                architecture_list=architecture_list,
+            )
+
+    def test_filename_constraint_matches_finite_boundary_equipment_parent(self):
+        detail_kinds = (
+            "基础数据",
+            "战技指标",
+            "运用数据",
+            "效能数据",
+            "模型数据",
+            "目特数据",
+            "声像数据",
+        )
+        architecture_list = [
+            {"id": 40, "name": "CVN-78", "parentId": 999},
+            *(
+                {
+                    "id": 41 + offset,
+                    "name": f"CVN-78-{kind}",
+                    "parentId": 40,
+                }
+                for offset, kind in enumerate(detail_kinds)
+            ),
+        ]
+        tree_index = build_architecture_tree_index(architecture_list)
+
+        self.assertEqual(
+            _unique_visible_equipment_identifier_parent(
+                file_name="Gerald R Ford CVN-78.pdf",
+                original_name="CVN 78 class.pdf",
+                visible_ids={node["id"] for node in architecture_list},
+                tree_index=tree_index,
+                architecture_list=architecture_list,
+            ),
+            40,
+        )
+
     @patch("app.services.llm_service.analysis_service.run_file_analysis_task")
     def test_run_file_analysis_batch_processes_files_in_order(self, mock_run_single):
         with workspace_tempdir() as tmp:
@@ -794,16 +1106,20 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             }
 
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
-            task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
+            task_a = task_service.create_file_task("a.txt", {"businessType": "file", "params": [request_payload["params"][0]]}, status="1")
+            task_b = task_service.create_file_task("b.txt", {"businessType": "file", "params": [request_payload["params"][1]]}, status="0")
             hub = LLMProgressHub()
             transitions = []
+            filename_constraint_modes = []
 
             def capture_transition(*, task_service, request_payload, **kwargs):
                 current = request_payload["params"][0]["fileName"]
                 status_a = task_service.get_task("file", "a.txt")["status"]
                 status_b = task_service.get_task("file", "b.txt")["status"]
                 transitions.append((current, status_a, status_b))
+                filename_constraint_modes.append(
+                    kwargs["analysis_filename_constraint_mode"]
+                )
                 task_service.mark_business_result("file", current, {"ok": True}, status="2", message="完成")
 
             mock_run_single.side_effect = capture_transition
@@ -819,6 +1135,11 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=Mock(),
                 knowledge_index_factory=Mock(),
+                execution_ids={
+                    "a.txt": task_a["execution_id"],
+                    "b.txt": task_b["execution_id"],
+                },
+                analysis_filename_constraint_mode="scope_guard",
             )
 
             self.assertEqual(
@@ -828,6 +1149,140 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     ("b.txt", "2", "1"),
                 ],
             )
+            self.assertEqual(
+                filename_constraint_modes,
+                ["scope_guard", "scope_guard"],
+            )
+
+    def test_stale_file_worker_stops_before_external_side_effects(self):
+        """旧 execution 进入 worker 时不得下载、发布进度或创建外部 Port。"""
+        with workspace_tempdir() as tmp:
+            file_name = "stale.txt"
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": file_name,
+                        "filePath": "https://example.invalid/stale.txt",
+                    }
+                ],
+            }
+            task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            first = task_service.create_file_task(file_name, request_payload)
+            task_service.mark_business_result(
+                "file",
+                file_name,
+                {"status": "2"},
+                status="2",
+                execution_id=first["execution_id"],
+            )
+            task_service.mark_callback_success(
+                "file",
+                file_name,
+                execution_id=first["execution_id"],
+            )
+            second = task_service.create_file_task(file_name, request_payload)
+            rag_factory = FakeDocumentRagFactory()
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service.download_to_temp_file"
+                ) as download_mock,
+                patch(
+                    "app.services.llm_service.analysis_service._publish_progress"
+                ) as publish_mock,
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_task,
+                )
+
+                run_file_analysis_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                    execution_id=first["execution_id"],
+                )
+
+            current = task_service.get_task("file", file_name)
+
+        download_mock.assert_not_called()
+        publish_mock.assert_not_called()
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge_factory.ports), 0)
+        self.assertEqual(current["execution_id"], second["execution_id"])
+        self.assertEqual(current["status"], "1")
+
+    def test_invalid_tree_stops_worker_before_download_and_remote_ports(self):
+        """即使绕过 HTTP 路由，worker 也必须在本地副作用前拒绝坏树。"""
+        with workspace_tempdir() as tmp:
+            file_name = "invalid-tree-worker.txt"
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": file_name,
+                        "filePath": (
+                            "https://example.invalid/"
+                            "invalid-tree-worker.txt"
+                        ),
+                        "architectureList": [{}],
+                    }
+                ],
+            }
+            task_service = LLMTaskService(
+                db_path=f"{tmp}/tasks.sqlite3"
+            )
+            task = task_service.create_file_task(
+                file_name,
+                request_payload,
+            )
+            rag_factory = FakeDocumentRagFactory()
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "download_to_temp_file"
+                ) as download_mock,
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "_publish_progress"
+                ) as publish_mock,
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_task,
+                )
+
+                run_file_analysis_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                    execution_id=task["execution_id"],
+                )
+
+            current = task_service.get_task("file", file_name)
+            recall = task_service.get_architecture_recall_decision(
+                execution_id=task["execution_id"]
+            )
+
+        download_mock.assert_not_called()
+        publish_mock.assert_called_once()
+        self.assertEqual(publish_mock.call_args.args[2], 1.0)
+        self.assertEqual(current["status"], "3")
+        self.assertEqual(recall["failure_stage"], "architecture_index")
+        self.assertEqual(len(rag_factory.ports), 0)
+        self.assertEqual(len(knowledge_factory.ports), 0)
 
     @staticmethod
     def _stage9_model_response(file_name: str, architecture_id: int | str) -> str:
@@ -843,8 +1298,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "fileDataItem": {
                     "fileName": file_name,
                     "dataFormat": "",
-                    "summary": "阶段 9 测试摘要",
-                    "keyword": "测试",
+                    "summary": "阶段 9 测试摘要包含分类、装备、参数、来源和标准信息。",
+                    "keyword": "分类, 装备, 参数, 来源, 标准",
                     "score": 55,
                     "source": "未明确数据来源",
                 },
@@ -879,6 +1334,9 @@ class LLMAnalysisServiceTests(unittest.TestCase):
     ) -> None:
         """在文件下载、归一化和翻译边界使用纯内存替身执行阶段 9 编排。"""
         file_name = request_payload["params"][0]["fileName"]
+        task = task_service.get_task("file", file_name)
+        if task is None:
+            raise AssertionError(f"测试任务不存在: {file_name}")
         local_file = str(Path(download_root) / file_name)
         with (
             patch(
@@ -909,6 +1367,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 callback_timeout=5,
                 document_rag_factory=document_rag_factory,
                 knowledge_index_factory=knowledge_index_factory,
+                execution_id=task["execution_id"],
+                analysis_classification_mode="legacy",
             )
 
     def test_stage9_success_audits_then_transfers_prepared_document(self):
@@ -918,7 +1378,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("stage 9", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9001, "name": "阶段九分类", "parentId": None}],
+                [{"id": 9001, "name": "阶段九分类", "parentId": 8999}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -977,7 +1437,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9051, "name": "父节点", "parentId": None},
+                    {"id": 9050, "name": "根节点", "parentId": None},
+                    {"id": 9051, "name": "父节点", "parentId": 9050},
                     {"id": 9052, "name": "子节点", "parentId": 9051},
                 ],
             )
@@ -1039,8 +1500,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9061, "name": "候选一", "parentId": None},
-                    {"id": 9062, "name": "候选二", "parentId": None},
+                    {"id": 9061, "name": "候选一", "parentId": 9060},
+                    {"id": 9062, "name": "候选二", "parentId": 9060},
                 ],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
@@ -1083,7 +1544,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9071, "name": "普通候选", "parentId": None},
+                    {"id": 9071, "name": "普通候选", "parentId": 9070},
                     {"id": 9072, "name": "数据标准", "parentId": None},
                     {
                         "id": 9073,
@@ -1120,8 +1581,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(task["result_payload"]["data"]["architectureId"], 9071)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
-    def test_stage9_invalid_model_architecture_uses_ordered_gjb_leaf_before_repair(self):
-        """数字字符串不合法时，应先按 GJB 正文命中首个数据标准叶子。"""
+    def test_stage9_invalid_model_architecture_uses_general_gjb_leaf_before_repair(self):
+        """数字字符串不合法时，应按 GJB 正文定向命中“通用要求”。"""
         with workspace_tempdir() as tmp:
             file_name = "gjb-fallback.txt"
             Path(tmp, file_name).write_text("本文件为 GJB 9001C-2017 国家军用标准。", encoding="utf-8")
@@ -1141,6 +1602,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                         "name": "建模与仿真标准",
                         "parentId": 9082,
                         "pathName": "数据标准/建模与仿真标准",
+                    },
+                    {
+                        "id": 9085,
+                        "name": "通用要求标准",
+                        "parentId": 9082,
+                        "pathName": "数据标准/通用要求标准",
                     },
                 ],
             )
@@ -1168,11 +1635,11 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             attempts = task_service.get_llm_interaction_attempts(interaction["id"])
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9083)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9085)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
-    def test_stage9_data_standard_parent_falls_back_to_ordered_leaf_without_gjb_text(self):
-        """数据标准父节点即使没有 GJB 关键词，也必须按顺序兜底到叶子。"""
+    def test_stage9_data_standard_parent_falls_back_to_general_leaf_without_gjb_text(self):
+        """数据标准父节点即使没有 GJB 关键词，也必须定向兜底到通用要求。"""
         with workspace_tempdir() as tmp:
             file_name = "data-standard-parent.txt"
             Path(tmp, file_name).write_text("数据标准父节点分类测试", encoding="utf-8")
@@ -1192,6 +1659,12 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                         "name": "建模与仿真标准",
                         "parentId": 9092,
                         "pathName": "数据标准/建模与仿真标准",
+                    },
+                    {
+                        "id": 9095,
+                        "name": "通用要求标准",
+                        "parentId": 9092,
+                        "pathName": "数据标准/通用要求标准",
                     },
                 ],
             )
@@ -1219,7 +1692,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             attempts = task_service.get_llm_interaction_attempts(interaction["id"])
 
         self.assertEqual(task["status"], "2")
-        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9093)
+        self.assertEqual(task["result_payload"]["data"]["architectureId"], 9095)
         self.assertEqual([item["prompt_kind"] for item in attempts], ["analysis"])
 
     def test_stage9_repair_cannot_store_data_standard_parent(self):
@@ -1285,7 +1758,8 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             request_payload = self._stage9_request(
                 file_name,
                 [
-                    {"id": 9101, "name": "候选一", "parentId": None},
+                    {"id": 9100, "name": "根节点", "parentId": None},
+                    {"id": 9101, "name": "候选一", "parentId": 9100},
                     {"id": 9102, "name": "候选二", "parentId": 9101},
                 ],
             )
@@ -1382,7 +1856,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("json repair", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9201, "name": "唯一候选", "parentId": None}],
+                [{"id": 9201, "name": "唯一候选", "parentId": 9200}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1419,7 +1893,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("audit", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9301, "name": "审计候选", "parentId": None}],
+                [{"id": 9301, "name": "审计候选", "parentId": 9300}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1462,7 +1936,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("retention", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9401, "name": "保留候选", "parentId": None}],
+                [{"id": 9401, "name": "保留候选", "parentId": 9400}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1498,7 +1972,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("released", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9451, "name": "补偿候选", "parentId": None}],
+                [{"id": 9451, "name": "补偿候选", "parentId": 9450}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1542,7 +2016,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             Path(tmp, file_name).write_text("cleanup", encoding="utf-8")
             request_payload = self._stage9_request(
                 file_name,
-                [{"id": 9471, "name": "清理候选", "parentId": None}],
+                [{"id": 9471, "name": "清理候选", "parentId": 9470}],
             )
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
             task_service.create_file_task(file_name, request_payload)
@@ -1584,18 +2058,19 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 "params": [
                     self._stage9_request(
                         file_name,
-                        [{"id": architecture_id, "name": f"批量候选{architecture_id}", "parentId": None}],
+                        [{"id": architecture_id, "name": f"批量候选{architecture_id}", "parentId": 9500}],
                     )["params"][0]
                     for file_name, architecture_id in zip(file_names, architecture_ids)
                 ],
             }
             task_service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            accepted_tasks = []
             for params in request_payload["params"]:
-                task_service.create_file_task(
+                accepted_tasks.append(task_service.create_file_task(
                     params["fileName"],
                     {"businessType": "file", "params": [params]},
                     status="1" if params["fileName"] == file_names[0] else "0",
-                )
+                ))
             source = RagSource(document_ref="document:batch", text="批量来源")
             rag_factory = FakeDocumentRagFactory(
                 analyse_outcomes=[
@@ -1639,6 +2114,11 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                     callback_timeout=5,
                     document_rag_factory=rag_factory,
                     knowledge_index_factory=knowledge_factory,
+                    execution_ids={
+                        task["business_key"]: task["execution_id"]
+                        for task in accepted_tasks
+                    },
+                    analysis_classification_mode="legacy",
                 )
 
             tasks = [task_service.get_task("file", name) for name in file_names]

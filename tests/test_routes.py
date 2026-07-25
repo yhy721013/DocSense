@@ -4,6 +4,10 @@ from unittest.mock import MagicMock, patch
 
 from app import create_app
 from app.container import APPLICATION_SERVICES_EXTENSION
+from app.services.llm_service.analysis_service import (
+    MAX_ANALYSIS_PARAMS_PER_REQUEST,
+    MAX_ANALYSIS_REQUEST_BYTES,
+)
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 
@@ -30,6 +34,20 @@ class LLMRouteValidationTests(unittest.TestCase):
         response = self.client.post("/llm/analysis", json={"businessType": "wrong", "params": [{}]})
         self.assertEqual(response.status_code, 400)
 
+    def test_analysis_rejects_non_object_json_root(self):
+        for payload in (["file"], [], False, 1):
+            with self.subTest(payload=payload):
+                response = self.client.post(
+                    "/llm/analysis",
+                    json=payload,
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.get_json()["error"],
+                    "请求JSON必须是对象",
+                )
+
     def test_generate_report_rejects_missing_params(self):
         response = self.client.post("/llm/generate-report", json={"businessType": "report"})
         self.assertEqual(response.status_code, 400)
@@ -54,6 +72,12 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 202)
         mock_thread.assert_called_once()
+        response_task = response.get_json()["task"]
+        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
+        self.assertEqual(
+            worker_kwargs["execution_id"],
+            response_task["execution_id"],
+        )
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_analysis_accepts_multiple_files_and_starts_one_batch_thread(self, mock_thread):
@@ -74,8 +98,17 @@ class LLMRouteValidationTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(len(response.get_json()["tasks"]), 2)
+        response_tasks = response.get_json()["tasks"]
+        self.assertEqual(len(response_tasks), 2)
         mock_thread.assert_called_once()
+        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
+        self.assertEqual(
+            worker_kwargs["execution_ids"],
+            {
+                task["business_key"]: task["execution_id"]
+                for task in response_tasks
+            },
+        )
 
     def test_analysis_rejects_duplicate_file_names_in_same_batch(self):
         response = self.client.post(
@@ -113,6 +146,407 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 409)
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_terminal_task_while_callback_is_pending(
+        self,
+        mock_thread,
+    ):
+        previous = self.task_service.create_file_task(
+            "callback-window.txt",
+            {"businessType": "file", "marker": "previous"},
+        )
+        self.task_service.mark_business_result(
+            "file",
+            "callback-window.txt",
+            {"status": "2", "marker": "previous-result"},
+            status="2",
+            execution_id=previous["execution_id"],
+        )
+
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "callback-window.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/"
+                            "callback-window.txt"
+                        ),
+                    }
+                ],
+            },
+        )
+
+        current = self.task_service.get_task(
+            "file",
+            "callback-window.txt",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["error"],
+            "上一次任务回调尚未结束",
+        )
+        self.assertEqual(
+            current["execution_id"],
+            previous["execution_id"],
+        )
+        self.assertEqual(
+            current["result_payload"]["marker"],
+            "previous-result",
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_failed_task_while_replay_lease_is_active(
+        self,
+        mock_thread,
+    ):
+        previous = self.task_service.create_file_task(
+            "callback-replay.txt",
+            {"businessType": "file", "marker": "previous"},
+        )
+        self.task_service.mark_business_result(
+            "file",
+            "callback-replay.txt",
+            {"status": "2", "marker": "previous-result"},
+            status="2",
+            execution_id=previous["execution_id"],
+        )
+        self.task_service.mark_callback_failed(
+            "file",
+            "callback-replay.txt",
+            "first callback failed",
+            execution_id=previous["execution_id"],
+        )
+        self.assertIsNotNone(
+            self.task_service.claim_callback_delivery(
+                "file",
+                "callback-replay.txt",
+                timeout=5,
+                execution_id=previous["execution_id"],
+            )
+        )
+
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "callback-replay.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/"
+                            "callback-replay.txt"
+                        ),
+                    }
+                ],
+            },
+        )
+
+        current = self.task_service.get_task(
+            "file",
+            "callback-replay.txt",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["error"],
+            "上一次任务回调尚未结束",
+        )
+        self.assertEqual(
+            current["execution_id"],
+            previous["execution_id"],
+        )
+        self.assertEqual(
+            current["result_payload"]["marker"],
+            "previous-result",
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_keeps_missing_null_and_empty_architecture_compatibility(
+        self,
+        mock_thread,
+    ):
+        for index, architecture_value in enumerate((None, []), start=1):
+            params = {
+                "fileName": f"compat-{index}.txt",
+                "filePath": f"http://127.0.0.1:8000/compat-{index}.txt",
+                "architectureList": architecture_value,
+            }
+            response = self.client.post(
+                "/llm/analysis",
+                json={"businessType": "file", "params": [params]},
+            )
+            self.assertEqual(response.status_code, 202)
+
+        self.assertEqual(mock_thread.call_count, 2)
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_explicitly_malformed_architecture_ranges(
+        self,
+        mock_thread,
+    ):
+        invalid_ranges = (
+            {"architectureList": {}},
+            {"architectureList": [{}]},
+            {
+                "architectureList": [
+                    {"id": 1, "name": "节点甲"},
+                    {"id": 1, "name": "节点乙"},
+                ]
+            },
+            {"architectureStandardList": {}},
+            {"architectureStandardList": [{}]},
+        )
+        for index, invalid_range in enumerate(invalid_ranges, start=1):
+            with self.subTest(invalid_range=invalid_range):
+                file_name = f"invalid-tree-{index}.txt"
+                response = self.client.post(
+                    "/llm/analysis",
+                    json={
+                        "businessType": "file",
+                        "params": [
+                            {
+                                "fileName": file_name,
+                                "filePath": (
+                                    "http://127.0.0.1:8000/"
+                                    f"{file_name}"
+                                ),
+                                **invalid_range,
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIsNone(
+                    self.task_service.get_task("file", file_name)
+                )
+
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_invalid_unicode_and_non_finite_json(
+        self,
+        mock_thread,
+    ):
+        invalid_values = (
+            {"architectureList": [{"id": 1, "name": "\ud800"}]},
+            {
+                "architectureList": [
+                    {
+                        "id": 1,
+                        "name": "节点",
+                        "extension": "\ud800",
+                    }
+                ]
+            },
+            {"enableFullTranslation": float("nan")},
+            {"enableFullTranslation": float("inf")},
+        )
+        for index, invalid_value in enumerate(invalid_values, start=1):
+            with self.subTest(invalid_value=invalid_value):
+                file_name = f"invalid-json-{index}.txt"
+                response = self.client.post(
+                    "/llm/analysis",
+                    json={
+                        "businessType": "file",
+                        "params": [
+                            {
+                                "fileName": file_name,
+                                "filePath": (
+                                    "http://127.0.0.1:8000/"
+                                    f"{file_name}"
+                                ),
+                                **invalid_value,
+                            }
+                        ],
+                    },
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.get_json()["error"],
+                    "请求JSON包含非法数值或Unicode字符",
+                )
+                self.assertIsNone(
+                    self.task_service.get_task("file", file_name)
+                )
+
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_validates_every_batch_item_before_creating_tasks(
+        self,
+        mock_thread,
+    ):
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "valid-first.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/valid-first.txt"
+                        ),
+                        "architectureList": [
+                            {"id": 1, "name": "合法节点"}
+                        ],
+                    },
+                    {
+                        "fileName": "invalid-second.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/invalid-second.txt"
+                        ),
+                        "architectureList": [{}],
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNone(
+            self.task_service.get_task("file", "valid-first.txt")
+        )
+        self.assertIsNone(
+            self.task_service.get_task("file", "invalid-second.txt")
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_overdeep_tree_before_task_creation(
+        self,
+        mock_thread,
+    ):
+        architecture_list = [
+            {
+                "id": depth,
+                "name": f"层级{depth}",
+                "parentId": depth - 1 if depth > 1 else None,
+            }
+            for depth in range(1, 130)
+        ]
+
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "overdeep.txt",
+                        "filePath": (
+                            "http://127.0.0.1:8000/overdeep.txt"
+                        ),
+                        "architectureList": architecture_list,
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("可见深度不能超过", response.get_json()["error"])
+        self.assertIsNone(
+            self.task_service.get_task("file", "overdeep.txt")
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_non_object_params_without_silent_filtering(
+        self,
+        mock_thread,
+    ):
+        response = self.client.post(
+            "/llm/analysis",
+            json={
+                "businessType": "file",
+                "params": [
+                    {
+                        "fileName": "valid.txt",
+                        "filePath": "http://127.0.0.1:8000/valid.txt",
+                    },
+                    "not-an-object",
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("params[1]必须是对象", response.get_json()["error"])
+        self.assertIsNone(
+            self.task_service.get_task("file", "valid.txt")
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_too_many_files_before_task_creation(
+        self,
+        mock_thread,
+    ):
+        params = [
+            {
+                "fileName": f"batch-{index}.txt",
+                "filePath": (
+                    f"http://127.0.0.1:8000/batch-{index}.txt"
+                ),
+            }
+            for index in range(MAX_ANALYSIS_PARAMS_PER_REQUEST + 1)
+        ]
+
+        response = self.client.post(
+            "/llm/analysis",
+            json={"businessType": "file", "params": params},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            str(MAX_ANALYSIS_PARAMS_PER_REQUEST),
+            response.get_json()["error"],
+        )
+        self.assertIsNone(
+            self.task_service.get_task("file", "batch-0.txt")
+        )
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_rejects_oversized_content_length_before_parsing(
+        self,
+        mock_thread,
+    ):
+        response = self.client.post(
+            "/llm/analysis",
+            data=b"{}",
+            content_type="application/json",
+            environ_overrides={
+                "CONTENT_LENGTH": str(MAX_ANALYSIS_REQUEST_BYTES + 1)
+            },
+        )
+
+        self.assertEqual(response.status_code, 413)
+        mock_thread.assert_not_called()
+
+    @patch("app.blueprints.llm.threading.Thread")
+    def test_analysis_bounds_chunked_body_without_content_length(
+        self,
+        mock_thread,
+    ):
+        with patch(
+            "app.blueprints.llm.MAX_ANALYSIS_REQUEST_BYTES",
+            8,
+        ):
+            response = self.client.post(
+                "/llm/analysis",
+                data=b'{"payload":"too-large"}',
+                content_type="application/json",
+                environ_overrides={
+                    "CONTENT_LENGTH": None,
+                    "wsgi.input_terminated": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 413)
+        mock_thread.assert_not_called()
 
     @patch("app.blueprints.llm.threading.Thread")
     def test_generate_report_starts_background_task_for_valid_request(self, mock_thread):
@@ -425,4 +859,3 @@ class LLMRouteValidationTests(unittest.TestCase):
         mock_client_instance.create_rag_workspace.assert_called_once_with("architectureId-2", user_id=1)
         self.kb_service.add_workspace.assert_called_once_with(2, "ws_created")
         mock_client_instance.update_embeddings.assert_called_once_with("custom-documents/test.pdf", "ws_created", user_id=1, metadata={"file_name": "a.pdf", "architecture_id": 2})
-

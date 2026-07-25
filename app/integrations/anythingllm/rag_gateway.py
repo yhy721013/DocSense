@@ -43,6 +43,7 @@ from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.ports import (
     CleanupResult,
     DocumentRagSession,
+    MAX_RAG_FRESH_CONVERSATION_SWITCHES,
     PreparedDocumentRef,
     RagAttempt,
     RagExecutionTrace,
@@ -355,8 +356,9 @@ class _AnythingLLMRagSession:
     """一个文件分析任务独占的纯方案 B 会话。
 
     Session 在构造时已经拥有完整工作区和线程。``analyse`` 负责一次性完成上传、加入、
-    Pin 和首次查询；``ask`` 只在同一线程中追加查询。调用轨迹以不可变快照返回；清理会
-    按所有权状态决定是否补偿删除全局文档，并保证外部删除最多执行一次。
+    Pin 和首次查询；调用方可在准备成功后创建一次无历史的新线程，再由 ``ask`` 在当前
+    活跃线程中追加查询。调用轨迹以不可变快照返回；清理会按所有权状态决定是否补偿删除
+    全局文档，并保证外部删除最多执行一次。
     """
 
     _TRANSIENT_EMBEDDING_STATUS_CODES = frozenset({502, 503, 504})
@@ -396,7 +398,11 @@ class _AnythingLLMRagSession:
         self._thread_client = thread_client
         self._context_name = normalized_context_name
         self._context_ref = context_ref
-        self._conversation_ref = conversation_ref
+        # 主线程引用继续作为 RagExecutionTrace 的稳定会话标识，避免既有审计和资源租约
+        # 因阶段切换而失去最初创建身份。实际查询始终使用 active 引用；第二线程通过
+        # lifecycle_events 的 conversation_create 事件独立审计。
+        self._primary_conversation_ref = conversation_ref
+        self._active_conversation_ref = conversation_ref
         self._user_id = user_id
         self._embedding_max_attempts = validated_embedding_attempts
         self._source_marker = normalized_source_marker
@@ -414,6 +420,9 @@ class _AnythingLLMRagSession:
         self._global_document_cleanup_required = False
         self._analyse_started = False
         self._analyse_succeeded = False
+        self._fresh_conversation_attempt_count = 0
+        self._fresh_conversation_success_count = 0
+        self._fresh_conversation_names_attempted: set[str] = set()
         self._closed = False
         self._first_cleanup_result: Optional[CleanupResult] = None
         self._failure_stage: Optional[str] = None
@@ -424,6 +433,7 @@ class _AnythingLLMRagSession:
         file_path: str,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
     ) -> RagResult:
@@ -440,6 +450,7 @@ class _AnythingLLMRagSession:
             )
         normalized_file_path = self._required_text(file_path, name="file_path")
         normalized_prompt = normalize_rag_prompt(prompt)
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
         self._analyse_started = True
 
@@ -457,7 +468,7 @@ class _AnythingLLMRagSession:
             result = self._query(
                 prompt=normalized_prompt,
                 operation="analyse",
-                prompt_kind=RagPromptKind.ANALYSIS,
+                prompt_kind=validated_prompt_kind,
                 require_sources=require_sources,
                 max_attempts=max_attempts,
             )
@@ -472,6 +483,117 @@ class _AnythingLLMRagSession:
 
         self._analyse_succeeded = True
         return result
+
+    def start_fresh_conversation(
+        self,
+        *,
+        conversation_name: str,
+        failure_is_fatal: bool = True,
+    ) -> bool:
+        """为后续阶段创建无历史线程，并原子切换查询目标。
+
+        外部创建前完成全部本地状态校验，并先消费最多两次的切换名额。默认失败保持既有
+        fatal 语义；可选增强显式传入 ``failure_is_fatal=False`` 时，仅对 AnythingLLM
+        稳定传输/协议异常返回 ``False``，保留当前活动线程和此前成功状态。无论哪种模式
+        都不会重试存在不确定副作用的创建请求。
+        """
+        self._ensure_open()
+        normalized_name = self._required_text(
+            conversation_name,
+            name="conversation_name",
+        )
+        if not isinstance(failure_is_fatal, bool):
+            raise TypeError("failure_is_fatal 必须是 bool")
+        if not self._analyse_succeeded or not self._document_ref:
+            raise self._operation_error(
+                "新对话只能在 analyse 成功后创建",
+                failure_stage="session_not_prepared",
+            )
+        if (
+            self._fresh_conversation_attempt_count
+            >= MAX_RAG_FRESH_CONVERSATION_SWITCHES
+        ):
+            raise self._operation_error(
+                "每个 RAG Session 最多切换两次新对话",
+                failure_stage="conversation_switch_repeated",
+            )
+        if normalized_name in self._fresh_conversation_names_attempted:
+            raise self._operation_error(
+                "同名阶段隔离对话不得重复创建",
+                failure_stage="conversation_switch_repeated",
+            )
+
+        # 在外部调用前消费名额。即使请求超时，也不能盲目重放可能已经成功的创建。
+        self._fresh_conversation_attempt_count += 1
+        self._fresh_conversation_names_attempted.add(normalized_name)
+        lifecycle_attempt = self._next_lifecycle_attempt("conversation_create")
+        try:
+            thread = self._thread_client.create_thread(
+                self._context_ref,
+                normalized_name,
+                user_id=self._user_id,
+            )
+            conversation_ref = str(
+                getattr(thread, "slug", "") or ""
+            ).strip()
+            if not conversation_ref:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM 创建线程结果缺少有效 slug"
+                )
+            known_conversation_refs = {
+                str(event.external_ref or "").strip()
+                for event in self._lifecycle_events
+                if event.operation == "conversation_create" and event.success
+            }
+            if conversation_ref in known_conversation_refs:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM 新线程引用与既有线程重复"
+                )
+        except Exception as exc:
+            error_message = self._safe_error(
+                exc,
+                fallback="创建阶段隔离对话失败",
+            )
+            self._record_lifecycle_event(
+                operation="conversation_create",
+                attempt=lifecycle_attempt,
+                success=False,
+                failure_stage="conversation_create",
+                error_message=error_message,
+            )
+            if (
+                not failure_is_fatal
+                and isinstance(exc, AnythingLLMTransportError)
+            ):
+                logger.warning(
+                    "AnythingLLM 可选阶段隔离会话创建失败，保留当前线程: "
+                    "action=start_fresh_conversation attempt=%d error_type=%s",
+                    lifecycle_attempt,
+                    type(exc).__name__,
+                )
+                return False
+            if self._uploaded_document is not None:
+                self._schedule_failed_document_cleanup(self._uploaded_document)
+            raise self._operation_error(
+                error_message,
+                failure_stage="conversation_create",
+            ) from exc
+
+        self._record_lifecycle_event(
+            operation="conversation_create",
+            attempt=lifecycle_attempt,
+            success=True,
+            external_ref=conversation_ref,
+        )
+        self._active_conversation_ref = conversation_ref
+        self._fresh_conversation_success_count += 1
+        logger.info(
+            "AnythingLLM 阶段隔离会话创建完成: action=start_fresh_conversation "
+            "has_context_ref=%s has_conversation_ref=%s",
+            bool(self._context_ref),
+            bool(conversation_ref),
+        )
+        return True
 
     def ask(
         self,
@@ -507,6 +629,63 @@ class _AnythingLLMRagSession:
             if self._uploaded_document is not None:
                 self._schedule_failed_document_cleanup(self._uploaded_document)
             raise
+
+    def ask_optional(
+        self,
+        prompt: str,
+        *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
+        require_sources: bool = True,
+        max_attempts: int = 1,
+    ) -> Optional[RagResult]:
+        """执行可失败开放的增强查询，并在预期模型失败后恢复会话成功态。"""
+        self._ensure_open()
+        normalized_prompt = normalize_rag_prompt(prompt)
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
+        self._validate_max_attempts(max_attempts)
+        if not self._analyse_succeeded or not self._document_ref:
+            raise self._operation_error(
+                "ask_optional 必须在 analyse 成功后调用",
+                failure_stage="session_not_prepared",
+            )
+
+        previous_failure_stage = self._failure_stage
+        previous_error_message = self._error_message
+        attempt_count_before = len(self._attempts)
+        try:
+            return self._query(
+                prompt=normalized_prompt,
+                operation="ask",
+                prompt_kind=validated_prompt_kind,
+                require_sources=require_sources,
+                max_attempts=max_attempts,
+            )
+        except RagOperationError as exc:
+            attempt_was_recorded = len(self._attempts) > attempt_count_before
+            failure_stage = str(exc.trace.failure_stage or "").strip()
+            cause = exc.__cause__
+            expected_failure = (
+                attempt_was_recorded
+                and failure_stage in {"query", "sources"}
+                and (
+                    cause is None
+                    or isinstance(cause, AnythingLLMTransportError)
+                )
+            )
+            if not expected_failure:
+                if self._uploaded_document is not None:
+                    self._schedule_failed_document_cleanup(self._uploaded_document)
+                raise
+
+            self._failure_stage = previous_failure_stage
+            self._error_message = previous_error_message
+            logger.warning(
+                "AnythingLLM 可选增强查询失败，保留会话继续执行: "
+                "action=ask_optional stage=%s attempt_count=%d",
+                failure_stage,
+                len(self._attempts) - attempt_count_before,
+            )
+            return None
 
     @property
     def trace(self) -> RagExecutionTrace:
@@ -914,7 +1093,7 @@ class _AnythingLLMRagSession:
             try:
                 answer = self._thread_client.ask(
                     self._context_ref,
-                    self._conversation_ref,
+                    self._active_conversation_ref,
                     prompt,
                     user_id=self._user_id,
                     mode="query",
@@ -1110,9 +1289,33 @@ class _AnythingLLMRagSession:
             for event in self._lifecycle_events
             if event.operation == "conversation_create" and event.success
         ]
+        successful_conversation_refs = [
+            str(event.external_ref or "").strip()
+            for event in successful_conversation_events
+        ]
+        conversation_events = [
+            event
+            for event in self._lifecycle_events
+            if event.operation == "conversation_create"
+        ]
+        expected_conversation_event_count = (
+            1 + self._fresh_conversation_attempt_count
+        )
+        expected_successful_conversation_count = (
+            1 + self._fresh_conversation_success_count
+        )
         context_isolated = (
             len(successful_context_events) == 1
-            and len(successful_conversation_events) == 1
+            and len(conversation_events) == expected_conversation_event_count
+            and len(successful_conversation_events)
+            == expected_successful_conversation_count
+            and all(successful_conversation_refs)
+            and len(set(successful_conversation_refs))
+            == len(successful_conversation_refs)
+            and successful_conversation_refs[0]
+            == self._primary_conversation_ref
+            and successful_conversation_refs[-1]
+            == self._active_conversation_ref
             and self._bound_locations == {external_location}
             and self._pinned_location == external_location
         )
@@ -1287,7 +1490,7 @@ class _AnythingLLMRagSession:
         logger.error(
             "AnythingLLM RAG 操作失败: has_context_ref=%s has_conversation_ref=%s stage=%s",
             bool(self._context_ref),
-            bool(self._conversation_ref),
+            bool(self._active_conversation_ref),
             failure_stage,
         )
         return RagOperationError(message, self._trace())
@@ -1297,7 +1500,7 @@ class _AnythingLLMRagSession:
         return RagExecutionTrace(
             context_name=self._context_name,
             context_ref=self._context_ref,
-            conversation_ref=self._conversation_ref,
+            conversation_ref=self._primary_conversation_ref,
             attempts=tuple(self._attempts),
             failure_stage=self._failure_stage,
             error_message=self._error_message,

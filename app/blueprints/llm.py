@@ -31,15 +31,26 @@ from app.services.chat.domain.chat_id import (
     require_public_chat_id,
 )
 from app.services.core.progress import normalize_progress
+from app.services.core.architecture_tree import (
+    ArchitectureTreeValidationError,
+)
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
     CHAT_MAX_MESSAGE_CHARS,
 )
 from app.services.llm_service.analysis_service import (
+    MAX_ANALYSIS_PARAMS_PER_REQUEST,
+    MAX_ANALYSIS_REQUEST_BYTES,
     run_file_analysis_batch_task,
     run_file_analysis_task,
+    validate_analysis_architecture_ranges,
 )
 from app.services.llm_service.report_service import run_report_task
+from app.services.llm_service.task_service import (
+    TaskAdmissionBusyError,
+    TaskAlreadyProcessingError,
+    file_task_admission_block_reason,
+)
 from app.services.llm_service.weaponry_service import (
     WeaponrySelectedDocumentAmbiguityError,
     WeaponrySelectedDocumentError,
@@ -317,7 +328,69 @@ def llm_analysis():
     kb_service = services.kb_service
     progress_hub = services.progress_hub
     llm_config = services.llm_config
-    payload = request.get_json(silent=True) or {}
+    content_length = request.content_length
+    if (
+        content_length is not None
+        and content_length > MAX_ANALYSIS_REQUEST_BYTES
+    ):
+        logger.warning(
+            "文件分析请求被拒绝: 请求体过大 content_length=%s limit=%s",
+            content_length,
+            MAX_ANALYSIS_REQUEST_BYTES,
+        )
+        return jsonify({"error": "请求体过大"}), 413
+    try:
+        if content_length is None:
+            # 对 chunked/未知长度请求只读取上限加一个字节，避免为了判断超限先把
+            # 无界请求体完整载入内存。标准 WSGI 未声明流已终止时，Werkzeug 会安全
+            # 返回空数据，而不会等待无限输入。
+            raw_body = request.stream.read(
+                MAX_ANALYSIS_REQUEST_BYTES + 1
+            )
+            if len(raw_body) > MAX_ANALYSIS_REQUEST_BYTES:
+                logger.warning(
+                    "文件分析请求被拒绝: 无Content-Length请求体过大 "
+                    "body_bytes>%s",
+                    MAX_ANALYSIS_REQUEST_BYTES,
+                )
+                return jsonify({"error": "请求体过大"}), 413
+            payload = json.loads(raw_body) if raw_body else {}
+        else:
+            payload = request.get_json(silent=True)
+            if payload is None:
+                payload = {}
+    except json.JSONDecodeError:
+        payload = {}
+    except (RecursionError, UnicodeError, ValueError):
+        logger.warning(
+            "文件分析请求被拒绝: JSON结构无法安全解析"
+        )
+        return jsonify({"error": "请求JSON格式无效"}), 400
+    if not isinstance(payload, dict):
+        logger.warning(
+            "文件分析请求被拒绝: JSON顶层不是对象 type=%s",
+            type(payload).__name__,
+        )
+        return jsonify({"error": "请求JSON必须是对象"}), 400
+    try:
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (
+        TypeError,
+        ValueError,
+        RecursionError,
+        UnicodeEncodeError,
+    ):
+        logger.warning(
+            "文件分析请求被拒绝: JSON含非有限数值或非法Unicode"
+        )
+        return jsonify(
+            {"error": "请求JSON包含非法数值或Unicode字符"}
+        ), 400
     logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
     if payload.get("businessType") != "file":
         logger.warning(
@@ -326,10 +399,34 @@ def llm_analysis():
         )
         return jsonify({"error": "businessType必须为file"}), 400
 
-    params_list = _get_params(payload)
-    if not params_list:
+    raw_params = payload.get("params")
+    if not isinstance(raw_params, list) or not raw_params:
         logger.warning("文件分析请求被拒绝: params为空或格式无效")
         return jsonify({"error": "params不能为空"}), 400
+    if len(raw_params) > MAX_ANALYSIS_PARAMS_PER_REQUEST:
+        logger.warning(
+            "文件分析请求被拒绝: params数量过多 count=%s limit=%s",
+            len(raw_params),
+            MAX_ANALYSIS_PARAMS_PER_REQUEST,
+        )
+        return jsonify(
+            {
+                "error": (
+                    "params数量不能超过"
+                    f"{MAX_ANALYSIS_PARAMS_PER_REQUEST}"
+                )
+            }
+        ), 400
+    for index, item in enumerate(raw_params):
+        if not isinstance(item, dict):
+            logger.warning(
+                "文件分析请求被拒绝: params项不是对象 index=%s",
+                index,
+            )
+            return jsonify(
+                {"error": f"params[{index}]必须是对象"}
+            ), 400
+    params_list = list(raw_params)
 
     seen_file_names = set()
     for index, params in enumerate(params_list):
@@ -356,28 +453,73 @@ def llm_analysis():
             )
             return jsonify({"error": "filePath不能为空"}), 400
 
-        existing_task = task_service.get_task("file", normalized_name)
-        if existing_task and existing_task["status"] in {"0", "1"}:
+        try:
+            validate_analysis_architecture_ranges(params)
+        except ArchitectureTreeValidationError as exc:
             logger.warning(
-                "文件分析请求被拒绝: 任务正在处理中 fileName=%s status=%s",
+                "文件分析请求被拒绝: 领域树无效 index=%s error=%s",
+                index,
+                exc,
+            )
+            return jsonify(
+                {"error": f"params[{index}]: {exc}"}
+            ), 400
+
+    for params in params_list:
+        normalized_name = params["fileName"].strip()
+        existing_task = task_service.get_task("file", normalized_name)
+        block_reason = file_task_admission_block_reason(existing_task)
+        if block_reason:
+            error_message = (
+                "上一次任务回调尚未结束"
+                if block_reason == "callback_pending"
+                else "任务正在处理中"
+            )
+            logger.warning(
+                "文件分析请求被拒绝: %s fileName=%s status=%s "
+                "callback_status=%s",
+                error_message,
                 normalized_name,
                 existing_task["status"],
+                existing_task["callback_status"],
             )
-            return jsonify({"error": "任务正在处理中"}), 409
+            return jsonify({"error": error_message}), 409
 
-    tasks = []
-    for index, params in enumerate(params_list):
-        file_name = params["fileName"]
-        task = task_service.create_file_task(
-            file_name=file_name.strip(),
-            request_payload={"businessType": "file", "params": [params]},
-            status="1" if index == 0 else "0",
+    submissions = [
+        (
+            params["fileName"].strip(),
+            {"businessType": "file", "params": [params]},
+            "1" if index == 0 else "0",
         )
-        tasks.append(task)
+        for index, params in enumerate(params_list)
+    ]
+    try:
+        tasks = task_service.create_file_tasks_if_available(submissions)
+    except TaskAlreadyProcessingError as exc:
+        error_message = (
+            "上一次任务回调尚未结束"
+            if exc.reason == "callback_pending"
+            else "任务正在处理中"
+        )
+        logger.warning(
+            "文件分析请求在原子受理阶段冲突: %s fileName=%s "
+            "status=%s callback_status=%s",
+            error_message,
+            exc.business_key,
+            exc.status,
+            exc.callback_status,
+        )
+        return jsonify({"error": error_message}), 409
+    except TaskAdmissionBusyError:
+        logger.warning("文件分析任务库持续繁忙，暂时无法受理", exc_info=True)
+        return jsonify({"error": "任务服务繁忙，请稍后重试"}), 503
+
+    for task in tasks:
+        file_name = task["business_key"]
         progress_hub.publish(
             "file",
-            file_name.strip(),
-            {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
+            file_name,
+            {"businessType": "file", "data": {"fileName": file_name, "progress": 0.0}},
         )
 
     _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
@@ -392,7 +534,25 @@ def llm_analysis():
         # Gateway 在后台任务线程内部按文件创建，批量任务也不会跨文件共享有状态对象。
         "document_rag_factory": services.document_rag_factory,
         "knowledge_index_factory": services.knowledge_index_factory,
+        "analysis_classification_mode": (
+            services.analysis_classification_config.mode
+        ),
+        "analysis_filename_constraint_mode": (
+            services.analysis_classification_config.filename_constraint_mode
+        ),
+        "analysis_data_standard_mode": (
+            services.analysis_classification_config.data_standard_mode
+        ),
+        "analysis_identity_reselect_mode": (
+            services.analysis_classification_config.identity_reselect_mode
+        ),
     }
+    if len(tasks) == 1:
+        _task_kwargs["execution_id"] = tasks[0]["execution_id"]
+    else:
+        _task_kwargs["execution_ids"] = {
+            task["business_key"]: task["execution_id"] for task in tasks
+        }
     worker = threading.Thread(
         target=services.upload_task_limiter.run,
         args=(_task_fn,),

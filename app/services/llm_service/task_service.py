@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 from uuid import uuid4
 
@@ -49,6 +53,182 @@ _COMPLETED_TASK_STATUSES = {
     "weaponry": frozenset({"2", "3"}),
 }
 """允许进入回调终态的现有业务完成状态。"""
+
+_ACTIVE_FILE_TASK_STATUSES = frozenset({"0", "1"})
+_FILE_CALLBACK_HANDOFF_STATUS = "pending"
+_MIN_CALLBACK_DELIVERY_LEASE_SECONDS = 60.0
+_MAX_CALLBACK_DELIVERY_LEASE_SECONDS = 7 * 24 * 60 * 60.0
+
+
+def _callback_delivery_lease_seconds(timeout: Any) -> float:
+    """根据 HTTP timeout 生成有余量且有硬上限的回调租约。"""
+    try:
+        normalized_timeout = float(timeout)
+    except (TypeError, ValueError):
+        normalized_timeout = 0.0
+    if not math.isfinite(normalized_timeout) or normalized_timeout < 0:
+        normalized_timeout = 0.0
+    return min(
+        _MAX_CALLBACK_DELIVERY_LEASE_SECONDS,
+        max(
+            _MIN_CALLBACK_DELIVERY_LEASE_SECONDS,
+            normalized_timeout * 4 + 60.0,
+        ),
+    )
+
+
+def file_task_admission_block_reason(
+    task: Mapping[str, Any] | None,
+    *,
+    callback_delivery_in_flight: bool = False,
+) -> str | None:
+    """返回同名文件任务暂不可重跑的稳定原因。
+
+    文件业务结果与外部回调状态分两次提交。终态任务仍为 ``pending`` 时，旧 worker
+    可能尚未发起回调、正在执行 HTTP，或刚完成 HTTP 尚未提交回调结果；此时覆盖单行
+    任务记录会让旧执行丢失回调或无法记录已送达结果。因此该短暂交接窗口与处理中状态
+    一样必须阻止新执行受理。``failed`` 已代表至少完成过一次真实尝试，平时仍保留显式
+    重跑能力；但其补发租约有效期间也必须阻断，避免旧补发写坏新执行。
+    """
+    if not task:
+        return None
+    status = str(task.get("status") or "")
+    if status in _ACTIVE_FILE_TASK_STATUSES:
+        return "processing"
+    callback_status = str(task.get("callback_status") or "")
+    if callback_status == _FILE_CALLBACK_HANDOFF_STATUS:
+        return "callback_pending"
+    if callback_delivery_in_flight:
+        return "callback_pending"
+    return None
+
+
+class TaskAlreadyProcessingError(RuntimeError):
+    """同一文件已有活动执行或尚未完成首次回调交接。"""
+
+    def __init__(
+        self,
+        business_key: str,
+        status: str,
+        callback_status: str = "",
+        *,
+        callback_delivery_in_flight: bool = False,
+    ):
+        self.business_key = business_key
+        self.status = status
+        self.callback_status = callback_status
+        self.reason = file_task_admission_block_reason(
+            {
+                "status": status,
+                "callback_status": callback_status,
+            },
+            callback_delivery_in_flight=callback_delivery_in_flight,
+        )
+        message = (
+            "上一次任务回调尚未结束"
+            if self.reason == "callback_pending"
+            else "任务正在处理中"
+        )
+        super().__init__(f"{message}: {business_key}")
+
+
+class TaskAdmissionBusyError(RuntimeError):
+    """任务库在受理时持续繁忙，调用方可安全稍后重试。"""
+
+
+class TaskExecutionConflictError(RuntimeError):
+    """任务写入携带的执行身份已不是当前业务键对应的执行。"""
+
+    def __init__(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+    ):
+        self.business_type = business_type
+        self.business_key = business_key
+        self.execution_id = execution_id
+        super().__init__(
+            "任务执行身份已失效: "
+            f"business_type={business_type}, business_key={business_key}, "
+            f"execution_id={execution_id}"
+        )
+
+
+class TaskStateConflictError(RuntimeError):
+    """当前执行已处于不允许本次操作的业务状态。"""
+
+    def __init__(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+        status: str,
+    ):
+        self.business_type = business_type
+        self.business_key = business_key
+        self.execution_id = execution_id
+        self.status = status
+        super().__init__(
+            "任务状态不允许当前操作: "
+            f"business_type={business_type}, business_key={business_key}, "
+            f"execution_id={execution_id}, status={status}"
+        )
+
+
+ARCHITECTURE_RECALL_FAILURE_STAGES = frozenset(
+    {
+        "architecture_index",
+        "architecture_recall",
+        "architecture_prompt_budget",
+        "architecture_contract",
+        "analysis_extraction",
+    }
+)
+"""领域召回与两阶段分类链路允许持久化的稳定失败阶段。"""
+
+MAX_ARCHITECTURE_RECALL_EXECUTION_ID_CHARS = 128
+MAX_ARCHITECTURE_RECALL_BASE_CANDIDATES = 64
+MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES = 128
+MAX_ARCHITECTURE_RECALL_CHANNELS = 16
+MAX_ARCHITECTURE_RECALL_CHANNEL_CANDIDATES = 512
+MAX_ARCHITECTURE_RECALL_RRF_SCORES = 4096
+MAX_ARCHITECTURE_RECALL_PROTECTED_CANDIDATES = 128
+MAX_ARCHITECTURE_RECALL_PROTECTED_REASONS_PER_CANDIDATE = 8
+MAX_ARCHITECTURE_RECALL_REASON_CHARS = 512
+MAX_ARCHITECTURE_RECALL_PATH_CHARS = 2048
+MAX_ARCHITECTURE_RECALL_NODE_TYPE_CHARS = 32
+MAX_ARCHITECTURE_RECALL_REMARK_CHARS = 512
+MAX_ARCHITECTURE_RECALL_JSON_CHARS = 512_000
+MAX_ARCHITECTURE_RECALL_PROMPT_CHARS = 2_000_000
+MAX_ARCHITECTURE_RECALL_ELAPSED_MS = 86_400_000
+MAX_ARCHITECTURE_RECALL_ERROR_CHARS = 4096
+
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MAX_SQLITE_INTEGER = (1 << 63) - 1
+
+
+class ArchitectureRecallAuditError(RuntimeError):
+    """领域召回决策无法安全持久化时抛出的稳定应用异常。"""
+
+    stage = "architecture_recall_audit"
+
+
+@dataclass(frozen=True)
+class ArchitectureRecallAuditWriteResult:
+    """领域召回审计写入的幂等结果。"""
+
+    execution_id: str
+    created: bool
+    reused: bool
+    finalized: bool
+
+    def __post_init__(self) -> None:
+        if not self.execution_id:
+            raise ValueError("execution_id不能为空")
+        if self.created == self.reused:
+            raise ValueError("created与reused必须且只能有一个为True")
+
 
 class LLMTaskService:
     """持久化异步 LLM 任务、交互审计和回调状态。
@@ -134,6 +314,8 @@ class LLMTaskService:
                     callback_status TEXT NOT NULL DEFAULT 'pending',
                     callback_attempts INTEGER NOT NULL DEFAULT 0,
                     last_callback_error TEXT NOT NULL DEFAULT '',
+                    callback_claim_id TEXT NOT NULL DEFAULT '',
+                    callback_claim_expires_at REAL NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (business_type, business_key)
@@ -176,6 +358,18 @@ class LLMTaskService:
                 table="llm_tasks",
                 column="execution_id",
                 definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_tasks",
+                column="callback_claim_id",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_tasks",
+                column="callback_claim_expires_at",
+                definition="REAL NOT NULL DEFAULT 0",
             )
             conn.execute(
                 """
@@ -330,6 +524,47 @@ class LLMTaskService:
                 ON weaponry_task_document_snapshots (execution_id, sequence_no)
                 """
             )
+            # 召回决策按 execution_id 独立留存，故意不关联 llm_tasks 外键。同一业务键
+            # 重跑会替换 llm_tasks 当前 execution_id；若在此处使用 ON DELETE CASCADE，
+            # 历史分类证据会随任务重跑丢失，无法用于 E2E 取证和线上复盘。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_architecture_recall_decisions (
+                    execution_id TEXT PRIMARY KEY,
+                    tree_fingerprint TEXT NOT NULL,
+                    query_digest TEXT NOT NULL,
+                    decision_digest TEXT NOT NULL,
+                    base_top64_json TEXT NOT NULL,
+                    final_candidates_json TEXT NOT NULL,
+                    channel_rankings_json TEXT NOT NULL,
+                    rrf_scores_json TEXT NOT NULL,
+                    protected_reasons_json TEXT NOT NULL,
+                    prompt_chars INTEGER NOT NULL CHECK (prompt_chars >= 0),
+                    recall_elapsed_ms INTEGER NOT NULL CHECK (recall_elapsed_ms >= 0),
+                    returned_architecture_id INTEGER,
+                    returned_rank INTEGER,
+                    total_elapsed_ms INTEGER,
+                    failure_stage TEXT,
+                    error_message TEXT NOT NULL DEFAULT '',
+                    finalization_digest TEXT,
+                    finalized_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (returned_architecture_id IS NULL AND returned_rank IS NULL)
+                        OR
+                        (returned_architecture_id >= 1 AND returned_rank >= 1)
+                    ),
+                    CHECK (total_elapsed_ms IS NULL OR total_elapsed_ms >= 0)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_architecture_recall_created_at
+                ON llm_architecture_recall_decisions (created_at)
+                """
+            )
 
     def _serialize(self, value: Any) -> str:
         """生成严格 JSON，拒绝 SQLite 之外无法可靠交换的 NaN/Infinity。"""
@@ -344,6 +579,272 @@ class LLMTaskService:
         if not value:
             return None
         return json.loads(value)
+
+    @staticmethod
+    def _normalize_recall_execution_id(execution_id: Any) -> str:
+        normalized = str(execution_id or "").strip()
+        if not normalized:
+            raise ValueError("execution_id不能为空")
+        if len(normalized) > MAX_ARCHITECTURE_RECALL_EXECUTION_ID_CHARS:
+            raise ValueError("execution_id超出召回审计长度上限")
+        return normalized
+
+    @staticmethod
+    def _normalize_recall_digest(
+        value: Any,
+        *,
+        field_name: str,
+        allow_empty: bool = False,
+    ) -> str:
+        normalized = str(value or "").strip().lower()
+        if allow_empty and not normalized:
+            return ""
+        if not _SHA256_PATTERN.fullmatch(normalized):
+            raise ValueError(f"{field_name}必须是64位SHA-256十六进制摘要")
+        return normalized
+
+    @staticmethod
+    def _normalize_recall_positive_id(value: Any, *, field_name: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name}必须是正整数")
+        if isinstance(value, int):
+            normalized = value
+        elif isinstance(value, str) and value.isascii() and value.isdigit():
+            normalized = int(value)
+        else:
+            raise ValueError(f"{field_name}必须是正整数")
+        if normalized < 1 or normalized > _MAX_SQLITE_INTEGER:
+            raise ValueError(f"{field_name}超出SQLite正整数范围")
+        return normalized
+
+    @staticmethod
+    def _normalize_recall_non_negative_int(
+        value: Any,
+        *,
+        field_name: str,
+        upper_bound: int,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{field_name}必须是非负整数")
+        if value < 0 or value > upper_bound:
+            raise ValueError(f"{field_name}超出允许范围")
+        return value
+
+    @classmethod
+    def _normalize_recall_ranked_ids(
+        cls,
+        values: Sequence[Any],
+        *,
+        field_name: str,
+        max_items: int,
+    ) -> list[int]:
+        if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+            raise TypeError(f"{field_name}必须是ID序列")
+        if len(values) > max_items:
+            raise ValueError(f"{field_name}数量超出上限{max_items}")
+        normalized: list[int] = []
+        seen: set[int] = set()
+        for raw_id in values:
+            node_id = cls._normalize_recall_positive_id(
+                raw_id,
+                field_name=f"{field_name}节点ID",
+            )
+            if node_id in seen:
+                raise ValueError(f"{field_name}存在重复节点ID")
+            seen.add(node_id)
+            normalized.append(node_id)
+        return normalized
+
+    @classmethod
+    def _normalize_recall_final_candidates(
+        cls,
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> list[Dict[str, Any]]:
+        if isinstance(candidates, (str, bytes)) or not isinstance(
+            candidates,
+            Sequence,
+        ):
+            raise TypeError("final_candidates必须是Mapping序列")
+        if len(candidates) > MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES:
+            raise ValueError(
+                "final_candidates数量超出上限"
+                f"{MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES}"
+            )
+
+        allowed_fields = {"id", "pathName", "nodeType", "remark"}
+        normalized: list[Dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for index, candidate in enumerate(candidates):
+            if not isinstance(candidate, Mapping):
+                raise TypeError("final_candidates只能包含Mapping")
+            unknown_fields = set(candidate) - allowed_fields
+            if unknown_fields:
+                raise ValueError(
+                    "final_candidates包含非模型投影字段: "
+                    + ",".join(sorted(str(item) for item in unknown_fields))
+                )
+            node_id = cls._normalize_recall_positive_id(
+                candidate.get("id"),
+                field_name=f"final_candidates[{index}].id",
+            )
+            if node_id in seen_ids:
+                raise ValueError("final_candidates存在重复节点ID")
+            seen_ids.add(node_id)
+
+            path_name = str(candidate.get("pathName") or "").strip()
+            if not path_name:
+                raise ValueError(f"final_candidates[{index}].pathName不能为空")
+            if len(path_name) > MAX_ARCHITECTURE_RECALL_PATH_CHARS:
+                raise ValueError(f"final_candidates[{index}].pathName超出长度上限")
+            node_type = str(candidate.get("nodeType") or "").strip()
+            if not node_type:
+                raise ValueError(f"final_candidates[{index}].nodeType不能为空")
+            if len(node_type) > MAX_ARCHITECTURE_RECALL_NODE_TYPE_CHARS:
+                raise ValueError(f"final_candidates[{index}].nodeType超出长度上限")
+            if node_type not in {"leaf", "parent"}:
+                raise ValueError(
+                    f"final_candidates[{index}].nodeType只能是leaf或parent"
+                )
+
+            item: Dict[str, Any] = {
+                "id": node_id,
+                "pathName": path_name,
+                "nodeType": node_type,
+            }
+            if "remark" in candidate and candidate.get("remark") is not None:
+                remark = str(candidate.get("remark") or "").strip()
+                if len(remark) > MAX_ARCHITECTURE_RECALL_REMARK_CHARS:
+                    raise ValueError(f"final_candidates[{index}].remark超出长度上限")
+                if remark:
+                    item["remark"] = remark
+            normalized.append(item)
+        return normalized
+
+    @classmethod
+    def _normalize_recall_channel_rankings(
+        cls,
+        channel_rankings: Mapping[str, Sequence[Any]],
+    ) -> Dict[str, list[int]]:
+        if not isinstance(channel_rankings, Mapping):
+            raise TypeError("channel_rankings必须是Mapping")
+        if len(channel_rankings) > MAX_ARCHITECTURE_RECALL_CHANNELS:
+            raise ValueError(
+                "channel_rankings通道数量超出上限"
+                f"{MAX_ARCHITECTURE_RECALL_CHANNELS}"
+            )
+        normalized: Dict[str, list[int]] = {}
+        for raw_name, ranked_ids in channel_rankings.items():
+            channel_name = str(raw_name or "").strip()
+            if not channel_name:
+                raise ValueError("channel_rankings通道名不能为空")
+            if len(channel_name) > 64:
+                raise ValueError("channel_rankings通道名超出长度上限")
+            if channel_name in normalized:
+                raise ValueError("channel_rankings规范化后存在重复通道名")
+            normalized[channel_name] = cls._normalize_recall_ranked_ids(
+                ranked_ids,
+                field_name=f"channel_rankings[{channel_name}]",
+                max_items=MAX_ARCHITECTURE_RECALL_CHANNEL_CANDIDATES,
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_recall_rrf_scores(
+        cls,
+        rrf_scores: Mapping[Any, Any],
+    ) -> Dict[str, float]:
+        if not isinstance(rrf_scores, Mapping):
+            raise TypeError("rrf_scores必须是Mapping")
+        if len(rrf_scores) > MAX_ARCHITECTURE_RECALL_RRF_SCORES:
+            raise ValueError("rrf_scores数量超出上限")
+        normalized: Dict[str, float] = {}
+        for raw_id, raw_score in rrf_scores.items():
+            node_id = cls._normalize_recall_positive_id(
+                raw_id,
+                field_name="rrf_scores节点ID",
+            )
+            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                raise ValueError("rrf_scores分数必须是有限非负数")
+            score = float(raw_score)
+            if not math.isfinite(score) or score < 0.0 or score > 1000.0:
+                raise ValueError("rrf_scores分数必须是有限非负数")
+            if str(node_id) in normalized:
+                raise ValueError("rrf_scores规范化后存在重复节点ID")
+            normalized[str(node_id)] = score
+        return normalized
+
+    @classmethod
+    def _normalize_recall_protected_reasons(
+        cls,
+        protected_reasons: Mapping[Any, Sequence[Any]],
+        *,
+        final_candidate_ids: set[int],
+    ) -> Dict[str, list[str]]:
+        if not isinstance(protected_reasons, Mapping):
+            raise TypeError("protected_reasons必须是Mapping")
+        if len(protected_reasons) > MAX_ARCHITECTURE_RECALL_PROTECTED_CANDIDATES:
+            raise ValueError("protected_reasons节点数量超出上限")
+
+        normalized: Dict[str, list[str]] = {}
+        for raw_id, raw_reasons in protected_reasons.items():
+            node_id = cls._normalize_recall_positive_id(
+                raw_id,
+                field_name="protected_reasons节点ID",
+            )
+            if node_id not in final_candidate_ids:
+                raise ValueError("protected_reasons只能引用最终模型候选")
+            if str(node_id) in normalized:
+                raise ValueError("protected_reasons规范化后存在重复节点ID")
+            if isinstance(raw_reasons, (str, bytes)) or not isinstance(
+                raw_reasons,
+                Sequence,
+            ):
+                raise TypeError("protected_reasons中的原因必须是字符串序列")
+            if len(raw_reasons) > MAX_ARCHITECTURE_RECALL_PROTECTED_REASONS_PER_CANDIDATE:
+                raise ValueError("protected_reasons单节点原因数量超出上限")
+            reasons: list[str] = []
+            seen: set[str] = set()
+            for raw_reason in raw_reasons:
+                reason = str(raw_reason or "").strip()
+                if not reason:
+                    raise ValueError("protected_reasons原因不能为空")
+                if len(reason) > MAX_ARCHITECTURE_RECALL_REASON_CHARS:
+                    raise ValueError("protected_reasons原因超出长度上限")
+                if reason in seen:
+                    raise ValueError("protected_reasons存在重复原因")
+                seen.add(reason)
+                reasons.append(reason)
+            normalized[str(node_id)] = reasons
+        return normalized
+
+    def _serialize_recall_json(self, value: Any, *, field_name: str) -> str:
+        serialized = self._serialize(value)
+        if len(serialized) > MAX_ARCHITECTURE_RECALL_JSON_CHARS:
+            raise ValueError(f"{field_name}序列化后超出召回审计长度上限")
+        return serialized
+
+    @staticmethod
+    def _recall_payload_digest(payload: Mapping[str, Any]) -> str:
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _run_recall_audit_write(
+        self,
+        *,
+        operation: str,
+        writer: Any,
+    ) -> Any:
+        try:
+            return self._audit_executor.run(operation=operation, writer=writer)
+        except InteractionAuditError as exc:
+            message = str(exc).replace("交互审计", "领域召回审计")
+            raise ArchitectureRecallAuditError(message) from exc
 
     def _row_to_task(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {
@@ -505,9 +1006,10 @@ class LLMTaskService:
                     business_type, business_key, execution_id, request_payload,
                     status, progress, message,
                     result_payload, callback_status, callback_attempts, last_callback_error,
+                    callback_claim_id, callback_claim_expires_at,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(business_type, business_key) DO UPDATE SET
                     request_payload = excluded.request_payload,
                     execution_id = excluded.execution_id,
@@ -518,6 +1020,8 @@ class LLMTaskService:
                     callback_status = excluded.callback_status,
                     callback_attempts = excluded.callback_attempts,
                     last_callback_error = excluded.last_callback_error,
+                    callback_claim_id = excluded.callback_claim_id,
+                    callback_claim_expires_at = excluded.callback_claim_expires_at,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at
                 """,
@@ -533,6 +1037,8 @@ class LLMTaskService:
                     "pending",
                     0,
                     "",
+                    "",
+                    0.0,
                     now,
                     now,
                 ),
@@ -576,8 +1082,207 @@ class LLMTaskService:
             )
         return task
 
-    def create_file_task(self, file_name: str, request_payload: Dict[str, Any], status: str = "1") -> Dict[str, Any]:
-        return self._upsert_task("file", file_name, request_payload, status=status)
+    def create_file_tasks_if_available(
+        self,
+        file_tasks: Sequence[tuple[str, Dict[str, Any], str]],
+    ) -> list[Dict[str, Any]]:
+        """在一个写事务内原子受理一批文件任务。
+
+        任一业务键仍处于 ``0``/``1``、业务终态的首次回调仍为 ``pending``，或失败
+        回调正在执行补发租约时整批回滚。前者避免路由层“先查后写”的竞态让两个请求
+        同时获得 202；后两者保护外部回调交接窗口，避免新执行覆盖正在发送的旧结果。
+        返回值是在同一事务内读取的各执行快照，调用方必须把其中的 ``execution_id``
+        传给后台执行器。
+        """
+        if not file_tasks:
+            raise ValueError("file_tasks不能为空")
+
+        normalized_tasks: list[tuple[str, str, str, str, str]] = []
+        seen_file_names: set[str] = set()
+        for file_name, request_payload, status in file_tasks:
+            normalized_name = str(file_name or "").strip()
+            if not normalized_name:
+                raise ValueError("file_name不能为空")
+            if normalized_name in seen_file_names:
+                raise ValueError(f"file_tasks包含重复file_name: {normalized_name}")
+            if not isinstance(request_payload, dict):
+                raise TypeError("request_payload必须是对象")
+            normalized_status = str(status)
+            if normalized_status not in {"0", "1"}:
+                raise ValueError("新文件任务status只能是0或1")
+            seen_file_names.add(normalized_name)
+            now = _utc_now_iso()
+            normalized_tasks.append(
+                (
+                    normalized_name,
+                    self._serialize(request_payload),
+                    normalized_status,
+                    uuid4().hex,
+                    now,
+                )
+            )
+
+        snapshots: list[Dict[str, Any]] = []
+        admission_epoch = time.time()
+        try:
+            with self._connection() as conn:
+                # 在读 active 状态前先取得写保留锁，避免两个连接都通过检查后再竞争写入。
+                # JSON 序列化和 UUID 生成已经在锁外完成，锁内只保留有界短 SQL。
+                conn.execute("BEGIN IMMEDIATE")
+                for file_name, _, _, _, _ in normalized_tasks:
+                    blocking = conn.execute(
+                        """
+                        SELECT status, callback_status, callback_claim_id,
+                               callback_claim_expires_at
+                        FROM llm_tasks
+                        WHERE business_type = 'file' AND business_key = ?
+                          AND (
+                              status IN ('0', '1')
+                              OR callback_status = 'pending'
+                              OR (
+                                  callback_claim_id <> ''
+                                  AND callback_claim_expires_at > ?
+                              )
+                          )
+                        """,
+                        (file_name, admission_epoch),
+                    ).fetchone()
+                    if blocking is not None:
+                        raise TaskAlreadyProcessingError(
+                            file_name,
+                            str(blocking["status"]),
+                            str(blocking["callback_status"]),
+                            callback_delivery_in_flight=(
+                                bool(blocking["callback_claim_id"])
+                                and float(
+                                    blocking["callback_claim_expires_at"]
+                                    or 0
+                                )
+                                > admission_epoch
+                            ),
+                        )
+
+                for (
+                    file_name,
+                    serialized_payload,
+                    status,
+                    execution_id,
+                    now,
+                ) in normalized_tasks:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO llm_tasks (
+                            business_type, business_key, execution_id, request_payload,
+                            status, progress, message,
+                            result_payload, callback_status, callback_attempts,
+                            last_callback_error, callback_claim_id,
+                            callback_claim_expires_at, created_at, updated_at
+                        )
+                        VALUES (
+                            'file', ?, ?, ?, ?, 0.0, '', NULL, 'pending', 0, '',
+                            '', 0, ?, ?
+                        )
+                        ON CONFLICT(business_type, business_key) DO UPDATE SET
+                            request_payload = excluded.request_payload,
+                            execution_id = excluded.execution_id,
+                            status = excluded.status,
+                            progress = excluded.progress,
+                            message = excluded.message,
+                            result_payload = excluded.result_payload,
+                            callback_status = excluded.callback_status,
+                            callback_attempts = excluded.callback_attempts,
+                            last_callback_error = excluded.last_callback_error,
+                            callback_claim_id = excluded.callback_claim_id,
+                            callback_claim_expires_at =
+                                excluded.callback_claim_expires_at,
+                            created_at = excluded.created_at,
+                            updated_at = excluded.updated_at
+                        WHERE llm_tasks.status IN ('2', '3')
+                          AND llm_tasks.callback_status
+                              IN ('success', 'failed', 'skipped')
+                          AND (
+                              llm_tasks.callback_claim_id = ''
+                              OR llm_tasks.callback_claim_expires_at <= ?
+                          )
+                        """,
+                        (
+                            file_name,
+                            execution_id,
+                            serialized_payload,
+                            status,
+                            now,
+                            now,
+                            admission_epoch,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        blocking = conn.execute(
+                            """
+                            SELECT status, callback_status, callback_claim_id,
+                                   callback_claim_expires_at
+                            FROM llm_tasks
+                            WHERE business_type = 'file' AND business_key = ?
+                            """,
+                            (file_name,),
+                        ).fetchone()
+                        raise TaskAlreadyProcessingError(
+                            file_name,
+                            (
+                                str(blocking["status"])
+                                if blocking is not None
+                                else ""
+                            ),
+                            (
+                                str(blocking["callback_status"])
+                                if blocking is not None
+                                else ""
+                            ),
+                            callback_delivery_in_flight=(
+                                blocking is not None
+                                and bool(blocking["callback_claim_id"])
+                                and float(
+                                    blocking["callback_claim_expires_at"]
+                                    or 0
+                                )
+                                > admission_epoch
+                            ),
+                        )
+                    row = conn.execute(
+                        """
+                        SELECT business_type, business_key, execution_id, request_payload,
+                               status, progress, message, result_payload, callback_status,
+                               callback_attempts, last_callback_error, created_at, updated_at
+                        FROM llm_tasks
+                        WHERE business_type = 'file' AND business_key = ?
+                        """,
+                        (file_name,),
+                    ).fetchone()
+                    if row is None or row["execution_id"] != execution_id:
+                        raise RuntimeError("文件任务写入完成后未能读取本次执行快照")
+                    snapshots.append(self._row_to_task(row))
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise TaskAdmissionBusyError("任务库繁忙，请稍后重试") from exc
+            raise
+
+        for task in snapshots:
+            logger.info(
+                "文件任务已原子受理: business_key=%s execution_id=%s status=%s",
+                task["business_key"],
+                task["execution_id"],
+                task["status"],
+            )
+        return snapshots
+
+    def create_file_task(
+        self,
+        file_name: str,
+        request_payload: Dict[str, Any],
+        status: str = "1",
+    ) -> Dict[str, Any]:
+        return self.create_file_tasks_if_available(
+            ((file_name, request_payload, status),)
+        )[0]
 
     def create_report_task(self, report_id: int, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._upsert_task("report", str(report_id), request_payload, status="0")
@@ -613,6 +1318,41 @@ class LLMTaskService:
             ).fetchone()
         return self._row_to_task(row) if row else None
 
+    def require_current_execution(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+        *,
+        allowed_statuses: Sequence[str] | None = None,
+    ) -> Dict[str, Any]:
+        """确认业务键仍绑定指定执行，并可选限制当前状态。
+
+        本方法用于外部副作用前的执行身份门禁；它本身不替代后续数据库写入的 CAS。
+        文件任务在 ``0``/``1`` 状态期间不能被原子受理入口替换，因此该门禁与受理规则
+        共同保证远端 Session、永久知识库和回调不会由已失效 worker 发起。
+        """
+        expected_execution_id = str(execution_id or "").strip()
+        if not expected_execution_id:
+            raise ValueError("execution_id不能为空")
+        task = self.get_task(business_type, business_key)
+        if task is None or task["execution_id"] != expected_execution_id:
+            raise TaskExecutionConflictError(
+                business_type,
+                business_key,
+                expected_execution_id,
+            )
+        if allowed_statuses is not None:
+            normalized_statuses = {str(status) for status in allowed_statuses}
+            if task["status"] not in normalized_statuses:
+                raise TaskStateConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                    task["status"],
+                )
+        return task
+
     def get_tasks(self, business_type: str, business_keys: list[str]) -> list[Dict[str, Any]]:
         tasks: list[Dict[str, Any]] = []
         for business_key in business_keys:
@@ -620,6 +1360,386 @@ class LLMTaskService:
             if task is not None:
                 tasks.append(task)
         return tasks
+
+    def upsert_architecture_recall_decision(
+        self,
+        *,
+        execution_id: str,
+        tree_fingerprint: str,
+        query_digest: str,
+        base_top64: Sequence[Any],
+        final_candidates: Sequence[Mapping[str, Any]],
+        channel_rankings: Mapping[str, Sequence[Any]],
+        rrf_scores: Mapping[Any, Any],
+        protected_reasons: Mapping[Any, Sequence[Any]],
+        prompt_chars: int,
+        recall_elapsed_ms: int,
+    ) -> ArchitectureRecallAuditWriteResult:
+        """在创建远端 RAG Session 前幂等保存完整召回决策。
+
+        同一 ``execution_id`` 重放完全相同的决策会返回 ``reused=True``；任何字段变化
+        都视为幂等冲突，禁止静默覆盖首次召回证据。该表不保存正文，调用方只能传递模型
+        投影、排名、分数、摘要和计数。
+
+        ``tree_fingerprint`` 仅在领域树索引尚未构建时允许为空，使
+        ``architecture_index`` 失败仍可先落审计再终结；成功召回必须传 64 位摘要。
+        """
+        normalized_execution_id = self._normalize_recall_execution_id(execution_id)
+        normalized_tree_fingerprint = self._normalize_recall_digest(
+            tree_fingerprint,
+            field_name="tree_fingerprint",
+            allow_empty=True,
+        )
+        normalized_query_digest = self._normalize_recall_digest(
+            query_digest,
+            field_name="query_digest",
+        )
+        normalized_base = self._normalize_recall_ranked_ids(
+            base_top64,
+            field_name="base_top64",
+            max_items=MAX_ARCHITECTURE_RECALL_BASE_CANDIDATES,
+        )
+        normalized_final = self._normalize_recall_final_candidates(final_candidates)
+        final_ids = {item["id"] for item in normalized_final}
+        if not set(normalized_base).issubset(final_ids):
+            raise ValueError("base_top64必须全部包含在最终模型候选中")
+        normalized_channels = self._normalize_recall_channel_rankings(channel_rankings)
+        normalized_rrf = self._normalize_recall_rrf_scores(rrf_scores)
+        normalized_protected = self._normalize_recall_protected_reasons(
+            protected_reasons,
+            final_candidate_ids=final_ids,
+        )
+        normalized_prompt_chars = self._normalize_recall_non_negative_int(
+            prompt_chars,
+            field_name="prompt_chars",
+            upper_bound=MAX_ARCHITECTURE_RECALL_PROMPT_CHARS,
+        )
+        normalized_recall_elapsed = self._normalize_recall_non_negative_int(
+            recall_elapsed_ms,
+            field_name="recall_elapsed_ms",
+            upper_bound=MAX_ARCHITECTURE_RECALL_ELAPSED_MS,
+        )
+
+        serialized_base = self._serialize_recall_json(
+            normalized_base,
+            field_name="base_top64",
+        )
+        serialized_final = self._serialize_recall_json(
+            normalized_final,
+            field_name="final_candidates",
+        )
+        serialized_channels = self._serialize_recall_json(
+            normalized_channels,
+            field_name="channel_rankings",
+        )
+        serialized_rrf = self._serialize_recall_json(
+            normalized_rrf,
+            field_name="rrf_scores",
+        )
+        serialized_protected = self._serialize_recall_json(
+            normalized_protected,
+            field_name="protected_reasons",
+        )
+        decision_payload = {
+            "tree_fingerprint": normalized_tree_fingerprint,
+            "query_digest": normalized_query_digest,
+            "base_top64": normalized_base,
+            "final_candidates": normalized_final,
+            "channel_rankings": normalized_channels,
+            "rrf_scores": normalized_rrf,
+            "protected_reasons": normalized_protected,
+            "prompt_chars": normalized_prompt_chars,
+            "recall_elapsed_ms": normalized_recall_elapsed,
+        }
+        decision_digest = self._recall_payload_digest(decision_payload)
+        now = _utc_now_iso()
+
+        def _write(conn: sqlite3.Connection) -> tuple[bool, bool]:
+            task = conn.execute(
+                """
+                SELECT business_type
+                FROM llm_tasks
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if task is None:
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：对应execution不存在或已被新执行替换"
+                )
+            if task["business_type"] != "file":
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：仅file任务允许写入召回决策"
+                )
+
+            existing = conn.execute(
+                """
+                SELECT decision_digest, finalized_at
+                FROM llm_architecture_recall_decisions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["decision_digest"] != decision_digest:
+                    raise ArchitectureRecallAuditError(
+                        "领域召回审计失败：同一execution的初始决策发生幂等冲突"
+                    )
+                return False, existing["finalized_at"] is not None
+
+            conn.execute(
+                """
+                INSERT INTO llm_architecture_recall_decisions (
+                    execution_id, tree_fingerprint, query_digest, decision_digest,
+                    base_top64_json, final_candidates_json, channel_rankings_json,
+                    rrf_scores_json, protected_reasons_json, prompt_chars,
+                    recall_elapsed_ms, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_execution_id,
+                    normalized_tree_fingerprint,
+                    normalized_query_digest,
+                    decision_digest,
+                    serialized_base,
+                    serialized_final,
+                    serialized_channels,
+                    serialized_rrf,
+                    serialized_protected,
+                    normalized_prompt_chars,
+                    normalized_recall_elapsed,
+                    now,
+                    now,
+                ),
+            )
+            return True, False
+
+        created, finalized = self._run_recall_audit_write(
+            operation="upsert_architecture_recall_decision",
+            writer=_write,
+        )
+        logger.info(
+            "领域召回初始决策已提交: execution_id=%s created=%s reused=%s "
+            "base_count=%s candidate_count=%s prompt_chars=%s",
+            normalized_execution_id,
+            created,
+            not created,
+            len(normalized_base),
+            len(normalized_final),
+            normalized_prompt_chars,
+        )
+        return ArchitectureRecallAuditWriteResult(
+            execution_id=normalized_execution_id,
+            created=created,
+            reused=not created,
+            finalized=finalized,
+        )
+
+    def finalize_architecture_recall_decision(
+        self,
+        *,
+        execution_id: str,
+        returned_architecture_id: int | None,
+        returned_rank: int | None,
+        total_elapsed_ms: int,
+        failure_stage: str | None = None,
+        error_message: str = "",
+    ) -> ArchitectureRecallAuditWriteResult:
+        """幂等终结召回决策，只补写结果字段，不覆盖任何初始召回证据。"""
+        normalized_execution_id = self._normalize_recall_execution_id(execution_id)
+        normalized_total_elapsed = self._normalize_recall_non_negative_int(
+            total_elapsed_ms,
+            field_name="total_elapsed_ms",
+            upper_bound=MAX_ARCHITECTURE_RECALL_ELAPSED_MS,
+        )
+        normalized_failure_stage = str(failure_stage or "").strip() or None
+        if (
+            normalized_failure_stage is not None
+            and normalized_failure_stage not in ARCHITECTURE_RECALL_FAILURE_STAGES
+        ):
+            raise ValueError("failure_stage不是允许的领域分类稳定失败阶段")
+        normalized_error = str(error_message or "").strip()
+        if len(normalized_error) > MAX_ARCHITECTURE_RECALL_ERROR_CHARS:
+            raise ValueError("error_message超出召回审计长度上限")
+        if normalized_failure_stage is None and normalized_error:
+            raise ValueError("成功召回终结不得携带error_message")
+        if normalized_failure_stage is not None and not normalized_error:
+            raise ValueError("失败召回终结必须携带error_message")
+
+        if returned_architecture_id is None and returned_rank is None:
+            normalized_returned_id = None
+            normalized_returned_rank = None
+        elif returned_architecture_id is None or returned_rank is None:
+            raise ValueError("returned_architecture_id与returned_rank必须同时为空或同时提供")
+        else:
+            normalized_returned_id = self._normalize_recall_positive_id(
+                returned_architecture_id,
+                field_name="returned_architecture_id",
+            )
+            normalized_returned_rank = self._normalize_recall_positive_id(
+                returned_rank,
+                field_name="returned_rank",
+            )
+            if normalized_returned_rank > MAX_ARCHITECTURE_RECALL_FINAL_CANDIDATES:
+                raise ValueError("returned_rank超出最终候选数量上限")
+        if normalized_returned_id is None and normalized_failure_stage is None:
+            raise ValueError("终结召回决策必须包含返回ID或失败阶段")
+
+        finalization_payload = {
+            "returned_architecture_id": normalized_returned_id,
+            "returned_rank": normalized_returned_rank,
+            "total_elapsed_ms": normalized_total_elapsed,
+            "failure_stage": normalized_failure_stage,
+            "error_message": normalized_error,
+        }
+        finalization_digest = self._recall_payload_digest(finalization_payload)
+        now = _utc_now_iso()
+
+        def _write(conn: sqlite3.Connection) -> bool:
+            task = conn.execute(
+                """
+                SELECT business_type
+                FROM llm_tasks
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if task is None:
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：对应execution不存在或已被新执行替换"
+                )
+            if task["business_type"] != "file":
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：仅file任务允许终结召回决策"
+                )
+            existing = conn.execute(
+                """
+                SELECT final_candidates_json, recall_elapsed_ms,
+                       finalization_digest, finalized_at
+                FROM llm_architecture_recall_decisions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if existing is None:
+                raise ArchitectureRecallAuditError(
+                    "领域召回审计失败：缺少初始召回决策"
+                )
+            if normalized_total_elapsed < int(existing["recall_elapsed_ms"]):
+                raise ValueError("total_elapsed_ms不得小于recall_elapsed_ms")
+
+            stored_candidates = json.loads(existing["final_candidates_json"])
+            if normalized_returned_id is not None:
+                candidate_ids = [int(item["id"]) for item in stored_candidates]
+                if normalized_returned_id not in candidate_ids:
+                    raise ValueError("returned_architecture_id不在最终模型候选中")
+                expected_rank = candidate_ids.index(normalized_returned_id) + 1
+                if normalized_returned_rank != expected_rank:
+                    raise ValueError("returned_rank与最终模型候选顺序不一致")
+
+            if existing["finalized_at"] is not None:
+                if existing["finalization_digest"] != finalization_digest:
+                    raise ArchitectureRecallAuditError(
+                        "领域召回审计失败：同一execution的终结结果发生幂等冲突"
+                    )
+                return False
+
+            conn.execute(
+                """
+                UPDATE llm_architecture_recall_decisions
+                SET returned_architecture_id = ?, returned_rank = ?,
+                    total_elapsed_ms = ?, failure_stage = ?, error_message = ?,
+                    finalization_digest = ?, finalized_at = ?, updated_at = ?
+                WHERE execution_id = ? AND finalized_at IS NULL
+                """,
+                (
+                    normalized_returned_id,
+                    normalized_returned_rank,
+                    normalized_total_elapsed,
+                    normalized_failure_stage,
+                    normalized_error,
+                    finalization_digest,
+                    now,
+                    now,
+                    normalized_execution_id,
+                ),
+            )
+            return True
+
+        created = self._run_recall_audit_write(
+            operation="finalize_architecture_recall_decision",
+            writer=_write,
+        )
+        logger.info(
+            "领域召回决策已终结: execution_id=%s created=%s reused=%s "
+            "returned_architecture_id=%s returned_rank=%s failure_stage=%s",
+            normalized_execution_id,
+            created,
+            not created,
+            normalized_returned_id,
+            normalized_returned_rank,
+            normalized_failure_stage or "",
+        )
+        return ArchitectureRecallAuditWriteResult(
+            execution_id=normalized_execution_id,
+            created=created,
+            reused=not created,
+            finalized=True,
+        )
+
+    def get_architecture_recall_decision(
+        self,
+        execution_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """读取一条召回决策，供测试、E2E 和离线复盘取证。"""
+        normalized_execution_id = self._normalize_recall_execution_id(execution_id)
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT execution_id, tree_fingerprint, query_digest,
+                       base_top64_json, final_candidates_json,
+                       channel_rankings_json, rrf_scores_json,
+                       protected_reasons_json, prompt_chars,
+                       recall_elapsed_ms, returned_architecture_id,
+                       returned_rank, total_elapsed_ms, failure_stage,
+                       error_message, finalized_at, created_at, updated_at
+                FROM llm_architecture_recall_decisions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        rrf_scores = {
+            int(node_id): float(score)
+            for node_id, score in json.loads(row["rrf_scores_json"]).items()
+        }
+        protected_reasons = {
+            int(node_id): list(reasons)
+            for node_id, reasons in json.loads(row["protected_reasons_json"]).items()
+        }
+        return {
+            "execution_id": row["execution_id"],
+            "tree_fingerprint": row["tree_fingerprint"],
+            "query_digest": row["query_digest"],
+            "base_top64": json.loads(row["base_top64_json"]),
+            "final_candidates": json.loads(row["final_candidates_json"]),
+            "channel_rankings": json.loads(row["channel_rankings_json"]),
+            "rrf_scores": rrf_scores,
+            "protected_reasons": protected_reasons,
+            "prompt_chars": row["prompt_chars"],
+            "recall_elapsed_ms": row["recall_elapsed_ms"],
+            "returned_architecture_id": row["returned_architecture_id"],
+            "returned_rank": row["returned_rank"],
+            "total_elapsed_ms": row["total_elapsed_ms"],
+            "failure_stage": row["failure_stage"],
+            "error_message": row["error_message"],
+            "finalized": row["finalized_at"] is not None,
+            "finalized_at": row["finalized_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def get_weaponry_task_document_snapshots(
         self,
@@ -1344,12 +2464,14 @@ class LLMTaskService:
         result_payload: Dict[str, Any],
         *,
         status: str,
+        execution_id: str | None = None,
     ) -> None:
         self.mark_business_result(
             business_type,
             business_key,
             result_payload=result_payload,
             status=status,
+            execution_id=execution_id,
         )
 
     def mark_business_result(
@@ -1360,21 +2482,61 @@ class LLMTaskService:
         *,
         status: str,
         message: str = "",
+        execution_id: str | None = None,
     ) -> None:
         now = _utc_now_iso()
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        active_clause = " AND status IN ('0', '1')" if expected_execution_id else ""
+        params: list[Any] = [
+            status,
+            1.0,
+            message,
+            self._serialize(result_payload),
+            now,
+            business_type,
+            business_key,
+        ]
+        if expected_execution_id:
+            params.append(expected_execution_id)
         with self._connection() as conn:
-            conn.execute(
-                """
+            cursor = conn.execute(
+                f"""
                 UPDATE llm_tasks
                 SET status = ?, progress = ?, message = ?, result_payload = ?, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
+                {execution_clause}
+                {active_clause}
                 """,
-                (status, 1.0, message, self._serialize(result_payload), now, business_type, business_key),
+                tuple(params),
             )
+            if expected_execution_id and cursor.rowcount != 1:
+                task = conn.execute(
+                    """
+                    SELECT execution_id, status
+                    FROM llm_tasks
+                    WHERE business_type = ? AND business_key = ?
+                    """,
+                    (business_type, business_key),
+                ).fetchone()
+                if task is None or task["execution_id"] != expected_execution_id:
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
+                raise TaskStateConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                    task["status"],
+                )
         logger.info(
-            "任务业务结果已标记: business_type=%s business_key=%s status=%s",
+            "任务业务结果已标记: business_type=%s business_key=%s "
+            "execution_id=%s status=%s",
             business_type,
             business_key,
+            expected_execution_id or "-",
             status,
         )
 
@@ -1386,23 +2548,177 @@ class LLMTaskService:
         progress: float,
         message: str,
         status: Optional[str] = None,
+        execution_id: str | None = None,
     ) -> None:
         now = _utc_now_iso()
         progress = normalize_progress(progress)
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        active_clause = " AND status IN ('0', '1')" if expected_execution_id else ""
         status_sql = "status = ?, " if status is not None else ""
         params: list[Any] = []
         if status is not None:
             params.append(status)
         params.extend([progress, message, now, business_type, business_key])
+        if expected_execution_id:
+            params.append(expected_execution_id)
         with self._connection() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 f"""
                 UPDATE llm_tasks
                 SET {status_sql}progress = ?, message = ?, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
+                {execution_clause}
+                {active_clause}
                 """,
                 tuple(params),
             )
+            if expected_execution_id and cursor.rowcount != 1:
+                task = conn.execute(
+                    """
+                    SELECT execution_id, status
+                    FROM llm_tasks
+                    WHERE business_type = ? AND business_key = ?
+                    """,
+                    (business_type, business_key),
+                ).fetchone()
+                if task is None or task["execution_id"] != expected_execution_id:
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
+                raise TaskStateConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                    task["status"],
+                )
+
+    def claim_callback_delivery(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        timeout: float,
+        execution_id: str | None = None,
+    ) -> tuple[str, Dict[str, Any]] | None:
+        """原子领取一次文件终态回调发送租约并返回冻结任务快照。
+
+        ``pending`` 首次发送和 ``failed`` 补发共用同一租约。文件任务受理会在租约有效期
+        内拒绝同名重跑；回调结果写入还必须同时匹配 ``execution_id`` 与租约 ID，从而
+        防止旧补发把新执行误标为成功或失败。租约超过 HTTP timeout 的保守余量后允许
+        接管，避免进程崩溃把任务永久锁死。
+        """
+        if business_type != "file":
+            raise ValueError("回调发送租约当前仅支持file任务")
+        completed_statuses = _COMPLETED_TASK_STATUSES.get(business_type)
+        if not completed_statuses:
+            raise ValueError(f"未知 business_type: {business_type}")
+        expected_execution_id = str(execution_id or "").strip()
+        now_epoch = time.time()
+        now = _utc_now_iso()
+        claim_id = uuid4().hex
+        claim_expires_at = (
+            now_epoch + _callback_delivery_lease_seconds(timeout)
+        )
+        status_placeholders = ", ".join("?" for _ in completed_statuses)
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message, result_payload, callback_status,
+                       callback_attempts, last_callback_error, callback_claim_id,
+                       callback_claim_expires_at, created_at, updated_at
+                FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (business_type, business_key),
+            ).fetchone()
+            if current is None:
+                return None
+            current_execution_id = str(current["execution_id"] or "")
+            if (
+                expected_execution_id
+                and current_execution_id != expected_execution_id
+            ):
+                raise TaskExecutionConflictError(
+                    business_type,
+                    business_key,
+                    expected_execution_id,
+                )
+            if (
+                current["status"] not in completed_statuses
+                or current["callback_status"] not in {"pending", "failed"}
+            ):
+                return None
+            current_claim_id = str(current["callback_claim_id"] or "")
+            current_claim_expires_at = float(
+                current["callback_claim_expires_at"] or 0
+            )
+            if (
+                current_claim_id
+                and current_claim_expires_at > now_epoch
+            ):
+                return None
+
+            cursor = conn.execute(
+                f"""
+                UPDATE llm_tasks
+                SET callback_claim_id = ?, callback_claim_expires_at = ?,
+                    updated_at = ?
+                WHERE business_type = ? AND business_key = ?
+                  AND execution_id = ?
+                  AND status IN ({status_placeholders})
+                  AND callback_status IN ('pending', 'failed')
+                  AND (
+                      callback_claim_id = ''
+                      OR callback_claim_expires_at <= ?
+                  )
+                """,
+                (
+                    claim_id,
+                    claim_expires_at,
+                    now,
+                    business_type,
+                    business_key,
+                    current_execution_id,
+                    *sorted(completed_statuses),
+                    now_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = conn.execute(
+                """
+                SELECT business_type, business_key, execution_id, request_payload,
+                       status, progress, message, result_payload, callback_status,
+                       callback_attempts, last_callback_error, callback_claim_id,
+                       callback_claim_expires_at, created_at, updated_at
+                FROM llm_tasks
+                WHERE business_type = ? AND business_key = ?
+                """,
+                (business_type, business_key),
+            ).fetchone()
+            if (
+                claimed is None
+                or claimed["execution_id"] != current_execution_id
+                or claimed["callback_claim_id"] != claim_id
+            ):
+                raise RuntimeError("回调发送租约领取后无法读取一致快照")
+            task = self._row_to_task(claimed)
+
+        logger.info(
+            "回调发送租约已领取: business_type=%s business_key=%s "
+            "execution_id=%s lease_seconds=%.3f",
+            business_type,
+            business_key,
+            current_execution_id,
+            claim_expires_at - now_epoch,
+        )
+        return claim_id, task
 
     def _mark_callback_result(
         self,
@@ -1411,6 +2727,8 @@ class LLMTaskService:
         *,
         callback_status: str,
         error: str,
+        execution_id: str | None = None,
+        claim_id: str | None = None,
     ) -> None:
         """以比较并交换方式提交一次真实回调结果。
 
@@ -1430,35 +2748,67 @@ class LLMTaskService:
             raise ValueError(f"未知 business_type: {business_type}")
         status_placeholders = ", ".join("?" for _ in completed_statuses)
         now = _utc_now_iso()
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        expected_claim_id = str(claim_id or "").strip()
+        claim_clause = (
+            " AND callback_claim_id = ?"
+            if expected_claim_id
+            else " AND callback_claim_id = ''"
+        )
+        update_params: list[Any] = [
+            callback_status,
+            normalized_error,
+            now,
+            business_type,
+            business_key,
+            *sorted(completed_statuses),
+        ]
+        if expected_execution_id:
+            update_params.append(expected_execution_id)
+        if expected_claim_id:
+            update_params.append(expected_claim_id)
         with self._connection() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE llm_tasks
                 SET callback_status = ?, callback_attempts = callback_attempts + 1,
-                    last_callback_error = ?, updated_at = ?
+                    last_callback_error = ?, callback_claim_id = '',
+                    callback_claim_expires_at = 0, updated_at = ?
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'failed')
                   AND status IN ({status_placeholders})
+                  {execution_clause}
+                  {claim_clause}
                 """,
-                (
-                    callback_status,
-                    normalized_error,
-                    now,
-                    business_type,
-                    business_key,
-                    *sorted(completed_statuses),
-                ),
+                tuple(update_params),
             )
             if cursor.rowcount != 1:
                 task = conn.execute(
                     """
-                    SELECT status, callback_status FROM llm_tasks
+                    SELECT execution_id, status, callback_status,
+                           callback_claim_id
+                    FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
                     (business_type, business_key),
                 ).fetchone()
                 if task is None:
                     raise ValueError("待更新回调结果的任务不存在")
+                if (
+                    expected_execution_id
+                    and task["execution_id"] != expected_execution_id
+                ):
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
+                if (
+                    expected_claim_id
+                    and task["callback_claim_id"] != expected_claim_id
+                ):
+                    raise ValueError("回调发送租约已失效")
                 if task["status"] not in completed_statuses:
                     raise ValueError("任务尚未完成，不能提交回调结果")
                 raise ValueError(
@@ -1466,13 +2816,23 @@ class LLMTaskService:
                     f"{task['callback_status']} -> {callback_status}"
                 )
 
-    def mark_callback_failed(self, business_type: str, business_key: str, error: str) -> None:
+    def mark_callback_failed(
+        self,
+        business_type: str,
+        business_key: str,
+        error: str,
+        *,
+        execution_id: str | None = None,
+        claim_id: str | None = None,
+    ) -> None:
         """记录一次实际失败的回调，禁止覆盖成功或无需回调终态。"""
         self._mark_callback_result(
             business_type,
             business_key,
             callback_status="failed",
             error=error,
+            execution_id=execution_id,
+            claim_id=claim_id,
         )
         logger.warning(
             "外部回调失败已记录: business_type=%s business_key=%s error_chars=%d",
@@ -1481,13 +2841,22 @@ class LLMTaskService:
             len(str(error or "")),
         )
 
-    def mark_callback_success(self, business_type: str, business_key: str) -> None:
+    def mark_callback_success(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        execution_id: str | None = None,
+        claim_id: str | None = None,
+    ) -> None:
         """记录一次实际成功的回调，成功后状态不可再次改写。"""
         self._mark_callback_result(
             business_type,
             business_key,
             callback_status="success",
             error="",
+            execution_id=execution_id,
+            claim_id=claim_id,
         )
         logger.info(
             "外部回调成功已记录: business_type=%s business_key=%s",
@@ -1495,7 +2864,13 @@ class LLMTaskService:
             business_key,
         )
 
-    def mark_callback_skipped(self, business_type: str, business_key: str) -> bool:
+    def mark_callback_skipped(
+        self,
+        business_type: str,
+        business_key: str,
+        *,
+        execution_id: str | None = None,
+    ) -> bool:
         """把未配置回调的任务幂等标记为 ``skipped``。
 
         只有仍处于 ``pending`` 或已经是 ``skipped`` 的任务允许执行该转换。实际回调已经
@@ -1507,29 +2882,45 @@ class LLMTaskService:
         if not completed_statuses:
             raise ValueError(f"未知 business_type: {business_type}")
         status_placeholders = ", ".join("?" for _ in completed_statuses)
+        expected_execution_id = str(execution_id or "").strip()
+        execution_clause = " AND execution_id = ?" if expected_execution_id else ""
+        now_epoch = time.time()
         transition_succeeded = False
         current_status = ""
+        callback_delivery_in_flight = False
+        update_params: list[Any] = [
+            now,
+            business_type,
+            business_key,
+            *sorted(completed_statuses),
+            now_epoch,
+        ]
+        if expected_execution_id:
+            update_params.append(expected_execution_id)
         with self._connection() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE llm_tasks
-                SET callback_status = 'skipped', last_callback_error = '', updated_at = ?
+                SET callback_status = 'skipped', last_callback_error = '',
+                    callback_claim_id = '', callback_claim_expires_at = 0,
+                    updated_at = ?
                 WHERE business_type = ? AND business_key = ?
                   AND callback_status IN ('pending', 'skipped')
                   AND status IN ({status_placeholders})
+                  AND (
+                      callback_claim_id = ''
+                      OR callback_claim_expires_at <= ?
+                  )
+                  {execution_clause}
                 """,
-                (
-                    now,
-                    business_type,
-                    business_key,
-                    *sorted(completed_statuses),
-                ),
+                tuple(update_params),
             )
             transition_succeeded = cursor.rowcount == 1
             if not transition_succeeded:
                 task = conn.execute(
                     """
-                    SELECT status, callback_status
+                    SELECT execution_id, status, callback_status,
+                           callback_claim_id, callback_claim_expires_at
                     FROM llm_tasks
                     WHERE business_type = ? AND business_key = ?
                     """,
@@ -1540,9 +2931,31 @@ class LLMTaskService:
                         "待跳过回调的任务不存在: "
                         f"business_type={business_type}, business_key={business_key}"
                     )
+                if (
+                    expected_execution_id
+                    and task["execution_id"] != expected_execution_id
+                ):
+                    raise TaskExecutionConflictError(
+                        business_type,
+                        business_key,
+                        expected_execution_id,
+                    )
                 if task["status"] not in completed_statuses:
                     raise ValueError("任务尚未完成，不能标记 callback_status=skipped")
                 current_status = task["callback_status"]
+                callback_delivery_in_flight = (
+                    bool(task["callback_claim_id"])
+                    and float(task["callback_claim_expires_at"] or 0)
+                    > now_epoch
+                )
+                if callback_delivery_in_flight:
+                    logger.warning(
+                        "回调发送租约仍有效，暂不标记为 skipped: "
+                        "business_type=%s business_key=%s",
+                        business_type,
+                        business_key,
+                    )
+                    return False
                 if current_status not in {"success", "failed"}:
                     raise ValueError(f"未知 callback_status: {current_status}")
 
@@ -1622,14 +3035,48 @@ class LLMTaskService:
                 in _COMPLETED_TASK_STATUSES.get(business_type, frozenset())
                 and task["callback_status"] == "pending"
             ):
-                self.mark_callback_skipped(business_type, business_key)
-            return False
-        if not self.should_replay_callback(business_type, business_key):
+                self.mark_callback_skipped(
+                    business_type,
+                    business_key,
+                    execution_id=task["execution_id"],
+                )
             return False
 
-        task = self.get_task(business_type, business_key)
-        if not task:
+        if business_type != "file":
+            # report/weaponry 的首次回调目前尚未领取发送租约。只给其 check-task 补发
+            # 单边加租约，会让正在完成的首次回调无法提交真实结果，反而造成状态失真。
+            # 在这两条首次回调链路完成 execution + claim 一体化迁移前，保持既有行为。
+            if not self.should_replay_callback(business_type, business_key):
+                return False
+            task = self.get_task(business_type, business_key)
+            if not task:
+                return False
+            payload = task["result_payload"] or {}
+            callback_ok = post_callback_payload(
+                normalized_callback_url,
+                payload,
+                timeout=timeout,
+                callback_context=self._callback_context_for_task(task),
+            )
+            if callback_ok:
+                self.mark_callback_success(business_type, business_key)
+                return True
+            self.mark_callback_failed(
+                business_type,
+                business_key,
+                "callback replay failed",
+            )
             return False
+
+        claim = self.claim_callback_delivery(
+            business_type,
+            business_key,
+            timeout=timeout,
+        )
+        if claim is None:
+            return False
+        claim_id, task = claim
+        execution_id = task["execution_id"]
 
         payload = task["result_payload"] or {}
         callback_ok = post_callback_payload(
@@ -1639,8 +3086,19 @@ class LLMTaskService:
             callback_context=self._callback_context_for_task(task),
         )
         if callback_ok:
-            self.mark_callback_success(business_type, business_key)
+            self.mark_callback_success(
+                business_type,
+                business_key,
+                execution_id=execution_id,
+                claim_id=claim_id,
+            )
             return True
 
-        self.mark_callback_failed(business_type, business_key, "callback replay failed")
+        self.mark_callback_failed(
+            business_type,
+            business_key,
+            "callback replay failed",
+            execution_id=execution_id,
+            claim_id=claim_id,
+        )
         return False

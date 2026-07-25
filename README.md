@@ -75,11 +75,13 @@ app/
       database.py                   # 知识库映射持久化（architecture_id <-> workspace_slug）
       progress_hub.py               # 进度发布/订阅中枢
       prompts.py                    # 统一 Prompt 构建
+      architecture_tree.py          # 完整领域树校验、不可变索引与进程内 LRU 缓存
     llm_service/
       analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
+      architecture_recall_service.py # 本地 lexical/tree/rule 召回、RRF 融合与有界候选投影
       report_service.py             # 报告生成主流程
       weaponry_service.py           # 知识谱系字段提取主流程
-      task_service.py               # 任务状态、结果、回调状态持久化
+      task_service.py               # 任务状态、结果、回调状态与领域召回审计持久化
       translation_service.py        # 翻译服务编排层
     chat/
       application/                  # 对话命令、历史、标题、中断、删除与运行执行器
@@ -138,6 +140,8 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 
 `/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。`skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过 check-task 自动补发。
 
+同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID 与租约 ID 双重 CAS 写回状态并释放租约，进程中断后过期租约可由后续补发接管。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
+
 ## 5. 接口行为说明（按当前代码核对）
 
 | 方法 | 路径 | 说明 |
@@ -166,20 +170,33 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 关键补充：
 
 1. `/llm/analysis`
-   - 同请求可提交多个文件，服务端按数组顺序串行执行。
+   - 同请求可提交最多 32 个文件，服务端按数组顺序串行执行；整个 JSON 请求体最大 64 MiB，超出时同步返回 HTTP `413`。
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
    - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
    - `params[].originalFileName` 表示业务原始文件名；服务端保留其请求原值，除作为文件解析提示词上下文外，还用于知识谱系回调中的来源展示。
    - `params[].channel` 表示资料来源机构候选范围（字典编码），服务端只使用请求中提供的候选，不再注入“装发、军情、科技、训练”等默认值；未传、传空数组或没有有效候选对象时，Prompt 要求模型输出空字符串，回调 `data.channel` 也返回空字符串。
    - `params[].security` 表示密级候选范围（字典编码），回调 `data.security` 返回密级解析结果；解析时根据文档开头内容判断，未见密级相关说明时，候选包含“公开”则返回“公开”，否则返回密级候选中的第一个 `value`。
-   - `architectureList` 使用甲方最新节点结构：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为节点名词概述。
-   - `architectureStandardList` 表示数据标准额外解析范围；当最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 会额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。
-   - 若 `architectureList` 只有一个节点，解析结果直接返回该节点 `id`，不再执行领域分类判断；其他信息提取仍正常执行。
-   - 主 Prompt 的多节点分类合同是：`architectureId` 必须返回有唯一文档证据支持的候选叶子节点 ID；叶子证据不足、无法区分或无法匹配时保持为空，不得返回父节点、公共父节点或任意默认值。
-   - 当前服务端尚未验证普通候选是否为叶子：单候选会直接返回该节点 ID；多候选成功路径要求非空 `architectureId`，并只校验它是请求 `architectureList` 中的整数候选。因而主 Prompt 输出的空值会先被视为合同不合规，普通领域的非叶子候选却可能通过校验；这两点都是当前实现限制，不代表主 Prompt 的目标口径。首次结果不合规时，服务端会先尝试下述 GJB 确定性兜底，未命中再发起一次 architecture repair，repair 仍不合规才将任务置为失败。
-   - GJB、国军标、国家军用标准资料的兜底分类只会返回候选中“数据标准”分支下的叶子节点，禁止返回“数据标准”父节点。服务端保留前端 `architectureList` 原始顺序：多个数据标准叶子均可选或无法区分时，返回其中第一个叶子；模型直接返回数据标准父节点时，也会触发相同的叶子兜底，父节点不会进入成功回调或永久知识库。
+   - 请求与 callback 结构保持不变。甲方继续在每个 `params[]` 中传完整 `architectureList`；服务端保留完整树用于结果合法性、数据标准判断、知识库存储归并和 callback，仅将本地 Top-K 召回后的有界候选投影发送给模型。
+   - `architectureList` 节点结构不变：`id` 为节点唯一标识，`name` 为节点名称，`parentId` 为父节点 id，`path` 为 id 路径链，`pathName` 为名称路径链，`remark` 为可选的节点名词概述。节点 ID 兼容正数字符串，但布尔值、非正数、重复 ID、父链成环或越界输入会在建任务和下载文件前同步返回 HTTP `400`；同一批次任一项无效时整批不受理。
+   - 单个 `architectureList` 或非空 `architectureStandardList` 最多 10,000 个节点、可见深度最多 128 层，`name`/`path`/`pathName`/`remark` 分别最多 256/2,048/2,048/4,096 字符，四个文本字段累计最多 2,000,000 字符，包含扩展字段的紧凑 JSON 最多 4,000,000 字符。缺失、`null` 或空 `architectureList` 为兼容历史调用继续使用服务端默认树；显式非空列表不得包含被静默过滤的坏节点。
+   - 默认 `topk_two_stage` 模式先用文件名、标题、型号/标准号及有界正文片段在本地执行 exact、字符 BM25、树路由和规则召回，再让模型对最多 128 个候选分类；分类 Prompt 最多 32,000 字符，超限或召回失败不会降级为发送完整领域树。
+   - 若 `architectureList` 只有一个合法节点，直接确定该节点 ID，并以字段抽取作为首次模型查询；多候选时先分类，再在同一文档 Session 的全新独立 Thread 中抽取字段，避免分类回答污染字段抽取上下文。抽取 Prompt 不再包含完整领域树，只携带已确认 ID、语义路径和节点类型。
+   - 多候选优先选择证据充分的叶子。证据不足时只允许返回模型可见的最深可靠父节点；父节点必须属于完整树、深度至少为 2 且通过召回资格检查，八个根节点和“数据标准”父节点均禁止返回。
+   - 分类返回空值或非法 ID 时，仅在相同候选集合和阶段预算内执行有限 repair；普通资料无有效召回信号，或分类与 repair 后仍无法确定时，文件任务置为 `status=3`，不会默认回退到 ID `1`，也不会成功回调或写入永久知识库。已确认的数据标准正文适用下述独立保护规则。
+   - 数据标准正文保护由 `DOCSENSE_ANALYSIS_DATA_STANDARD_MODE` 独立控制，默认 `scope_guard`。只有文件名与首页标准号等证据共同确认的 GJB 标准正文才会启用：召回候选限制为“数据标准”分支的六类叶子，分类 Prompt 使用各叶子的用途语义，并禁止以目录中的通用“术语和定义”章节直接判为“术语与定义”标准。模型与有限 repair 仍无法确认专业类别时定向归入“通用要求”（兼容节点名“通用要求标准”）；候选树缺少该叶子时任务置为 `status=3`。正文仅引用 GJB 标准而自身并非标准文件时不启用该保护；可显式设置为 `legacy` 即时回滚到既有候选召回。
+   - 旧 GJB 兜底不再按 `architectureList` 请求顺序选择第一个数据标准叶子；无论请求顺序如何，只能定向选择“通用要求”叶子。
+   - `architectureStandardList` 仍是独立的数据标准扩展字段开关；只有最终 `architectureId` 命中该范围或其子孙节点时，`fileDataItem` 才额外返回 `militaryName`、`num`、`startTime`、`implTime`、`approvalDept`。它不替代完整 `architectureList`，也不改变领域分类候选。
+   - 运行模式由 `DOCSENSE_ANALYSIS_CLASSIFICATION_MODE` 控制：`topk_two_stage` 为默认模式；`topk_single` 保留 Top-K 有界候选但回滚为单阶段分类与抽取；`legacy` 仅适用于完整树候选不超过 128 且最终完整 Prompt 不超过 32,000 字符的小树。
+   - 文件名分类约束由 `DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE` 控制：默认 `scope_guard`，启用简氏作用域识别，以及 `originalFileName` 与首页真实标题的双源分支约束；可显式设置为 `legacy` 即时回滚到既有文件名硬约束。文件名只作为优先分类信号，不能在证据冲突或不足时单独决定最终分类；显式空值或未知值会使服务拒绝启动。
+   - 装备身份受限重选由 `DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE` 独立控制，默认 `enforce`。只有描述性 `originalFileName` 与文档开头/标题两路相互独立的证据共同确认同一唯一装备型号、该型号唯一映射到一个装备父节点，且父节点及七类直属明细叶子均在模型可见候选中时，门禁才可能通过；正文中偶然提及的部件或同级舰不能单独触发。初次分类已在该装备分支内时保持原结果，只有落在分支外或仅命中过粗祖先时才允许在“确认的装备父节点 + 七类直属明细叶子”内重选一次。`shadow` 会记录这次重选但不采纳，`enforce` 会采纳合法结果；重选返回空值、越界节点或调用失败时 fail-open 保留初次分类，不扩大候选、不循环重试。需要即时关闭该优化时可显式设置为 `off`。
+   - 数据标准正文保护与文件名分类约束相互独立；启用时日志会记录标准号、标准标题、证据来源、候选作用域，以及最终是模型叶子命中还是 `data_standard_general_fallback` 受控兜底。
+   - 召回决策按任务 execution 持久化 tree fingerprint、query digest、候选与排名、Prompt 字符数、返回 ID/rank、耗时和失败阶段，不保存正文。AnythingLLM 标签向量召回不在本轮实现范围；在人工 gold 门禁通过前，不据此宣称生产分类准确率已经提升。
    - 当最终分类名称严格符合 `<武器装备名称>-基础数据`、`<武器装备名称>-战技指标`、`<武器装备名称>-运用数据` 或 `<武器装备名称>-效能数据` 时，回调 `data.architectureId` 返回具体子分类 ID；本地知识库关系和 AnythingLLM workspace 按解析出的装备级父节点 ID 归并。业务 metadata 以 DocSense 本地数据库为准，AnythingLLM 上传 metadata 当前仅写入用于来源追踪的 `docSource`，不写入分类 ID。
    - 主 Prompt 要求 `fileDataItem.score` 必填且只能是 `95`、`85`、`75`、`65`、`55`，分别对应闭源渠道或权威机构公开发布，专业科研单位/知名智库/装备研制单位，专业信息网站，普通信息网站，未明确数据来源资料；服务端映射会将缺失、无法转为数值、数值不是整数值或候选外的评分归一化为 `55`，可转换为整值的 `95.0`、`"95"` 等输入会保留为对应整数档位。
+   - `fileDataItem.summary` 按全文材料类型生成客观中文摘要：明确识别为新闻或科普资讯文稿时使用对应固定前缀并限制为 100～300 个字符，明确识别为报告时使用固定前缀并限制为 300～500 个字符，前缀计入长度；标准、规范、手册、目录、表格等不强制归入这三类，不添加材料类型前缀，只遵守非空、客观且最多 500 个字符的通用约束。
+   - `fileDataItem.keyword` 使用英文逗号分隔，目标数量为 5～10 个。服务端按最终 `architectureId` 的已验证 `parentId` 祖先链提取最多 4 个节点原名作为分类路径关键词并排列在前，再接收优先能够在摘要中、必要时能够在正文中直接核验的内容关键词；重复、超长或缺少文本证据的内容关键词会被丢弃，不会为满足数量补造无关词。
+   - `fileDataItem.relatedTechnology` 使用英文逗号分隔，最多返回 10 个具有正文证据的中文规范技术名称；装备名称、型号、部队番号、地名、作战概念、单次战术动作和宽泛概括词不属于所属技术。外文资料允许将原文技术术语准确翻译为中文，模型同时生成的 `relatedTechnologyEvidence` 仅供服务端核验原文术语，不新增回调字段；无法核验的所属技术会被丢弃。
+   - 摘要缺失时服务端保留标题回退；已标注材料类型的摘要长度越界、最终关键词少于 5 个或所属技术证据不合格时，文件任务仍按成功处理，并对可检测到的违约记录 warning。因此验收摘要、关键词和所属技术质量时不能只检查任务 `status=2` 或 callback 成功。
    - 解析后可进入翻译流程（由 `translation_service` 编排）。
 
 2. `/llm/generate-report`
@@ -452,6 +469,19 @@ zsh scripts/test_llm_check_task.sh http://127.0.0.1:5001 tests/fixtures/llm/chec
 zsh scripts/test_llm_progress.sh ws://127.0.0.1:5001/llm/progress tests/fixtures/llm/check_task_file_request.json 5 false
 ```
 
+领域召回 benchmark 可直接读取包含 `params[0].architectureList` 的请求 JSON；输出只包含 tree fingerprint、query digest、候选数、Prompt 字符数和召回指标等有界统计，不输出正文。`finalCandidateRecall` 统计模型最终可见候选，能计入合同允许的可靠父节点，是发布门禁的主指标；`recallAt64` 只统计基础叶子 Top-64，保留为诊断指标：
+
+```bash
+.venv/bin/python scripts/benchmark_architecture_recall.py \
+  --tree-json /path/to/analysis-request-with-full-tree.json \
+  --cases-json /path/to/architecture-recall-cases.json \
+  --min-final-candidate-recall 1.0
+```
+
+启用任一阈值后，每个 case 都必须提供 `goldIds` 或 `gold_ids`。如需同时约束基础叶子诊断指标，可增加 `--min-base-leaf-recall-at-64 0.95`。退出码 `0` 表示报告生成成功且门禁通过（或未启用门禁），`1` 表示指标未达门禁，`2` 表示输入或门禁配置非法；质量失败仍会输出有界 JSON 指标，便于定位排名，但不会回显正文。
+
+三文件真实 E2E 必须直接读取验收提供的 `文件解析领域树.json` 中 `.params[0].architectureList` 的完整节点内容。当前固定验收树为 6,822 个节点；构造多文件请求时须逐项保持节点原始顺序与字段内容，不得改用默认树、合成树、截断树或二次生成的节点。外部 fixture 的本机绝对路径和原始运行产物不提交到仓库。
+
 目录级武器装备字段抽取自动化脚本：
 
 ```bash
@@ -513,10 +543,19 @@ Windows 与 macOS 可按各自环境选择对应脚本。
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
 ```
 
-当前完整测试集中有用例直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`；未准备这些本地请求文件时，完整发现命令会因 fixture 缺失失败。除此之外，当前分支的完整测试仍有其他既有失败，因此不能把上述命令当作全绿基线；应按实际运行结果区分通过项和失败项。核对 analysis service 合同、候选默认值、callback debug 路由和 security 迁移时，可运行不依赖这些本地请求文件的定向测试：
+当前完整测试集中有用例直接读取受 `.gitignore` 排除的 `tests/fixtures/llm/*.json`；未准备这些本地请求文件时，完整发现命令会因 fixture 缺失失败。除此之外，当前分支的完整测试仍有其他既有失败，因此不能把上述命令当作全绿基线；应按实际运行结果区分通过项和失败项。核对 analysis 树索引、Top-K 召回、两阶段 Prompt、运行模式、字段合同、候选默认值、callback debug 路由和 security 迁移时，可运行不依赖这些本地请求文件的定向测试：
 
 ```bash
-.venv/bin/python -m unittest tests.test_analysis_service tests.test_range_defaults tests.test_callback_debug_routes tests.test_migrate_analysis_security
+.venv/bin/python -m unittest \
+  tests.test_architecture_tree \
+  tests.test_architecture_recall_service \
+  tests.test_architecture_recall_benchmark \
+  tests.test_analysis_prompts \
+  tests.test_analysis_classification_config \
+  tests.test_analysis_service \
+  tests.test_range_defaults \
+  tests.test_callback_debug_routes \
+  tests.test_migrate_analysis_security
 ```
 
 ## 9. 协议文档

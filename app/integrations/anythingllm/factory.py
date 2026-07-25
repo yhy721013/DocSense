@@ -22,7 +22,8 @@ from app.integrations.anythingllm.policies import (
     DEFAULT_EMBEDDING_ATTEMPTS,
     DEFAULT_UPLOAD_RETRIES,
     DEFAULT_UPLOAD_RETRY_BASE_DELAY_SECONDS,
-    document_rag_workspace_settings,
+    analysis_rag_workspace_settings,
+    knowledge_index_workspace_settings,
     validate_embedding_max_attempts,
     validate_upload_max_retries,
     validate_upload_retry_base_delay,
@@ -111,7 +112,7 @@ class AnythingLLMGatewayFactory:
         self._config = config
         self._user_id = user_id
         resolved_workspace_settings = (
-            document_rag_workspace_settings()
+            analysis_rag_workspace_settings()
             if workspace_settings is None
             else dict(workspace_settings)
         )
@@ -218,7 +219,7 @@ class AnythingLLMKnowledgeIndexFactory:
         self._database_service = database_service
         self._user_id = user_id
         resolved_workspace_settings = (
-            document_rag_workspace_settings()
+            knowledge_index_workspace_settings()
             if workspace_settings is None
             else dict(workspace_settings)
         )
