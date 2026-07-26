@@ -542,10 +542,10 @@
   ],
   "misleadingGuidanceCase": {
     "field": "最大航速",
-    "guidance": "示例值：最大航速通常写为35节",
-    "targetEvidence": "该舰试航最大航速为31节。",
-    "expectedContent": "31节",
-    "forbiddenContent": "35节",
+    "guidance": "示例值：最大航速通常写为35 节",
+    "targetEvidence": "该舰试航最大航速为31 节。",
+    "expectedContent": "31 节",
+    "forbiddenContent": "35 节",
     "guidanceMayAppearInRows": false,
     "targetEvidenceMustAppearInRows": true
   },

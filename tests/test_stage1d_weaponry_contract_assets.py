@@ -356,8 +356,8 @@ class Stage1DWeaponryContractAssetTests(unittest.TestCase):
         self.assertEqual(1, disabled["targetSearchCallsPerField"])
 
         misleading = self.contract["misleadingGuidanceCase"]
-        self.assertEqual("31节", misleading["expectedContent"])
-        self.assertEqual("35节", misleading["forbiddenContent"])
+        self.assertEqual("31 节", misleading["expectedContent"])
+        self.assertEqual("35 节", misleading["forbiddenContent"])
         self.assertFalse(misleading["guidanceMayAppearInRows"])
         self.assertTrue(misleading["targetEvidenceMustAppearInRows"])
 

@@ -1046,6 +1046,133 @@ class RunWeaponryApplicationTests(unittest.TestCase):
             operations.index("retrieval.close"),
         )
 
+    def test_input_unit_value_preserves_internal_space_in_callback(self) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override={
+                    "templateClassifyId": 1772442376645760,
+                    "fieldName": "标准排水量",
+                    "fieldType": "INPUT",
+                    "fieldDescription": "按术语规则提取标准排水量并保留标准单位",
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                },
+            )
+        )
+        harness.configure_retrieval(
+            (
+                _candidate(
+                    "standard-displacement",
+                    "doc-a",
+                    "甲舰装备齐全并搭载额定舰员、武备与给养时，"
+                    "标准排水量明确记载为70926吨。",
+                    rank=1,
+                ),
+            )
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("standard-displacement",),
+            text="70926 吨",
+        )
+        harness.configure_translation(document_sequence=1, item_sequence=1)
+
+        result = harness.run_service.execute(harness.task_id)
+        field = (
+            harness.tasks.completion_calls[-1]
+            .result.to_callback()
+            .to_public_dict()["data"]["weaponryTemplateFieldList"][0]
+        )
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("70926 吨", field["analyseData"])
+        self.assertEqual(
+            "70926 吨",
+            field["analyseDataSource"][0]["content"],
+        )
+
+    def test_table_unit_value_preserves_internal_space_in_callback(self) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override={
+                    "templateClassifyId": 1772442376645761,
+                    "fieldName": "舰艇排水量表",
+                    "fieldType": "TABLE",
+                    "fieldDescription": "按舰艇型号逐行提取标准排水量",
+                    "tableFieldList": [
+                        [
+                            {
+                                "fieldName": "型号",
+                                "fieldType": "INPUT",
+                                "fieldDescription": "舰艇型号",
+                                "analyseData": "",
+                                "analyseDataSource": [],
+                            },
+                            {
+                                "fieldName": "标准排水量",
+                                "fieldType": "INPUT",
+                                "fieldDescription": "包含标准单位的排水量",
+                                "analyseData": "",
+                                "analyseDataSource": [],
+                            },
+                        ]
+                    ],
+                },
+            )
+        )
+        harness.configure_retrieval(
+            (
+                _candidate(
+                    "table-standard-displacement",
+                    "doc-a",
+                    "甲型舰的技术参数表明确列出该型号标准排水量为70926吨，"
+                    "该数值对应装备齐全时的标准工况。",
+                    rank=1,
+                ),
+            )
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("table-standard-displacement",),
+            text=json.dumps(
+                [
+                    {
+                        "__rowKey": "甲型舰",
+                        "型号": "甲型舰",
+                        "标准排水量": "70926 吨",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=1,
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=2,
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        row = (
+            harness.tasks.completion_calls[-1]
+            .result.to_callback()
+            .to_public_dict()["data"]["weaponryTemplateFieldList"][0][
+                "tableFieldList"
+            ][0]
+        )
+        cells = {cell["fieldName"]: cell for cell in row}
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("70926 吨", cells["标准排水量"]["analyseData"])
+        self.assertEqual(
+            "70926 吨",
+            cells["标准排水量"]["analyseDataSource"][0]["content"],
+        )
+
     def test_all_rejected_is_success_with_empty_source_and_zero_model_calls(self) -> None:
         harness = _WeaponryHarness(_submission(document_count=1))
         harness.configure_retrieval(
