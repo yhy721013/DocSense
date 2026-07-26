@@ -42,6 +42,8 @@ from app.modules.weaponry.adapters import (
 from app.modules.weaponry.domain import (
     AUXILIARY_GUIDANCE_NONE,
     AUXILIARY_GUIDANCE_TERMS_RULES_V1,
+    EVIDENCE_REFERENCE_FILTER_LEGACY,
+    EVIDENCE_REFERENCE_FILTER_STRATEGY,
     EXTRACTION_CONTEXT_EVIDENCE_ONLY_V1,
     EXTRACTION_CONTEXT_PROVIDED_EVIDENCE_V1,
     EXTRACTION_PROMPT_VERSION,
@@ -403,6 +405,29 @@ class WeaponrySchemaV2ProfileTests(unittest.TestCase):
         self.assertFalse(hasattr(first, "minimum_provider_score"))
         self.assertFalse(hasattr(first, "reranker_fingerprint"))
         self.assertIn("score-or-stable-rank", first.score_protocol)
+        self.assertEqual(
+            EVIDENCE_REFERENCE_FILTER_STRATEGY,
+            first.reference_filter_strategy,
+        )
+
+    def test_reference_filter_strategy_changes_profile_identity(self) -> None:
+        current = _policy()
+        legacy = build_weaponry_production_selection_policy(
+            WeaponryProductionSelectionProfileConfig(
+                provider_fingerprint=current.provider_fingerprint,
+                embedding_fingerprint=current.embedding_fingerprint,
+                document_processing_fingerprint=(
+                    current.document_processing_fingerprint
+                ),
+                reference_filter_strategy=EVIDENCE_REFERENCE_FILTER_LEGACY,
+            )
+        )
+
+        self.assertNotEqual(current.profile_id, legacy.profile_id)
+        self.assertEqual(
+            EVIDENCE_REFERENCE_FILTER_LEGACY,
+            legacy.reference_filter_strategy,
+        )
 
     def test_minimal_multi_document_golden_asset_freezes_structure_not_precision(self) -> None:
         asset = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))

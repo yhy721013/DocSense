@@ -99,6 +99,7 @@ def _capabilities(
         score_semantics=config.score_semantics,
         score_protocol=config.score_protocol,
         ranking_strategy=config.ranking_strategy,
+        reference_filter_strategy=config.reference_filter_strategy,
         extraction_context_strategy=config.extraction_context_strategy,
     )
 
@@ -312,6 +313,10 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
             {"DOCSENSE_WEAPONRY_RUNTIME_MODE": "cluster"},
             {"DOCSENSE_WEAPONRY_QUERY_VERSION": "changed-query"},
             {"DOCSENSE_WEAPONRY_SCORE_PROTOCOL": "changed-score"},
+            {
+                "DOCSENSE_WEAPONRY_REFERENCE_FILTER_STRATEGY":
+                "changed-reference-filter"
+            },
             {
                 "DOCSENSE_WEAPONRY_EXTRACTION_CONTEXT_STRATEGY":
                 "evidence_only_context_v1"

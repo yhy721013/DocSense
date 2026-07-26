@@ -7,6 +7,7 @@ import unittest
 from app.modules.weaponry.domain import (
     EVIDENCE_SCORE_MODE_RANK,
     EVIDENCE_SCORE_MODE_SCORE,
+    EVIDENCE_REFERENCE_FILTER_LEGACY,
     EvidenceCandidate,
     EvidenceSelectionPolicy,
     RetrievalColumn,
@@ -145,6 +146,62 @@ class WeaponryChunkQualityTests(unittest.TestCase):
             "尼米茲號航空母艦隸屬美國海軍，本文介紹其部署與艦載航空兵活動。"
         )
         self.assertFalse(quality.reference_like)
+
+    def test_year_dense_markdown_business_table_is_not_mistaken_for_references(
+        self,
+    ) -> None:
+        text = (
+            "## Fleet list\n\n"
+            "| Ship | Hull No. | Laid down | Launched | Commissioned |\n"
+            "|---|---:|---|---|---|\n"
+            "| Nimitz | CVN 68 | 1968-06-22 | 1972-05-13 | 1975-05-03 |\n"
+            "| Dwight D. Eisenhower | CVN 69 | 1970-08-15 | 1975-10-11 | 1977-10-18 |\n"
+            "| Carl Vinson | CVN 70 | 1975-10-11 | 1980-03-15 | 1982-03-13 |"
+        )
+        quality = assess_chunk_quality(text)
+        legacy_quality = assess_chunk_quality(
+            text,
+            reference_filter_strategy=EVIDENCE_REFERENCE_FILTER_LEGACY,
+        )
+
+        self.assertFalse(quality.reference_like)
+        self.assertNotIn("reference-like-content", quality.rejection_reasons)
+        self.assertTrue(legacy_quality.reference_like)
+
+    def test_year_dense_markdown_table_with_reference_signals_is_still_rejected(
+        self,
+    ) -> None:
+        for reference_signal in (
+            "Retrieved from https://example.test/source",
+            "USNI News archive",
+        ):
+            with self.subTest(reference_signal=reference_signal):
+                quality = assess_chunk_quality(
+                    "## Source index\n\n"
+                    "| Ship | Year |\n"
+                    "|---|---:|\n"
+                    "| Nimitz | 2018 |\n"
+                    "| Eisenhower | 2019 |\n"
+                    "| Vinson | 2020 |\n"
+                    "| Roosevelt | 2021 |\n"
+                    "| Lincoln | 2022 |\n"
+                    f"| Washington | 2023 |\n\n{reference_signal}"
+                )
+
+                self.assertTrue(quality.reference_like)
+                self.assertIn(
+                    "reference-like-content",
+                    quality.rejection_reasons,
+                )
+
+    def test_year_dense_english_prose_keeps_existing_reference_gate(self) -> None:
+        quality = assess_chunk_quality(
+            "Publication chronology: the 2018 edition superseded the 2019 "
+            "edition, followed by revisions in 2020, 2021, 2022, and 2023."
+        )
+
+        self.assertTrue(quality.reference_like)
+        self.assertIn("reference-like-content", quality.rejection_reasons)
 
 
 class WeaponryEvidenceSelectionV2Tests(unittest.TestCase):

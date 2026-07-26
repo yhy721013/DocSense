@@ -230,8 +230,9 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
    - 提交时会校验 `analyseData` / `analyseDataSource` 必须清空。
    - `params.filePathList` 可选；缺省或空数组表示解析当前类别下的全部文件，非空时可选择任意已进入知识库类别的文件。列表元素兼容完整下载 URL 和裸哈希文件名；服务端从 URL 路径提取并解码文件名、按首次出现顺序去重，并要求每个文件名唯一对应一条本地文档记录。未解析文件返回 `404`；同名跨类别或多个选中文件对应同一外部文档位置时返回 `400`，不会随机选择文档。
    - 显式文件范围和类别全量范围都会在受理阶段冻结为不可变文档快照；后台执行不会重新按类别选文档，也不会修改任何永久来源 workspace。每个 execution 使用任务级临时检索范围，资源创建后立即登记，终态后由持久清理意图和独立恢复线程收敛。
-   - 字段抽取使用“专用语义 Query → Candidate → 稳定 score-or-rank Selection → Provided-Evidence Extraction”链路。普通 `INPUT` 字段候选批次默认 `topN=8`，`TABLE` 字段默认 `topN=16`；这是供应商单次候选批次，不是 `rows` 内容截断配额。合法来源、正文和分数/排名协议通过后，Evidence 全文按稳定顺序进入抽取和回调 `rows`。
+   - 字段抽取使用“专用语义 Query → Candidate → 稳定 score-or-rank Selection → Provided-Evidence Extraction”链路。普通 `INPUT` 字段候选批次默认 `topN=8`，`TABLE` 字段默认 `topN=16`；这是供应商单次候选批次，不是 `rows` 内容截断配额。合法来源、正文和分数/排名协议通过后，Evidence 全文按稳定顺序进入抽取和回调 `rows`。引用型正文筛选版本也会冻结进 production profile；当前版本不会仅因结构化 Markdown 业务表包含较多英文名称和年份就将其丢弃，但显式参考文献标题、至少 4 个 URL，或年份密集且伴随 URL、引用标记或非结构化高英文占比的内容仍会触发过滤。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取。只有成功解析出有效行时，回调才扩展为多行二维 `tableFieldList`；否则保留原始列模板。
+   - `fieldName` 去除首尾空格后精确等于 `装备编号`、`一级分类`、`二级分类`、`三级分类` 或 `四级分类` 时，服务端强制执行保留字段空值合同。该合同覆盖顶层 `INPUT` 和 `TABLE.tableFieldList` 嵌套列：命中字段跳过术语辅助、目标证据检索、模型抽取和翻译，回调固定返回 `analyseData=""`，并保留一个标准空来源占位对象（`content/source/time/fileName/translate` 均为空字符串，`rows=[]`）。混合 TABLE 只抽取普通列并按原始列顺序组装，保留列仍强制为空；仅含保留列的 TABLE 不进入外部抽取链。近似名称（如 `装备编号说明`）及其他普通字段不受影响。
    - 术语规则辅助由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制，默认关闭。关闭路径不读取术语目录/workspace 配置，也不产生术语文件、网络、workspace 或 embedding I/O；开启路径只读预先配置的独立术语 workspace，术语内容仅作为字段口径、别名和单位参考，不进入 `analyseDataSource`，也不得作为装备事实来源。
    - 武器谱只保留按来源文件聚合 Evidence 后抽取的 `file_aggregate_v1` 策略。每个来源 attempt 使用全新、无历史的临时 workspace/thread，并且只接收最终 `rows` 对应的 Evidence；禁止访问任务或类别文档 workspace 做二次 RAG，也不存在共享父 Thread 回退。
    - 回调 `analyseDataSource.source` 严格返回文件解析请求中 `originalFileName` 的原值，`fileName` 返回哈希文件名，`rows` 与实际进入该来源模型 Prompt 的完整 Evidence 逐项、同序一致。MHTML/OCR 等内部产物名不会写入回调；缺少来源谱系的数据必须重新解析，不做名称猜测。
@@ -345,7 +346,7 @@ Weaponry 可选配置：
 - `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用可拔除的术语规则辅助上下文，默认 `false`；关闭时不读取其余术语专属配置，也不产生术语 Provider I/O。
 - `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
 - `WEAPONRY_TERMS_CATALOG_FINGERPRINT`：启用术语辅助时必填，用于把只读术语目录版本冻结到 execution 策略；当前新链不会自动上传、移动或删除术语文档。
-- `DOCSENSE_WEAPONRY_*`：武器谱单实例 Dispatcher、维护扫描、清理超时/租约、供应商能力指纹和固定 score/rank/Extraction 策略。默认值及必填项见 `.env.example`；这些变量均为内部运行配置，不属于公开接口。
+- `DOCSENSE_WEAPONRY_*`：武器谱单实例 Dispatcher、维护扫描、清理超时/租约、供应商能力指纹和固定 score/rank、引用型正文筛选、Extraction 策略。默认值及必填项见 `.env.example`；这些变量均为内部运行配置，不属于公开接口。
 - 生产环境必须提供 provider、embedding、文档处理和 extraction model 四类真实能力指纹，配置
   `DOCSENSE_WEAPONRY_PRODUCTION_ATTESTATION_PATH`，并将
   `DOCSENSE_WEAPONRY_REQUIRE_PRODUCTION_GATE=true`。指纹或证明缺失、漂移、过期、被篡改时，
@@ -614,12 +615,33 @@ pwsh -NoLogo -Command "./scripts/test_llm_weaponry_directory.ps1 '测试文件-�
 
 如需递归扫描子目录，加 `--recursive`；如只想确认会扫描哪些文件和使用哪些临时 `architectureId`，加 `--dry-run`。脚本会自动避开已存在的 `architectureId`，防止旧 workspace/document 记录污染本轮结果。
 
+目录 runner 默认仍使用既有 75 字段模板。需要专门核验上述保留字段合同时，可增加默认关闭的
+`--verify-forced-empty-contract`：
+
+```bash
+zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
+  --base-url http://127.0.0.1:5001 \
+  --output-dir "/var/lib/docsense/runtime/weaponry_forced_empty_contract" \
+  --verify-forced-empty-contract
+```
+
+该模式使用最小探针：5 个顶层保留 `INPUT`、普通对照字段 `舷号`、同时含 5 个保留列和普通列的
+混合 `TABLE`，以及仅含保留列的 `TABLE`。保留字段不计入 `extractable_field_count`、
+`non_empty_count` 或 `missing_fields`，违规非空值单独记录；manifest 另行记录顶层、两类 TABLE、
+普通字段对照、callback 状态和 interaction audit 的合同核验结果。
+
+由于 `/llm/check-task` 成功时返回 HTTP 200 空响应体，runner 只用该请求触发必要的 callback
+恢复，任务终态改从与 DocSense 服务相同的隔离任务 SQLite 轮询。服务与 runner 必须指向同一个
+`DOCSENSE_LLM_TASK_DB`；HTTP 200 后找不到对应业务键的任务行时，runner 会立即报告数据库路径
+不一致，而不是继续空转。真实合同核验应使用全新 `DOCSENSE_RUNTIME_DIR`/输出目录，并配置且
+启动本地 mock callback 服务，避免历史任务、回调和审计记录混入本轮证据。
+
 测试文件批量武器装备字段抽取复现流程：
 
 1. 确认 AnythingLLM 可用并启动 DocSense，目录批跑建议使用 `APP_DEBUG=false python run.py`。Weaponry 新链固定采用 `file_aggregate_v1`，无需再设置模式变量。只有在 `.env` 配置了本地 mock 的 `CALLBACK_URL` 且需要核验真实回调时，才需要另行启动 `python scripts/mock_callback_server.py`。
 2. 先执行带 `--dry-run` 的目录 wrapper，核对扫描文件、输出目录和临时 `architectureId`。runner 会读取知识库映射并自动避开已存在的 ID；如使用自定义 `--architecture-base`，仍应检查 dry-run manifest 是否符合预期。
 3. 去掉 `--dry-run` 执行目录 wrapper。未提供 `--static-base` 时，runner 会自动为目标目录启动临时静态文件服务；提供该参数时才复用调用方已有的文件服务。
-4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、轮询 `/llm/check-task`、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并轮询终态。请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造。
+4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、调用 `/llm/check-task` 触发必要的回调恢复并从同一任务 SQLite 轮询终态、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并按相同方式轮询。默认请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造；只有显式传入 `--verify-forced-empty-contract` 时才改用最小合同探针。
 5. 术语规则辅助默认关闭。若联调时显式启用，需提前准备独立的只读术语 workspace，并配置 `WEAPONRY_TERMS_WORKSPACE_NAME` 与 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`；新链不会自动上传、移动或删除术语文档，也不会修改目标文档 workspace。
 6. runner 持续写出 `qwen3-4b-new.csv`、`qwen3-4b-new.md`、来源核验表、manifest 和逐文件快照；来源核验表用于确认装备事实来源不是 `term_rule_*.md`。
 

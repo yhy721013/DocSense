@@ -21,6 +21,8 @@ EVIDENCE_SCORE_SEMANTICS = "higher-is-more-relevant-in-unit-interval"
 EVIDENCE_SCORE_PROTOCOL = "explicit-unit-score-or-stable-rank-v2"
 EVIDENCE_RANKING_STRATEGY = "score-desc-or-rank-asc-stable-v2"
 EVIDENCE_DEDUP_STRATEGY = "normalized-exact-within-document-v1"
+EVIDENCE_REFERENCE_FILTER_LEGACY = "reference-signals-v1"
+EVIDENCE_REFERENCE_FILTER_STRATEGY = "reference-signals-structured-table-v2"
 EVIDENCE_SCORE_MODE_SCORE = "score"
 EVIDENCE_SCORE_MODE_RANK = "rank"
 _EVIDENCE_SCORE_MODES = frozenset(
@@ -39,6 +41,10 @@ _CJK_WHITESPACE_PATTERN = re.compile(
 )
 _URL_PATTERN = re.compile(r"https?://|www\.", flags=re.IGNORECASE)
 _YEAR_PATTERN = re.compile(r"\b(?:19|20)\d{2}\b")
+_MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(
+    r"^\s*\|(?:\s*:?-{3,}:?\s*\|){2,}\s*$",
+    flags=re.MULTILINE,
+)
 _REFERENCE_MARKERS = (
     "参考文献",
     "參考文獻",
@@ -291,6 +297,7 @@ class EvidenceSelectionPolicy:
     input_candidate_top_n: int = 8
     table_candidate_top_n: int = 16
     dedup_strategy: str = EVIDENCE_DEDUP_STRATEGY
+    reference_filter_strategy: str = EVIDENCE_REFERENCE_FILTER_STRATEGY
     reject_reference_like: bool = True
 
     def __post_init__(self) -> None:
@@ -368,6 +375,13 @@ class EvidenceSelectionPolicy:
         if self.dedup_strategy != EVIDENCE_DEDUP_STRATEGY:
             raise WeaponryRetrievalValidationError(
                 "当前 profile 的 dedup_strategy 不受支持"
+            )
+        if self.reference_filter_strategy not in {
+            EVIDENCE_REFERENCE_FILTER_LEGACY,
+            EVIDENCE_REFERENCE_FILTER_STRATEGY,
+        }:
+            raise WeaponryRetrievalValidationError(
+                "当前 profile 的 reference_filter_strategy 不受支持"
             )
         if not isinstance(self.reject_reference_like, bool):
             raise WeaponryRetrievalValidationError(
@@ -607,11 +621,22 @@ def build_retrieval_query(field: RetrievalField) -> RetrievalQuery:
     )
 
 
-def assess_chunk_quality(raw_text: str) -> ChunkQualityReport:
+def assess_chunk_quality(
+    raw_text: str,
+    *,
+    reference_filter_strategy: str = EVIDENCE_REFERENCE_FILTER_STRATEGY,
+) -> ChunkQualityReport:
     """识别供应商 metadata、空内容和参考文献密集块，不输出正文。"""
 
     if not isinstance(raw_text, str):
         raise WeaponryRetrievalValidationError("raw_text 必须是 str")
+    if reference_filter_strategy not in {
+        EVIDENCE_REFERENCE_FILTER_LEGACY,
+        EVIDENCE_REFERENCE_FILTER_STRATEGY,
+    }:
+        raise WeaponryRetrievalValidationError(
+            "reference_filter_strategy 不受支持"
+        )
     metadata_match = _PROVIDER_METADATA_PATTERN.match(raw_text)
     metadata_chars = len(metadata_match.group(0)) if metadata_match else 0
     content = normalize_evidence_text(raw_text)
@@ -631,13 +656,31 @@ def assess_chunk_quality(raw_text: str) -> ChunkQualityReport:
         marker in folded
         for marker in ("参考文献", "參考文獻", "參考資料", "bibliography", "references")
     )
+    structured_markdown_table = bool(
+        _MARKDOWN_TABLE_SEPARATOR_PATTERN.search(content)
+    )
+    # 舰艇清单、装备批次等结构化业务表天然包含大量英文名称和年份，不能仅凭这两个
+    # 统计特征当作参考文献丢弃。显式参考文献标题、密集 URL，以及年份密集并伴随
+    # URL、引用标记或非结构化高英文占比的内容仍保持原门禁。
+    year_dense_reference_signals = (
+        year_count >= 5
+        and (
+            url_count > 0
+            or marker_count > 0
+            or (
+                latin_ratio >= 0.35
+                and (
+                    reference_filter_strategy
+                    == EVIDENCE_REFERENCE_FILTER_LEGACY
+                    or not structured_markdown_table
+                )
+            )
+        )
+    )
     reference_like = (
         explicit_reference_block
         or url_count >= 4
-        or (
-            year_count >= 5
-            and (url_count > 0 or marker_count > 0 or latin_ratio >= 0.35)
-        )
+        or year_dense_reference_signals
     )
     reasons: list[str] = []
     if content_chars < 20:
@@ -813,7 +856,10 @@ def select_evidence(
                 EvidenceRejection(candidate.candidate_id, "score-profile-mismatch")
             )
             continue
-        quality = assess_chunk_quality(candidate.text)
+        quality = assess_chunk_quality(
+            candidate.text,
+            reference_filter_strategy=profile.reference_filter_strategy,
+        )
         if "content-empty-or-too-short" in quality.rejection_reasons:
             rejected.append(
                 EvidenceRejection(candidate.candidate_id, "content-empty-or-too-short")

@@ -28,9 +28,12 @@ from app.modules.weaponry.domain import (
     WeaponryInputSnapshot,
     WeaponryRetrievalValidationError,
     assemble_table_rows,
+    build_forced_empty_result,
+    build_table_empty_fallback_result,
     build_input_extraction_prompt,
     build_retrieval_query,
     build_table_extraction_prompt,
+    external_processing_specification,
     merge_table_rows,
     parse_table_json_rows,
     select_evidence,
@@ -226,6 +229,23 @@ class WeaponryFieldExecutor:
             field_sequence=field_sequence,
             is_current=is_current,
         )
+        processing_field = external_processing_specification(field)
+        if processing_field is None:
+            # 甲方保留字段必须在任何 Guidance、检索、审计、模型和翻译之前收敛为空；
+            # 但仍先完成 latest 复核，避免失去所有权的 execution 继续产出业务结果。
+            self._ensure_current(is_current)
+            logger.info(
+                "武器谱保留字段确定性置空，跳过全部字段级外部调用: "
+                "task_id=%s field_sequence=%d field_type=%s",
+                task_id.value,
+                field_sequence,
+                field.field_type,
+            )
+            return WeaponryFieldExecution(
+                result=build_forced_empty_result(field),
+                selected_evidence_count=0,
+                model_call_count=0,
+            )
         # 每次字段执行独享一个诊断列表；它既不会跨字段共享，也不会进入公开结果，
         # 只用于 Dispatcher 区分业务空结果和外部能力降级。
         diagnostic_error_codes: list[str] = []
@@ -233,7 +253,7 @@ class WeaponryFieldExecutor:
             task_id=task_id,
             business_ref=business_ref,
             snapshot=snapshot,
-            field=field,
+            field=processing_field,
             field_sequence=field_sequence,
             is_current=is_current,
             diagnostics=diagnostic_error_codes,
@@ -243,7 +263,7 @@ class WeaponryFieldExecutor:
             business_ref=business_ref,
             snapshot=snapshot,
             scope=scope,
-            field=field,
+            field=processing_field,
             field_sequence=field_sequence,
             is_current=is_current,
         )
@@ -259,8 +279,13 @@ class WeaponryFieldExecutor:
                 field_sequence,
                 field.field_type,
             )
+            result = (
+                build_table_empty_fallback_result(field)
+                if field.field_type == "TABLE" and processing_field != field
+                else WeaponryFieldResult(specification=field)
+            )
             return WeaponryFieldExecution(
-                result=WeaponryFieldResult(specification=field),
+                result=result,
                 selected_evidence_count=0,
                 model_call_count=0,
                 diagnostic_error_codes=tuple(diagnostic_error_codes),
@@ -286,7 +311,7 @@ class WeaponryFieldExecutor:
                     business_ref=business_ref,
                     snapshot=snapshot,
                     document=document,
-                    field=field,
+                    field=processing_field,
                     field_sequence=field_sequence,
                     evidence=evidence,
                     guidance=guidance,
@@ -350,7 +375,7 @@ class WeaponryFieldExecutor:
                 business_ref=business_ref,
                 snapshot=snapshot,
                 document=document,
-                field=field,
+                field=processing_field,
                 field_sequence=field_sequence,
                 evidence=evidence,
                 guidance=guidance,
@@ -365,7 +390,7 @@ class WeaponryFieldExecutor:
                 continue
             parsed_rows = parse_table_json_rows(
                 answer.text,
-                field,
+                processing_field,
                 max_rows=snapshot.execution_policy.max_table_rows,
             )
             if not parsed_rows:
@@ -382,7 +407,7 @@ class WeaponryFieldExecutor:
             translation_item_sequence = 0
             for parsed_row in parsed_rows:
                 translations: list[tuple[str, str]] = []
-                for column in field.columns:
+                for column in processing_field.columns:
                     cell_value = parsed_row.get(column.field_name)
                     if not cell_value:
                         continue
@@ -428,11 +453,19 @@ class WeaponryFieldExecutor:
             field,
             max_rows=snapshot.execution_policy.max_table_rows,
         )
-        return WeaponryFieldExecution(
-            result=WeaponryFieldResult(
+        assembled_rows = assemble_table_rows(merged, field)
+        result = (
+            WeaponryFieldResult(
                 specification=field,
-                table_rows=assemble_table_rows(merged, field),
-            ),
+                table_rows=assembled_rows,
+            )
+            if assembled_rows
+            else build_table_empty_fallback_result(field)
+            if processing_field != field
+            else WeaponryFieldResult(specification=field)
+        )
+        return WeaponryFieldExecution(
+            result=result,
             selected_evidence_count=len(selection.selected),
             model_call_count=model_calls,
             diagnostic_error_codes=tuple(
