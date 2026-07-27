@@ -9,7 +9,7 @@ import os
 from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.modules.weaponry.domain import (
     AUXILIARY_GUIDANCE_NONE,
-    AUXILIARY_GUIDANCE_TERMS_RULES_V1,
+    AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
     EVIDENCE_RANKING_STRATEGY,
     EVIDENCE_REFERENCE_FILTER_STRATEGY,
     EVIDENCE_SCORE_PROTOCOL,
@@ -368,7 +368,7 @@ def build_weaponry_runtime_policies(
     )
     if config.terms_rule_context_enabled:
         auxiliary = AuxiliaryGuidancePolicySnapshot(
-            policy_id=AUXILIARY_GUIDANCE_TERMS_RULES_V1,
+            policy_id=AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
             catalog_fingerprint=config.terms_catalog_fingerprint or "",
             top_n=config.terms_candidate_top_n,
             max_context_chars=config.terms_max_context_chars,

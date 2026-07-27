@@ -41,6 +41,7 @@ from app.modules.weaponry.adapters import (
 )
 from app.modules.weaponry.domain import (
     AUXILIARY_GUIDANCE_NONE,
+    AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
     AUXILIARY_GUIDANCE_TERMS_RULES_V1,
     EVIDENCE_REFERENCE_FILTER_LEGACY,
     EVIDENCE_REFERENCE_FILTER_STRATEGY,
@@ -370,16 +371,53 @@ class _FailingCreatedResourceRegistrar:
 class _FakeTermsProvider:
     def __init__(self) -> None:
         self.calls = 0
+        self.queries: list[tuple[str, int]] = []
         self.error: Exception | None = None
 
     def search(self, query: str, *, top_n: int):
         self.calls += 1
+        self.queries.append((query, top_n))
         if self.error is not None:
             raise self.error
         return (
             TermsRuleChunk("terms-a", "术语 A 的含义和单位规则。", 1),
             TermsRuleChunk("terms-b", "术语 B 的别名和字段口径。", 2),
         )[:top_n]
+
+
+def _term_rule_chunk(card_id: str, *, rank: int) -> TermsRuleChunk:
+    matches = tuple((ROOT / "terms").glob(f"{card_id}_*.md"))
+    if len(matches) != 1:
+        raise AssertionError(f"{card_id} 规则卡数量异常: {len(matches)}")
+    path = matches[0]
+    return TermsRuleChunk(
+        source_ref=f"custom-documents/{path.name}.json",
+        text=path.read_text(encoding="utf-8"),
+        rank=rank,
+    )
+
+
+class _PerFieldTermsProvider:
+    _CARD_BY_FIELD = {
+        "标准排水量": "term_rule_0016",
+        "满载排水量": "term_rule_0017",
+        "长": "term_rule_0018",
+        "型宽": "term_rule_0021",
+        "吃水": "term_rule_0022",
+        "最大速度": "term_rule_0052",
+    }
+
+    def __init__(self) -> None:
+        self.queries: list[tuple[str, int]] = []
+
+    def search(self, query: str, *, top_n: int):
+        self.queries.append((query, top_n))
+        field_name = query.splitlines()[0].removeprefix("字段：")
+        correct_card = self._CARD_BY_FIELD.get(field_name)
+        chunks = [_term_rule_chunk("term_rule_0011", rank=1)]
+        if correct_card is not None:
+            chunks.append(_term_rule_chunk(correct_card, rank=2))
+        return tuple(chunks[:top_n])
 
 
 class _FakeTranslator:
@@ -1690,9 +1728,180 @@ class WeaponryOptionalAdaptersTests(unittest.TestCase):
         result = terms.load(terms_request)
         self.assertEqual(AuxiliaryGuidanceOutcome.PROVIDED, result.outcome)
         self.assertLessEqual(sum(len(item.text) for item in result.guidance), 20)
+        self.assertEqual(1, provider.calls)
+        self.assertIn("字段：雷达型号", provider.queries[0][0])
         provider.error = RuntimeError("provider down")
         degraded = terms.load(terms_request)
         self.assertEqual(AuxiliaryGuidanceOutcome.DEGRADED, degraded.outcome)
+
+    def test_column_compact_input_selects_exact_card_and_preserves_contract(self) -> None:
+        task_id = TaskId("auxiliary-column-input")
+        field = WeaponryFieldSpecification.from_mapping(
+            {
+                "templateClassifyId": 1,
+                "fieldName": "最大速度",
+                "fieldType": "INPUT",
+                "fieldDescription": "提取舰艇最大航速",
+            }
+        )
+        provider = _PerFieldTermsProvider()
+        request = AuxiliaryGuidanceRequest(
+            call=_call(task_id, WeaponryOperation.AUXILIARY_GUIDANCE),
+            field=field,
+            policy=AuxiliaryGuidancePolicySnapshot(
+                AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
+                "terms-catalog:test",
+                5,
+                600,
+            ),
+        )
+
+        result = TermsRuleGuidanceAdapter(
+            provider,
+            catalog_fingerprint="terms-catalog:test",
+        ).load(request)
+
+        self.assertEqual(AuxiliaryGuidanceOutcome.PROVIDED, result.outcome)
+        self.assertEqual(1, len(provider.queries))
+        self.assertEqual(1, len(result.guidance))
+        self.assertIn("term_rule_0052", result.guidance[0].guidance_id)
+        self.assertIn("单位：节", result.guidance[0].text)
+        self.assertIn("格式：[数值] 节", result.guidance[0].text)
+        self.assertIn("数字与单位间仅一个半角空格", result.guidance[0].text)
+        self.assertIn("1,234→1234", result.guidance[0].text)
+        self.assertIn("并列值逐项带单位并去重", result.guidance[0].text)
+        self.assertNotIn("term_rule_0011", result.guidance[0].text)
+        self.assertLessEqual(len(result.guidance[0].text), 600)
+
+    def test_column_compact_table_queries_each_column_and_keeps_all_unit_cores(
+        self,
+    ) -> None:
+        task_id = TaskId("auxiliary-column-table")
+        columns = (
+            ("型号/适用范围", "标识该行适用的舰级或型号"),
+            ("长", "提取舰艇全长"),
+            ("型宽", "提取舰艇型宽"),
+            ("吃水", "提取设计或满载吃水"),
+            ("最大速度", "提取舰艇最大航速"),
+        )
+        field = WeaponryFieldSpecification.from_mapping(
+            {
+                "templateClassifyId": 1,
+                "fieldName": "尺度与航速指标",
+                "fieldType": "TABLE",
+                "fieldDescription": "按型号逐行提取尺度和航速",
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldName": name,
+                            "fieldType": "INPUT",
+                            "fieldDescription": description,
+                        }
+                        for name, description in columns
+                    ]
+                ],
+            }
+        )
+        provider = _PerFieldTermsProvider()
+        request = AuxiliaryGuidanceRequest(
+            call=_call(task_id, WeaponryOperation.AUXILIARY_GUIDANCE),
+            field=field,
+            policy=AuxiliaryGuidancePolicySnapshot(
+                AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
+                "terms-catalog:test",
+                5,
+                1200,
+            ),
+        )
+
+        result = TermsRuleGuidanceAdapter(
+            provider,
+            catalog_fingerprint="terms-catalog:test",
+        ).load(request)
+
+        self.assertEqual(AuxiliaryGuidanceOutcome.PROVIDED, result.outcome)
+        self.assertEqual(
+            [name for name, _ in columns],
+            [
+                query.splitlines()[0].removeprefix("字段：")
+                for query, _ in provider.queries
+            ],
+        )
+        self.assertEqual(5, len(provider.queries))
+        self.assertEqual(4, len(result.guidance))
+        self.assertEqual(
+            [
+                "term_rule_0018",
+                "term_rule_0021",
+                "term_rule_0022",
+                "term_rule_0052",
+            ],
+            [
+                next(
+                    card_id
+                    for card_id in (
+                        "term_rule_0018",
+                        "term_rule_0021",
+                        "term_rule_0022",
+                        "term_rule_0052",
+                    )
+                    if card_id in item.guidance_id
+                )
+                for item in result.guidance
+            ],
+        )
+        self.assertEqual(
+            ["单位：米", "单位：米", "单位：米", "单位：节"],
+            [
+                next(line for line in item.text.splitlines() if line.startswith("单位："))
+                for item in result.guidance
+            ],
+        )
+        self.assertTrue(
+            all("规则不是事实来源" in item.text for item in result.guidance)
+        )
+        self.assertLessEqual(
+            sum(len(item.text) for item in result.guidance),
+            1200,
+        )
+
+    def test_column_compact_degrades_instead_of_dropping_late_column_cores(
+        self,
+    ) -> None:
+        task_id = TaskId("auxiliary-column-budget")
+        field = WeaponryFieldSpecification.from_mapping(
+            {
+                "templateClassifyId": 1,
+                "fieldName": "尺度指标",
+                "fieldType": "TABLE",
+                "tableFieldList": [
+                    [
+                        {"fieldName": name, "fieldType": "INPUT"}
+                        for name in ("长", "型宽", "吃水", "最大速度")
+                    ]
+                ],
+            }
+        )
+        provider = _PerFieldTermsProvider()
+        request = AuxiliaryGuidanceRequest(
+            call=_call(task_id, WeaponryOperation.AUXILIARY_GUIDANCE),
+            field=field,
+            policy=AuxiliaryGuidancePolicySnapshot(
+                AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
+                "terms-catalog:test",
+                5,
+                100,
+            ),
+        )
+
+        result = TermsRuleGuidanceAdapter(
+            provider,
+            catalog_fingerprint="terms-catalog:test",
+        ).load(request)
+
+        self.assertEqual(AuxiliaryGuidanceOutcome.DEGRADED, result.outcome)
+        self.assertEqual("terms_rule_context_budget_insufficient", result.error_code)
+        self.assertEqual((), result.guidance)
 
     def test_translation_success_and_failure_keep_compatibility(self) -> None:
         request = WeaponryTranslationRequest(

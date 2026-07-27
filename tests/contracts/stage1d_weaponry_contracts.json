@@ -530,12 +530,15 @@
       "promptGuidanceCount": 0
     },
     {
-      "policy": "terms-rules-v1",
+      "policy": "terms-rules-column-compact-v2",
       "directoryScanCalls": "startup-coordinator-only",
       "workspaceCalls": "startup-coordinator-only",
       "uploadCalls": "startup-coordinator-only-when-needed",
       "embeddingCalls": "startup-coordinator-only-when-needed",
-      "guidanceSearchCallsPerField": 1,
+      "guidanceSearchCallsPerInputField": 1,
+      "guidanceSearchCallsPerTableColumn": 1,
+      "guidanceSelection": "exact-standard-name-alias-or-description",
+      "contextBudget": "all-column-cores-first-then-fair-optional-allocation",
       "targetSearchCallsPerField": 1,
       "promptGuidanceCount": "zero-or-more-bounded-items"
     }

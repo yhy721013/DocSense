@@ -526,6 +526,13 @@ class WeaponryFieldExecutor:
             {
                 "field_name": field.field_name,
                 "field_description": field.field_description,
+                "columns": [
+                    {
+                        "field_name": column.field_name,
+                        "field_description": column.field_description,
+                    }
+                    for column in field.columns
+                ],
                 "policy_id": snapshot.auxiliary_guidance_policy.policy_id,
                 "catalog_fingerprint": snapshot.auxiliary_guidance_policy.catalog_fingerprint,
                 "top_n": snapshot.auxiliary_guidance_policy.top_n,

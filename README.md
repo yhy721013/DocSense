@@ -233,7 +233,8 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
    - 字段抽取使用“专用语义 Query → Candidate → 稳定 score-or-rank Selection → Provided-Evidence Extraction”链路。普通 `INPUT` 字段候选批次默认 `topN=8`，`TABLE` 字段默认 `topN=16`；这是供应商单次候选批次，不是 `rows` 内容截断配额。合法来源、正文和分数/排名协议通过后，Evidence 全文按稳定顺序进入抽取和回调 `rows`。引用型正文筛选版本也会冻结进 production profile；当前版本不会仅因结构化 Markdown 业务表包含较多英文名称和年份就将其丢弃，但显式参考文献标题、至少 4 个 URL，或年份密集且伴随 URL、引用标记或非结构化高英文占比的内容仍会触发过滤。
    - `TABLE` 字段不再按单元格逐个查询；请求中的 `tableFieldList` 作为列模板，后端会进行整表检索和 JSON 行抽取。只有成功解析出有效行时，回调才扩展为多行二维 `tableFieldList`；否则保留原始列模板。
    - `fieldName` 去除首尾空格后精确等于 `装备编号`、`一级分类`、`二级分类`、`三级分类` 或 `四级分类` 时，服务端强制执行保留字段空值合同。该合同覆盖顶层 `INPUT` 和 `TABLE.tableFieldList` 嵌套列：命中字段跳过术语辅助、目标证据检索、模型抽取和翻译，回调固定返回 `analyseData=""`，并保留一个标准空来源占位对象（`content/source/time/fileName/translate` 均为空字符串，`rows=[]`）。混合 TABLE 只抽取普通列并按原始列顺序组装，保留列仍强制为空；仅含保留列的 TABLE 不进入外部抽取链。近似名称（如 `装备编号说明`）及其他普通字段不受影响。
-   - 术语规则辅助由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制，默认关闭。关闭路径不读取术语目录/workspace 配置，也不产生术语文件、网络、workspace 或 embedding I/O；开启路径只读预先配置的独立术语 workspace，术语内容仅作为字段口径、别名和单位参考，术语规则卡正文不进入 `analyseDataSource`，也不得作为装备事实来源。仅当术语辅助已启用且字段命中“标准单位”非空的规则卡时，规则卡要求模型把字段值写成“数值表达 + 单个半角空格 + 规则标准单位”，例如 `70926 吨`，禁止只返回 `70926`；该格式同时用于顶层 `INPUT` 的 `analyseData`、对应各来源的 `analyseDataSource.content`，以及 `TABLE.tableFieldList` 的命中单元格。请求与回调的 JSON 字段、层级和类型均不改变；这是条件化的术语规则输出要求，不是关闭术语辅助时的全局格式保证，也不新增服务端单位拼接或换算后处理。
+   - 术语规则辅助由 `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED` 控制，默认关闭。关闭路径不读取术语目录/workspace 配置，也不产生术语文件、网络、workspace 或 embedding I/O；开启路径只读预先配置的独立术语 workspace，术语内容仅作为字段口径、别名和单位参考，术语规则卡正文不进入 `analyseDataSource`，也不得作为装备事实来源。新 execution 冻结 `terms-rules-column-compact-v2`：每个 `INPUT` 字段独立检索一次，每个普通 `TABLE` 列分别独立检索一次；只有标准中英文字段名、别名或字段说明语义能够明确对应的规则卡才会命中。命中卡先压缩为包含目标列、卡片 ID、标准字段、标准单位、输出格式和防止“只改单位名”的核心合同，所有命中列的核心合同均保留后，剩余总预算才按列公平分配定义、别名、特殊换算规则和样例，避免靠前规则卡耗尽预算而静默丢失后续列。旧 execution 中已冻结的 `terms-rules-v1` 继续按旧行为执行。
+   - 仅当术语辅助已启用且字段命中“标准单位”非空的规则卡时，规则卡要求模型把字段值写成“数值表达 + 单个半角空格 + 规则标准单位”，例如 `70926 吨`，禁止只返回 `70926`；该格式同时用于顶层 `INPUT` 的 `analyseData`、对应各来源的 `analyseDataSource.content`，以及 `TABLE.tableFieldList` 的命中单元格。请求与回调的 JSON 字段、层级和类型均不改变；这是条件化的术语规则输出要求，不是关闭术语辅助时的全局格式保证，也不新增服务端单位拼接或换算后处理。
    - 武器谱只保留按来源文件聚合 Evidence 后抽取的 `file_aggregate_v1` 策略。每个来源 attempt 使用全新、无历史的临时 workspace/thread，并且只接收最终 `rows` 对应的 Evidence；禁止访问任务或类别文档 workspace 做二次 RAG，也不存在共享父 Thread 回退。
    - 回调 `analyseDataSource.source` 严格返回文件解析请求中 `originalFileName` 的原值，`fileName` 返回哈希文件名，`rows` 与实际进入该来源模型 Prompt 的完整 Evidence 逐项、同序一致。MHTML/OCR 等内部产物名不会写入回调；缺少来源谱系的数据必须重新解析，不做名称猜测。
    - 公开路由不创建线程；请求可靠受理后返回 HTTP 202 严格空响应体。相同 `architectureId` 存在活动任务，或 Callback Guard 处于发送/结果未知状态时返回既有 HTTP 409。
@@ -346,6 +347,8 @@ Weaponry 可选配置：
 - `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用可拔除的术语规则辅助上下文，默认 `false`；关闭时不读取其余术语专属配置，也不产生术语 Provider I/O。
 - `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
 - `WEAPONRY_TERMS_CATALOG_FINGERPRINT`：启用术语辅助时必填，用于把只读术语目录版本冻结到 execution 策略；当前新链不会自动上传、移动或删除术语文档。本地 `terms/` 内容变更不会自动同步到已配置的在线术语 workspace。
+- `DOCSENSE_WEAPONRY_TERMS_CANDIDATE_TOP_N`：每个 `INPUT` 字段或每个普通 `TABLE` 列独立检索的规则卡候选数，默认 `5`。
+- `DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS`：单个业务字段最终注入的全部压缩规则文本总预算，默认 `1200`。服务端先完整保留所有命中列的核心合同；若该预算连全部核心合同都无法容纳，则本次术语辅助整体降级为空并记录 `terms_rule_context_budget_insufficient`，不会只截掉靠后的列。
 - `DOCSENSE_WEAPONRY_*`：武器谱单实例 Dispatcher、维护扫描、清理超时/租约、供应商能力指纹和固定 score/rank、引用型正文筛选、Extraction 策略。默认值及必填项见 `.env.example`；这些变量均为内部运行配置，不属于公开接口。
 - 生产环境必须提供 provider、embedding、文档处理和 extraction model 四类真实能力指纹，配置
   `DOCSENSE_WEAPONRY_PRODUCTION_ATTESTATION_PATH`，并将
@@ -642,7 +645,7 @@ zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
 2. 先执行带 `--dry-run` 的目录 wrapper，核对扫描文件、输出目录和临时 `architectureId`。runner 会读取知识库映射并自动避开已存在的 ID；如使用自定义 `--architecture-base`，仍应检查 dry-run manifest 是否符合预期。
 3. 去掉 `--dry-run` 执行目录 wrapper。未提供 `--static-base` 时，runner 会自动为目标目录启动临时静态文件服务；提供该参数时才复用调用方已有的文件服务。
 4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、调用 `/llm/check-task` 触发必要的回调恢复并从同一任务 SQLite 轮询终态、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并按相同方式轮询。默认请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造；只有显式传入 `--verify-forced-empty-contract` 时才改用最小合同探针。
-5. 术语规则辅助默认关闭。若联调时显式启用，需提前准备独立的只读术语 workspace，并配置 `WEAPONRY_TERMS_WORKSPACE_NAME` 与 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`；新链不会自动上传、移动或删除术语文档，也不会修改目标文档 workspace。本地 `terms/` 规则更新后，部署方必须用更新后的规则卡重新索引该只读术语 workspace，更新 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`，重启 DocSense，并提交全新的 execution 验证单位格式。历史任务的回调补发只会重发已持久化的 `result_payload`，不会重新执行模型抽取，也不会自动补齐新单位格式。
+5. 术语规则辅助默认关闭。若联调时显式启用，需提前准备独立的只读术语 workspace，并配置 `WEAPONRY_TERMS_WORKSPACE_NAME` 与 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`；新链不会自动上传、移动或删除术语文档，也不会修改目标文档 workspace。本地 `terms/` 规则更新后，部署方必须用更新后的规则卡重新索引该只读术语 workspace，更新 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`，重启 DocSense，并提交全新的 execution 验证单位格式。验证日志中的 `policy_id` 应为 `terms-rules-column-compact-v2`，并应逐字段列出实际命中的 `card_ids`。历史任务的回调补发只会重发已持久化的 `result_payload`，不会重新执行模型抽取，也不会自动补齐新单位格式。
 6. runner 持续写出 `qwen3-4b-new.csv`、`qwen3-4b-new.md`、来源核验表、manifest 和逐文件快照；来源核验表用于确认装备事实来源不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。

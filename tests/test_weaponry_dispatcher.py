@@ -293,7 +293,10 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
         )
         policies = build_weaponry_runtime_policies(config)
         self.assertTrue(config.terms_rule_context_enabled)
-        self.assertEqual("terms-rules-v1", policies.auxiliary_guidance.policy_id)
+        self.assertEqual(
+            "terms-rules-column-compact-v2",
+            policies.auxiliary_guidance.policy_id,
+        )
         self.assertEqual(1200, policies.auxiliary_guidance.max_context_chars)
 
     def test_deprecated_mode_one_and_unknown_modes_fail_before_composition(self) -> None:
