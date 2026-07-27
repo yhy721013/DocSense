@@ -530,22 +530,25 @@
       "promptGuidanceCount": 0
     },
     {
-      "policy": "terms-rules-v1",
+      "policy": "terms-rules-column-compact-v2",
       "directoryScanCalls": "startup-coordinator-only",
       "workspaceCalls": "startup-coordinator-only",
       "uploadCalls": "startup-coordinator-only-when-needed",
       "embeddingCalls": "startup-coordinator-only-when-needed",
-      "guidanceSearchCallsPerField": 1,
+      "guidanceSearchCallsPerInputField": 1,
+      "guidanceSearchCallsPerTableColumn": 1,
+      "guidanceSelection": "exact-standard-name-alias-or-description",
+      "contextBudget": "all-column-cores-first-then-fair-optional-allocation",
       "targetSearchCallsPerField": 1,
       "promptGuidanceCount": "zero-or-more-bounded-items"
     }
   ],
   "misleadingGuidanceCase": {
     "field": "最大航速",
-    "guidance": "示例值：最大航速通常写为35节",
-    "targetEvidence": "该舰试航最大航速为31节。",
-    "expectedContent": "31节",
-    "forbiddenContent": "35节",
+    "guidance": "示例值：最大航速通常写为35 节",
+    "targetEvidence": "该舰试航最大航速为31 节。",
+    "expectedContent": "31 节",
+    "forbiddenContent": "35 节",
     "guidanceMayAppearInRows": false,
     "targetEvidenceMustAppearInRows": true
   },

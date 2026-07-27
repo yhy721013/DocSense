@@ -136,6 +136,7 @@ def _submission(
     table: bool = False,
     document_count: int = 2,
     architecture_id: int = 10502,
+    field_override: dict[str, object] | None = None,
 ) -> WeaponrySubmission:
     """构造包含真实公开投影、冻结文档范围和内部策略的提交命令。"""
 
@@ -175,6 +176,9 @@ def _submission(
             "analyseData": "",
             "analyseDataSource": [],
         }
+
+    if field_override is not None:
+        field = field_override
 
     file_names = ("a-hash.pdf", "b-hash.pdf")[:document_count]
     payload = {
@@ -218,6 +222,51 @@ def _submission(
         ),
         trace_id=f"trace-stage1d4-application-{architecture_id}",
     )
+
+
+def _forced_input_field(field_name: str) -> dict[str, object]:
+    return {
+        "templateClassifyId": 1772442376645750,
+        "fieldName": field_name,
+        "fieldType": "INPUT",
+        "fieldDescription": "该字段由甲方维护，模型不得生成",
+        "futureExtension": {"keep": "input"},
+        "analyseData": "",
+        "analyseDataSource": [],
+    }
+
+
+def _forced_table_field(*, mixed: bool) -> dict[str, object]:
+    column_names = [
+        "装备编号",
+        "一级分类",
+        "二级分类",
+        "三级分类",
+        "四级分类",
+    ]
+    if mixed:
+        column_names[1:1] = ["型号"]
+        column_names.append("用途")
+    return {
+        "templateClassifyId": 1772442376645751,
+        "fieldName": "装备明细",
+        "fieldType": "TABLE",
+        "fieldDescription": "按装备逐行提取普通业务字段",
+        "futureExtension": {"keep": "table"},
+        "tableFieldList": [
+            [
+                {
+                    "fieldName": field_name,
+                    "fieldType": "INPUT",
+                    "fieldDescription": f"{field_name}说明",
+                    "futureColumnKey": index,
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                }
+                for index, field_name in enumerate(column_names, start=1)
+            ]
+        ],
+    }
 
 
 def _candidate(
@@ -552,6 +601,409 @@ class SubmitWeaponryApplicationTests(unittest.TestCase):
 class RunWeaponryApplicationTests(unittest.TestCase):
     """验证字段执行、审计、latest、Callback 与资源收敛。"""
 
+    def test_all_forced_input_names_short_circuit_every_field_interaction(
+        self,
+    ) -> None:
+        empty_source = {
+            "content": "",
+            "source": "",
+            "time": "",
+            "fileName": "",
+            "rows": [],
+            "translate": "",
+        }
+        for field_name in (
+            "装备编号",
+            "一级分类",
+            "二级分类",
+            "三级分类",
+            "四级分类",
+        ):
+            with self.subTest(field_name=field_name):
+                harness = _WeaponryHarness(
+                    _submission(
+                        document_count=1,
+                        field_override=_forced_input_field(
+                            f" \t{field_name}\n"
+                        ),
+                    )
+                )
+
+                result = harness.run_service.execute(harness.task_id)
+                public_field = (
+                    harness.tasks.completion_calls[-1]
+                    .result.fields[0]
+                    .to_public_dict()
+                )
+
+                self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+                self.assertEqual(0, result.selected_evidence_count)
+                self.assertEqual(0, result.model_call_count)
+                self.assertEqual("", public_field["analyseData"])
+                self.assertEqual(
+                    [empty_source],
+                    public_field["analyseDataSource"],
+                )
+                self.assertTrue(harness.tasks.latest_calls)
+                self.assertEqual([], harness.guidance.calls)
+                self.assertEqual([], harness.retrieval.search_calls)
+                self.assertEqual([], harness.extraction.calls)
+                self.assertEqual([], harness.translation.calls)
+                self.assertEqual((), harness.audit.pending)
+                self.assertEqual((), harness.audit.completions)
+                self.assertNotIn(
+                    "audit.reserve",
+                    tuple(
+                        event.operation for event in harness.recorder.events
+                    ),
+                )
+
+    def test_forced_input_checks_latest_before_returning_empty_result(self) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override=_forced_input_field("装备编号"),
+            )
+        )
+        harness.tasks.latest_results.append(False)
+
+        result = harness.run_service.execute(harness.task_id)
+
+        self.assertEqual(RunWeaponryOutcome.STALE, result.outcome)
+        self.assertEqual(1, len(harness.tasks.latest_calls))
+        self.assertEqual([], harness.tasks.completion_calls)
+        self.assertEqual([], harness.guidance.calls)
+        self.assertEqual([], harness.retrieval.search_calls)
+        self.assertEqual([], harness.extraction.calls)
+        self.assertEqual([], harness.translation.calls)
+        self.assertEqual((), harness.audit.completions)
+
+    def test_similar_input_name_continues_normal_extraction(self) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override=_forced_input_field("装备编号说明"),
+            )
+        )
+        harness.configure_retrieval(
+            (_candidate("normal-near-match", "doc-a", _EVIDENCE_A1, rank=1),)
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("normal-near-match",),
+            text="这是正常字段说明",
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=1,
+            translated_text="normal field description",
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        field = harness.tasks.completion_calls[-1].result.fields[0]
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("这是正常字段说明", field.analyse_data)
+        self.assertEqual(1, len(harness.guidance.calls))
+        self.assertEqual(1, len(harness.retrieval.search_calls))
+        self.assertEqual(1, len(harness.extraction.calls))
+        self.assertEqual(1, len(harness.translation.calls))
+
+    def test_all_forced_table_columns_return_one_complete_empty_row_without_calls(
+        self,
+    ) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override=_forced_table_field(mixed=False),
+            )
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        public_field = (
+            harness.tasks.completion_calls[-1]
+            .result.fields[0]
+            .to_public_dict()
+        )
+        cells = public_field["tableFieldList"][0]
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(0, result.selected_evidence_count)
+        self.assertEqual(0, result.model_call_count)
+        self.assertEqual(
+            [
+                "装备编号",
+                "一级分类",
+                "二级分类",
+                "三级分类",
+                "四级分类",
+            ],
+            [cell["fieldName"] for cell in cells],
+        )
+        self.assertEqual(list(range(1, 6)), [
+            cell["futureColumnKey"] for cell in cells
+        ])
+        for cell in cells:
+            self.assertEqual("", cell["analyseData"])
+            self.assertEqual(
+                [
+                    {
+                        "content": "",
+                        "source": "",
+                        "time": "",
+                        "fileName": "",
+                        "rows": [],
+                        "translate": "",
+                    }
+                ],
+                cell["analyseDataSource"],
+            )
+        self.assertEqual([], harness.guidance.calls)
+        self.assertEqual([], harness.retrieval.search_calls)
+        self.assertEqual([], harness.extraction.calls)
+        self.assertEqual([], harness.translation.calls)
+        self.assertEqual((), harness.audit.completions)
+
+    def test_mixed_table_exposes_only_normal_columns_and_forces_pollution_empty(
+        self,
+    ) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override=_forced_table_field(mixed=True),
+            )
+        )
+        harness.configure_retrieval(
+            (_candidate("mixed-table-a", "doc-a", _EVIDENCE_A1, rank=1),)
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("mixed-table-a",),
+            text=json.dumps(
+                [
+                    {
+                        "装备编号": "MALICIOUS-001",
+                        "型号": "AN/SPY-1",
+                        "一级分类": "MALICIOUS-L1",
+                        "二级分类": "MALICIOUS-L2",
+                        "三级分类": "MALICIOUS-L3",
+                        "四级分类": "MALICIOUS-L4",
+                        "用途": "搜索与跟踪",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=1,
+            translated_text="AN/SPY-1",
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=2,
+            translated_text="search and tracking",
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        field = harness.tasks.completion_calls[-1].result.fields[0]
+        public_field = field.to_public_dict()
+        cells = public_field["tableFieldList"][0]
+        cells_by_name = {cell["fieldName"]: cell for cell in cells}
+        normal_names = ("型号", "用途")
+        forced_names = (
+            "装备编号",
+            "一级分类",
+            "二级分类",
+            "三级分类",
+            "四级分类",
+        )
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(1, result.model_call_count)
+        self.assertEqual(1, len(field.table_rows))
+        self.assertEqual(
+            [
+                "装备编号",
+                "型号",
+                "一级分类",
+                "二级分类",
+                "三级分类",
+                "四级分类",
+                "用途",
+            ],
+            [cell["fieldName"] for cell in cells],
+        )
+        self.assertEqual({"keep": "table"}, public_field["futureExtension"])
+        for field_name in forced_names:
+            with self.subTest(field_name=field_name):
+                self.assertEqual("", cells_by_name[field_name]["analyseData"])
+                self.assertEqual(
+                    "",
+                    cells_by_name[field_name]["analyseDataSource"][0][
+                        "content"
+                    ],
+                )
+                self.assertEqual(
+                    [],
+                    cells_by_name[field_name]["analyseDataSource"][0]["rows"],
+                )
+        self.assertEqual(
+            "AN/SPY-1",
+            cells_by_name["型号"]["analyseData"],
+        )
+        self.assertEqual(
+            "搜索与跟踪",
+            cells_by_name["用途"]["analyseData"],
+        )
+
+        guidance_field = harness.guidance.calls[0].field
+        retrieval_call = harness.retrieval.search_calls[0]
+        extraction_request = harness.extraction.calls[0]
+        self.assertEqual(
+            normal_names,
+            tuple(column.field_name for column in guidance_field.columns),
+        )
+        self.assertEqual(
+            normal_names,
+            tuple(
+                column.field_name
+                for column in extraction_request.field.columns
+            ),
+        )
+        self.assertEqual(
+            [list(normal_names)],
+            [
+                [cell["fieldName"] for cell in row]
+                for row in extraction_request.field.template.to_dict()[
+                    "tableFieldList"
+                ]
+            ],
+        )
+        for forced_name in forced_names:
+            self.assertNotIn(forced_name, retrieval_call.query.text)
+            self.assertNotIn(forced_name, extraction_request.prompt.text)
+        for normal_name in normal_names:
+            self.assertIn(normal_name, retrieval_call.query.text)
+            self.assertIn(normal_name, extraction_request.prompt.text)
+        self.assertEqual(
+            ["AN/SPY-1", "搜索与跟踪"],
+            [request.text for request in harness.translation.calls],
+        )
+        self.assertEqual(5, len(harness.audit.completions))
+
+    def test_mixed_table_without_selected_evidence_returns_complete_empty_row(
+        self,
+    ) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override=_forced_table_field(mixed=True),
+            )
+        )
+        harness.configure_retrieval(
+            (
+                _candidate(
+                    "mixed-too-short",
+                    "doc-a",
+                    "内容过短",
+                    rank=1,
+                    score=0.99,
+                ),
+            )
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        cells = (
+            harness.tasks.completion_calls[-1]
+            .result.fields[0]
+            .to_public_dict()["tableFieldList"][0]
+        )
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(0, result.selected_evidence_count)
+        self.assertEqual(0, result.model_call_count)
+        self.assertEqual([], harness.extraction.calls)
+        self.assertEqual([], harness.translation.calls)
+        self._assert_mixed_empty_fallback_cells(cells)
+
+    def test_mixed_table_without_valid_model_rows_returns_complete_empty_row(
+        self,
+    ) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override=_forced_table_field(mixed=True),
+            )
+        )
+        harness.configure_retrieval(
+            (_candidate("mixed-no-row", "doc-a", _EVIDENCE_A1, rank=1),)
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("mixed-no-row",),
+            text=json.dumps(
+                [{"装备编号": "MALICIOUS-001"}],
+                ensure_ascii=False,
+            ),
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        cells = (
+            harness.tasks.completion_calls[-1]
+            .result.fields[0]
+            .to_public_dict()["tableFieldList"][0]
+        )
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(1, result.selected_evidence_count)
+        self.assertEqual(1, result.model_call_count)
+        self.assertEqual(1, len(harness.extraction.calls))
+        self.assertEqual([], harness.translation.calls)
+        self._assert_mixed_empty_fallback_cells(cells)
+
+    def _assert_mixed_empty_fallback_cells(
+        self,
+        cells: list[dict[str, object]],
+    ) -> None:
+        self.assertEqual(
+            [
+                "装备编号",
+                "型号",
+                "一级分类",
+                "二级分类",
+                "三级分类",
+                "四级分类",
+                "用途",
+            ],
+            [cell["fieldName"] for cell in cells],
+        )
+        forced_names = {
+            "装备编号",
+            "一级分类",
+            "二级分类",
+            "三级分类",
+            "四级分类",
+        }
+        for cell in cells:
+            self.assertEqual("", cell["analyseData"])
+            if cell["fieldName"] in forced_names:
+                self.assertEqual(
+                    [
+                        {
+                            "content": "",
+                            "source": "",
+                            "time": "",
+                            "fileName": "",
+                            "rows": [],
+                            "translate": "",
+                        }
+                    ],
+                    cell["analyseDataSource"],
+                )
+            else:
+                self.assertEqual([], cell["analyseDataSource"])
+
     def test_success_matches_golden_and_calls_documents_in_frozen_order(self) -> None:
         harness = _WeaponryHarness()
         harness.configure_golden_input()
@@ -592,6 +1044,133 @@ class RunWeaponryApplicationTests(unittest.TestCase):
         self.assertLess(
             operations.index("resource.prepare_cleanup"),
             operations.index("retrieval.close"),
+        )
+
+    def test_input_unit_value_preserves_internal_space_in_callback(self) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override={
+                    "templateClassifyId": 1772442376645760,
+                    "fieldName": "标准排水量",
+                    "fieldType": "INPUT",
+                    "fieldDescription": "按术语规则提取标准排水量并保留标准单位",
+                    "analyseData": "",
+                    "analyseDataSource": [],
+                },
+            )
+        )
+        harness.configure_retrieval(
+            (
+                _candidate(
+                    "standard-displacement",
+                    "doc-a",
+                    "甲舰装备齐全并搭载额定舰员、武备与给养时，"
+                    "标准排水量明确记载为70926吨。",
+                    rank=1,
+                ),
+            )
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("standard-displacement",),
+            text="70926 吨",
+        )
+        harness.configure_translation(document_sequence=1, item_sequence=1)
+
+        result = harness.run_service.execute(harness.task_id)
+        field = (
+            harness.tasks.completion_calls[-1]
+            .result.to_callback()
+            .to_public_dict()["data"]["weaponryTemplateFieldList"][0]
+        )
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("70926 吨", field["analyseData"])
+        self.assertEqual(
+            "70926 吨",
+            field["analyseDataSource"][0]["content"],
+        )
+
+    def test_table_unit_value_preserves_internal_space_in_callback(self) -> None:
+        harness = _WeaponryHarness(
+            _submission(
+                document_count=1,
+                field_override={
+                    "templateClassifyId": 1772442376645761,
+                    "fieldName": "舰艇排水量表",
+                    "fieldType": "TABLE",
+                    "fieldDescription": "按舰艇型号逐行提取标准排水量",
+                    "tableFieldList": [
+                        [
+                            {
+                                "fieldName": "型号",
+                                "fieldType": "INPUT",
+                                "fieldDescription": "舰艇型号",
+                                "analyseData": "",
+                                "analyseDataSource": [],
+                            },
+                            {
+                                "fieldName": "标准排水量",
+                                "fieldType": "INPUT",
+                                "fieldDescription": "包含标准单位的排水量",
+                                "analyseData": "",
+                                "analyseDataSource": [],
+                            },
+                        ]
+                    ],
+                },
+            )
+        )
+        harness.configure_retrieval(
+            (
+                _candidate(
+                    "table-standard-displacement",
+                    "doc-a",
+                    "甲型舰的技术参数表明确列出该型号标准排水量为70926吨，"
+                    "该数值对应装备齐全时的标准工况。",
+                    rank=1,
+                ),
+            )
+        )
+        harness.configure_answer(
+            document_sequence=1,
+            evidence_ids=("table-standard-displacement",),
+            text=json.dumps(
+                [
+                    {
+                        "__rowKey": "甲型舰",
+                        "型号": "甲型舰",
+                        "标准排水量": "70926 吨",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=1,
+        )
+        harness.configure_translation(
+            document_sequence=1,
+            item_sequence=2,
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+        row = (
+            harness.tasks.completion_calls[-1]
+            .result.to_callback()
+            .to_public_dict()["data"]["weaponryTemplateFieldList"][0][
+                "tableFieldList"
+            ][0]
+        )
+        cells = {cell["fieldName"]: cell for cell in row}
+
+        self.assertEqual(RunWeaponryOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual("70926 吨", cells["标准排水量"]["analyseData"])
+        self.assertEqual(
+            "70926 吨",
+            cells["标准排水量"]["analyseDataSource"][0]["content"],
         )
 
     def test_all_rejected_is_success_with_empty_source_and_zero_model_calls(self) -> None:

@@ -1207,6 +1207,9 @@ def create_application_services() -> ApplicationServices:
             score_semantics=weaponry_infrastructure_config.score_semantics,
             score_protocol=weaponry_infrastructure_config.score_protocol,
             ranking_strategy=weaponry_infrastructure_config.ranking_strategy,
+            reference_filter_strategy=(
+                weaponry_infrastructure_config.reference_filter_strategy
+            ),
             extraction_context_strategy=(
                 weaponry_infrastructure_config.extraction_context_strategy
             ),

@@ -330,6 +330,7 @@ def build_offline_application_services(
         score_semantics=weaponry_config.score_semantics,
         score_protocol=weaponry_config.score_protocol,
         ranking_strategy=weaponry_config.ranking_strategy,
+        reference_filter_strategy=weaponry_config.reference_filter_strategy,
         extraction_context_strategy=weaponry_config.extraction_context_strategy,
     )
     weaponry_task_commands = LegacyTaskCommandAdapter(

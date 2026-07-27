@@ -215,6 +215,7 @@ def _weaponry_capabilities(
         score_semantics=config.score_semantics,
         score_protocol=config.score_protocol,
         ranking_strategy=config.ranking_strategy,
+        reference_filter_strategy=config.reference_filter_strategy,
         extraction_context_strategy=config.extraction_context_strategy,
     )
 

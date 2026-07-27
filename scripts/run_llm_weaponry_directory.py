@@ -23,6 +23,10 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.modules.weaponry.domain import (  # noqa: E402
+    FORCED_EMPTY_FIELD_NAMES,
+    is_forced_empty_field_name,
+)
 from app.services.core.config import load_anythingllm_config  # noqa: E402
 from app.services.utils.anythingllm_client import AnythingLLMClient  # noqa: E402
 
@@ -111,6 +115,28 @@ FIELD_NAMES = [
     "航保装置种类",
     "航保装置数量",
 ]
+EXTRACTABLE_FIELD_NAMES = tuple(
+    name for name in FIELD_NAMES if not is_forced_empty_field_name(name)
+)
+FORCED_EMPTY_CONTRACT_INPUT_FIELDS = tuple(
+    name for name in FIELD_NAMES if is_forced_empty_field_name(name)
+)
+FORCED_EMPTY_CONTRACT_CONTROL_FIELD = "舷号"
+FORCED_EMPTY_CONTRACT_MIXED_TABLE_FIELD = "保留字段与单舰信息"
+FORCED_EMPTY_CONTRACT_RESERVED_TABLE_FIELD = "保留字段空值合同"
+FORCED_EMPTY_CONTRACT_MIXED_COLUMNS = (
+    *FORCED_EMPTY_CONTRACT_INPUT_FIELDS,
+    "单舰名称",
+    "舷号",
+)
+STANDARD_EMPTY_DATA_SOURCE = {
+    "content": "",
+    "source": "",
+    "time": "",
+    "fileName": "",
+    "rows": [],
+    "translate": "",
+}
 
 FIELD_DESCRIPTIONS = {
     "装备编号": "提取装备编号、项目编号或资料中的唯一编号标识。",
@@ -245,6 +271,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--analysis-timeout", type=int, default=1800)
     parser.add_argument("--weaponry-timeout", type=int, default=5400)
     parser.add_argument("--poll-interval", type=float, default=5.0)
+    parser.add_argument(
+        "--verify-forced-empty-contract",
+        action="store_true",
+        help=(
+            "改用最小保留字段合同探针，并严格验证顶层/TABLE 空值、普通字段对照、"
+            "callback 与 interaction audit；默认关闭，原 75 个 INPUT 字段不变。"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="只生成计划和 manifest，不请求 DocSense。")
     return parser.parse_args()
 
@@ -321,15 +355,79 @@ def request_json(method: str, base_url: str, path: str, payload: dict[str, Any] 
     return body
 
 
-def get_task_payload(business_type: str, business_key: str) -> dict[str, Any] | None:
-    with sqlite3.connect(TASK_DB) as conn:
-        row = conn.execute(
-            "select result_payload from llm_tasks where business_type=? and business_key=?",
-            (business_type, str(business_key)),
-        ).fetchone()
-    if not row or not row[0]:
+def get_task_snapshot(
+    business_type: str,
+    business_key: str | int,
+) -> dict[str, Any] | None:
+    """从 runner 与服务约定的同一个 TASK_DB 读取任务真相。
+
+    ``/llm/check-task`` 仍会在轮询时调用，用于触发 callback recovery；其 HTTP 200
+    响应允许为空，不能再作为任务状态或结果来源。
+    """
+
+    if not TASK_DB.exists():
         return None
-    return json.loads(row[0])
+    try:
+        with sqlite3.connect(TASK_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT business_type, business_key, status, progress, message,
+                       result_payload, callback_status, callback_attempts,
+                       last_callback_error, execution_id, created_at, updated_at
+                FROM llm_tasks
+                WHERE business_type=? AND business_key=?
+                """,
+                (business_type, str(business_key)),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"无法读取 TASK_DB={TASK_DB}: {exc}") from exc
+    if row is None:
+        return None
+    result_payload: dict[str, Any] | None = None
+    raw_result = row["result_payload"]
+    if raw_result:
+        try:
+            decoded = json.loads(raw_result)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"TASK_DB={TASK_DB} 中 {business_type}/{business_key} 的 result_payload 不是合法 JSON"
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError(
+                f"TASK_DB={TASK_DB} 中 {business_type}/{business_key} 的 result_payload 必须为对象"
+            )
+        result_payload = decoded
+    return {
+        "business_type": str(row["business_type"]),
+        "business_key": str(row["business_key"]),
+        "status": str(row["status"]),
+        "progress": row["progress"],
+        "message": str(row["message"] or ""),
+        "result_payload": result_payload,
+        "callback_status": str(row["callback_status"] or ""),
+        "callback_attempts": int(row["callback_attempts"] or 0),
+        "last_callback_error": str(row["last_callback_error"] or ""),
+        "execution_id": str(row["execution_id"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def task_snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if key != "result_payload"
+    }
+
+
+def get_task_payload(business_type: str, business_key: str) -> dict[str, Any] | None:
+    snapshot = get_task_snapshot(business_type, business_key)
+    if snapshot is None:
+        return None
+    result_payload = snapshot.get("result_payload")
+    return result_payload if isinstance(result_payload, dict) else None
 
 
 def wait_task(
@@ -341,22 +439,50 @@ def wait_task(
     timeout_seconds: int,
     poll_interval: float,
     label: str,
-) -> dict[str, Any]:
+    wait_for_callback: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     start = time.time()
-    last_progress: float | None = None
+    last_observation: tuple[str, Any, str] | None = None
     while True:
         payload = {"businessType": business_type, "params": [{key_name: key_value}]}
-        body = request_json("POST", base_url, "/llm/check-task", payload, timeout=30)
-        data = body.get("data") or {}
-        status = str(data.get("status", ""))
-        progress = data.get("progress")
-        if progress != last_progress:
-            logger.info("%s status=%s progress=%s", label, status, progress)
-            last_progress = progress
+        check_task_response = request_json(
+            "POST",
+            base_url,
+            "/llm/check-task",
+            payload,
+            timeout=30,
+        )
+        snapshot = get_task_snapshot(business_type, key_value)
+        if snapshot is None:
+            raise RuntimeError(
+                f"{label}: /llm/check-task 已返回 HTTP 200，但 TASK_DB={TASK_DB} "
+                f"的 llm_tasks 中不存在 {business_type}/{key_value}；"
+                "DocSense 服务与 runner 很可能使用了不一致的 DOCSENSE_LLM_TASK_DB"
+            )
+        status = str(snapshot["status"])
+        progress = snapshot["progress"]
+        callback_status = str(snapshot["callback_status"])
+        observation = (status, progress, callback_status)
+        if observation != last_observation:
+            logger.info(
+                "%s status=%s progress=%s callback=%s",
+                label,
+                status,
+                progress,
+                callback_status,
+            )
+            last_observation = observation
         if status in {"2", "3"}:
-            return body
+            if (
+                not wait_for_callback
+                or callback_status not in {"pending", "sending"}
+            ):
+                return snapshot, check_task_response
         if time.time() - start > timeout_seconds:
-            raise TimeoutError(f"{label} timed out after {timeout_seconds}s: {body}")
+            raise TimeoutError(
+                f"{label} timed out after {timeout_seconds}s: "
+                f"{task_snapshot_summary(snapshot)}"
+            )
         time.sleep(poll_interval)
 
 
@@ -389,27 +515,126 @@ def build_analysis_payload(file_name: str, file_url: str, architecture_id: int) 
     }
 
 
-def build_weaponry_payload(architecture_id: int, target_file_name: str, template_classify_id: int) -> dict[str, Any]:
-    suffix = (
-        f"本次抽取的唯一目标 PDF 文件名是 {target_file_name}。"
-        "仅依据该目标 PDF 的明确装备事实抽取；terms/ 术语文件、term_rule_ 开头文件只用于理解字段定义和抽取口径，"
+def _weaponry_target_suffix(
+    target_file_name: str,
+    *,
+    generic_file: bool = False,
+) -> str:
+    target_name_label = "文件名" if generic_file else " PDF 文件名"
+    target_fact_label = "目标文件" if generic_file else "目标 PDF "
+    return (
+        f"本次抽取的唯一目标{target_name_label}是 {target_file_name}。"
+        f"仅依据该{target_fact_label}的明确装备事实抽取；terms/ 术语文件、term_rule_ 开头文件只用于理解字段定义和抽取口径，"
         "不是目标装备资料，不得把术语规则、字段定义或示例作为 analyseData。"
         f"如果检索片段的来源文件不是 {target_file_name}，只能把它当作术语参考，不能从中抽取取值。"
-        "如果当前上下文只来自术语文件或不含目标 PDF 的装备事实，请只回答\"未找到\"；"
-        "找不到目标 PDF 明确依据时也请只回答\"未找到\"，不要猜测。"
+        f"如果当前上下文只来自术语文件或不含{target_fact_label}的装备事实，请只回答\"未找到\"；"
+        f"找不到{target_fact_label}明确依据时也请只回答\"未找到\"，不要猜测。"
     )
-    fields = []
-    for name in FIELD_NAMES:
+
+
+def _input_field_template(
+    name: str,
+    *,
+    description: str,
+    template_classify_id: int,
+) -> dict[str, Any]:
+    return {
+        "templateClassifyId": template_classify_id,
+        "fieldName": name,
+        "fieldType": "INPUT",
+        "fieldDescription": description,
+        "analyseData": "",
+        "analyseDataSource": [],
+    }
+
+
+def _table_column_template(name: str, *, description: str) -> dict[str, Any]:
+    return {
+        "fieldName": name,
+        "fieldType": "INPUT",
+        "fieldDescription": description,
+        "analyseData": "",
+        "analyseDataSource": [],
+    }
+
+
+def build_weaponry_payload(
+    architecture_id: int,
+    target_file_name: str,
+    template_classify_id: int,
+    *,
+    verify_forced_empty_contract: bool = False,
+) -> dict[str, Any]:
+    suffix = _weaponry_target_suffix(
+        target_file_name,
+        generic_file=verify_forced_empty_contract,
+    )
+    if verify_forced_empty_contract:
+        fields = [
+            _input_field_template(
+                name,
+                description=f"{FIELD_DESCRIPTIONS[name]} {suffix}",
+                template_classify_id=template_classify_id,
+            )
+            for name in FORCED_EMPTY_CONTRACT_INPUT_FIELDS
+        ]
         fields.append(
-            {
-                "templateClassifyId": template_classify_id,
-                "fieldName": name,
-                "fieldType": "INPUT",
-                "fieldDescription": f"{FIELD_DESCRIPTIONS[name]} {suffix}",
-                "analyseData": "",
-                "analyseDataSource": [],
-            }
+            _input_field_template(
+                FORCED_EMPTY_CONTRACT_CONTROL_FIELD,
+                description=(
+                    f"{FIELD_DESCRIPTIONS[FORCED_EMPTY_CONTRACT_CONTROL_FIELD]} {suffix}"
+                ),
+                template_classify_id=template_classify_id,
+            )
         )
+        mixed_columns = [
+            _table_column_template(
+                name,
+                description=(
+                    f"{FIELD_DESCRIPTIONS.get(name, '提取单舰正式名称。')} {suffix}"
+                ),
+            )
+            for name in FORCED_EMPTY_CONTRACT_MIXED_COLUMNS
+        ]
+        reserved_columns = [
+            _table_column_template(
+                name,
+                description=f"{FIELD_DESCRIPTIONS[name]} {suffix}",
+            )
+            for name in FORCED_EMPTY_CONTRACT_INPUT_FIELDS
+        ]
+        fields.extend(
+            [
+                {
+                    "templateClassifyId": template_classify_id,
+                    "fieldName": FORCED_EMPTY_CONTRACT_MIXED_TABLE_FIELD,
+                    "fieldType": "TABLE",
+                    "fieldDescription": (
+                        "按单舰逐行抽取单舰名称和舷号；五个甲方保留列必须保持空值。 "
+                        f"{suffix}"
+                    ),
+                    "tableFieldList": [mixed_columns],
+                },
+                {
+                    "templateClassifyId": template_classify_id,
+                    "fieldName": FORCED_EMPTY_CONTRACT_RESERVED_TABLE_FIELD,
+                    "fieldType": "TABLE",
+                    "fieldDescription": (
+                        "仅用于验证五个甲方保留列的确定性空值合同，不得检索或调用模型。"
+                    ),
+                    "tableFieldList": [reserved_columns],
+                },
+            ]
+        )
+    else:
+        fields = [
+            _input_field_template(
+                name,
+                description=f"{FIELD_DESCRIPTIONS[name]} {suffix}",
+                template_classify_id=template_classify_id,
+            )
+            for name in FIELD_NAMES
+        ]
     return {
         "businessType": "weaponry",
         "params": {
@@ -469,6 +694,357 @@ def source_info(field: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def get_weaponry_interaction_audits(task_id: str) -> list[dict[str, Any]]:
+    if not task_id:
+        raise RuntimeError("weaponry task snapshot 缺少 execution_id，无法核对 interaction audit")
+    if not TASK_DB.exists():
+        raise RuntimeError(f"TASK_DB 不存在: {TASK_DB}")
+    try:
+        with sqlite3.connect(TASK_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT task_id, business_key, call_id, operation, field_sequence,
+                       document_sequence, item_sequence, attempt_no, state, outcome,
+                       created_at, updated_at
+                FROM weaponry_interaction_audits
+                WHERE task_id=?
+                ORDER BY field_sequence, operation, document_sequence,
+                         item_sequence, attempt_no
+                """,
+                (task_id,),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"无法从 TASK_DB={TASK_DB} 读取 weaponry_interaction_audits: {exc}"
+        ) from exc
+    return [dict(row) for row in rows]
+
+
+def _empty_contract_errors(field: object, *, subject: str) -> list[str]:
+    if not isinstance(field, dict):
+        return [f"{subject}: missing"]
+    errors: list[str] = []
+    if field.get("analyseData") != "":
+        errors.append(f"{subject}: analyseData_not_empty")
+    if field.get("analyseDataSource") != [STANDARD_EMPTY_DATA_SOURCE]:
+        errors.append(f"{subject}: analyseDataSource_not_standard_empty_placeholder")
+    return errors
+
+
+def _has_real_evidence_source(field: object) -> bool:
+    if not isinstance(field, dict):
+        return False
+    sources = field.get("analyseDataSource")
+    if not isinstance(sources, list):
+        return False
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_name = str(source.get("source") or source.get("fileName") or "").strip()
+        rows = source.get("rows")
+        if (
+            source_name
+            and isinstance(rows, list)
+            and any(str(row or "").strip() for row in rows)
+        ):
+            return True
+    return False
+
+
+def _validated_table_rows(
+    field: object,
+    *,
+    subject: str,
+    expected_columns: tuple[str, ...],
+    expected_row_count: int | None = None,
+) -> tuple[list[list[dict[str, Any]]], list[str]]:
+    if not isinstance(field, dict):
+        return [], [f"{subject}: missing"]
+    raw_rows = field.get("tableFieldList")
+    if not isinstance(raw_rows, list):
+        return [], [f"{subject}: rows_missing"]
+    errors: list[str] = []
+    if expected_row_count is not None and len(raw_rows) != expected_row_count:
+        errors.append(
+            f"{subject}: expected_{expected_row_count}_rows_got_{len(raw_rows)}"
+        )
+    elif not raw_rows:
+        errors.append(f"{subject}: rows_missing")
+    rows: list[list[dict[str, Any]]] = []
+    for row_index, raw_row in enumerate(raw_rows, start=1):
+        if not isinstance(raw_row, list):
+            errors.append(f"{subject}.row{row_index}: row_not_array")
+            rows.append([])
+            continue
+        names = tuple(
+            str(cell.get("fieldName") or "")
+            if isinstance(cell, dict)
+            else "<non-object>"
+            for cell in raw_row
+        )
+        if names != expected_columns:
+            errors.append(
+                f"{subject}.row{row_index}: expected_columns_"
+                f"{','.join(expected_columns)}_got_{','.join(names)}"
+            )
+        rows.append([cell for cell in raw_row if isinstance(cell, dict)])
+    return rows, errors
+
+
+def verify_forced_empty_contract(
+    result_payload: dict[str, Any] | None,
+    task_snapshot: dict[str, Any],
+    interaction_rows: list[dict[str, Any]] | None,
+    *,
+    analysis_task_snapshot: dict[str, Any] | None = None,
+    interaction_error: str = "",
+) -> dict[str, Any]:
+    fields = extract_fields(result_payload)
+    fields_by_name = {
+        str(field.get("fieldName") or ""): field
+        for field in fields
+        if isinstance(field, dict)
+    }
+    errors: list[str] = []
+
+    top_level_errors: list[str] = []
+    for name in FORCED_EMPTY_CONTRACT_INPUT_FIELDS:
+        top_level_errors.extend(
+            _empty_contract_errors(
+                fields_by_name.get(name),
+                subject=f"top_level.{name}",
+            )
+        )
+    errors.extend(top_level_errors)
+
+    control_field = fields_by_name.get(FORCED_EMPTY_CONTRACT_CONTROL_FIELD)
+    control_value = (
+        str(control_field.get("analyseData") or "").strip()
+        if isinstance(control_field, dict)
+        else ""
+    )
+    control_has_source = _has_real_evidence_source(control_field)
+    control_errors: list[str] = []
+    if not control_value:
+        control_errors.append("control.舷号: analyseData_empty")
+    if not control_has_source:
+        control_errors.append("control.舷号: real_evidence_source_missing")
+    errors.extend(control_errors)
+
+    mixed_field = fields_by_name.get(FORCED_EMPTY_CONTRACT_MIXED_TABLE_FIELD)
+    mixed_rows, mixed_errors = _validated_table_rows(
+        mixed_field,
+        subject="mixed_table",
+        expected_columns=FORCED_EMPTY_CONTRACT_MIXED_COLUMNS,
+    )
+    for row_index, row in enumerate(mixed_rows, start=1):
+        cells = {str(cell.get("fieldName") or ""): cell for cell in row}
+        for name in FORCED_EMPTY_CONTRACT_INPUT_FIELDS:
+            mixed_errors.extend(
+                _empty_contract_errors(
+                    cells.get(name),
+                    subject=f"mixed_table.row{row_index}.{name}",
+                )
+            )
+        for name in ("单舰名称", "舷号"):
+            cell = cells.get(name)
+            value = (
+                str(cell.get("analyseData") or "").strip()
+                if isinstance(cell, dict)
+                else ""
+            )
+            if not value:
+                mixed_errors.append(
+                    f"mixed_table.row{row_index}.{name}: analyseData_empty"
+                )
+            if not _has_real_evidence_source(cell):
+                mixed_errors.append(
+                    f"mixed_table.row{row_index}.{name}: real_evidence_source_missing"
+                )
+    errors.extend(mixed_errors)
+
+    reserved_table_field = fields_by_name.get(
+        FORCED_EMPTY_CONTRACT_RESERVED_TABLE_FIELD
+    )
+    reserved_rows, reserved_table_errors = _validated_table_rows(
+        reserved_table_field,
+        subject="reserved_table",
+        expected_columns=FORCED_EMPTY_CONTRACT_INPUT_FIELDS,
+        expected_row_count=1,
+    )
+    for row_index, row in enumerate(reserved_rows, start=1):
+        cells = {str(cell.get("fieldName") or ""): cell for cell in row}
+        for name in FORCED_EMPTY_CONTRACT_INPUT_FIELDS:
+            reserved_table_errors.extend(
+                _empty_contract_errors(
+                    cells.get(name),
+                    subject=f"reserved_table.row{row_index}.{name}",
+                )
+            )
+    errors.extend(reserved_table_errors)
+
+    analysis_status = (
+        str(analysis_task_snapshot.get("status") or "")
+        if isinstance(analysis_task_snapshot, dict)
+        else ""
+    )
+    analysis_callback_status = (
+        str(analysis_task_snapshot.get("callback_status") or "")
+        if isinstance(analysis_task_snapshot, dict)
+        else ""
+    )
+    weaponry_status = str(task_snapshot.get("status") or "")
+    weaponry_callback_status = str(task_snapshot.get("callback_status") or "")
+    callback_errors: list[str] = []
+    if analysis_status != "2":
+        callback_errors.append(
+            f"analysis: expected_status_2_got_{analysis_status or 'unavailable'}"
+        )
+    if analysis_callback_status != "success":
+        callback_errors.append(
+            "analysis_callback: "
+            f"expected_success_got_{analysis_callback_status or 'unavailable'}"
+        )
+    if weaponry_status != "2":
+        callback_errors.append(
+            f"weaponry: expected_status_2_got_{weaponry_status or 'empty'}"
+        )
+    if weaponry_callback_status != "success":
+        callback_errors.append(
+            "weaponry_callback: "
+            f"expected_success_got_{weaponry_callback_status or 'empty'}"
+        )
+    errors.extend(callback_errors)
+
+    operations_by_sequence: dict[str, list[str]] = {}
+    audit_errors: list[str] = []
+    if interaction_error:
+        audit_errors.append(f"interaction_audit: {interaction_error}")
+    elif interaction_rows is None:
+        audit_errors.append("interaction_audit: unavailable")
+    else:
+        for row in interaction_rows:
+            sequence = str(row.get("field_sequence") or "")
+            operation = str(row.get("operation") or "")
+            if sequence and operation:
+                operations_by_sequence.setdefault(sequence, []).append(operation)
+        operations_by_sequence = {
+            sequence: sorted(set(operations))
+            for sequence, operations in operations_by_sequence.items()
+        }
+        for sequence in (1, 2, 3, 4, 5, 8):
+            operations = operations_by_sequence.get(str(sequence), [])
+            if operations:
+                audit_errors.append(
+                    f"interaction_audit.field_sequence_{sequence}: "
+                    f"expected_zero_interactions_got_{','.join(operations)}"
+                )
+        required_operations = {"target_retrieval", "evidence_extraction"}
+        for sequence in (6, 7):
+            operations = set(operations_by_sequence.get(str(sequence), []))
+            missing = sorted(required_operations - operations)
+            if missing:
+                audit_errors.append(
+                    f"interaction_audit.field_sequence_{sequence}: "
+                    f"missing_{','.join(missing)}"
+                )
+    errors.extend(audit_errors)
+
+    return {
+        "passed": not errors,
+        "errors": errors,
+        "callback": {
+            "passed": not callback_errors,
+            "analysis": {
+                "status": analysis_status,
+                "callback_status": analysis_callback_status,
+                "attempts": int(
+                    analysis_task_snapshot.get("callback_attempts") or 0
+                )
+                if isinstance(analysis_task_snapshot, dict)
+                else 0,
+                "last_error": str(
+                    analysis_task_snapshot.get("last_callback_error") or ""
+                )
+                if isinstance(analysis_task_snapshot, dict)
+                else "",
+            },
+            "weaponry": {
+                "status": weaponry_status,
+                "callback_status": weaponry_callback_status,
+                "attempts": int(task_snapshot.get("callback_attempts") or 0),
+                "last_error": str(task_snapshot.get("last_callback_error") or ""),
+            },
+            "errors": callback_errors,
+        },
+        "top_level_forced_empty": {
+            "passed": not top_level_errors,
+            "field_names": list(FORCED_EMPTY_CONTRACT_INPUT_FIELDS),
+            "errors": top_level_errors,
+        },
+        "ordinary_control": {
+            "passed": not control_errors,
+            "field_name": FORCED_EMPTY_CONTRACT_CONTROL_FIELD,
+            "value": control_value,
+            "has_real_evidence_source": control_has_source,
+            "errors": control_errors,
+        },
+        "mixed_table": {
+            "passed": not mixed_errors,
+            "field_name": FORCED_EMPTY_CONTRACT_MIXED_TABLE_FIELD,
+            "row_count": len(mixed_rows),
+            "errors": mixed_errors,
+        },
+        "reserved_only_table": {
+            "passed": not reserved_table_errors,
+            "field_name": FORCED_EMPTY_CONTRACT_RESERVED_TABLE_FIELD,
+            "row_count": len(reserved_rows),
+            "errors": reserved_table_errors,
+        },
+        "interaction_audit": {
+            "passed": not audit_errors,
+            "task_id": str(task_snapshot.get("execution_id") or ""),
+            "row_count": len(interaction_rows or []),
+            "operations_by_field_sequence": operations_by_sequence,
+            "errors": audit_errors,
+        },
+    }
+
+
+def summarize_input_field_statistics(
+    fields_by_name: dict[str, dict[str, Any]],
+    field_names: tuple[str, ...],
+) -> dict[str, Any]:
+    extractable = tuple(
+        name for name in field_names if not is_forced_empty_field_name(name)
+    )
+    non_empty_count = 0
+    forced_empty_violations: list[str] = []
+    forced_empty_source_violations: list[str] = []
+    missing_fields: list[str] = []
+    for name in field_names:
+        field = fields_by_name.get(name, {})
+        value = str(field.get("analyseData") or "").strip()
+        if is_forced_empty_field_name(name):
+            if value:
+                forced_empty_violations.append(name)
+            if field.get("analyseDataSource") != [STANDARD_EMPTY_DATA_SOURCE]:
+                forced_empty_source_violations.append(name)
+        elif value:
+            non_empty_count += 1
+        else:
+            missing_fields.append(name)
+    return {
+        "extractable_field_names": extractable,
+        "extractable_field_count": len(extractable),
+        "non_empty_count": non_empty_count,
+        "missing_fields": missing_fields,
+        "forced_empty_violations": forced_empty_violations,
+        "forced_empty_source_violations": forced_empty_source_violations,
+    }
+
+
 def markdown_escape(value: Any) -> str:
     return str(value or "").replace("|", "\\|").replace("\n", "<br>")
 
@@ -486,7 +1062,12 @@ def write_outputs(
     audit_json_path = out_dir / f"{output_prefix}_source_audit.json"
     manifest_path = out_dir / f"{output_prefix}_manifest.json"
 
-    headers = ["文件名", *FIELD_NAMES]
+    input_field_names = manifest.get("input_field_names")
+    if not isinstance(input_field_names, list) or not all(
+        isinstance(name, str) and name for name in input_field_names
+    ):
+        input_field_names = list(FIELD_NAMES)
+    headers = ["文件名", *input_field_names]
     with csv_path.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
@@ -555,6 +1136,7 @@ def run_file(
     analysis_timeout: int,
     weaponry_timeout: int,
     poll_interval: float,
+    verify_forced_empty_contract_flag: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     file_name = file_path.name
     file_out_dir = out_dir / file_path.stem
@@ -573,7 +1155,7 @@ def run_file(
         encoding="utf-8",
     )
 
-    analysis_state = wait_task(
+    analysis_state, analysis_check_task_response = wait_task(
         base_url,
         "file",
         "fileName",
@@ -581,18 +1163,30 @@ def run_file(
         timeout_seconds=analysis_timeout,
         poll_interval=poll_interval,
         label=f"analysis {file_name}",
+        wait_for_callback=verify_forced_empty_contract_flag,
     )
     (file_out_dir / "analysis_check_task_response.json").write_text(
-        json.dumps(analysis_state, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            {
+                "http_response": analysis_check_task_response,
+                "task_db": str(TASK_DB),
+                "task": task_snapshot_summary(analysis_state),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
-    analysis_result = get_task_payload("file", file_name)
+    analysis_result = analysis_state.get("result_payload")
     (file_out_dir / "analysis_task_result.json").write_text(
         json.dumps(analysis_result, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    if str(analysis_state.get("data", {}).get("status")) != "2":
-        raise RuntimeError(f"analysis failed for {file_name}: {analysis_state}")
+    if str(analysis_state.get("status")) != "2":
+        raise RuntimeError(
+            f"analysis failed for {file_name}: {task_snapshot_summary(analysis_state)}"
+        )
 
     kb_records = kb_records_for(architecture_id)
     (file_out_dir / "knowledge_base_records.json").write_text(
@@ -604,7 +1198,12 @@ def run_file(
         raise RuntimeError(f"architectureId={architecture_id} isolation check failed: {kb_records}")
     logger.info("KB isolation OK workspace=%s", related_docs[0].get("workspace_slug"))
 
-    weaponry_payload = build_weaponry_payload(architecture_id, file_name, template_classify_id)
+    weaponry_payload = build_weaponry_payload(
+        architecture_id,
+        file_name,
+        template_classify_id,
+        verify_forced_empty_contract=verify_forced_empty_contract_flag,
+    )
     (file_out_dir / "weaponry_request.json").write_text(
         json.dumps(weaponry_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -616,7 +1215,7 @@ def run_file(
         encoding="utf-8",
     )
 
-    weaponry_state = wait_task(
+    weaponry_state, weaponry_check_task_response = wait_task(
         base_url,
         "weaponry",
         "architectureId",
@@ -624,30 +1223,48 @@ def run_file(
         timeout_seconds=weaponry_timeout,
         poll_interval=poll_interval,
         label=f"weaponry {file_name}",
+        wait_for_callback=verify_forced_empty_contract_flag,
     )
     (file_out_dir / "weaponry_check_task_response.json").write_text(
-        json.dumps(weaponry_state, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            {
+                "http_response": weaponry_check_task_response,
+                "task_db": str(TASK_DB),
+                "task": task_snapshot_summary(weaponry_state),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
-    weaponry_result = get_task_payload("weaponry", str(architecture_id))
+    weaponry_result = weaponry_state.get("result_payload")
     (file_out_dir / "weaponry_task_result.json").write_text(
         json.dumps(weaponry_result, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    if str(weaponry_state.get("data", {}).get("status")) != "2":
-        raise RuntimeError(f"weaponry failed for {file_name}: {weaponry_state}")
+    if str(weaponry_state.get("status")) != "2":
+        raise RuntimeError(
+            f"weaponry failed for {file_name}: {task_snapshot_summary(weaponry_state)}"
+        )
 
     fields = extract_fields(weaponry_result)
     fields_by_name = {field.get("fieldName"): field for field in fields if isinstance(field, dict)}
+    summary_field_names = (
+        (*FORCED_EMPTY_CONTRACT_INPUT_FIELDS, FORCED_EMPTY_CONTRACT_CONTROL_FIELD)
+        if verify_forced_empty_contract_flag
+        else tuple(FIELD_NAMES)
+    )
+    field_statistics = summarize_input_field_statistics(
+        fields_by_name,
+        summary_field_names,
+    )
     row: dict[str, Any] = {"文件名": file_name}
     audit_rows: list[dict[str, Any]] = []
-    non_empty = 0
     term_source_fields: list[str] = []
-    for field_name in FIELD_NAMES:
+    for field_name in summary_field_names:
         field = fields_by_name.get(field_name, {})
         value = str(field.get("analyseData") or "").strip()
-        if value:
-            non_empty += 1
         row[field_name] = normalize_missing(value)
         info = source_info(field)
         if value and "term_rule_" in info["source_list"]:
@@ -665,19 +1282,87 @@ def run_file(
             }
         )
 
+    contract_verification: dict[str, Any] | None = None
+    if verify_forced_empty_contract_flag:
+        interaction_rows: list[dict[str, Any]] | None = None
+        interaction_error = ""
+        try:
+            interaction_rows = get_weaponry_interaction_audits(
+                str(weaponry_state.get("execution_id") or "")
+            )
+        except RuntimeError as exc:
+            interaction_error = str(exc)
+        (file_out_dir / "weaponry_interaction_audit.json").write_text(
+            json.dumps(
+                {
+                    "task_db": str(TASK_DB),
+                    "task_id": str(weaponry_state.get("execution_id") or ""),
+                    "error": interaction_error,
+                    "rows": interaction_rows or [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        contract_verification = verify_forced_empty_contract(
+            weaponry_result if isinstance(weaponry_result, dict) else None,
+            weaponry_state,
+            interaction_rows,
+            analysis_task_snapshot=analysis_state,
+            interaction_error=interaction_error,
+        )
+        (file_out_dir / "forced_empty_contract_verification.json").write_text(
+            json.dumps(contract_verification, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     file_manifest = {
         "fileName": file_name,
         "sourcePath": str(file_path),
         "fileUrl": file_url,
         "architectureId": architecture_id,
-        "analysis_state": analysis_state.get("data"),
-        "weaponry_state": weaponry_state.get("data"),
-        "field_count": len(FIELD_NAMES),
-        "non_empty_count": non_empty,
-        "missing_fields": [name for name in FIELD_NAMES if row[name] == "未找到明确依据"],
+        "task_db": str(TASK_DB),
+        "analysis_state": task_snapshot_summary(analysis_state),
+        "weaponry_state": task_snapshot_summary(weaponry_state),
+        "callbacks": {
+            "analysis": {
+                "status": str(analysis_state.get("status") or ""),
+                "callback_status": str(
+                    analysis_state.get("callback_status") or ""
+                ),
+                "attempts": int(analysis_state.get("callback_attempts") or 0),
+                "last_error": str(
+                    analysis_state.get("last_callback_error") or ""
+                ),
+            },
+            "weaponry": {
+                "status": str(weaponry_state.get("status") or ""),
+                "callback_status": str(
+                    weaponry_state.get("callback_status") or ""
+                ),
+                "attempts": int(weaponry_state.get("callback_attempts") or 0),
+                "last_error": str(
+                    weaponry_state.get("last_callback_error") or ""
+                ),
+            },
+        },
+        "field_count": len(fields),
+        "input_field_count": len(summary_field_names),
+        "extractable_field_count": field_statistics["extractable_field_count"],
+        "non_empty_count": field_statistics["non_empty_count"],
+        "missing_fields": field_statistics["missing_fields"],
+        "forced_empty_fields": list(FORCED_EMPTY_CONTRACT_INPUT_FIELDS),
+        "forced_empty_violations": field_statistics["forced_empty_violations"],
+        "forced_empty_source_violations": field_statistics[
+            "forced_empty_source_violations"
+        ],
         "term_source_fields": term_source_fields,
         "workspace_records": kb_records,
     }
+    if contract_verification is not None:
+        file_manifest["forced_empty_contract_verification"] = contract_verification
     return row, audit_rows, file_manifest
 
 
@@ -707,15 +1392,42 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=False)
 
     base_url = args.base_url.strip() or default_base_url()
+    template_field_count = (
+        8 if args.verify_forced_empty_contract else len(FIELD_NAMES)
+    )
+    input_field_count = (
+        len(FORCED_EMPTY_CONTRACT_INPUT_FIELDS) + 1
+        if args.verify_forced_empty_contract
+        else len(FIELD_NAMES)
+    )
+    extractable_field_count = (
+        1 if args.verify_forced_empty_contract else len(EXTRACTABLE_FIELD_NAMES)
+    )
     manifest: dict[str, Any] = {
         "run_id": run_id,
         "base_url": base_url,
+        "runtime_dir": str(RUNTIME_DIR),
+        "task_db": str(TASK_DB),
+        "knowledge_base_db": str(KB_DB),
         "file_dir": str(file_dir),
         "patterns": patterns,
         "recursive": args.recursive,
         "output_dir": str(out_dir),
         "output_prefix": args.output_prefix,
         "architecture_base": architecture_base,
+        "field_count": template_field_count,
+        "input_field_count": input_field_count,
+        "input_field_names": (
+            [
+                *FORCED_EMPTY_CONTRACT_INPUT_FIELDS,
+                FORCED_EMPTY_CONTRACT_CONTROL_FIELD,
+            ]
+            if args.verify_forced_empty_contract
+            else list(FIELD_NAMES)
+        ),
+        "extractable_field_count": extractable_field_count,
+        "forced_empty_fields": list(FORCED_EMPTY_CONTRACT_INPUT_FIELDS),
+        "verify_forced_empty_contract": bool(args.verify_forced_empty_contract),
         "started_at": datetime.now().isoformat(),
         "dry_run": bool(args.dry_run),
         "files": [
@@ -768,6 +1480,7 @@ def main() -> int:
                 analysis_timeout=args.analysis_timeout,
                 weaponry_timeout=args.weaponry_timeout,
                 poll_interval=args.poll_interval,
+                verify_forced_empty_contract_flag=args.verify_forced_empty_contract,
             )
             rows.append(row)
             audit_rows.extend(file_audit_rows)
@@ -775,11 +1488,23 @@ def main() -> int:
             manifest["completed_rows"] = len(rows)
             manifest["updated_at"] = datetime.now().isoformat()
             write_outputs(out_dir, args.output_prefix, rows, audit_rows, manifest)
+            verification = file_manifest.get("forced_empty_contract_verification")
+            if (
+                args.verify_forced_empty_contract
+                and (
+                    not isinstance(verification, dict)
+                    or not verification.get("passed")
+                )
+            ):
+                raise RuntimeError(
+                    f"{file_path.name} 保留字段合同探针失败: "
+                    f"{verification.get('errors', []) if isinstance(verification, dict) else 'missing verification'}"
+                )
             logger.info(
                 "DONE %s non_empty=%s/%d term_source_fields=%s",
                 file_path.name,
                 file_manifest["non_empty_count"],
-                len(FIELD_NAMES),
+                file_manifest["extractable_field_count"],
                 file_manifest["term_source_fields"],
             )
     finally:

@@ -355,9 +355,21 @@ class Stage1DWeaponryContractAssetTests(unittest.TestCase):
             self.assertEqual(0, disabled[key], msg=key)
         self.assertEqual(1, disabled["targetSearchCallsPerField"])
 
+        column_compact = matrix["terms-rules-column-compact-v2"]
+        self.assertEqual(1, column_compact["guidanceSearchCallsPerInputField"])
+        self.assertEqual(1, column_compact["guidanceSearchCallsPerTableColumn"])
+        self.assertEqual(
+            "exact-standard-name-alias-or-description",
+            column_compact["guidanceSelection"],
+        )
+        self.assertEqual(
+            "all-column-cores-first-then-fair-optional-allocation",
+            column_compact["contextBudget"],
+        )
+
         misleading = self.contract["misleadingGuidanceCase"]
-        self.assertEqual("31节", misleading["expectedContent"])
-        self.assertEqual("35节", misleading["forbiddenContent"])
+        self.assertEqual("31 节", misleading["expectedContent"])
+        self.assertEqual("35 节", misleading["forbiddenContent"])
         self.assertFalse(misleading["guidanceMayAppearInRows"])
         self.assertTrue(misleading["targetEvidenceMustAppearInRows"])
 

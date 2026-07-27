@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from .errors import WeaponryDomainValidationError
+from .forced_empty_fields import is_forced_empty_field_name
 from .models import (
     WeaponryAnalyseDataSource,
     WeaponryFieldSpecification,
@@ -489,9 +490,17 @@ def assemble_table_rows(
         row = tuple(
             WeaponryTableCellResult(
                 specification=column,
-                analyse_data=merged.value_for(column.field_name),
+                analyse_data=(
+                    ""
+                    if is_forced_empty_field_name(column.field_name)
+                    else merged.value_for(column.field_name)
+                ),
                 sources=(
-                    merged.sources_for(column.field_name)
+                    (
+                        ()
+                        if is_forced_empty_field_name(column.field_name)
+                        else merged.sources_for(column.field_name)
+                    )
                     or (WeaponryAnalyseDataSource.empty(),)
                 ),
             )
