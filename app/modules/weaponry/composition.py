@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from typing import Callable
 
 from app.modules.tasks.ports import (
     ProcessSingletonGuardPort,
@@ -224,6 +225,7 @@ def compose_weaponry_application_services(
     config: WeaponryInfrastructureConfig,
     capabilities: WeaponryRuntimeCapabilities,
     creation_intent_recovery: WeaponryBoundedMaintenancePort | None = None,
+    startup_gate: Callable[[], None] | None = None,
 ) -> WeaponryApplicationServices:
     """显式注入全部 I/O 边界并构造单一实例链，不启动线程或访问外部服务。
 
@@ -277,6 +279,7 @@ def compose_weaponry_application_services(
         config=config,
         execution_limiter=execution_limiter,
         process_guard=process_guard,
+        startup_gate=startup_gate,
     )
     submit = SubmitWeaponryTask(
         task_commands=task_commands,

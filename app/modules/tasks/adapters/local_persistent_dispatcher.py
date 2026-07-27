@@ -201,6 +201,7 @@ class LocalPersistentTaskDispatcher:
         maintenance_tasks: tuple[LocalPersistentMaintenanceTask, ...] = (),
         execution_limiter: TaskExecutionPermitPort | None = None,
         process_guard: ProcessSingletonGuardPort | None = None,
+        startup_gate: Callable[[], None] | None = None,
         accepted_deferral_handler: Callable[[TaskId, str], bool] | None = None,
         fatal_error_handler: Callable[[str], None] | None = None,
         event_logger: logging.Logger | None = None,
@@ -234,6 +235,8 @@ class LocalPersistentTaskDispatcher:
             ProcessSingletonGuardPort,
         ):
             raise TypeError("process_guard 必须实现 ProcessSingletonGuardPort")
+        if startup_gate is not None and not callable(startup_gate):
+            raise TypeError("startup_gate 必须可调用或为 None")
         if accepted_deferral_handler is not None and not callable(
             accepted_deferral_handler
         ):
@@ -252,6 +255,7 @@ class LocalPersistentTaskDispatcher:
         self._maintenance_tasks = tasks
         self._execution_limiter = execution_limiter
         self._process_guard = process_guard
+        self._startup_gate = startup_gate
         # 少数业务需要把受理前失败的退避时间与自身持久化计数放在同一事务内计算。
         # 内核只保留“失败后必须持久化冷却”的通用语义；未注入时继续使用既有固定
         # retry_at 行为，避免 Report/Weaponry 的已验证链路发生行为变化。
@@ -377,6 +381,12 @@ class LocalPersistentTaskDispatcher:
                             "单实例进程锁已被其他进程占用"
                         )
                     self._guard_acquired = True
+
+                # 启动门禁必须位于跨进程锁之后、后台线程之前。业务模块可在这里完成
+                # 必须串行化的外部资源准备；若门禁失败，统一异常路径会释放进程锁，
+                # Worker 尚未创建，因此不会领取到依赖尚未就绪的任务。
+                if self._startup_gate is not None:
+                    self._startup_gate()
 
                 self._owner_pid = os.getpid()
                 self._stop_event.clear()

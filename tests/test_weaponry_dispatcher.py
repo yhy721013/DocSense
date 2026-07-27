@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from itertools import count
 from pathlib import Path
 import sqlite3
@@ -280,7 +281,9 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
         }
         self.assertTrue(forbidden.isdisjoint(environment.accessed))
 
-    def test_terms_enabled_requires_and_freezes_all_terms_settings(self) -> None:
+    def test_terms_enabled_defers_policy_until_automatic_fingerprint_is_frozen(
+        self,
+    ) -> None:
         config = load_weaponry_infrastructure_config(
             self._environment(
                 WEAPONRY_TERMS_RULE_CONTEXT_ENABLED="true",
@@ -291,8 +294,16 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
                 DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS="1200",
             )
         )
-        policies = build_weaponry_runtime_policies(config)
         self.assertTrue(config.terms_rule_context_enabled)
+        self.assertIsNone(config.terms_catalog_fingerprint)
+        policies = build_weaponry_runtime_policies(
+            replace(
+                config,
+                terms_catalog_fingerprint=(
+                    "terms-manifest-v1:sha256:" + ("a" * 64)
+                ),
+            )
+        )
         self.assertEqual(
             "terms-rules-column-compact-v2",
             policies.auxiliary_guidance.policy_id,
@@ -978,6 +989,51 @@ class WeaponryOfflineCompositionTests(unittest.TestCase):
             self.assertIs(services.execution_limiter, limiter)
             self.assertIs(services.submit.task_commands, services.runner.task_commands)
             services.close()
+
+    def test_startup_gate_failure_releases_process_lock_before_worker_starts(
+        self,
+    ) -> None:
+        with workspace_tempdir() as tmp:
+            recorder = WeaponryInvocationRecorder()
+            tasks = FakeWeaponryTaskCommandPort(recorder)
+            callbacks = FakeWeaponryCallbackPort(recorder)
+            config = _config()
+            lock_path = Path(tmp) / "locks" / "weaponry.lock"
+            services = compose_weaponry_application_services(
+                task_commands=tasks,
+                progress_publisher=FakeWeaponryProgressPublisherPort(recorder),
+                retrieval=FakeTargetEvidenceRetrievalPort(recorder),
+                extraction=FakeEvidenceExtractionPort(recorder),
+                guidance=FakeAuxiliaryGuidancePort(recorder),
+                translation=FakeWeaponryTranslationPort(recorder),
+                audit=FakeWeaponryInteractionAuditPort(recorder),
+                callbacks=callbacks,
+                callback_recovery_source=callbacks,
+                resources=FakeWeaponryResourceStorePort(recorder),
+                resource_cleaner=FakeWeaponryExternalResourceCleanupPort(recorder),
+                document_scope=FakeWeaponryDocumentScopePort(),
+                execution_limiter=UploadTaskLimiter(1),
+                process_guard=FileProcessSingletonGuard(lock_path),
+                config=config,
+                capabilities=_capabilities(config),
+                startup_gate=lambda: (_ for _ in ()).throw(
+                    RuntimeError("terms catalog unavailable")
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "terms catalog unavailable",
+            ):
+                services.start()
+            snapshot = services.snapshot()
+            self.assertEqual("stopped", snapshot.lifecycle_state)
+            self.assertEqual(0, snapshot.worker_thread_count)
+            self.assertEqual(0, snapshot.maintenance_thread_count)
+
+            probe = FileProcessSingletonGuard(lock_path)
+            self.assertTrue(probe.acquire())
+            probe.release()
 
     def test_capability_fingerprint_mismatch_fails_before_threads(self) -> None:
         config = _config()

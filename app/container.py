@@ -96,6 +96,7 @@ from app.modules.tasks.adapters import (
 )
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.modules.weaponry.adapters import (
+    AnythingLLMTermsCatalogCoordinator,
     AnythingLLMProvidedEvidenceExtractionAdapter,
     AnythingLLMWeaponryCreationIntentRecoveryAdapter,
     AnythingLLMReadOnlyTermsRuleProvider,
@@ -110,11 +111,14 @@ from app.modules.weaponry.adapters import (
     SQLiteWeaponryCreationIntentStoreAdapter,
     SQLiteWeaponryInteractionAuditAdapter,
     SQLiteWeaponryResourceStoreAdapter,
+    SQLiteTermsCatalogStateStore,
     StoreBackedWeaponryResourceRegistrar,
     TermsRuleGuidanceAdapter,
+    TermsCatalogWorkspaceResolver,
     WeaponryRuntimeCapabilities,
     WeaponryProductionGateSnapshot,
     WeaponryTaskCommandCodec,
+    build_terms_catalog_manifest,
     load_weaponry_infrastructure_config,
 )
 from app.modules.weaponry.adapters.local_dispatcher import (
@@ -853,6 +857,17 @@ def create_application_services() -> ApplicationServices:
     )
     report_infrastructure_config = load_report_infrastructure_config()
     weaponry_infrastructure_config = load_weaponry_infrastructure_config()
+    # 术语开启时由本地真实内容自动生成唯一指纹，不再读取人工版本标签。这里只读取并
+    # 冻结本地清单；AnythingLLM 写入仍延迟到 Weaponry 取得单实例锁后的启动门禁。
+    weaponry_terms_manifest = None
+    if weaponry_infrastructure_config.terms_rule_context_enabled:
+        weaponry_terms_manifest = build_terms_catalog_manifest(
+            weaponry_infrastructure_config.terms_dir or ""
+        )
+        weaponry_infrastructure_config = replace(
+            weaponry_infrastructure_config,
+            terms_catalog_fingerprint=weaponry_terms_manifest.fingerprint,
+        )
     reassign_infrastructure_config = load_reassignment_infrastructure_config()
     logger.info(
         "已读取单实例基础设施配置: chat_runtime_mode=%s report_runtime_mode=%s "
@@ -1138,17 +1153,30 @@ def create_application_services() -> ApplicationServices:
             weaponry_infrastructure_config.extraction_model_fingerprint
         ),
     )
+    weaponry_terms_startup_gate = None
     if weaponry_infrastructure_config.terms_rule_context_enabled:
-        # 启用分支只读预先配置的共享术语 workspace；它不拥有上传、绑定或删除权限。
+        if weaponry_terms_manifest is None:  # 防御性保护，上方启用分支必须已冻结清单。
+            raise RuntimeError("术语辅助已启用但本地术语清单未构造")
+        terms_workspace_resolver = TermsCatalogWorkspaceResolver(
+            weaponry_client_factory,
+            workspace_base_name=(
+                weaponry_infrastructure_config.terms_workspace_name or ""
+            ),
+        )
+        terms_catalog_coordinator = AnythingLLMTermsCatalogCoordinator(
+            weaponry_client_factory,
+            manifest=weaponry_terms_manifest,
+            workspace_base_name=(
+                weaponry_infrastructure_config.terms_workspace_name or ""
+            ),
+            state_store=SQLiteTermsCatalogStateStore(llm_config.task_db_path),
+            resolver=terms_workspace_resolver,
+        )
+        weaponry_terms_startup_gate = terms_catalog_coordinator.prepare
         weaponry_guidance = TermsRuleGuidanceAdapter(
             AnythingLLMReadOnlyTermsRuleProvider(
                 weaponry_client_factory,
-                workspace_slug=(
-                    weaponry_infrastructure_config.terms_workspace_name or ""
-                ),
-            ),
-            catalog_fingerprint=(
-                weaponry_infrastructure_config.terms_catalog_fingerprint or ""
+                workspace_resolver=terms_workspace_resolver,
             ),
         )
     else:
@@ -1225,6 +1253,7 @@ def create_application_services() -> ApplicationServices:
                 ),
             )
         ),
+        startup_gate=weaponry_terms_startup_gate,
     )
     services = ApplicationServices(
         document_rag_factory=document_rag_factory,

@@ -356,8 +356,9 @@ Weaponry 可选配置：
 
 - `WEAPONRY_ANALYSE_MODE`：已删除的迁移期模式选择器。新链固定为 `file_aggregate_v1`；不配置或遗留值 `2` 可启动，旧值 `1` 及其他值会在应用装配阶段明确拒绝，不会切回遗留流程。
 - `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用可拔除的术语规则辅助上下文，默认 `false`；关闭时不读取其余术语专属配置，也不产生术语 Provider I/O。
-- `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
-- `WEAPONRY_TERMS_CATALOG_FINGERPRINT`：启用术语辅助时必填，用于把只读术语目录版本冻结到 execution 策略；当前新链不会自动上传、移动或删除术语文档。本地 `terms/` 内容变更不会自动同步到已配置的在线术语 workspace。
+- `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则版本化 AnythingLLM workspace 的基础名称，默认 `weaponry-terms-rules`；实际名称会自动追加目录内容摘要前缀。
+- `WEAPONRY_TERMS_DIR`：本地术语卡目录，默认 `terms`。启用术语辅助时，服务端严格读取其中的 `term_rule_*.md`，按排序后的相对路径、`card_id` 和 UTF-8 内容自动生成 `terms-manifest-v1:sha256:<digest>` 指纹；不再读取或要求人工 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`。
+- Weaponry 取得本地单实例锁后、启动 Worker 前，会幂等准备该指纹对应的独立版本化 workspace：只补齐缺失规则卡并精确验证完整性，不修改目标文档 workspace，也不自动删除旧版本。上传或绑定结果无法确认时会持久化隔离并阻止 Worker 启动，禁止盲目重放。旧 execution 继续按其冻结指纹读取旧版本；升级前的人工指纹只读回退到原 workspace。
 - `DOCSENSE_WEAPONRY_TERMS_CANDIDATE_TOP_N`：每个 `INPUT` 字段或每个普通 `TABLE` 列独立检索的规则卡候选数，默认 `5`。
 - `DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS`：单个业务字段最终注入的全部压缩规则文本总预算，默认 `1200`。服务端先完整保留所有命中列的核心合同；若该预算连全部核心合同都无法容纳，则本次术语辅助整体降级为空并记录 `terms_rule_context_budget_insufficient`，不会只截掉靠后的列。
 - `DOCSENSE_WEAPONRY_*`：武器谱单实例 Dispatcher、维护扫描、清理超时/租约、供应商能力指纹和固定 score/rank、引用型正文筛选、Extraction 策略。默认值及必填项见 `.env.example`；这些变量均为内部运行配置，不属于公开接口。
@@ -656,7 +657,7 @@ zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
 2. 先执行带 `--dry-run` 的目录 wrapper，核对扫描文件、输出目录和临时 `architectureId`。runner 会读取知识库映射并自动避开已存在的 ID；如使用自定义 `--architecture-base`，仍应检查 dry-run manifest 是否符合预期。
 3. 去掉 `--dry-run` 执行目录 wrapper。未提供 `--static-base` 时，runner 会自动为目标目录启动临时静态文件服务；提供该参数时才复用调用方已有的文件服务。
 4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、调用 `/llm/check-task` 触发必要的回调恢复并从同一任务 SQLite 轮询终态、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并按相同方式轮询。默认请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造；只有显式传入 `--verify-forced-empty-contract` 时才改用最小合同探针。
-5. 术语规则辅助默认关闭。若联调时显式启用，需提前准备独立的只读术语 workspace，并配置 `WEAPONRY_TERMS_WORKSPACE_NAME` 与 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`；新链不会自动上传、移动或删除术语文档，也不会修改目标文档 workspace。本地 `terms/` 规则更新后，部署方必须用更新后的规则卡重新索引该只读术语 workspace，更新 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`，重启 DocSense，并提交全新的 execution 验证单位格式。验证日志中的 `policy_id` 应为 `terms-rules-column-compact-v2`，并应逐字段列出实际命中的 `card_ids`。历史任务的回调补发只会重发已持久化的 `result_payload`，不会重新执行模型抽取，也不会自动补齐新单位格式。
+5. 术语规则辅助默认关闭。显式启用后只需配置本地 `WEAPONRY_TERMS_DIR` 和稳定的 `WEAPONRY_TERMS_WORKSPACE_NAME` 基础名称；服务端在启动期自动计算内容指纹、创建或复用对应的版本化 workspace、上传缺失规则卡并验证绑定完整性。可先执行 `venv\Scripts\python.exe -B scripts\sync_weaponry_terms_catalog.py --dry-run` 只读查看计划，再用 `--apply` 调用同一协调器显式同步；`--apply` 会取得与在线服务相同的 Weaponry 单实例锁，锁被占用时拒绝并发写入。运行链不会修改目标文档 workspace，也不会自动删除旧术语版本。验证日志中的 `policy_id` 应为 `terms-rules-column-compact-v2`，并应逐字段列出实际命中的 `card_ids`。历史任务的回调补发只会重发已持久化的 `result_payload`，不会重新执行模型抽取，也不会自动补齐新单位格式。
 6. runner 持续写出 `qwen3-4b-new.csv`、`qwen3-4b-new.md`、来源核验表、manifest 和逐文件快照；来源核验表用于确认装备事实来源不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。
