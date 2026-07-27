@@ -23,6 +23,12 @@ from app.integrations.anythingllm.policies import (
     analysis_rag_workspace_settings,
     knowledge_index_workspace_settings,
 )
+from app.modules.document_processing import (
+    LegacyOfficeConfig,
+    LegacyOfficeConversionError,
+    LegacyOfficePreparer,
+    LibreOfficeLegacyOfficePreparer,
+)
 from app.modules.report.adapters import (
     AnythingLLMReportClientFactory,
     AnythingLLMReportRagAdapter,
@@ -127,6 +133,7 @@ from app.services.core.config import (
     load_analysis_classification_config,
     load_anythingllm_config,
     load_chat_infrastructure_config,
+    load_legacy_office_config,
     load_llm_integration_config,
     load_report_infrastructure_config,
 )
@@ -144,6 +151,16 @@ from app.services.llm_service.translation_service import get_translation_service
 logger = logging.getLogger(__name__)
 
 APPLICATION_SERVICES_EXTENSION = "docsense_services"
+
+
+def _disabled_legacy_office_preparer() -> LegacyOfficePreparer:
+    """为显式离线容器夹具提供不探测本机软件的安全默认依赖。"""
+
+    return LibreOfficeLegacyOfficePreparer(
+        LegacyOfficeConfig.disabled(
+            jobs_root=RUNTIME_DIR / "office_conversion" / "jobs",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -190,6 +207,9 @@ class ApplicationServices:
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
     report_infrastructure_config: ReportInfrastructureConfig
+    legacy_office_preparer: LegacyOfficePreparer = field(
+        default_factory=_disabled_legacy_office_preparer
+    )
     analysis_classification_config: AnalysisClassificationConfig = field(
         default_factory=AnalysisClassificationConfig.topk_two_stage
     )
@@ -229,6 +249,7 @@ class ApplicationServices:
             "llm_config": self.llm_config,
             "anythingllm_config": self.anythingllm_config,
             "report_infrastructure_config": self.report_infrastructure_config,
+            "legacy_office_preparer": self.legacy_office_preparer,
             "analysis_classification_config": self.analysis_classification_config,
             "chat_infrastructure_config": self.chat_infrastructure_config,
         }
@@ -571,6 +592,36 @@ def create_application_services() -> ApplicationServices:
     report_infrastructure_config = load_report_infrastructure_config()
     weaponry_infrastructure_config = load_weaponry_infrastructure_config()
     reassign_infrastructure_config = load_reassignment_infrastructure_config()
+    legacy_office_config = load_legacy_office_config()
+    legacy_office_preparer = LibreOfficeLegacyOfficePreparer(
+        legacy_office_config
+    )
+    removed_office_jobs = legacy_office_preparer.sweep_stale_jobs()
+    try:
+        libreoffice_version = (
+            legacy_office_preparer.preflight()
+            if legacy_office_config.enabled
+            else None
+        )
+    except LegacyOfficeConversionError as exc:
+        logger.error(
+            "Legacy Office 启动门禁失败: error_code=%s diagnostic=%s",
+            exc.code,
+            exc.diagnostic,
+        )
+        # 不把 subprocess/OSError 原始异常链交给 Flask 启动日志；转换器 diagnostic
+        # 已经过长度限制和路径脱敏。
+        raise LegacyOfficeConversionError(
+            exc.code,
+            diagnostic=exc.diagnostic,
+        ) from None
+    logger.info(
+        "Legacy Office 本地转换配置已就绪: enabled=%s "
+        "libreoffice_version=%s swept_jobs=%d",
+        legacy_office_config.enabled,
+        libreoffice_version or "disabled",
+        removed_office_jobs,
+    )
     logger.info(
         "已读取单实例基础设施配置: chat_runtime_mode=%s report_runtime_mode=%s "
         "weaponry_runtime_mode=%s reassign_runtime_mode=%s "
@@ -665,6 +716,7 @@ def create_application_services() -> ApplicationServices:
         report_artifacts,
         download_timeout=llm_config.download_timeout,
         max_download_bytes=report_infrastructure_config.max_download_bytes,
+        legacy_office_preparer=legacy_office_preparer,
     )
     report_rag = AnythingLLMReportRagAdapter(
         AnythingLLMReportClientFactory(anythingllm_config),
@@ -925,6 +977,7 @@ def create_application_services() -> ApplicationServices:
         llm_config=llm_config,
         anythingllm_config=anythingllm_config,
         report_infrastructure_config=report_infrastructure_config,
+        legacy_office_preparer=legacy_office_preparer,
         analysis_classification_config=analysis_classification_config,
         chat_infrastructure_config=chat_infrastructure_config,
         weaponry_services=weaponry_services,

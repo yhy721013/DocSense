@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import html
+import re
+import unicodedata
 
 from .errors import ReportDomainValidationError
 from .models import (
@@ -20,6 +22,160 @@ from .models import (
 EMPTY_REPORT_HTML = '<div class="report-content"><pre></pre></div>'
 _REPORT_CONTEXT_NAME_MAX_CHARS = 96
 _REPORT_CONVERSATION_NAME_MAX_CHARS = 64
+_PUBLIC_SOURCE_NAME_MAX_CHARS = 255
+_PUBLIC_SOURCE_NAME_MAX_UTF8_BYTES = 255
+_PUBLIC_SOURCE_NAME_SAFE_PUNCTUATION = frozenset("._-")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _strict_percent_decode(value: str) -> str | None:
+    """严格解码 URL path 段；畸形转义或非 UTF-8 字节按不可信名称处理。"""
+
+    decoded = bytearray()
+    cursor = 0
+    try:
+        while cursor < len(value):
+            character = value[cursor]
+            if character != "%":
+                decoded.extend(character.encode("utf-8", errors="strict"))
+                cursor += 1
+                continue
+            if (
+                cursor + 2 >= len(value)
+                or value[cursor + 1] not in _HEX_DIGITS
+                or value[cursor + 2] not in _HEX_DIGITS
+            ):
+                return None
+            decoded.append(int(value[cursor + 1 : cursor + 3], 16))
+            cursor += 3
+        return bytes(decoded).decode("utf-8", errors="strict")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        return None
+
+
+def _url_path_without_query_or_fragment(source_url: str) -> str:
+    """只提取常规绝对/相对 URL 的 path，不把 authority 当作文件名。"""
+
+    without_fragment = source_url.partition("#")[0]
+    value = without_fragment.partition("?")[0]
+    scheme_separator = value.find("://")
+    if scheme_separator >= 0:
+        authority_and_path = value[scheme_separator + 3 :]
+        path_at = authority_and_path.find("/")
+        return authority_and_path[path_at:] if path_at >= 0 else ""
+    if value.startswith("//"):
+        authority_and_path = value[2:]
+        path_at = authority_and_path.find("/")
+        return authority_and_path[path_at:] if path_at >= 0 else ""
+    return value
+
+
+def _is_safe_public_source_name(value: str) -> bool:
+    """限制可进入任意 HTML 上下文的 URL basename，避免属性或协议注入。"""
+
+    if (
+        not value
+        or value in {".", ".."}
+        or value.strip() != value
+        or len(value) > _PUBLIC_SOURCE_NAME_MAX_CHARS
+        or any(unicodedata.category(character).startswith("C") for character in value)
+    ):
+        return False
+    for character in value:
+        if character in _PUBLIC_SOURCE_NAME_SAFE_PUNCTUATION:
+            continue
+        if unicodedata.category(character)[:1] not in {"L", "M", "N"}:
+            return False
+    try:
+        return len(value.encode("utf-8")) <= _PUBLIC_SOURCE_NAME_MAX_UTF8_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _public_source_name(source_url: str, sequence_no: int) -> str:
+    """从 URL path 提取业务文件名；query/fragment 永不参与展示名。"""
+
+    fallback = f"来源文件{sequence_no}"
+    if not isinstance(source_url, str):
+        return fallback
+    path = _url_path_without_query_or_fragment(source_url)
+    encoded_basename = path.rsplit("/", 1)[-1]
+    decoded_basename = _strict_percent_decode(encoded_basename)
+    if decoded_basename is None or not _is_safe_public_source_name(decoded_basename):
+        return fallback
+    return decoded_basename
+
+
+def _artifact_basename(artifact_id: str) -> str:
+    """从不透明引用中兼容提取 POSIX/Windows 风格的精确末段。"""
+
+    return artifact_id.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
+
+def sanitize_public_report_content(
+    content: str | None,
+    *,
+    source_urls: tuple[str, ...],
+    artifact_sources: tuple[tuple[str, int | None], ...],
+) -> str | None:
+    """把本次内部 RAG 标识替换为安全业务来源名。
+
+    调用方必须先保存原始 RAG trace，再把本函数结果用于报告 Artifact 和 callback。
+    """
+
+    if content is None:
+        return None
+    if not isinstance(content, str):
+        raise ReportDomainValidationError("报告 RAG 内容类型无效")
+    if not isinstance(source_urls, tuple) or not isinstance(artifact_sources, tuple):
+        raise ReportDomainValidationError("报告来源映射必须是 tuple")
+
+    replacement_by_folded_token: dict[str, str] = {}
+    exact_tokens: set[str] = set()
+    for artifact_id, sequence_no in artifact_sources:
+        if (
+            not isinstance(artifact_id, str)
+            or sequence_no is None
+            or not isinstance(sequence_no, int)
+            or isinstance(sequence_no, bool)
+            or sequence_no <= 0
+            or sequence_no > len(source_urls)
+        ):
+            raise ReportDomainValidationError("RAG Artifact 来源顺序超出任务输入范围")
+        public_name = _public_source_name(
+            source_urls[sequence_no - 1],
+            sequence_no,
+        )
+        tokens = (artifact_id, _artifact_basename(artifact_id))
+        for token in tokens:
+            if not token:
+                raise ReportDomainValidationError("RAG Artifact 内部标识无效")
+            folded = token.casefold()
+            previous = replacement_by_folded_token.get(folded)
+            if previous is not None and previous != public_name:
+                raise ReportDomainValidationError("RAG Artifact 展示名映射冲突")
+            replacement_by_folded_token[folded] = public_name
+            exact_tokens.add(token)
+
+    if not exact_tokens or not content:
+        return content
+
+    pattern = re.compile(
+        "|".join(
+            re.escape(token)
+            for token in sorted(exact_tokens, key=lambda value: (-len(value), value))
+        ),
+        flags=re.IGNORECASE,
+    )
+
+    def _replacement(match: re.Match[str]) -> str:
+        replacement = replacement_by_folded_token.get(match.group(0).casefold())
+        if replacement is None:
+            # Unicode IGNORECASE 的少数扩展等价字符不得绕过 casefold 冲突门禁。
+            raise ReportDomainValidationError("RAG Artifact 展示名匹配不确定")
+        return replacement
+
+    return pattern.sub(_replacement, content)
 
 
 def ensure_report_html(content: str | None) -> str:

@@ -6,16 +6,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.documents import (
+    AnythingLLMDocumentClient,
+    XlsxFolderCleanupToken,
+)
 from app.integrations.anythingllm.errors import (
+    AnythingLLMCleanupUncertainError,
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
+    AnythingLLMTimeoutError,
+    AnythingLLMUploadRejectedError,
 )
 from app.integrations.anythingllm.models import AnythingLLMDocument, AnythingLLMSource
 
@@ -119,6 +126,46 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
         self.assertEqual(f"document:{document_id}", document.document_ref)
         self.assertEqual("17", document.raw_document_id)
         self.assertEqual("location_uuid", document.identity_source)
+
+    def test_xlsx_sheet_identity_uses_full_location_hash_across_payload_ids(self) -> None:
+        """同一 Sheet 的 upload/workspace ID 不同也必须得到相同稳定身份。"""
+        location = "prepared-a.xlsx-6f2a/sheet-summary.json"
+        uploaded = AnythingLLMDocument.from_payload(
+            {"id": "collector-sheet-id", "location": location}
+        )
+        workspace = AnythingLLMDocument.from_payload(
+            {"docId": "workspace-row-id", "docpath": location}
+        )
+        expected_id = (
+            "location-sha256-"
+            + hashlib.sha256(location.encode("utf-8")).hexdigest()
+        )
+
+        self.assertEqual(expected_id, uploaded.id)
+        self.assertEqual(uploaded.id, workspace.id)
+        self.assertEqual(uploaded.document_ref, workspace.document_ref)
+        self.assertEqual("collector-sheet-id", uploaded.raw_document_id)
+        self.assertEqual("workspace-row-id", workspace.raw_document_id)
+        self.assertEqual("location_sha256", uploaded.identity_source)
+        self.assertEqual("location_sha256", workspace.identity_source)
+
+    def test_xlsx_different_sheet_locations_have_different_identity(self) -> None:
+        """稳定身份必须包含完整 Sheet location，而不是四位父目录 token。"""
+        first = AnythingLLMDocument.from_payload(
+            {
+                "id": "same-payload-id",
+                "location": "prepared-a.xlsx-6f2a/sheet-summary.json",
+            }
+        )
+        second = AnythingLLMDocument.from_payload(
+            {
+                "id": "same-payload-id",
+                "location": "prepared-a.xlsx-6f2a/sheet-details.json",
+            }
+        )
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertNotEqual(first.document_ref, second.document_ref)
 
     def test_upload_serializes_source_marker_as_structured_metadata(self) -> None:
         """来源标记必须放入 multipart metadata，不能污染文件名或正文。"""
@@ -368,6 +415,276 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
                 sleep=self.sleep,
             )
 
+    def test_upload_accepts_exactly_one_xlsx_sheet(self) -> None:
+        """单 Sheet XLSX 应返回 location-hash 身份且不触发临时清理。"""
+        location = "prepared-a.xlsx-6f2a/sheet-summary.json"
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {
+                    "id": "collector-sheet-id",
+                    "location": location,
+                    "title": "prepared-a.xlsx - Sheet:summary",
+                }
+            ]
+        }
+
+        document = self.client.upload_document(str(self.file_path), user_id=7)
+
+        self.assertEqual(location, document.location)
+        self.assertEqual("location_sha256", document.identity_source)
+        self.transport.get_json.assert_not_called()
+        self.transport.delete_json.assert_not_called()
+
+    def test_upload_rejects_multi_sheet_after_confirmed_folder_cleanup(self) -> None:
+        """多 Sheet 必须完整识别成员、删除整次上传后再稳定失败。"""
+        folder = "prepared-a.xlsx-6f2a"
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {
+                    "id": "sheet-a",
+                    "location": f"{folder}/sheet-summary.json",
+                },
+                {
+                    "id": "sheet-b",
+                    "location": f"{folder}/sheet-details.json",
+                },
+            ]
+        }
+        self.transport.get_json.return_value = {
+            "folder": folder,
+            "documents": [
+                {"name": "sheet-details.json"},
+                {"name": "sheet-summary.json"},
+            ],
+            "error": None,
+        }
+        self.transport.delete_json.return_value = {
+            "success": True,
+            "message": "Folder removed successfully",
+        }
+
+        with self.assertRaises(AnythingLLMUploadRejectedError) as raised:
+            self.client.upload_document(str(self.file_path), user_id=7)
+
+        self.assertTrue(raised.exception.cleanup_attempted)
+        self.assertTrue(raised.exception.cleanup_confirmed)
+        self.assertTrue(raised.exception.folder_cleanup_token)
+        self.transport.get_json.assert_called_once_with(
+            f"documents/folder/{folder}",
+            user_id=7,
+        )
+        self.transport.delete_json.assert_called_once_with(
+            "document/remove-folder",
+            {"name": folder},
+            user_id=7,
+        )
+
+    def test_upload_multi_sheet_cleanup_unknown_is_explicit_and_recoverable(self) -> None:
+        """删除响应超时且目录仍在时不得把多 Sheet 清理伪装成成功。"""
+        folder = "prepared-a.xlsx-6f2a"
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {"id": "sheet-a", "location": f"{folder}/sheet-summary.json"},
+                {"id": "sheet-b", "location": f"{folder}/sheet-details.json"},
+            ]
+        }
+        self.transport.get_json.side_effect = [
+            {
+                "folder": folder,
+                "documents": [
+                    {"name": "sheet-summary.json"},
+                    {"name": "sheet-details.json"},
+                ],
+                "error": None,
+            },
+            {
+                "localFiles": {
+                    "items": [{"name": folder, "type": "folder"}],
+                    "name": "documents",
+                    "type": "folder",
+                }
+            },
+        ]
+        self.transport.delete_json.side_effect = AnythingLLMTimeoutError(
+            "remove-folder timeout"
+        )
+
+        with self.assertRaises(AnythingLLMUploadRejectedError) as raised:
+            self.client.upload_document(str(self.file_path))
+
+        self.assertTrue(raised.exception.cleanup_attempted)
+        self.assertFalse(raised.exception.cleanup_confirmed)
+        self.assertTrue(raised.exception.folder_cleanup_token)
+        self.assertIsInstance(
+            raised.exception.__cause__,
+            AnythingLLMCleanupUncertainError,
+        )
+
+    def test_xlsx_malformed_dto_is_cleaned_using_locations_collected_first(
+        self,
+    ) -> None:
+        """成员缺少 id 时仍应使用预先冻结的精确 Sheet 集合清理整批上传。"""
+        folder = "prepared-a.xlsx-6f2a"
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {
+                    "location": f"{folder}/sheet-summary.json",
+                },
+                {
+                    "id": "sheet-details",
+                    "location": f"{folder}/sheet-details.json",
+                },
+            ]
+        }
+        self.transport.get_json.return_value = {
+            "folder": folder,
+            "documents": [
+                {"name": "sheet-details.json"},
+                {"name": "sheet-summary.json"},
+            ],
+            "error": None,
+        }
+        self.transport.delete_json.return_value = {
+            "success": True,
+            "message": "Folder removed successfully",
+        }
+
+        with self.assertLogs(
+            "app.integrations.anythingllm.documents",
+            level="WARNING",
+        ) as logs:
+            with self.assertRaises(AnythingLLMUploadRejectedError) as raised:
+                self.client.upload_document(str(self.file_path), user_id=7)
+
+        error = raised.exception
+        self.assertTrue(error.cleanup_attempted)
+        self.assertTrue(error.cleanup_confirmed)
+        self.assertTrue(error.folder_cleanup_token)
+        self.assertIsInstance(error.__cause__, AnythingLLMProtocolError)
+        self.assertNotIn(error.folder_cleanup_token, "\n".join(logs.output))
+        self.transport.get_json.assert_called_once_with(
+            f"documents/folder/{folder}",
+            user_id=7,
+        )
+        self.transport.delete_json.assert_called_once_with(
+            "document/remove-folder",
+            {"name": folder},
+            user_id=7,
+        )
+
+    def test_xlsx_malformed_dto_cleanup_unknown_keeps_recovery_token(
+        self,
+    ) -> None:
+        """畸形 DTO 的目录删除结果未知时必须向上层交付同一受控恢复 token。"""
+        folder = "prepared-a.xlsx-6f2a"
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {
+                    "location": f"{folder}/sheet-summary.json",
+                },
+            ]
+        }
+        self.transport.get_json.side_effect = [
+            {
+                "folder": folder,
+                "documents": [{"name": "sheet-summary.json"}],
+                "error": None,
+            },
+            {
+                "localFiles": {
+                    "items": [{"name": folder, "type": "folder"}],
+                    "name": "documents",
+                    "type": "folder",
+                }
+            },
+        ]
+        self.transport.delete_json.side_effect = AnythingLLMTimeoutError(
+            "remove-folder timeout"
+        )
+
+        with self.assertLogs(
+            "app.integrations.anythingllm.documents",
+            level="ERROR",
+        ) as logs:
+            with self.assertRaises(AnythingLLMUploadRejectedError) as raised:
+                self.client.upload_document(str(self.file_path))
+
+        error = raised.exception
+        self.assertTrue(error.cleanup_attempted)
+        self.assertFalse(error.cleanup_confirmed)
+        self.assertTrue(error.folder_cleanup_token)
+        self.assertIsInstance(
+            error.__cause__,
+            AnythingLLMCleanupUncertainError,
+        )
+        self.assertNotIn(error.folder_cleanup_token, "\n".join(logs.output))
+
+    def test_malformed_xlsx_mixed_or_duplicate_locations_never_guess_cleanup(
+        self,
+    ) -> None:
+        """即使 DTO 也畸形，混合目录和重复成员仍不得签发 token 或猜测删除。"""
+        invalid_document_sets = (
+            [
+                {
+                    "location": "prepared-a.xlsx-6f2a/sheet-a.json",
+                },
+                {
+                    "id": "b",
+                    "location": "prepared-b.xlsx-7e3b/sheet-b.json",
+                },
+            ],
+            [
+                {
+                    "location": "prepared-a.xlsx-6f2a/sheet-a.json",
+                },
+                {
+                    "id": "b",
+                    "location": "prepared-a.xlsx-6f2a/sheet-a.json",
+                },
+            ],
+        )
+        for documents in invalid_document_sets:
+            with self.subTest(documents=documents):
+                self.transport.reset_mock()
+                self.transport.post_multipart.return_value = {
+                    "documents": documents
+                }
+
+                with self.assertRaises(AnythingLLMUploadRejectedError) as raised:
+                    self.client.upload_document(str(self.file_path))
+
+                self.assertFalse(raised.exception.cleanup_attempted)
+                self.assertFalse(raised.exception.cleanup_confirmed)
+                self.assertEqual("", raised.exception.folder_cleanup_token)
+                self.transport.get_json.assert_not_called()
+                self.transport.delete_json.assert_not_called()
+
+    def test_upload_rejects_duplicate_mixed_or_multi_custom_documents(self) -> None:
+        """畸形集合不得被截断成首项，也不得发起猜测性的文件夹删除。"""
+        invalid_document_sets = (
+            [
+                {"id": "a", "location": "prepared-a.xlsx-6f2a/sheet-a.json"},
+                {"id": "b", "location": "prepared-a.xlsx-6f2a/sheet-a.json"},
+            ],
+            [
+                {"id": "a", "location": "prepared-a.xlsx-6f2a/sheet-a.json"},
+                {"id": "b", "location": "prepared-b.xlsx-7e3b/sheet-b.json"},
+            ],
+            [
+                {"id": "a", "location": "custom-documents/a.json"},
+                {"id": "b", "location": "custom-documents/b.json"},
+            ],
+        )
+        for documents in invalid_document_sets:
+            with self.subTest(documents=documents):
+                self.transport.reset_mock()
+                self.transport.post_multipart.return_value = {
+                    "documents": documents
+                }
+                with self.assertRaises(AnythingLLMUploadRejectedError):
+                    self.client.upload_document(str(self.file_path))
+                self.transport.delete_json.assert_not_called()
+
     def test_delete_document_uses_official_global_purge_endpoint(self) -> None:
         """永久删除必须使用上传返回的 location 调用官方全局清理接口。"""
         self.transport.delete_json.return_value = {
@@ -408,6 +725,173 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
                 self.transport.delete_json.return_value = response
                 with self.assertRaises(AnythingLLMProtocolError):
                     self.client.delete_document("custom-documents/a.json")
+
+    def test_xlsx_cleanup_token_rejects_encoded_traversal_and_unicode_controls(self) -> None:
+        """Folder token 不得接受会被 URL/文件系统二次解释的危险组件。"""
+        invalid_locations = (
+            "/safe.xlsx-abcd/sheet-a.json",
+            r"C:\safe.xlsx-abcd\sheet-a.json",
+            "safe.xlsx-abcd/../sheet-a.json",
+            "safe..xlsx-abcd/sheet-a.json",
+            "safe.xlsx-abcd/sheet-%2e%2e.json",
+            "safe.xlsx-abcd/sheet-%2fetc.json",
+            "safe.xlsx-abcd/sheet-\x7f.json",
+            "safe.xlsx-abcd/sheet-\u0085.json",
+            "safe.xlsx-abcd/sheet-\u202e.json",
+            "safe.xlsx-abcd/sheet-\u2028.json",
+            "custom-documents/sheet-a.json",
+            "safe.xlsx-abcd/nested/sheet-a.json",
+            "safe.docx-abcd/sheet-a.json",
+        )
+        for location in invalid_locations:
+            with self.subTest(location=repr(location)):
+                with self.assertRaises(ValueError):
+                    XlsxFolderCleanupToken.issue((location,))
+
+    def test_delete_document_artifact_keeps_custom_document_contract(self) -> None:
+        """新增 Artifact 删除入口不得改变普通 custom-documents 的官方端点。"""
+        self.transport.delete_json.return_value = {
+            "success": True,
+            "message": "Documents removed successfully",
+        }
+
+        self.client.delete_document_artifact(
+            "custom-documents/a.json",
+            user_id=7,
+        )
+
+        self.transport.get_json.assert_not_called()
+        self.transport.delete_json.assert_called_once_with(
+            "system/remove-documents",
+            {"names": ["custom-documents/a.json"]},
+            user_id=7,
+        )
+
+    def test_delete_xlsx_folder_rejects_member_drift_before_delete(self) -> None:
+        """目录当前成员与上传快照不一致时必须拒绝破坏性 remove-folder。"""
+        folder = "safe.xlsx-abcd"
+        token = XlsxFolderCleanupToken.issue(
+            (f"{folder}/sheet-summary.json",)
+        )
+        self.transport.get_json.return_value = {
+            "folder": folder,
+            "documents": [
+                {"name": "sheet-summary.json"},
+                {"name": "sheet-unexpected.json"},
+            ],
+            "error": None,
+        }
+
+        with self.assertRaises(AnythingLLMCleanupUncertainError):
+            self.client.delete_xlsx_folder(token, user_id=7)
+
+        self.transport.delete_json.assert_not_called()
+
+    def test_delete_xlsx_folder_uses_validated_folder_endpoint(self) -> None:
+        """严格单成员快照通过核对后才能调用 remove-folder。"""
+        folder = "safe.xlsx-abcd"
+        token = XlsxFolderCleanupToken.issue(
+            (f"{folder}/sheet-summary.json",)
+        )
+        self.transport.get_json.return_value = {
+            "folder": folder,
+            "documents": [{"name": "sheet-summary.json"}],
+            "error": None,
+        }
+        self.transport.delete_json.return_value = {
+            "success": True,
+            "message": "Folder removed successfully",
+        }
+
+        self.client.delete_xlsx_folder(token, user_id=7)
+
+        self.transport.delete_json.assert_called_once_with(
+            "document/remove-folder",
+            {"name": folder},
+            user_id=7,
+        )
+
+    def test_xlsx_folder_allows_common_business_name_and_quotes_request_path(self) -> None:
+        """普通空格、括号和中文可用，但 folder-list 动态段必须做 URL 编码。"""
+        folder = "报告 (最终版).xlsx-abcd"
+        sheet_name = "sheet-工作表 1.json"
+        token = XlsxFolderCleanupToken.issue(
+            (f"{folder}/{sheet_name}",)
+        )
+        self.transport.get_json.return_value = {
+            "folder": folder,
+            "documents": [{"name": sheet_name}],
+            "error": None,
+        }
+        self.transport.delete_json.return_value = {
+            "success": True,
+            "message": "Folder removed successfully",
+        }
+
+        self.client.delete_xlsx_folder(token, user_id=7)
+
+        self.transport.get_json.assert_called_once_with(
+            (
+                "documents/folder/"
+                "%E6%8A%A5%E5%91%8A%20%28%E6%9C%80%E7%BB%88%E7%89%88%29"
+                ".xlsx-abcd"
+            ),
+            user_id=7,
+        )
+        self.transport.delete_json.assert_called_once_with(
+            "document/remove-folder",
+            {"name": folder},
+            user_id=7,
+        )
+
+    def test_folder_list_404_is_not_treated_as_absent_when_root_still_has_folder(self) -> None:
+        """旧版本缺少 folder-list 时，根目录仍见目标必须触发版本门禁。"""
+        folder = "safe.xlsx-abcd"
+        token = XlsxFolderCleanupToken.issue(
+            (f"{folder}/sheet-summary.json",)
+        )
+        self.transport.get_json.side_effect = [
+            AnythingLLMHTTPError(
+                "not found",
+                status_code=404,
+                response_summary="",
+            ),
+            {
+                "localFiles": {
+                    "name": "documents",
+                    "type": "folder",
+                    "items": [{"name": folder, "type": "folder"}],
+                }
+            },
+        ]
+
+        with self.assertRaises(AnythingLLMCleanupUncertainError):
+            self.client.delete_xlsx_folder(token)
+
+        self.transport.delete_json.assert_not_called()
+
+    def test_folder_list_and_root_404_keep_cleanup_outcome_unknown(self) -> None:
+        """两个读取端点均 404 不能证明目录缺失，必须保持 fail-closed。"""
+        token = XlsxFolderCleanupToken.issue(
+            ("safe.xlsx-abcd/sheet-summary.json",)
+        )
+        self.transport.get_json.side_effect = [
+            AnythingLLMHTTPError(
+                "folder not found",
+                status_code=404,
+                response_summary="",
+            ),
+            AnythingLLMHTTPError(
+                "root not found",
+                status_code=404,
+                response_summary="",
+            ),
+        ]
+
+        with self.assertRaises(AnythingLLMCleanupUncertainError):
+            self.client.delete_xlsx_folder(token)
+
+        self.transport.delete_json.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

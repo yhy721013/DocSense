@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,9 +13,11 @@ from app.integrations.anythingllm.models import (
     AnythingLLMThread,
     AnythingLLMWorkspace,
 )
+from app.integrations.anythingllm.documents import XlsxFolderCleanupToken
 from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
     AnythingLLMTimeoutError,
+    AnythingLLMUploadRejectedError,
 )
 from app.modules.report.adapters.anythingllm_rag import (
     AnythingLLMReportClientFactory,
@@ -24,6 +28,7 @@ from app.modules.report.adapters.local_artifacts import LocalReportArtifactAdapt
 from app.modules.report.ports import (
     CleanupReportRag,
     ReportArtifactCategory,
+    ReportRagCleanupRef,
     ReportRagExecutionError,
     ReportRagRequest,
 )
@@ -49,6 +54,9 @@ class _Backend:
         self.workspace_create_error: Exception | None = None
         self.workspaces: list[AnythingLLMWorkspace] = []
         self.upload_error_after_success_at: int | None = None
+        self.upload_rejected_error: AnythingLLMUploadRejectedError | None = None
+        self.deleted_folder_tokens: list[str] = []
+        self.delete_folder_error: Exception | None = None
 
 
 class _Documents:
@@ -62,6 +70,8 @@ class _Documents:
         marker = metadata["docSource"]
         self.backend.upload_markers.append(marker)
         self.backend.upload_names.append(Path(file_path).name)
+        if self.backend.upload_rejected_error is not None:
+            raise self.backend.upload_rejected_error
         document = AnythingLLMDocument(
             id=f"doc-{index}",
             location=f"custom-documents/source-{index}-00000000-0000-0000-0000-00000000000{index}.json",
@@ -77,6 +87,15 @@ class _Documents:
         self.backend.deleted_documents.append(location)
         if self.backend.delete_document_failure == location:
             raise RuntimeError("delete failed")
+
+    def delete_document_artifact(self, location: str, *, user_id=None) -> None:
+        self.delete_document(location, user_id=user_id)
+
+    def delete_xlsx_folder(self, token: XlsxFolderCleanupToken, *, user_id=None) -> None:
+        token.parse()
+        self.backend.deleted_folder_tokens.append(token.value)
+        if self.backend.delete_folder_error is not None:
+            raise self.backend.delete_folder_error
 
 
 class _Workspaces:
@@ -230,6 +249,37 @@ class ReportRagAdapterTests(unittest.TestCase):
             RuntimeError,
         )
 
+    def test_legacy_v1_cleanup_ref_remains_decodable_without_migration(self) -> None:
+        """版本 2 新字段不得使数据库中既有 v1 cleanup ref 失效。"""
+        backend = _Backend()
+        adapter = AnythingLLMReportRagAdapter(
+            _Factory(backend),
+            artifact_path_resolver=lambda _artifact: Path("unused"),
+        )
+        location = "custom-documents/legacy.json"
+        payload = {
+            "version": 1,
+            "next_sequence": 9,
+            "context_ref": "workspace-1",
+            "conversation_ref": "thread-1",
+            "document_locations": [location],
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).decode("ascii")
+
+        events = adapter.cleanup(
+            CleanupReportRag(ReportRagCleanupRef(f"v1.{encoded}"))
+        )
+
+        self.assertTrue(all(event.success for event in events))
+        self.assertEqual([location], backend.deleted_documents)
+
     def test_multidocument_success_preserves_order_trace_sources_and_cleanup(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
@@ -299,6 +349,89 @@ class ReportRagAdapterTests(unittest.TestCase):
             operations = tuple(event.operation for event in error.trace.lifecycle_events)
             self.assertIn("document_upload", operations)
             self.assertEqual("transport_close", operations[-1])
+
+    def test_multi_sheet_rejection_records_confirmed_internal_cleanup(self) -> None:
+        """Client 已确认整批清理时，报告失败轨迹不得标成外部结果未知。"""
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            artifacts = LocalReportArtifactAdapter(root / "artifacts")
+            backend = _Backend()
+            folder = "prepared-a.xlsx-6f2a"
+            token = XlsxFolderCleanupToken.issue(
+                (
+                    f"{folder}/sheet-summary.json",
+                    f"{folder}/sheet-details.json",
+                )
+            )
+            backend.upload_rejected_error = AnythingLLMUploadRejectedError(
+                "当前仅支持单 Sheet XLSX",
+                cleanup_attempted=True,
+                cleanup_confirmed=True,
+                folder_cleanup_token=token.value,
+            )
+            adapter = AnythingLLMReportRagAdapter(
+                _Factory(backend),
+                artifact_path_resolver=artifacts.resolve_path,
+            )
+
+            with self.assertRaises(ReportRagExecutionError) as raised:
+                adapter.generate(_request(artifacts, root))
+
+            self.assertFalse(raised.exception.external_outcome_unknown)
+            self.assertEqual("document_upload", raised.exception.trace.failure_stage)
+            folder_event = next(
+                event
+                for event in raised.exception.trace.lifecycle_events
+                if event.operation == "global_document_folder_delete"
+            )
+            self.assertTrue(folder_event.success)
+
+    def test_unknown_multi_sheet_cleanup_token_survives_report_recovery(self) -> None:
+        """首次 remove-folder 结果未知时，cleanup ref 必须保留 opaque token 供恢复。"""
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            artifacts = LocalReportArtifactAdapter(root / "artifacts")
+            backend = _Backend()
+            folder = "prepared-a.xlsx-6f2a"
+            token = XlsxFolderCleanupToken.issue(
+                (
+                    f"{folder}/sheet-summary.json",
+                    f"{folder}/sheet-details.json",
+                )
+            )
+            backend.upload_rejected_error = AnythingLLMUploadRejectedError(
+                "当前仅支持单 Sheet XLSX，且多 Sheet 上传清理结果未确认",
+                cleanup_attempted=True,
+                cleanup_confirmed=False,
+                folder_cleanup_token=token.value,
+            )
+            adapter = AnythingLLMReportRagAdapter(
+                _Factory(backend),
+                artifact_path_resolver=artifacts.resolve_path,
+            )
+
+            with self.assertRaises(ReportRagExecutionError) as raised:
+                adapter.generate(_request(artifacts, root))
+
+            error = raised.exception
+            self.assertTrue(error.external_outcome_unknown)
+            self.assertEqual(
+                "document_upload_cleanup_outcome_unknown",
+                error.trace.failure_stage,
+            )
+            self.assertIsNotNone(error.cleanup_ref)
+
+            events = adapter.cleanup(
+                CleanupReportRag(error.cleanup_ref)  # type: ignore[arg-type]
+            )
+
+            self.assertEqual([token.value], backend.deleted_folder_tokens)
+            folder_event = next(
+                event
+                for event in events
+                if event.operation == "global_document_folder_delete"
+            )
+            self.assertTrue(folder_event.success)
 
     def test_ambiguous_context_create_is_reconciled_by_unique_task_name(self) -> None:
         """写响应丢失后只能查回唯一资源，不能盲目重放创建请求。"""

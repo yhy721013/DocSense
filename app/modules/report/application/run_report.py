@@ -27,6 +27,7 @@ from app.modules.report.domain import (
     REPORT_STATUS_SUCCEEDED,
     ReportAuditError,
     ReportCallbackPayload,
+    ReportDomainValidationError,
     ReportError,
     ReportInputSnapshot,
     ReportPortContractError,
@@ -40,6 +41,7 @@ from app.modules.report.domain import (
     build_report_conversation_name,
     build_report_prompt,
     build_report_result,
+    sanitize_public_report_content,
 )
 from app.modules.report.ports import (
     DeliverReportCallback,
@@ -260,9 +262,20 @@ class RunReportTask:
                 lambda: self._resources.track_audit(audit_receipt),
             )
 
+            try:
+                public_content = sanitize_public_report_content(
+                    rag_response.raw_content,
+                    source_urls=snapshot.source_urls,
+                    artifact_sources=tuple(
+                        (artifact.artifact_id, artifact.sequence_no)
+                        for artifact in upload_files
+                    ),
+                )
+            except ReportDomainValidationError as exc:
+                raise ReportPortContractError(str(exc)) from exc
             report_result = build_report_result(
                 snapshot.report_id,
-                rag_response.raw_content,
+                public_content,
             )
             if report_result.empty_rag_result:
                 logger.warning(

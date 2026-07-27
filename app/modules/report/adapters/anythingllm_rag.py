@@ -18,7 +18,10 @@ from types import MappingProxyType
 from typing import Any, Callable, Iterator, Mapping, Protocol
 from uuid import uuid4
 
-from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.documents import (
+    AnythingLLMDocumentClient,
+    XlsxFolderCleanupToken,
+)
 from app.integrations.anythingllm.errors import (
     AnythingLLMConnectionError,
     AnythingLLMHTTPError,
@@ -26,8 +29,12 @@ from app.integrations.anythingllm.errors import (
     AnythingLLMTimeoutError,
     AnythingLLMTransportError,
     AnythingLLMTransportClosedError,
+    AnythingLLMUploadRejectedError,
 )
-from app.integrations.anythingllm.models import AnythingLLMDocument
+from app.integrations.anythingllm.models import (
+    AnythingLLMDocument,
+    parse_xlsx_sheet_location,
+)
 from app.integrations.anythingllm.policies import (
     DEFAULT_EMBEDDING_ATTEMPTS,
     DEFAULT_UPLOAD_RETRIES,
@@ -60,7 +67,8 @@ from app.services.core.config import AnythingLLMConfig
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_EMBEDDING_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
-_CLEANUP_TOKEN_VERSION = 1
+_CLEANUP_TOKEN_VERSION = 2
+_LEGACY_CLEANUP_TOKEN_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,7 @@ class _ExecutionState:
     lifecycle_events: list[ReportRagLifecycleEvent] = field(default_factory=list)
     attempts: list[ReportRagAttempt] = field(default_factory=list)
     documents: list[AnythingLLMDocument] = field(default_factory=list)
+    folder_cleanup_tokens: list[str] = field(default_factory=list)
     source_markers: dict[str, str] = field(default_factory=dict)
     operation_attempts: dict[str, int] = field(default_factory=dict)
     transport_opened: bool = False
@@ -201,6 +210,7 @@ class _CleanupState:
     context_ref: str | None
     conversation_ref: str | None
     document_locations: tuple[str, ...]
+    folder_cleanup_tokens: tuple[str, ...] = ()
 
 
 class AnythingLLMReportRagAdapter:
@@ -436,13 +446,25 @@ class AnythingLLMReportRagAdapter:
                 for location in reversed(cleanup.document_locations):
                     touch()
                     self._cleanup_action(
-                        lambda current=location: clients.documents.delete_document(
+                        lambda current=location: self._delete_global_document_artifact(
+                            clients.documents,
                             current,
-                            user_id=self._user_id,
                         ),
                         record=record,
                         operation="global_document_delete",
                         external_ref=location,
+                        failure_stage="cleanup_document",
+                    )
+                for token_value in reversed(cleanup.folder_cleanup_tokens):
+                    touch()
+                    self._cleanup_action(
+                        lambda current=token_value: clients.documents.delete_xlsx_folder(
+                            XlsxFolderCleanupToken(current),
+                            user_id=self._user_id,
+                        ),
+                        record=record,
+                        operation="global_document_folder_delete",
+                        external_ref=None,
                         failure_stage="cleanup_document",
                     )
         except _LifecycleCheckpointError:
@@ -485,6 +507,13 @@ class AnythingLLMReportRagAdapter:
                         "global_document_delete",
                         success=False,
                         external_ref=location,
+                        failure_stage="cleanup_transport",
+                        error_message=cleanup_error,
+                    )
+                for _token_value in reversed(cleanup.folder_cleanup_tokens):
+                    record(
+                        "global_document_folder_delete",
+                        success=False,
                         failure_stage="cleanup_transport",
                         error_message=cleanup_error,
                     )
@@ -624,6 +653,49 @@ class AnythingLLMReportRagAdapter:
                     raise AnythingLLMProtocolError(
                         "上传结果缺少文档 location 或 document_ref"
                     )
+            except AnythingLLMUploadRejectedError as exc:
+                message = self._safe_error(
+                    exc,
+                    fallback="报告文档上传不符合单 Sheet 协议",
+                )
+                self._record_lifecycle(
+                    state,
+                    "document_upload",
+                    success=False,
+                    failure_stage="document_upload",
+                    error_message=message,
+                )
+                if exc.cleanup_attempted:
+                    self._record_lifecycle(
+                        state,
+                        "global_document_folder_delete",
+                        success=exc.cleanup_confirmed,
+                        failure_stage=(
+                            None
+                            if exc.cleanup_confirmed
+                            else "document_upload_cleanup_outcome_unknown"
+                        ),
+                        error_message=(
+                            None
+                            if exc.cleanup_confirmed
+                            else "XLSX 多 Sheet 上传清理结果未确认"
+                        ),
+                    )
+                if (
+                    exc.folder_cleanup_token
+                    and exc.cleanup_attempted
+                    and not exc.cleanup_confirmed
+                ):
+                    state.folder_cleanup_tokens.append(exc.folder_cleanup_token)
+                raise _StageFailure(
+                    (
+                        "document_upload"
+                        if exc.cleanup_confirmed
+                        else "document_upload_cleanup_outcome_unknown"
+                    ),
+                    message,
+                    external_outcome_unknown=not exc.cleanup_confirmed,
+                ) from exc
             except Exception as exc:
                 self._fail_lifecycle(
                     state,
@@ -867,7 +939,13 @@ class AnythingLLMReportRagAdapter:
             for document in state.documents
             if str(getattr(document, "location", "") or "").strip()
         )
-        if not state.context_ref and not state.conversation_ref and not locations:
+        folder_cleanup_tokens = tuple(state.folder_cleanup_tokens)
+        if (
+            not state.context_ref
+            and not state.conversation_ref
+            and not locations
+            and not folder_cleanup_tokens
+        ):
             return None
         payload = {
             "version": _CLEANUP_TOKEN_VERSION,
@@ -875,6 +953,7 @@ class AnythingLLMReportRagAdapter:
             "context_ref": state.context_ref,
             "conversation_ref": state.conversation_ref,
             "document_locations": list(locations),
+            "folder_cleanup_tokens": list(folder_cleanup_tokens),
         }
         encoded = base64.urlsafe_b64encode(
             json.dumps(
@@ -888,8 +967,18 @@ class AnythingLLMReportRagAdapter:
 
     @staticmethod
     def _decode_cleanup_ref(cleanup_ref: ReportRagCleanupRef) -> _CleanupState:
-        prefix = f"v{_CLEANUP_TOKEN_VERSION}."
-        if not cleanup_ref.value.startswith(prefix):
+        version: int | None = None
+        prefix = ""
+        for candidate in (
+            _CLEANUP_TOKEN_VERSION,
+            _LEGACY_CLEANUP_TOKEN_VERSION,
+        ):
+            candidate_prefix = f"v{candidate}."
+            if cleanup_ref.value.startswith(candidate_prefix):
+                version = candidate
+                prefix = candidate_prefix
+                break
+        if version is None:
             raise ValueError("不支持的报告 RAG cleanup reference 版本")
         try:
             raw = base64.b64decode(
@@ -907,9 +996,11 @@ class AnythingLLMReportRagAdapter:
             "conversation_ref",
             "document_locations",
         }
+        if version == _CLEANUP_TOKEN_VERSION:
+            expected_keys.add("folder_cleanup_tokens")
         if not isinstance(payload, dict) or set(payload) != expected_keys:
             raise ValueError("报告 RAG cleanup reference 结构无效")
-        if payload["version"] != _CLEANUP_TOKEN_VERSION:
+        if payload["version"] != version:
             raise ValueError("报告 RAG cleanup reference 版本冲突")
         next_sequence = payload["next_sequence"]
         if (
@@ -935,13 +1026,38 @@ class AnythingLLMReportRagAdapter:
         normalized_locations = tuple(item.strip() for item in locations)
         if len(set(normalized_locations)) != len(normalized_locations):
             raise ValueError("报告 RAG cleanup reference 包含重复文档")
+        raw_folder_tokens = (
+            payload["folder_cleanup_tokens"]
+            if version == _CLEANUP_TOKEN_VERSION
+            else []
+        )
+        if (
+            not isinstance(raw_folder_tokens, list)
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in raw_folder_tokens
+            )
+        ):
+            raise ValueError("报告 RAG cleanup reference 文件夹集合无效")
+        folder_cleanup_tokens = tuple(item.strip() for item in raw_folder_tokens)
+        if len(set(folder_cleanup_tokens)) != len(folder_cleanup_tokens):
+            raise ValueError("报告 RAG cleanup reference 包含重复文件夹 token")
+        try:
+            for token_value in folder_cleanup_tokens:
+                XlsxFolderCleanupToken(token_value).parse()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "报告 RAG cleanup reference 包含无效文件夹 token"
+            ) from exc
         context_ref = optional_text(payload["context_ref"], "context_ref")
         conversation_ref = optional_text(
             payload["conversation_ref"],
             "conversation_ref",
         )
         if context_ref is None and (
-            conversation_ref is not None or normalized_locations
+            conversation_ref is not None
+            or normalized_locations
+            or folder_cleanup_tokens
         ):
             raise ValueError("报告 RAG cleanup reference 资源层级无效")
         return _CleanupState(
@@ -949,6 +1065,7 @@ class AnythingLLMReportRagAdapter:
             context_ref=context_ref,
             conversation_ref=conversation_ref,
             document_locations=normalized_locations,
+            folder_cleanup_tokens=folder_cleanup_tokens,
         )
 
     def _record_deferred_close_failure(
@@ -1079,13 +1196,24 @@ class AnythingLLMReportRagAdapter:
         # 普通业务/测试 RuntimeError 不会被误判为远端副作用未知。
         return isinstance(error, AnythingLLMTransportError)
 
+    def _delete_global_document_artifact(
+        self,
+        client: AnythingLLMDocumentClient,
+        location: str,
+    ) -> None:
+        """保持普通删除合同，仅对严格 nested XLSX 切换到文件夹级清理。"""
+        if parse_xlsx_sheet_location(location) is not None:
+            client.delete_document_artifact(location, user_id=self._user_id)
+            return
+        client.delete_document(location, user_id=self._user_id)
+
     @staticmethod
     def _cleanup_action(
         action: Callable[[], None],
         *,
         record: Callable[..., None],
         operation: str,
-        external_ref: str,
+        external_ref: str | None,
         failure_stage: str,
     ) -> None:
         try:

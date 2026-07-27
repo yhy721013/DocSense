@@ -190,6 +190,16 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 1. `/llm/analysis`
    - 同请求可提交最多 32 个文件，服务端按数组顺序串行执行；整个 JSON 请求体最大 64 MiB，超出时同步返回 HTTP `413`。
    - 支持 `mhtml/mht`，会先归一化正文再进入解析。
+   - 可选支持 Microsoft Office 97–2003 二进制文件：`.doc → .docx`、`.ppt → .pptx`、
+     `.xls → .xlsx`。服务端在下载后、上传 AnythingLLM 前使用本机 LibreOffice headless
+     转换；甲方请求、进度、任务查询、回调、知识库来源名和 `fileName`/`originalFileName`/
+     `format`/`dataFormat` 均继续使用业务原值，内部 OOXML 文件名不会对外返回。功能默认关闭；
+     关闭时 legacy 文件明确进入既有失败合同，不会原样上传。
+   - XLS/XLSX 当前只支持**恰好一个可解析工作表**。AnythingLLM 返回多个 Sheet 文档时，
+     服务端会明确拒绝该文件并清理本次上传的完整内部文件夹，不会静默只使用第一张表。
+     同一 `fileName` 的新版本成功入库后，只从当前知识库解绑旧 Sheet，不全局删除旧
+     Collector 文件夹，以免破坏历史对话或其他仍在引用旧版本的位置；旧文件夹可能继续
+     占用 AnythingLLM 存储，当前版本不提供引用计数式自动回收。
    - 扫描件 PDF 在 `/llm/analysis` 中默认先经 MinerU 解析为 Markdown，再上传到 AnythingLLM；MinerU 失败时降级为既有 OCR Markdown，再失败才直传原 PDF。
    - `params[].originalFileName` 表示业务原始文件名；服务端保留其请求原值，除作为文件解析提示词上下文外，还用于知识谱系回调中的来源展示。
    - `params[].channel` 表示资料来源机构候选范围（字典编码），服务端只使用请求中提供的候选，不再注入“装发、军情、科技、训练”等默认值；未传、传空数组或没有有效候选对象时，Prompt 要求模型输出空字符串，回调 `data.channel` 也返回空字符串。
@@ -220,7 +230,18 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 2. `/llm/generate-report`
    - `filePathList` 支持多文件，统一汇总后生成 HTML 报告。
    - `mhtml/mht` 文件会先归一化再参与报告生成。
+   - 启用 Legacy Office 转换后，`filePathList` 也支持 `.doc/.ppt/.xls`，按原顺序转换为
+     `.docx/.pptx/.xlsx` 后作为报告来源上传；任一 legacy 来源转换失败时报告整体按既有
+     `status="2"` 失败回调收口，不会进入 MHTML 原文件回退。
+   - 报告中的 XLS/XLSX 来源同样只接受单工作表；多工作表会使整个报告按既有失败合同
+     收口，并清理本次电子表格上传产生的全部临时 Sheet 资源。
+   - 模型若在报告内容中返回本次任务的内部上传名，服务端会在最终 HTML、任务结果和
+     callback 落库前，将其替换为对应 `filePathList` URL path 的安全末段文件名；
+     query/fragment 不参与展示。安全文件名只允许 Unicode 字母、数字、组合标记及
+     `.`、`_`、`-`；文件名为空或包含其他字符时回退为“来源文件N”。内部审计 trace
+     仍保留模型原始内容。
    - `templateOutline` 表示 Word 模板文件下载地址；服务端会下载 `.docx` 模板并提取其中的文字内容作为报告大纲要求，再进入原有报告生成流程。
+   - `.doc` 不支持作为 `templateOutline`；本轮不会隐式转换报告模板。
    - 当前公开路由已使用 `SubmitReportTask`/`RunReportTask(task_id)` 和任务级 Report RAG、
      Audit、Callback、Artifact、Resource Adapter。RAG 空内容继续按已确认兼容契约生成空 HTML
      并成功回调，但会记录内部可观测标记；临时 RAG 资源和本地产物均进入持久恢复闭环。
@@ -308,6 +329,12 @@ python -m pip install -r requirements.txt
 
 扫描 PDF 的内置 OCR 还依赖系统安装的 Tesseract 及所配置语言的数据包；`requirements.txt` 只安装 Python 依赖，不安装这些系统组件。默认 analysis 扫描件引擎为 MinerU，需要相应的本地运行环境，或通过 `DOCSENSE_MINERU_API_URL` 复用外部 MinerU API；MinerU 或内置 OCR 失败时，代码会按既有降级链路继续处理原 PDF。
 
+Office 97–2003 支持依赖本机稳定版 LibreOffice 26.2.x，且默认不启用。DocSense 不会在
+启动或任务执行时自动下载/安装 LibreOffice。仓库中的
+[Legacy Office 离线交付说明](scripts/legacy_office/README.md) 提供固定 26.2.5 的
+官方下载、SHA-256 校验、离线打包、安装和 preflight 流程；实际安装包、smoke 样本和
+最终包只写入 Git 已忽略的 `dist/legacy-office/`。
+
 2. 配置环境变量（建议使用 `.env`）
 
 启动代码当前直接读取以下变量且未在代码中提供兜底值，使用 `run.py` 前必须通过环境变量或 `.env` 配置：
@@ -338,6 +365,42 @@ python -m pip install -r requirements.txt
 - `DOCSENSE_REASSIGN_RUNTIME_MODE`：分类节点变更运行模式，当前唯一允许值为 `single_instance`。
   SQLite lease 使用进程本地时钟，配置为其他值会在装配阶段 fail-fast；迁移到数据库权威时间并完成
   跨实例 fencing 验证前，不得把该模块作为多实例运行链启用。
+- `DOCSENSE_LEGACY_OFFICE_ENABLED`：Legacy Office 转换总开关，默认 `false`。关闭时
+  不探测 LibreOffice，但 `.doc/.ppt/.xls` 任务会明确失败，禁止原样上传。
+- `DOCSENSE_LIBREOFFICE_EXECUTABLE`：可选的 `soffice` 绝对路径；为空时依次检查
+  Windows/macOS 标准安装路径和 `PATH`。
+- `DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES=26.2`：允许的稳定版本系列。
+  功能开启后，应用在公开路由/后台线程启动前执行 `--version` 门禁；缺失、
+  `LibreOfficeDev`、空值或非 26.2.x 均 fail-fast。
+- `DOCSENSE_LEGACY_OFFICE_TIMEOUT_SECONDS=120` 与
+  `DOCSENSE_LEGACY_OFFICE_MAX_CONCURRENCY=1`：单次转换超时和进程内并发上限。
+- `DOCSENSE_LEGACY_OFFICE_MAX_INPUT_BYTES=536870912` 与
+  `DOCSENSE_LEGACY_OFFICE_MAX_OUTPUT_BYTES=1073741824`：内部输入/输出安全上限，
+  默认分别为 512 MiB 和 1 GiB。任务私有目录固定派生为
+  `${DOCSENSE_RUNTIME_DIR}/office_conversion/jobs`，不使用持久转换缓存。
+
+Legacy Office 转换只按甲方保证正确的后缀路由，并额外校验 OLE2 文件签名。零字节、
+伪造后缀、密码保护、损坏文件、超时、非零退出、缺少/多个产物、超限或 OOXML ZIP
+结构不完整均 fail-closed。每次任务使用固定短输入名、独立 LibreOffice profile 和独立
+输出目录；宏安全设为最高级，加载时禁止更新外链，不配置可信目录，输出只允许非宏
+OOXML。OOXML 完整性校验在隔离子进程内执行，并在读取中央目录前按 ZIP/ZIP64 尾部
+元数据预检：固定最多 100,000 个成员、中央目录最多 64 MiB；后续校验固定最多
+120 秒，且成员声明的解压总量不得超过 4 GiB。这些门禁均不可通过环境变量放宽。
+宏、ActiveX、嵌入对象、动画和
+媒体不会执行，也不承诺完整保留。
+
+转换质量验收只要求与同内容直接上传 `.docx/.pptx/.xlsx` 的现有链路等价，不额外承诺
+PPT notes/OCR、XLS 公式计算结果/隐藏内容、动画/媒体，或三种 legacy 格式的
+`originalText` 全部非空。XLS/XLSX 只接受恰好一个可解析工作表，多工作表
+fail-closed。本轮交付平台为 Windows x64 与 macOS Apple Silicon；Windows 尚未实机认证。
+Docker、macOS Intel、Windows ARM64 和 `.doc` 报告模板不在范围。
+
+实现与交付依据为 LibreOffice 官方的
+[启动参数](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html)、
+[转换 filter](https://help.libreoffice.org/latest/en-US/text/shared/guide/convertfilters.html)、
+[宏安全](https://help.libreoffice.org/latest/en-US/text/shared/optionen/macrosecurity_sl.html)、
+[外链更新策略](https://help.libreoffice.org/latest/en-GB/text/shared/optionen/01040900.html)
+和[官方下载](https://www.libreoffice.org/download/)说明。
 
 在 macOS 上复制 `.env.example` 后，必须将其中启用的 Windows 路径 `DOCSENSE_RUNTIME_DIR=C:/DocSenseRuntime` 改为 macOS 绝对路径，或注释/删除该行以使用仓库根目录 `.runtime`；其他平台相关路径也应按实际环境调整。
 
@@ -429,6 +492,7 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 - 下载缓存：`${DOCSENSE_RUNTIME_DIR}/llm_downloads/`
 - OCR Markdown 缓存：`${DOCSENSE_RUNTIME_DIR}/ocr_markdown/`
 - MinerU Markdown 缓存：`${DOCSENSE_RUNTIME_DIR}/mineru_markdown/`
+- Legacy Office 临时任务：`${DOCSENSE_RUNTIME_DIR}/office_conversion/jobs/`
 - 回调历史：`${DOCSENSE_RUNTIME_DIR}/callback/`
 - SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
 - 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`

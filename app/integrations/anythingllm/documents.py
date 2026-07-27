@@ -7,21 +7,31 @@ Processor 暂时不可用错误，避免自动重放其他可能产生副作用�
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
+from urllib.parse import quote
 
 from app.integrations.anythingllm.errors import (
+    AnythingLLMCleanupUncertainError,
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
+    AnythingLLMTransportError,
+    AnythingLLMUploadRejectedError,
 )
 from app.integrations.anythingllm.models import (
     AnythingLLMDocument,
+    first_text,
+    normalize_document_location_key,
     normalize_document_path,
+    parse_xlsx_sheet_location,
     require_mapping,
+    require_sequence,
 )
 from app.integrations.anythingllm.policies import (
     DEFAULT_UPLOAD_RETRIES,
@@ -33,6 +43,91 @@ from app.integrations.anythingllm.transport import AnythingLLMTransport
 
 
 logger = logging.getLogger(__name__)
+
+
+_XLSX_FOLDER_CLEANUP_TOKEN_VERSION = 1
+
+
+@dataclass(frozen=True)
+class _XlsxFolderCleanupScope:
+    """严格解析后的单次 XLSX Collector 目录所有权快照。"""
+
+    folder_name: str
+    member_locations: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class XlsxFolderCleanupToken:
+    """只供 AnythingLLM 集成层恢复使用的 opaque 文件夹清理凭据。"""
+
+    value: str
+
+    @classmethod
+    def issue(cls, locations: Sequence[str]) -> "XlsxFolderCleanupToken":
+        """从同一次可信上传响应签发成员集合固定的清理 token。"""
+        normalized_locations: list[str] = []
+        folder_name = ""
+        for location in tuple(locations):
+            parsed = parse_xlsx_sheet_location(location)
+            if parsed is None:
+                raise ValueError("XLSX 清理成员位置不符合受控 Sheet 结构")
+            normalized_location, current_folder, _sheet_file = parsed
+            if folder_name and current_folder != folder_name:
+                raise ValueError("XLSX 清理成员不属于同一顶层目录")
+            folder_name = current_folder
+            normalized_locations.append(normalized_location)
+        if not normalized_locations:
+            raise ValueError("XLSX 清理成员不能为空")
+        if len(set(normalized_locations)) != len(normalized_locations):
+            raise ValueError("XLSX 清理成员包含重复位置")
+        ordered_locations = tuple(sorted(normalized_locations))
+        payload = {
+            "folder_name": folder_name,
+            "member_locations": list(ordered_locations),
+            "version": _XLSX_FOLDER_CLEANUP_TOKEN_VERSION,
+        }
+        encoded = base64.urlsafe_b64encode(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).decode("ascii")
+        return cls(f"v{_XLSX_FOLDER_CLEANUP_TOKEN_VERSION}.{encoded}")
+
+    def parse(self) -> _XlsxFolderCleanupScope:
+        """重新校验 token 结构、路径语法与规范编码，拒绝调用方伪造范围。"""
+        prefix = f"v{_XLSX_FOLDER_CLEANUP_TOKEN_VERSION}."
+        if not isinstance(self.value, str) or not self.value.startswith(prefix):
+            raise ValueError("XLSX 清理 token 版本无效")
+        try:
+            raw = base64.b64decode(
+                self.value[len(prefix) :].encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("XLSX 清理 token 无法解码") from exc
+        expected_keys = {"folder_name", "member_locations", "version"}
+        if not isinstance(payload, dict) or set(payload) != expected_keys:
+            raise ValueError("XLSX 清理 token 结构无效")
+        if payload["version"] != _XLSX_FOLDER_CLEANUP_TOKEN_VERSION:
+            raise ValueError("XLSX 清理 token 版本冲突")
+        folder_name = payload["folder_name"]
+        member_locations = payload["member_locations"]
+        if not isinstance(folder_name, str) or not isinstance(member_locations, list):
+            raise ValueError("XLSX 清理 token 字段类型无效")
+        if any(not isinstance(item, str) for item in member_locations):
+            raise ValueError("XLSX 清理 token 成员类型无效")
+        canonical = self.issue(member_locations)
+        if canonical.value != self.value:
+            raise ValueError("XLSX 清理 token 不是规范编码")
+        return _XlsxFolderCleanupScope(
+            folder_name=folder_name,
+            member_locations=tuple(member_locations),
+        )
 
 
 class AnythingLLMDocumentClient:
@@ -130,7 +225,7 @@ class AnythingLLMDocumentClient:
                         "document/upload",
                         **request_kwargs,
                     )
-                document = self._parse_upload_response(body)
+                document = self._parse_upload_response(body, user_id=user_id)
                 logger.info(
                     "AnythingLLM 文档上传完成: file_name=%s has_document_id=%s "
                     "has_document_location=%s has_document_ref=%s attempt=%d",
@@ -244,15 +339,344 @@ class AnythingLLMDocumentClient:
             user_id is not None,
         )
 
-    def _parse_upload_response(self, value: Any) -> AnythingLLMDocument:
-        """严格解析上传响应，不允许根据文件名猜测缺失的内部位置。"""
+    def delete_document_artifact(
+        self,
+        location: str,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        """按上传产物类型安全删除一个业务文件拥有的全局 Artifact。
+
+        普通 ``custom-documents`` 完全复用既有 ``delete_document`` 合同。严格匹配的
+        AnythingLLM 1.15.0 单 Sheet XLSX location 则转换为成员集合只有该 Sheet 的 opaque
+        token，并在删除前通过 folder-list 核对目录没有成员漂移。
+        """
+        xlsx_location = parse_xlsx_sheet_location(location)
+        if xlsx_location is None:
+            self.delete_document(location, user_id=user_id)
+            return
+        token = XlsxFolderCleanupToken.issue((xlsx_location[0],))
+        self.delete_xlsx_folder(token, user_id=user_id)
+
+    def delete_xlsx_folder(
+        self,
+        token: XlsxFolderCleanupToken,
+        *,
+        user_id: int | None = None,
+    ) -> None:
+        """使用严格 opaque token 删除一次 XLSX 上传产生的完整 Collector 目录。
+
+        该方法拒绝原始路径字符串。删除前必须由 folder-list 返回与 token 完全相同的成员
+        集合；若目标已不存在，则再通过根 documents 列表确认目录确实缺失。端点缺失、成员
+        漂移、网络结果不明或非 ``success=true`` 都按不确定清理失败处理。
+        """
+        if not isinstance(token, XlsxFolderCleanupToken):
+            raise TypeError("token 必须是 XlsxFolderCleanupToken")
+        scope = token.parse()
+        try:
+            current_members = self._list_xlsx_folder_members(
+                scope.folder_name,
+                user_id=user_id,
+            )
+        except AnythingLLMHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            try:
+                folder_absent = self._folder_absent_from_root(
+                    scope.folder_name,
+                    user_id=user_id,
+                )
+            except Exception as reconcile_exc:
+                raise AnythingLLMCleanupUncertainError(
+                    "AnythingLLM XLSX 文件夹缺失状态无法确认"
+                ) from reconcile_exc
+            if folder_absent:
+                logger.info(
+                    "AnythingLLM XLSX 上传目录已不存在: cleanup_status=already_absent "
+                    "has_user_context=%s",
+                    user_id is not None,
+                )
+                return
+            raise AnythingLLMCleanupUncertainError(
+                "AnythingLLM folder-list 能力不可用，拒绝执行 XLSX 文件夹删除"
+            ) from exc
+        if current_members != scope.member_locations:
+            raise AnythingLLMCleanupUncertainError(
+                "AnythingLLM XLSX 文件夹成员集合已变化，拒绝执行破坏性删除"
+            )
+
+        logger.info(
+            "开始删除 AnythingLLM XLSX 上传目录: member_count=%d has_user_context=%s",
+            len(scope.member_locations),
+            user_id is not None,
+        )
+        try:
+            body = self._transport.delete_json(
+                "document/remove-folder",
+                {"name": scope.folder_name},
+                user_id=user_id,
+            )
+        except AnythingLLMTransportError as exc:
+            # 删除请求可能已到达上游。只有重新读取根目录能证明目标已消失时，才把结果提升
+            # 为确定成功；任何二次读取失败或目录仍在都必须保留“不确定”语义。
+            try:
+                absent = self._folder_absent_from_root(
+                    scope.folder_name,
+                    user_id=user_id,
+                )
+            except Exception:
+                absent = False
+            if absent:
+                logger.warning(
+                    "AnythingLLM XLSX 文件夹删除响应不确定，但已确认目录不存在: "
+                    "cleanup_status=succeeded_after_reconcile"
+                )
+                return
+            raise AnythingLLMCleanupUncertainError(
+                "AnythingLLM XLSX 文件夹删除结果未确认"
+            ) from exc
+        payload = require_mapping(body, context="删除 XLSX 文件夹响应")
+        if payload.get("error") or payload.get("success") is not True:
+            raise AnythingLLMCleanupUncertainError(
+                "AnythingLLM 未确认 XLSX 文件夹已永久删除"
+            )
+        logger.info(
+            "AnythingLLM XLSX 上传目录删除完成: member_count=%d "
+            "has_user_context=%s",
+            len(scope.member_locations),
+            user_id is not None,
+        )
+
+    def _list_xlsx_folder_members(
+        self,
+        folder_name: str,
+        *,
+        user_id: int | None,
+    ) -> tuple[str, ...]:
+        """读取并严格规范化 folder-list 返回的直接 Sheet 成员。"""
+        requested_scope = XlsxFolderCleanupToken.issue(
+            (f"{folder_name}/sheet-placeholder.json",)
+        ).parse()
+        body = self._transport.get_json(
+            "documents/folder/"
+            f"{quote(requested_scope.folder_name, safe='')}",
+            user_id=user_id,
+        )
+        payload = require_mapping(body, context="XLSX folder-list 响应")
+        returned_folder = first_text(payload, "folder")
+        if returned_folder != requested_scope.folder_name or payload.get("error"):
+            raise AnythingLLMProtocolError(
+                "AnythingLLM XLSX folder-list 返回了不一致的目录"
+            )
+        documents = require_sequence(
+            payload.get("documents"),
+            context="XLSX folder-list documents 字段",
+        )
+        members: list[str] = []
+        for index, item in enumerate(documents):
+            record = require_mapping(item, context=f"XLSX folder-list 成员 {index}")
+            location = first_text(record, "location", "docpath", "docPath")
+            name = first_text(record, "name", "filename", "fileName")
+            if location:
+                parsed = parse_xlsx_sheet_location(location)
+            elif name:
+                parsed = parse_xlsx_sheet_location(
+                    f"{requested_scope.folder_name}/{name}"
+                )
+            else:
+                parsed = None
+            if parsed is None or parsed[1] != requested_scope.folder_name:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM XLSX folder-list 包含无效成员"
+                )
+            if location and name and parsed[2] != name:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM XLSX folder-list 成员名称与位置冲突"
+                )
+            members.append(parsed[0])
+        if len(set(members)) != len(members):
+            raise AnythingLLMProtocolError(
+                "AnythingLLM XLSX folder-list 包含重复成员"
+            )
+        return tuple(sorted(members))
+
+    def _folder_absent_from_root(
+        self,
+        folder_name: str,
+        *,
+        user_id: int | None,
+    ) -> bool:
+        """通过根 documents 列表确认目标顶层目录是否已经不存在。"""
+        requested_scope = XlsxFolderCleanupToken.issue(
+            (f"{folder_name}/sheet-placeholder.json",)
+        ).parse()
+        body = self._transport.get_json("documents", user_id=user_id)
+        payload = require_mapping(body, context="documents 根列表响应")
+        local_files = require_mapping(
+            payload.get("localFiles"),
+            context="documents 根列表 localFiles 字段",
+        )
+        items = require_sequence(
+            local_files.get("items"),
+            context="documents 根列表 items 字段",
+        )
+        for index, item in enumerate(items):
+            record = require_mapping(item, context=f"documents 根列表成员 {index}")
+            if (
+                first_text(record, "name").casefold()
+                == requested_scope.folder_name.casefold()
+            ):
+                return False
+        return True
+
+    def _parse_upload_response(
+        self,
+        value: Any,
+        *,
+        user_id: int | None,
+    ) -> AnythingLLMDocument:
+        """完整解析上传响应，并把 XLSX 单 Sheet 边界收口在原子客户端。"""
         payload = require_mapping(value, context="文档上传响应")
         documents = payload.get("documents")
         if not isinstance(documents, list) or not documents:
             raise AnythingLLMProtocolError(
                 "AnythingLLM 文档上传响应缺少非空 documents 数组"
             )
-        return AnythingLLMDocument.from_payload(documents[0])
+
+        # 先冻结全部成员和 location，再解析需要 id 等字段的 DTO。只要响应已经精确证明
+        # 所有非重复成员属于同一受控 XLSX Collector 目录，就必须先签发恢复 token；
+        # 否则后续某个成员缺少 id 时会丢失唯一安全的目录清理边界。
+        records: list[Mapping[str, Any]] = []
+        raw_locations: list[str] = []
+        try:
+            for index, item in enumerate(documents):
+                record = require_mapping(item, context=f"文档上传成员 {index}")
+                records.append(record)
+                raw_locations.append(
+                    first_text(record, "location", "docpath", "docPath")
+                )
+        except AnythingLLMProtocolError as exc:
+            raise AnythingLLMUploadRejectedError(
+                "AnythingLLM 文档上传响应包含空或畸形成员"
+            ) from exc
+
+        location_keys = tuple(
+            normalize_document_location_key(location)
+            for location in raw_locations
+        )
+        if any(not location for location in location_keys):
+            raise AnythingLLMUploadRejectedError(
+                "AnythingLLM 文档上传响应包含空位置"
+            )
+        if len(set(location_keys)) != len(location_keys):
+            raise AnythingLLMUploadRejectedError(
+                "AnythingLLM 文档上传响应包含重复位置"
+            )
+
+        xlsx_locations = tuple(
+            parse_xlsx_sheet_location(location) for location in raw_locations
+        )
+        trusted_xlsx_cleanup_token: XlsxFolderCleanupToken | None = None
+        if all(item is not None for item in xlsx_locations):
+            try:
+                trusted_xlsx_cleanup_token = XlsxFolderCleanupToken.issue(
+                    raw_locations
+                )
+            except ValueError:
+                # 全部成员虽然各自符合 Sheet 路径语法，但不属于同一顶层目录。此时不能
+                # 猜测任一目录拥有完整上传结果，后续保持 fail-closed 且不发起删除。
+                trusted_xlsx_cleanup_token = None
+
+        parsed_documents: list[AnythingLLMDocument] = []
+        try:
+            parsed_documents.extend(
+                AnythingLLMDocument.from_payload(record) for record in records
+            )
+        except AnythingLLMProtocolError as exc:
+            if trusted_xlsx_cleanup_token is None:
+                raise AnythingLLMUploadRejectedError(
+                    "AnythingLLM 文档上传响应包含空或畸形成员"
+                ) from exc
+            try:
+                self.delete_xlsx_folder(
+                    trusted_xlsx_cleanup_token,
+                    user_id=user_id,
+                )
+            except Exception as cleanup_exc:
+                logger.error(
+                    "AnythingLLM XLSX 上传响应成员畸形，且整批清理结果未确认: "
+                    "sheet_count=%d cleanup_attempted=true "
+                    "cleanup_confirmed=false error_type=%s",
+                    len(records),
+                    type(cleanup_exc).__name__,
+                )
+                raise AnythingLLMUploadRejectedError(
+                    "AnythingLLM XLSX 上传响应包含畸形成员，且整批清理结果未确认",
+                    cleanup_attempted=True,
+                    cleanup_confirmed=False,
+                    folder_cleanup_token=trusted_xlsx_cleanup_token.value,
+                ) from cleanup_exc
+            logger.warning(
+                "AnythingLLM XLSX 上传响应成员畸形，已完成整批清理: "
+                "sheet_count=%d cleanup_attempted=true cleanup_confirmed=true",
+                len(records),
+            )
+            raise AnythingLLMUploadRejectedError(
+                "AnythingLLM XLSX 上传响应包含畸形成员",
+                cleanup_attempted=True,
+                cleanup_confirmed=True,
+                folder_cleanup_token=trusted_xlsx_cleanup_token.value,
+            ) from exc
+
+        custom_documents = tuple(
+            location.startswith("custom-documents/") for location in location_keys
+        )
+        if all(custom_documents):
+            if len(parsed_documents) != 1:
+                raise AnythingLLMUploadRejectedError(
+                    "AnythingLLM 普通文档上传返回了多个文档成员"
+                )
+            return parsed_documents[0]
+        if not all(item is not None for item in xlsx_locations):
+            raise AnythingLLMUploadRejectedError(
+                "AnythingLLM 文档上传响应混合了不同产物结构"
+            )
+
+        token = trusted_xlsx_cleanup_token
+        if token is None:
+            raise AnythingLLMUploadRejectedError(
+                "AnythingLLM XLSX 上传响应包含混合顶层目录"
+            )
+        if len(parsed_documents) == 1:
+            return parsed_documents[0]
+
+        try:
+            self.delete_xlsx_folder(token, user_id=user_id)
+        except Exception as exc:
+            logger.error(
+                "AnythingLLM 多 Sheet XLSX 已拒绝，但整批清理结果未确认: "
+                "sheet_count=%d cleanup_attempted=true cleanup_confirmed=false "
+                "error_type=%s",
+                len(parsed_documents),
+                type(exc).__name__,
+            )
+            raise AnythingLLMUploadRejectedError(
+                "当前仅支持单 Sheet XLSX，且多 Sheet 上传清理结果未确认",
+                cleanup_attempted=True,
+                cleanup_confirmed=False,
+                folder_cleanup_token=token.value,
+            ) from exc
+        logger.warning(
+            "AnythingLLM 多 Sheet XLSX 已拒绝并完成整批清理: "
+            "sheet_count=%d cleanup_attempted=true cleanup_confirmed=true",
+            len(parsed_documents),
+        )
+        raise AnythingLLMUploadRejectedError(
+            "当前仅支持单 Sheet XLSX",
+            cleanup_attempted=True,
+            cleanup_confirmed=True,
+            folder_cleanup_token=token.value,
+        )
 
     def _can_retry_processor_error(
         self,

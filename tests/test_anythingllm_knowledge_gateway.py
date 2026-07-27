@@ -35,6 +35,7 @@ from app.services.llm_service.knowledge_index_operation_service import (
     STATUS_COMPENSATION_FAILED,
     STATUS_EXTERNAL_SUCCEEDED,
     STATUS_EXTERNAL_DETACHED,
+    STATUS_SUPERSEDED,
 )
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
@@ -63,6 +64,7 @@ class _KnowledgeGatewayHarness:
         self._upload_sequence = 0
         self.document_client.upload_document.side_effect = self._upload
         self.document_client.delete_document.side_effect = self._delete_global
+        self.document_client.delete_document_artifact.side_effect = self._delete_global
         self.workspace_client.update_embeddings.side_effect = self._update_embeddings
         self.workspace_client.find_document.side_effect = self._find_document
         self.gateway = AnythingLLMKnowledgeGateway(
@@ -258,6 +260,55 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
             self.assertEqual(operation.status, STATUS_COMMITTED)
             self.assertEqual(operation.metadata["ingested_file_name"], "hash.pdf")
 
+    def test_single_sheet_xlsx_transfer_accepts_workspace_payload_id_change(self):
+        """同一 nested location 的 Workspace 新 docId 不得阻断永久转交。"""
+        with workspace_tempdir() as tmp:
+            harness = _KnowledgeGatewayHarness(Path(tmp))
+            location = "prepared-hash.xlsx-6f2a/sheet-summary.json"
+            uploaded = AnythingLLMDocument.from_payload(
+                {"id": "collector-sheet-id", "location": location}
+            )
+            harness._global_documents[location] = uploaded
+            prepared = PreparedDocumentRef(
+                document_ref=uploaded.document_ref,
+                external_location=location,
+                content_sha256="b" * 64,
+                ingested_file_name="prepared-hash.xlsx",
+            )
+
+            def find_with_workspace_id(
+                _workspace_slug: str,
+                requested_location: str,
+                **_kwargs,
+            ) -> AnythingLLMDocument | None:
+                if requested_location not in harness._bound_documents:
+                    return None
+                return AnythingLLMDocument.from_payload(
+                    {
+                        "docId": "workspace-generated-id",
+                        "docpath": requested_location,
+                    }
+                )
+
+            harness.workspace_client.find_document.side_effect = find_with_workspace_id
+
+            result = harness.gateway.store_prepared_document(
+                harness.collection,
+                prepared,
+                harness.metadata(),
+                operation_context=harness.context(),
+                idempotency_key="xlsx-single-sheet",
+            )
+
+            self.assertTrue(result.created)
+            self.assertEqual(uploaded.document_ref, result.document_ref)
+            record = harness.database_service.get_document_record(
+                "hash.pdf",
+                architecture_id=100,
+            )
+            self.assertEqual(location, record["doc_path"])
+            harness.document_client.delete_document_artifact.assert_not_called()
+
     def test_exact_replay_reuses_committed_operation(self):
         """相同幂等键的第二次提交必须复用，不重复绑定或 Pin。"""
         with workspace_tempdir() as tmp:
@@ -351,6 +402,74 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                     idempotency_key="version-one",
                 )
             )
+
+    def test_replacing_single_sheet_xlsx_preserves_global_folder_artifact(self):
+        """XLSX 旧版本只从当前 Workspace 解绑，全局目录保留且新版本正常提交。"""
+        with workspace_tempdir() as tmp:
+            harness = _KnowledgeGatewayHarness(Path(tmp))
+            old_location = "prepared-old.xlsx-6f2a/sheet-summary.json"
+            old_document = AnythingLLMDocument.from_payload(
+                {"id": "collector-old", "location": old_location}
+            )
+            harness._global_documents[old_location] = old_document
+            old_prepared = PreparedDocumentRef(
+                document_ref=old_document.document_ref,
+                external_location=old_location,
+                content_sha256="a" * 64,
+                ingested_file_name="prepared-old.xlsx",
+            )
+            harness.gateway.store_prepared_document(
+                harness.collection,
+                old_prepared,
+                harness.metadata(),
+                operation_context=harness.context(),
+                idempotency_key="xlsx-version-one",
+            )
+            new_location = "prepared-new.xlsx-7e3b/sheet-summary.json"
+            new_document = AnythingLLMDocument.from_payload(
+                {"id": "collector-new", "location": new_location}
+            )
+            harness._global_documents[new_location] = new_document
+            new_prepared = PreparedDocumentRef(
+                document_ref=new_document.document_ref,
+                external_location=new_location,
+                content_sha256="b" * 64,
+                ingested_file_name="prepared-new.xlsx",
+            )
+            harness.document_client.delete_document_artifact.side_effect = (
+                AssertionError("替换旧 XLSX 不应删除全局目录")
+            )
+
+            replaced = harness.gateway.store_prepared_document(
+                harness.collection,
+                new_prepared,
+                harness.metadata(),
+                operation_context=harness.context("execution-2"),
+                idempotency_key="xlsx-version-two",
+            )
+
+            harness.workspace_client.update_embeddings.assert_any_call(
+                harness.collection.ref,
+                deletes=(old_location,),
+                user_id=1,
+            )
+            harness.document_client.delete_document_artifact.assert_not_called()
+            self.assertIn(old_location, harness._global_documents)
+            self.assertNotIn(old_location, harness._bound_documents)
+            self.assertIn(new_prepared.external_location, harness._bound_documents)
+            self.assertEqual(new_prepared.document_ref, replaced.document_ref)
+            old_operation = harness.task_service.knowledge_index_operations.get(
+                harness.collection.ref,
+                "xlsx-version-one",
+            )
+            new_operation = harness.task_service.knowledge_index_operations.get(
+                harness.collection.ref,
+                "xlsx-version-two",
+            )
+            self.assertIsNotNone(old_operation)
+            self.assertIsNotNone(new_operation)
+            self.assertEqual(STATUS_SUPERSEDED, old_operation.status)
+            self.assertEqual(STATUS_COMMITTED, new_operation.status)
 
     def test_local_commit_failure_is_reconciled_without_rebinding(self):
         """外部成功后的本地瞬时失败必须只重试 SQLite 提交。"""

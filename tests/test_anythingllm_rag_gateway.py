@@ -18,10 +18,14 @@ _TEST_DIRECTORY = tempfile.TemporaryDirectory(prefix="docsense-rag-tests-")
 _SAMPLE_FILE_PATH = Path(_TEST_DIRECTORY.name) / "sample.pdf"
 _SAMPLE_FILE_PATH.write_bytes(b"offline rag test document")
 
-from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.documents import (
+    AnythingLLMDocumentClient,
+    XlsxFolderCleanupToken,
+)
 from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
+    AnythingLLMUploadRejectedError,
 )
 from app.integrations.anythingllm.models import (
     AnythingLLMAnswer,
@@ -717,6 +721,118 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
             harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("upload_protocol", raised.exception.trace.failure_stage)
+
+    def test_malformed_upload_without_cleanup_scope_is_audited_as_unknown(self) -> None:
+        """无法定位外部成员时必须保留 outcome-unknown，不得伪装成已清理。"""
+        harness = _GatewayHarness()
+        harness.document_client.upload_document.side_effect = (
+            AnythingLLMUploadRejectedError(
+                "上传响应包含畸形成员",
+                cleanup_attempted=False,
+                cleanup_confirmed=False,
+            )
+        )
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
+
+        self.assertEqual(
+            "upload_outcome_unknown",
+            raised.exception.trace.failure_stage,
+        )
+        upload_event = next(
+            event
+            for event in raised.exception.trace.lifecycle_events
+            if event.operation == "document_upload"
+        )
+        self.assertFalse(upload_event.success)
+        self.assertEqual("upload_outcome_unknown", upload_event.failure_stage)
+        harness.document_client.delete_document.assert_not_called()
+        harness.document_client.delete_document_artifact.assert_not_called()
+
+    def test_multi_sheet_confirmed_cleanup_is_audited_before_analysis_failure(self) -> None:
+        """多 Sheet 已整批删除时仍要失败，但不得留下待恢复 folder token。"""
+        harness = _GatewayHarness()
+        folder = "prepared-a.xlsx-6f2a"
+        token = XlsxFolderCleanupToken.issue(
+            (
+                f"{folder}/sheet-summary.json",
+                f"{folder}/sheet-details.json",
+            )
+        )
+        harness.document_client.upload_document.side_effect = (
+            AnythingLLMUploadRejectedError(
+                "当前仅支持单 Sheet XLSX",
+                cleanup_attempted=True,
+                cleanup_confirmed=True,
+                folder_cleanup_token=token.value,
+            )
+        )
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
+
+        self.assertEqual("upload_protocol", raised.exception.trace.failure_stage)
+        folder_event = next(
+            event
+            for event in raised.exception.trace.lifecycle_events
+            if event.operation == "global_document_folder_delete"
+        )
+        self.assertTrue(folder_event.success)
+        self.assertEqual(token.value, folder_event.external_ref)
+        cleanup = session.close(retain_document=False)
+        self.assertTrue(cleanup.success)
+        harness.document_client.delete_xlsx_folder.assert_not_called()
+
+    def test_multi_sheet_unknown_cleanup_is_retried_after_analysis_audit(self) -> None:
+        """首次结果未知时 Session close 必须使用 opaque token 恢复清理。"""
+        harness = _GatewayHarness()
+        folder = "prepared-a.xlsx-6f2a"
+        token = XlsxFolderCleanupToken.issue(
+            (
+                f"{folder}/sheet-summary.json",
+                f"{folder}/sheet-details.json",
+            )
+        )
+        harness.document_client.upload_document.side_effect = (
+            AnythingLLMUploadRejectedError(
+                "多 Sheet 清理结果未确认",
+                cleanup_attempted=True,
+                cleanup_confirmed=False,
+                folder_cleanup_token=token.value,
+            )
+        )
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
+
+        self.assertEqual(
+            "upload_outcome_unknown",
+            raised.exception.trace.failure_stage,
+        )
+        initial_folder_event = next(
+            event
+            for event in raised.exception.trace.lifecycle_events
+            if event.operation == "global_document_folder_delete"
+        )
+        self.assertFalse(initial_folder_event.success)
+        self.assertEqual(token.value, initial_folder_event.external_ref)
+        cleanup = session.close(retain_document=False)
+        self.assertTrue(cleanup.success)
+        recovered_folder_event = tuple(
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "global_document_folder_delete"
+        )[-1]
+        self.assertTrue(recovered_folder_event.success)
+        self.assertEqual(token.value, recovered_folder_event.external_ref)
+        harness.document_client.delete_xlsx_folder.assert_called_once_with(
+            XlsxFolderCleanupToken(token.value),
+            user_id=7,
+        )
 
     def test_embedding_missing_empty_or_conflicting_workspace_is_protocol_failure(self) -> None:
         """嵌入响应必须返回非空且与目标一致的工作区引用。"""

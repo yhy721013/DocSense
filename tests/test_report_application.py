@@ -19,6 +19,7 @@ from app.modules.report.domain import (
     REPORT_STATUS_SUCCEEDED,
     ReportAuditError,
     ReportId,
+    ReportInputError,
     ReportPortContractError,
     ReportSourceNormalizationError,
     ReportSubmission,
@@ -53,15 +54,20 @@ from tests.fakes import (
 )
 
 
-def _submission(*, source_count: int = 2) -> ReportSubmission:
+def _submission(
+    *,
+    source_count: int = 2,
+    source_urls: tuple[str, ...] | None = None,
+) -> ReportSubmission:
     """构造保留顺序与重复语义的报告提交命令。"""
 
+    resolved_source_urls = source_urls or tuple(
+        f"http://files.local/source-{index}.mhtml"
+        for index in range(1, source_count + 1)
+    )
     return ReportSubmission(
         report_id=ReportId.from_public_value(132),
-        source_urls=tuple(
-            f"http://files.local/source-{index}.mhtml"
-            for index in range(1, source_count + 1)
-        ),
+        source_urls=resolved_source_urls,
         template_outline_url="http://files.local/template.docx",
         template_desc="正式模板",
         requirement="完整生成报告",
@@ -72,7 +78,12 @@ def _submission(*, source_count: int = 2) -> ReportSubmission:
 class _ReportHarness:
     """为每个用例建立彼此隔离、无数据库/网络/文件的测试装配。"""
 
-    def __init__(self, *, source_count: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        source_count: int = 2,
+        source_urls: tuple[str, ...] | None = None,
+    ) -> None:
         self.recorder = InvocationRecorder()
         self.tasks = FakeReportTaskCommandPort(self.recorder)
         self.progress = FakeProgressPublisherPort(self.recorder)
@@ -91,7 +102,10 @@ class _ReportHarness:
             rag=self.rag,
             audit=self.audit,
         )
-        self.submission = _submission(source_count=source_count)
+        self.submission = _submission(
+            source_count=source_count,
+            source_urls=source_urls,
+        )
         self.submit_service = SubmitReportTask(
             task_commands=self.tasks,
             progress_publisher=self.progress,
@@ -301,6 +315,196 @@ class RunReportApplicationTests(unittest.TestCase):
         self.assertEqual(1, len(harness.audit.append_calls))
         self.assertEqual(1, len(harness.artifacts.cleanup_calls))
 
+    def test_public_report_uses_decoded_source_basename_after_raw_trace_audit(
+        self,
+    ) -> None:
+        harness = _ReportHarness(
+            source_urls=(
+                "https://files.local/archive/"
+                "%E9%A1%B9%E7%9B%AE%E6%96%B9%E6%A1%88.doc"
+                "?download_token=secret-value#private-fragment",
+            )
+        )
+        internal_id = "scratch/rag_input/0001-001.docx"
+        harness.files.prepare_results["source-0001:normalized"] = (
+            ReportArtifactRef(
+                harness.task_id,
+                internal_id,
+                ReportArtifactCategory.RAG_INPUT,
+                sequence_no=1,
+            ),
+        )
+        raw_content = (
+            "<section>依据 SCRATCH/RAG_INPUT/0001-001.DOCX，"
+            "补充见 0001-001.docx。</section>"
+        )
+        harness.rag.raw_content = raw_content
+
+        result = harness.run_service.execute(harness.task_id)
+
+        self.assertEqual(RunReportOutcome.SUCCEEDED, result.outcome)
+        audited_trace = harness.audit.persist_calls[0].trace
+        self.assertEqual(raw_content, audited_trace.attempts[-1].raw_response)
+        completion = harness.tasks.completion_calls[0].result
+        self.assertEqual(
+            "<section>依据 项目方案.doc，补充见 项目方案.doc。</section>",
+            completion.report_result.raw_content,
+        )
+        public_payload = harness.callbacks.delivery_calls[0].payload.to_public_dict()
+        public_details = public_payload["data"]["details"]
+        self.assertEqual(completion.report_result.html_details, public_details)
+        for private_value in (
+            "0001-001.docx",
+            "scratch/rag_input",
+            "download_token",
+            "secret-value",
+            "private-fragment",
+        ):
+            self.assertNotIn(private_value.casefold(), public_details.casefold())
+
+    def test_unsafe_source_names_fall_back_and_multiple_artifacts_keep_source_order(
+        self,
+    ) -> None:
+        harness = _ReportHarness(
+            source_urls=(
+                "https://files.local/path/",
+                "https://files.local/%3Cunsafe%3E.ppt?token=hidden",
+                "https://files.local/bad%ZZ.xls#hidden",
+            )
+        )
+        prepared_by_source = {
+            1: ("scratch/rag_input/0001-001.docx", "0001-002.pdf"),
+            2: ("scratch/rag_input/0002-001.pptx",),
+            3: ("scratch/rag_input/0003-001.xlsx",),
+        }
+        for sequence_no, artifact_ids in prepared_by_source.items():
+            harness.files.prepare_results[
+                f"source-{sequence_no:04d}:normalized"
+            ] = tuple(
+                ReportArtifactRef(
+                    harness.task_id,
+                    artifact_id,
+                    ReportArtifactCategory.RAG_INPUT,
+                    sequence_no=sequence_no,
+                )
+                for artifact_id in artifact_ids
+            )
+        raw_content = (
+            "<section>0001-001.DOCX|0001-002.pdf|"
+            "0002-001.pptx|0003-001.xlsx</section>"
+        )
+        harness.rag.raw_content = raw_content
+
+        result = harness.run_service.execute(harness.task_id)
+
+        self.assertEqual(RunReportOutcome.SUCCEEDED, result.outcome)
+        self.assertEqual(
+            [1, 1, 2, 3],
+            [
+                item.sequence_no
+                for item in harness.rag.requests[0].ordered_source_files
+            ],
+        )
+        completion = harness.tasks.completion_calls[0].result
+        self.assertEqual(
+            "<section>来源文件1|来源文件1|来源文件2|来源文件3</section>",
+            completion.report_result.raw_content,
+        )
+        self.assertEqual(
+            raw_content,
+            harness.audit.persist_calls[0].trace.attempts[-1].raw_response,
+        )
+        self.assertNotIn(
+            "token=hidden",
+            harness.callbacks.delivery_calls[0].payload.details,
+        )
+
+    def test_public_source_name_whitelist_blocks_html_attribute_and_scheme_injection(
+        self,
+    ) -> None:
+        harness = _ReportHarness(
+            source_urls=(
+                "https://files.local/x%20onerror%3Dalert(1).doc",
+                "https://files.local/javascript%3Aalert(1).doc",
+            )
+        )
+        harness.files.prepare_results["source-0001:normalized"] = (
+            ReportArtifactRef(
+                harness.task_id,
+                "scratch/rag_input/0001-001.docx",
+                ReportArtifactCategory.RAG_INPUT,
+                sequence_no=1,
+            ),
+        )
+        harness.files.prepare_results["source-0002:normalized"] = (
+            ReportArtifactRef(
+                harness.task_id,
+                "scratch/rag_input/0002-001.docx",
+                ReportArtifactCategory.RAG_INPUT,
+                sequence_no=2,
+            ),
+        )
+        harness.rag.raw_content = (
+            "<img src=0001-001.docx><a href=0002-001.docx>来源</a>"
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+
+        self.assertEqual(RunReportOutcome.SUCCEEDED, result.outcome)
+        public_details = harness.callbacks.delivery_calls[0].payload.details
+        self.assertEqual(
+            "<img src=来源文件1><a href=来源文件2>来源</a>",
+            public_details,
+        )
+        self.assertNotIn("onerror", public_details.casefold())
+        self.assertNotIn("javascript:", public_details.casefold())
+
+    def test_casefold_artifact_collision_with_different_sources_fails_closed(
+        self,
+    ) -> None:
+        harness = _ReportHarness(
+            source_urls=(
+                "https://files.local/%E7%94%B2.doc",
+                "https://files.local/%E4%B9%99.doc",
+            )
+        )
+        harness.files.prepare_results["source-0001:normalized"] = (
+            ReportArtifactRef(
+                harness.task_id,
+                "scratch/rag_input/One.DOCX",
+                ReportArtifactCategory.RAG_INPUT,
+                sequence_no=1,
+            ),
+        )
+        harness.files.prepare_results["source-0002:normalized"] = (
+            ReportArtifactRef(
+                harness.task_id,
+                "one.docx",
+                ReportArtifactCategory.RAG_INPUT,
+                sequence_no=2,
+            ),
+        )
+        raw_content = "<section>One.DOCX</section>"
+        harness.rag.raw_content = raw_content
+
+        result = harness.run_service.execute(harness.task_id)
+
+        self.assertEqual(RunReportOutcome.FAILED, result.outcome)
+        self.assertEqual("report_port_contract_error", result.error_code)
+        self.assertEqual([], harness.artifacts.persisted_html)
+        self.assertEqual(
+            ReportRagAuditOutcome.SUCCEEDED,
+            harness.audit.persist_calls[0].outcome,
+        )
+        self.assertEqual(
+            raw_content,
+            harness.audit.persist_calls[0].trace.attempts[-1].raw_response,
+        )
+        self.assertEqual(
+            REPORT_STATUS_FAILED,
+            harness.callbacks.delivery_calls[0].payload.status,
+        )
+
     def test_empty_rag_result_remains_success_with_internal_signal(self) -> None:
         harness = _ReportHarness(source_count=1)
         harness.rag.raw_content = "   "
@@ -346,6 +550,23 @@ class RunReportApplicationTests(unittest.TestCase):
         self.assertEqual(RunReportOutcome.FAILED, invalid_result.outcome)
         self.assertEqual("report_port_contract_error", invalid_result.error_code)
         self.assertEqual([], invalid_harness.rag.requests)
+
+    def test_legacy_conversion_input_error_does_not_use_normalization_fallback(self) -> None:
+        harness = _ReportHarness(source_count=3)
+        harness.files.errors["normalize"] = ReportInputError(
+            "legacy Office conversion failed"
+        )
+
+        result = harness.run_service.execute(harness.task_id)
+
+        self.assertEqual(RunReportOutcome.FAILED, result.outcome)
+        self.assertEqual("report_input_error", result.error_code)
+        self.assertEqual([], harness.files.prepared)
+        self.assertEqual([], harness.rag.requests)
+        self.assertEqual([1], [item.sequence_no for item in harness.files.source_downloads])
+        completion = harness.tasks.completion_calls[0].result
+        self.assertEqual(REPORT_STATUS_FAILED, completion.callback_payload.status)
+        self.assertEqual("生成失败", completion.callback_payload.message)
 
     def test_empty_template_fails_before_rag_and_sends_failure_callback(self) -> None:
         harness = _ReportHarness(source_count=1)

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()  # 加载 .env 文件到环境变量，但不覆盖已显式传入的值
 
+from app.modules.document_processing import LegacyOfficeConfig
 from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.services.core.settings import (
     LLM_DOWNLOAD_DIR,
     LLM_TASK_DB_PATH,
     MINERU_CACHE_DIR,
     OCR_CACHE_DIR,
+    RUNTIME_DIR,
 )
 
 
@@ -46,6 +49,10 @@ class LLMIntegrationConfig:
     task_db_path: str
     download_timeout: float
     download_dir: str
+
+
+class LegacyOfficeConfigurationError(RuntimeError):
+    """Legacy Office 内部配置非法时阻断应用启动。"""
 
 
 ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE = "topk_two_stage"
@@ -385,6 +392,108 @@ def _parse_choice(raw_value: Optional[str], default: str, allowed: set[str]) -> 
         return default
     value = raw_value.strip().lower()
     return value if value in allowed else default
+
+
+def _strict_legacy_office_bool(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise LegacyOfficeConfigurationError(
+        f"{name} 必须是 true 或 false"
+    )
+
+
+def _strict_legacy_office_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise LegacyOfficeConfigurationError(
+            f"{name} 必须是正有限数字"
+        ) from exc
+    if (
+        value != value
+        or value in (float("inf"), float("-inf"))
+        or value <= 0.0
+    ):
+        raise LegacyOfficeConfigurationError(
+            f"{name} 必须是正有限数字"
+        )
+    return value
+
+
+def _strict_legacy_office_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise LegacyOfficeConfigurationError(
+            f"{name} 必须是正整数"
+        ) from exc
+    if value < 1:
+        raise LegacyOfficeConfigurationError(
+            f"{name} 必须是正整数"
+        )
+    return value
+
+
+def load_legacy_office_config() -> LegacyOfficeConfig:
+    """读取本地 LibreOffice 转换配置；误配必须在启动期显式失败。"""
+
+    executable_value = os.getenv(
+        "DOCSENSE_LIBREOFFICE_EXECUTABLE",
+        "",
+    ).strip()
+    executable = executable_value or None
+    if executable is not None and not Path(executable).is_absolute():
+        raise LegacyOfficeConfigurationError(
+            "DOCSENSE_LIBREOFFICE_EXECUTABLE 必须是绝对路径"
+        )
+
+    allowed_version_series = os.getenv(
+        "DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES",
+        "26.2",
+    ).strip()
+    if not allowed_version_series:
+        raise LegacyOfficeConfigurationError(
+            "DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES 不能为空"
+        )
+
+    try:
+        return LegacyOfficeConfig(
+            enabled=_strict_legacy_office_bool(
+                "DOCSENSE_LEGACY_OFFICE_ENABLED",
+                False,
+            ),
+            executable=executable,
+            allowed_version_series=allowed_version_series,
+            timeout_seconds=_strict_legacy_office_float(
+                "DOCSENSE_LEGACY_OFFICE_TIMEOUT_SECONDS",
+                120.0,
+            ),
+            max_concurrency=_strict_legacy_office_int(
+                "DOCSENSE_LEGACY_OFFICE_MAX_CONCURRENCY",
+                1,
+            ),
+            max_input_bytes=_strict_legacy_office_int(
+                "DOCSENSE_LEGACY_OFFICE_MAX_INPUT_BYTES",
+                512 * 1024 * 1024,
+            ),
+            max_output_bytes=_strict_legacy_office_int(
+                "DOCSENSE_LEGACY_OFFICE_MAX_OUTPUT_BYTES",
+                1024 * 1024 * 1024,
+            ),
+            jobs_root=RUNTIME_DIR / "office_conversion" / "jobs",
+        )
+    except (TypeError, ValueError) as exc:
+        raise LegacyOfficeConfigurationError(
+            f"Legacy Office 配置非法：{exc}"
+        ) from exc
 
 
 def load_anythingllm_config() -> AnythingLLMConfig:

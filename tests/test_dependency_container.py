@@ -788,6 +788,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             self.knowledge_index_factory,
             task_kwargs["knowledge_index_factory"],
         )
+        self.assertIs(
+            self.services.legacy_office_preparer,
+            task_kwargs["legacy_office_preparer"],
+        )
         self.assertEqual(
             ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
             task_kwargs["analysis_classification_mode"],
