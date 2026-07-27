@@ -9,8 +9,9 @@ import os
 from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.modules.weaponry.domain import (
     AUXILIARY_GUIDANCE_NONE,
-    AUXILIARY_GUIDANCE_TERMS_RULES_V1,
+    AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
     EVIDENCE_RANKING_STRATEGY,
+    EVIDENCE_REFERENCE_FILTER_STRATEGY,
     EVIDENCE_SCORE_PROTOCOL,
     EVIDENCE_SCORE_SEMANTICS,
     EXTRACTION_CONTEXT_PROVIDED_EVIDENCE_V1,
@@ -114,6 +115,7 @@ class WeaponryInfrastructureConfig:
     score_semantics: str = EVIDENCE_SCORE_SEMANTICS
     score_protocol: str = EVIDENCE_SCORE_PROTOCOL
     ranking_strategy: str = EVIDENCE_RANKING_STRATEGY
+    reference_filter_strategy: str = EVIDENCE_REFERENCE_FILTER_STRATEGY
     extraction_context_strategy: str = (
         EXTRACTION_CONTEXT_PROVIDED_EVIDENCE_V1
     )
@@ -186,6 +188,7 @@ class WeaponryInfrastructureConfig:
             "score_semantics",
             "score_protocol",
             "ranking_strategy",
+            "reference_filter_strategy",
             "extraction_context_strategy",
         ):
             object.__setattr__(
@@ -198,6 +201,7 @@ class WeaponryInfrastructureConfig:
             "score_semantics": EVIDENCE_SCORE_SEMANTICS,
             "score_protocol": EVIDENCE_SCORE_PROTOCOL,
             "ranking_strategy": EVIDENCE_RANKING_STRATEGY,
+            "reference_filter_strategy": EVIDENCE_REFERENCE_FILTER_STRATEGY,
             # 当前唯一已安装的生产 Extraction Adapter 只接受 Provided-Evidence。
             # evidence_only_context_v1 只有在供应商能力验证和 Adapter 落地后才能开放。
             "extraction_context_strategy": (
@@ -295,6 +299,7 @@ class WeaponryRuntimeCapabilities:
     score_semantics: str
     score_protocol: str
     ranking_strategy: str
+    reference_filter_strategy: str
     extraction_context_strategy: str
 
     def __post_init__(self) -> None:
@@ -350,6 +355,7 @@ def build_weaponry_runtime_policies(
             input_candidate_top_n=config.input_candidate_top_n,
             table_candidate_top_n=config.table_candidate_top_n,
             reject_reference_like=True,
+            reference_filter_strategy=config.reference_filter_strategy,
         )
     )
     execution = WeaponryExecutionPolicySnapshot(
@@ -362,7 +368,7 @@ def build_weaponry_runtime_policies(
     )
     if config.terms_rule_context_enabled:
         auxiliary = AuxiliaryGuidancePolicySnapshot(
-            policy_id=AUXILIARY_GUIDANCE_TERMS_RULES_V1,
+            policy_id=AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
             catalog_fingerprint=config.terms_catalog_fingerprint or "",
             top_n=config.terms_candidate_top_n,
             max_context_chars=config.terms_max_context_chars,
@@ -563,6 +569,10 @@ def load_weaponry_infrastructure_config(
         ranking_strategy=source.get(
             "DOCSENSE_WEAPONRY_RANKING_STRATEGY",
             EVIDENCE_RANKING_STRATEGY,
+        ),
+        reference_filter_strategy=source.get(
+            "DOCSENSE_WEAPONRY_REFERENCE_FILTER_STRATEGY",
+            EVIDENCE_REFERENCE_FILTER_STRATEGY,
         ),
         extraction_context_strategy=source.get(
             "DOCSENSE_WEAPONRY_EXTRACTION_CONTEXT_STRATEGY",

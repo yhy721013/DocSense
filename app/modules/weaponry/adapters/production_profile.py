@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from app.modules.weaponry.domain import (
     EVIDENCE_DEDUP_STRATEGY,
     EVIDENCE_RANKING_STRATEGY,
+    EVIDENCE_REFERENCE_FILTER_STRATEGY,
     EVIDENCE_SCORE_PROTOCOL,
     EVIDENCE_SCORE_SEMANTICS,
     RETRIEVAL_QUERY_VERSION,
@@ -29,6 +30,7 @@ class WeaponryProductionSelectionProfileConfig:
     document_processing_fingerprint: str
     input_candidate_top_n: int = 8
     table_candidate_top_n: int = 16
+    reference_filter_strategy: str = EVIDENCE_REFERENCE_FILTER_STRATEGY
     reject_reference_like: bool = True
 
 
@@ -50,6 +52,7 @@ def build_weaponry_production_selection_policy(
         "input_candidate_top_n": config.input_candidate_top_n,
         "table_candidate_top_n": config.table_candidate_top_n,
         "dedup_strategy": EVIDENCE_DEDUP_STRATEGY,
+        "reference_filter_strategy": config.reference_filter_strategy,
         "reject_reference_like": config.reject_reference_like,
     }
     encoded = json.dumps(

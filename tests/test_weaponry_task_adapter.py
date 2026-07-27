@@ -24,6 +24,8 @@ from app.modules.weaponry.adapters import WeaponryTaskCommandCodec
 from app.modules.weaponry.domain import (
     AUXILIARY_GUIDANCE_NONE,
     DOCUMENT_SCOPE_EXPLICIT,
+    EVIDENCE_REFERENCE_FILTER_LEGACY,
+    EVIDENCE_REFERENCE_FILTER_STRATEGY,
     EVIDENCE_SCORE_SEMANTICS,
     EXTRACTION_CONTEXT_PROVIDED_EVIDENCE_V1,
     EXTRACTION_PROMPT_VERSION,
@@ -281,6 +283,10 @@ class WeaponryTaskCodecTests(unittest.TestCase):
             decoded.evidence_selection_policy.document_processing_fingerprint,
         )
         self.assertEqual(
+            EVIDENCE_REFERENCE_FILTER_STRATEGY,
+            decoded.evidence_selection_policy.reference_filter_strategy,
+        )
+        self.assertEqual(
             EXTRACTION_PROMPT_VERSION,
             decoded.execution_policy.extraction_prompt_version,
         )
@@ -295,6 +301,29 @@ class WeaponryTaskCodecTests(unittest.TestCase):
             encoded.projection_request_payload["params"]["architectureId"],
         )
         json.dumps(encoded.input_payload, allow_nan=False)
+
+    def test_legacy_profile_without_reference_filter_version_keeps_legacy_semantics(
+        self,
+    ) -> None:
+        codec = WeaponryTaskCommandCodec()
+        encoded = codec.encode_submission(
+            _command(_submission()),
+            task_id=TaskId("weaponry-legacy-reference-filter"),
+            accepted_at="2026-07-18T01:02:03+00:00",
+        )
+        legacy_payload = deepcopy(dict(encoded.input_payload))
+        legacy_profile = legacy_payload["evidence_selection_policy"]
+        legacy_profile.pop("reference_filter_strategy")  # type: ignore[union-attr]
+
+        decoded = codec.decode_input(
+            schema_version=WEAPONRY_INPUT_SCHEMA_VERSION,
+            payload=legacy_payload,
+        )
+
+        self.assertEqual(
+            EVIDENCE_REFERENCE_FILTER_LEGACY,
+            decoded.evidence_selection_policy.reference_filter_strategy,
+        )
 
     def test_strict_decoder_rejects_missing_unknown_mismatch_and_non_finite_values(self) -> None:
         codec = WeaponryTaskCommandCodec()
@@ -324,6 +353,11 @@ class WeaponryTaskCodecTests(unittest.TestCase):
         unknown_score_protocol = deepcopy(base)
         unknown_score_protocol["evidence_selection_policy"]["score_protocol"] = "unknown"  # type: ignore[index]
         corrupted_payloads.append(unknown_score_protocol)
+        unknown_reference_filter = deepcopy(base)
+        unknown_reference_filter["evidence_selection_policy"][
+            "reference_filter_strategy"
+        ] = "unknown"
+        corrupted_payloads.append(unknown_reference_filter)
         broken_sequence = deepcopy(base)
         broken_sequence["document_scope"]["documents"][0]["sequence_no"] = 2  # type: ignore[index]
         corrupted_payloads.append(broken_sequence)

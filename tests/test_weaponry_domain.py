@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from app.modules.weaponry.domain import (
+    FORCED_EMPTY_FIELD_NAMES,
     AuxiliaryGuidance,
     EvidenceCandidate,
     EvidenceSelectionResult,
@@ -23,8 +24,12 @@ from app.modules.weaponry.domain import (
     WeaponryFieldSpecification,
     WeaponryResult,
     assemble_table_rows,
+    build_forced_empty_result,
+    build_table_empty_fallback_result,
     build_input_extraction_prompt,
     build_table_extraction_prompt,
+    external_processing_specification,
+    is_forced_empty_field_name,
     normalize_architecture_id_value,
     normalize_evidence_rows,
     merge_table_rows,
@@ -277,6 +282,272 @@ class WeaponryImmutableModelTests(unittest.TestCase):
         self.assertEqual(("目标证据",), prompt.rows)
         self.assertEqual((), result.selected)
         self.assertEqual((), result.rejected)
+
+
+class WeaponryForcedEmptyFieldPolicyTests(unittest.TestCase):
+    def test_forced_empty_names_use_trimmed_exact_matching(self) -> None:
+        self.assertEqual(
+            {
+                "装备编号",
+                "一级分类",
+                "二级分类",
+                "三级分类",
+                "四级分类",
+            },
+            set(FORCED_EMPTY_FIELD_NAMES),
+        )
+        for field_name in FORCED_EMPTY_FIELD_NAMES:
+            with self.subTest(field_name=field_name):
+                self.assertTrue(is_forced_empty_field_name(field_name))
+                self.assertTrue(
+                    is_forced_empty_field_name(f" \t{field_name}\n")
+                )
+
+        for field_name in (
+            "装备编号说明",
+            "主装备编号",
+            "一级分类名称",
+            "五级分类",
+            "",
+            None,
+            123,
+        ):
+            with self.subTest(field_name=field_name):
+                self.assertFalse(is_forced_empty_field_name(field_name))
+
+    def test_mixed_table_external_specification_contains_only_normal_columns(
+        self,
+    ) -> None:
+        specification = WeaponryFieldSpecification.from_mapping(
+            {
+                "templateClassifyId": 1772442376645742,
+                "fieldName": "装备明细",
+                "fieldType": "TABLE",
+                "futureExtension": {"preserved": True},
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldName": " 装备编号 ",
+                            "fieldType": "INPUT",
+                            "futureColumnKey": "forced",
+                        },
+                        {
+                            "fieldName": "型号",
+                            "fieldType": "INPUT",
+                            "futureColumnKey": "normal",
+                        },
+                    ],
+                    [
+                        {
+                            "fieldName": "一级分类",
+                            "fieldType": "INPUT",
+                        },
+                        {
+                            "fieldName": "用途",
+                            "fieldType": "INPUT",
+                        },
+                    ],
+                ],
+            }
+        )
+
+        narrowed = external_processing_specification(specification)
+
+        self.assertIsNotNone(narrowed)
+        assert narrowed is not None
+        self.assertEqual(("型号", "用途"), tuple(
+            column.field_name for column in narrowed.columns
+        ))
+        narrowed_template = narrowed.template.to_dict()
+        self.assertEqual({"preserved": True}, narrowed_template["futureExtension"])
+        self.assertEqual(
+            [["型号"], ["用途"]],
+            [
+                [cell["fieldName"] for cell in row]
+                for row in narrowed_template["tableFieldList"]
+            ],
+        )
+        normal_specification = _table_specification()
+        self.assertIs(
+            normal_specification,
+            external_processing_specification(normal_specification),
+        )
+
+    def test_fully_forced_fields_build_standard_empty_public_results(self) -> None:
+        input_specification = WeaponryFieldSpecification.from_mapping(
+            {
+                "fieldName": " 装备编号 ",
+                "fieldType": "INPUT",
+                "analyseData": "调用方脏值不会进入受理，但领域结果必须覆盖",
+                "analyseDataSource": [{"content": "脏来源"}],
+            }
+        )
+        input_result = build_forced_empty_result(
+            input_specification
+        ).to_public_dict()
+        self.assertEqual("", input_result["analyseData"])
+        self.assertEqual(
+            {
+                "content": "",
+                "source": "",
+                "time": "",
+                "fileName": "",
+                "rows": [],
+                "translate": "",
+            },
+            input_result["analyseDataSource"][0],
+        )
+
+        table_specification = WeaponryFieldSpecification.from_mapping(
+            {
+                "fieldName": "分类信息",
+                "fieldType": "TABLE",
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldName": field_name,
+                            "fieldType": "INPUT",
+                            "futureColumnKey": index,
+                        }
+                        for index, field_name in enumerate(
+                            (
+                                "装备编号",
+                                "一级分类",
+                                "二级分类",
+                                "三级分类",
+                                "四级分类",
+                            ),
+                            start=1,
+                        )
+                    ]
+                ],
+            }
+        )
+        table_result = build_forced_empty_result(
+            table_specification
+        ).to_public_dict()
+
+        self.assertIsNone(external_processing_specification(table_specification))
+        self.assertEqual(1, len(table_result["tableFieldList"]))
+        for index, cell in enumerate(table_result["tableFieldList"][0], start=1):
+            with self.subTest(index=index):
+                self.assertEqual(index, cell["futureColumnKey"])
+                self.assertEqual("", cell["analyseData"])
+                self.assertEqual(
+                    {
+                        "content": "",
+                        "source": "",
+                        "time": "",
+                        "fileName": "",
+                        "rows": [],
+                        "translate": "",
+                    },
+                    cell["analyseDataSource"][0],
+                )
+
+    def test_final_table_assembly_overrides_polluted_forced_cells(self) -> None:
+        specification = WeaponryFieldSpecification.from_mapping(
+            {
+                "fieldName": "装备明细",
+                "fieldType": "TABLE",
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldName": "装备编号",
+                            "fieldType": "INPUT",
+                        },
+                        {
+                            "fieldName": "型号",
+                            "fieldType": "INPUT",
+                        },
+                    ]
+                ],
+            }
+        )
+        polluted_source = WeaponryAnalyseDataSource(
+            content="MALICIOUS-001",
+            source="模型污染.pdf",
+            occurred_at="",
+            file_name="polluted.pdf",
+            rows=("不应进入最终保留字段",),
+            translation="polluted",
+        )
+        normal_source = WeaponryAnalyseDataSource(
+            content="AN/SPY-1",
+            source="手册.pdf",
+            occurred_at="",
+            file_name="manual.pdf",
+            rows=("AN/SPY-1 雷达",),
+            translation="",
+        )
+        assembled = assemble_table_rows(
+            (
+                MergedTableRow(
+                    values=(
+                        ("装备编号", "MALICIOUS-001"),
+                        ("型号", "AN/SPY-1"),
+                    ),
+                    sources=(
+                        ("装备编号", (polluted_source,)),
+                        ("型号", (normal_source,)),
+                    ),
+                ),
+            ),
+            specification,
+        )
+
+        self.assertEqual(1, len(assembled))
+        forced_cell, normal_cell = assembled[0]
+        self.assertEqual("", forced_cell.analyse_data)
+        self.assertEqual(
+            (WeaponryAnalyseDataSource.empty(),),
+            forced_cell.sources,
+        )
+        self.assertEqual("AN/SPY-1", normal_cell.analyse_data)
+        self.assertEqual((normal_source,), normal_cell.sources)
+
+    def test_mixed_table_empty_fallback_preserves_full_columns_and_source_semantics(
+        self,
+    ) -> None:
+        specification = WeaponryFieldSpecification.from_mapping(
+            {
+                "fieldName": "装备明细",
+                "fieldType": "TABLE",
+                "tableFieldList": [
+                    [
+                        {
+                            "fieldName": "装备编号",
+                            "fieldType": "INPUT",
+                            "futureColumnKey": "forced",
+                        },
+                        {
+                            "fieldName": "型号",
+                            "fieldType": "INPUT",
+                            "futureColumnKey": "normal",
+                        },
+                    ]
+                ],
+            }
+        )
+
+        public_result = build_table_empty_fallback_result(
+            specification
+        ).to_public_dict()
+        forced_cell, normal_cell = public_result["tableFieldList"][0]
+
+        self.assertEqual(["装备编号", "型号"], [
+            forced_cell["fieldName"],
+            normal_cell["fieldName"],
+        ])
+        self.assertEqual("forced", forced_cell["futureColumnKey"])
+        self.assertEqual("", forced_cell["analyseData"])
+        self.assertEqual(
+            [WeaponryAnalyseDataSource.empty().to_public_dict()],
+            forced_cell["analyseDataSource"],
+        )
+        self.assertEqual("normal", normal_cell["futureColumnKey"])
+        self.assertEqual("", normal_cell["analyseData"])
+        self.assertEqual([], normal_cell["analyseDataSource"])
 
 
 class WeaponrySourceAndPromptRuleTests(unittest.TestCase):

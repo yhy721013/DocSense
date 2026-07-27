@@ -160,6 +160,8 @@ class WeaponryApplicationServices:
             != self.config.document_processing_fingerprint
             or selection.query_version != self.config.query_version
             or selection.score_protocol != self.config.score_protocol
+            or selection.reference_filter_strategy
+            != self.config.reference_filter_strategy
             or execution.extraction_model_fingerprint
             != self.config.extraction_model_fingerprint
             or execution.extraction_context_strategy

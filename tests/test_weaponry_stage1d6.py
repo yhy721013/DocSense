@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Barrier, Lock
 from types import SimpleNamespace
 import inspect
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -53,6 +54,7 @@ from app.modules.weaponry.domain import (
     WEAPONRY_SUCCESS_MESSAGE,
     AuxiliaryGuidancePolicySnapshot,
     EvidenceSelectionPolicy,
+    WeaponryAnalyseDataSource,
     WeaponryDocumentScope,
     WeaponryDocumentSnapshot,
     WeaponryExecutionIdentity,
@@ -105,12 +107,13 @@ def _submission(
     *,
     marker: str = "callback",
     field_type: str = "INPUT",
+    field_name: str = "舰级名称",
 ) -> WeaponrySubmission:
     """构造完整 Schema v2 提交，测试不得绕过公开请求解析器。"""
 
     field: dict[str, object] = {
         "templateClassifyId": 7001,
-        "fieldName": "舰级名称",
+        "fieldName": field_name,
         "fieldType": field_type,
         "fieldDescription": "提取正式舰级名称",
         "analyseData": "",
@@ -449,6 +452,87 @@ class WeaponryCallbackGuardIntegrationTests(unittest.TestCase):
                         latest["result_payload"],
                         candidate.payload.to_public_dict(),
                     )
+
+    def test_recovery_does_not_rewrite_historical_forced_field_payload(self) -> None:
+        """新执行策略不得追溯修改已经持久化的旧 Callback 事实。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            service = LLMTaskService(database)
+            commands = LegacyTaskCommandAdapter(
+                service,
+                WeaponryTaskCommandCodec(),
+            )
+            submission = _submission(
+                10509,
+                marker="historical-forced-field",
+                field_name="装备编号",
+            )
+            created = commands.create_if_allowed(_task_command(submission))
+            self.assertIs(TaskSubmissionOutcome.ACCEPTED, created.outcome)
+            assert created.execution is not None
+            claimed = commands.claim(created.execution.task_id)
+            assert claimed.execution is not None
+            snapshot = claimed.execution.input_snapshot
+            historical_result = WeaponryResult(
+                identity=WeaponryExecutionIdentity(
+                    snapshot.task_id,
+                    snapshot.architecture_id,
+                ),
+                status=WEAPONRY_STATUS_SUCCEEDED,
+                fields=(
+                    WeaponryFieldResult(
+                        specification=snapshot.fields[0],
+                        analyse_data="HISTORICAL-001",
+                        sources=(
+                            WeaponryAnalyseDataSource(
+                                content="HISTORICAL-001",
+                                source="历史资料.pdf",
+                                occurred_at="",
+                                file_name="historical.pdf",
+                                rows=("历史装备编号为 HISTORICAL-001。",),
+                                translation="",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            self.assertTrue(
+                commands.finish_if_current(
+                    ExpectedTaskCompletion(
+                        expected_task_id=claimed.execution.task_id,
+                        business_ref=claimed.execution.business_ref,
+                        execution_state="succeeded",
+                        public_status=WEAPONRY_STATUS_SUCCEEDED,
+                        message=WEAPONRY_SUCCESS_MESSAGE,
+                        result=historical_result,
+                    )
+                )
+            )
+            latest = service.get_task("weaponry", "10509")
+            candidate = SQLiteWeaponryCallbackRecoverySource(
+                service
+            ).load_recoverable(10509)
+
+        assert candidate is not None
+        stored_bytes = json.dumps(
+            latest["result_payload"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        recovered_payload = candidate.payload.to_public_dict()
+        recovered_bytes = json.dumps(
+            recovered_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(stored_bytes, recovered_bytes)
+        self.assertEqual(
+            "HISTORICAL-001",
+            recovered_payload["data"]["weaponryTemplateFieldList"][0][
+                "analyseData"
+            ],
+        )
 
     def test_check_task_uses_same_guarded_recovery_instead_of_legacy_replay(self) -> None:
         """甲方规定的同步副作用必须复用 Worker 的同一个 Callback Guard。"""

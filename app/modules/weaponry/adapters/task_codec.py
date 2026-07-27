@@ -11,6 +11,7 @@ from app.modules.tasks.ports import ExpectedTaskCompletion, TaskSubmissionComman
 from app.modules.weaponry.domain import (
     EVIDENCE_DEDUP_STRATEGY,
     EVIDENCE_RANKING_STRATEGY,
+    EVIDENCE_REFERENCE_FILTER_LEGACY,
     EVIDENCE_SCORE_PROTOCOL,
     EVIDENCE_SCORE_SEMANTICS,
     WEAPONRY_BUSINESS_TYPE,
@@ -72,9 +73,11 @@ _PROFILE_KEYS = frozenset(
         "input_candidate_top_n",
         "table_candidate_top_n",
         "dedup_strategy",
+        "reference_filter_strategy",
         "reject_reference_like",
     }
 )
+_LEGACY_PROFILE_KEYS = _PROFILE_KEYS - {"reference_filter_strategy"}
 _EXECUTION_POLICY_KEYS = frozenset(
     {
         "extraction_strategy",
@@ -193,15 +196,27 @@ def _profile_payload(profile: EvidenceSelectionPolicy) -> dict[str, Any]:
         "input_candidate_top_n": profile.input_candidate_top_n,
         "table_candidate_top_n": profile.table_candidate_top_n,
         "dedup_strategy": profile.dedup_strategy,
+        "reference_filter_strategy": profile.reference_filter_strategy,
         "reject_reference_like": profile.reject_reference_like,
     }
 
 
 def _decode_profile(value: object) -> EvidenceSelectionPolicy:
+    expected_keys = (
+        _LEGACY_PROFILE_KEYS
+        if isinstance(value, Mapping)
+        and frozenset(value.keys()) == _LEGACY_PROFILE_KEYS
+        else _PROFILE_KEYS
+    )
     payload = _exact_mapping(
         value,
-        expected_keys=_PROFILE_KEYS,
+        expected_keys=expected_keys,
         name="evidence_selection_policy",
+    )
+    reference_filter_strategy = (
+        EVIDENCE_REFERENCE_FILTER_LEGACY
+        if expected_keys == _LEGACY_PROFILE_KEYS
+        else payload.get("reference_filter_strategy")
     )
     # ``score_semantics`` 必须显式存在且精确匹配；不能由新进程默认补值，否则历史任务会
     # 在配置或供应商升级后悄悄改变分数方向。
@@ -225,6 +240,7 @@ def _decode_profile(value: object) -> EvidenceSelectionPolicy:
         input_candidate_top_n=payload.get("input_candidate_top_n"),  # type: ignore[arg-type]
         table_candidate_top_n=payload.get("table_candidate_top_n"),  # type: ignore[arg-type]
         dedup_strategy=payload.get("dedup_strategy"),  # type: ignore[arg-type]
+        reference_filter_strategy=reference_filter_strategy,  # type: ignore[arg-type]
         reject_reference_like=payload.get("reject_reference_like"),  # type: ignore[arg-type]
     )
 
