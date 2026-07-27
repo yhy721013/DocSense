@@ -47,6 +47,70 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertEqual(data["data"]["sessions"][0]["chatId"], 10001)
         self.assertEqual(data["data"]["availableFiles"][0]["fileName"], "alpha.pdf")
 
+    def test_auto_selected_files_appear_from_bindings_and_local_history(self):
+        """调试页不能因调用方原始空数组而把成功会话显示成无文件。"""
+
+        self.kb_service.save_document_record(
+            "beta.pdf",
+            2,
+            "doc-beta",
+            "custom-documents/doc-beta.json",
+            original_name="Beta 原名.pdf",
+            ingested_file_name="beta.pdf",
+        )
+        self.kb_service.save_document_record(
+            "alpha.pdf",
+            1,
+            "doc-alpha",
+            "custom-documents/doc-alpha.json",
+            original_name="Alpha 原名.pdf",
+            ingested_file_name="alpha.pdf",
+        )
+        chat_response = self.client.post(
+            "/llm/chat",
+            json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": 10002,
+                    "fileNames": [],
+                    "message": "请总结",
+                },
+            },
+        )
+        chat_response.get_data()
+
+        with self.assertLogs(
+            "app.blueprints.debug",
+            level="INFO",
+        ) as captured:
+            bootstrap_response = self.client.get("/debug/api/chat/bootstrap")
+        history_response = self.client.get(
+            "/llm/chat/history",
+            query_string={"chatId": "10002"},
+        )
+
+        self.assertEqual(200, bootstrap_response.status_code)
+        bootstrap = bootstrap_response.get_json()
+        session = next(
+            item
+            for item in bootstrap["data"]["sessions"]
+            if item["chatId"] == 10002
+        )
+        self.assertEqual(["alpha.pdf", "beta.pdf"], session["fileNames"])
+        history = history_response.get_json()
+        self.assertEqual(
+            [{"name": "Alpha 原名.pdf"}, {"name": "Beta 原名.pdf"}],
+            history[0]["files"],
+        )
+        response_log = next(
+            message
+            for message in captured.output
+            if "调试初始化数据响应已生成" in message
+        )
+        self.assertIn("session_count=1", response_log)
+        self.assertIn("current_binding_count=2", response_log)
+        self.assertNotIn("alpha.pdf", response_log)
+
     def test_chat_page_renders_shell(self):
         response = self.client.get("/debug/chat")
         html = response.get_data(as_text=True)

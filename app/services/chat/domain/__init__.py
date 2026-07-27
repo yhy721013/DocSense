@@ -1,5 +1,9 @@
 """文件对话的领域模型与事件。"""
 
+from app.services.chat.domain.document_candidates import (
+    ChatDocumentCandidate,
+    ChatDocumentSelectionCandidates,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.chat_id import (
     chat_id_public_value,
@@ -59,6 +63,8 @@ from app.services.chat.domain.models import (
 
 __all__ = [
     "ChatCleanupJob",
+    "ChatDocumentCandidate",
+    "ChatDocumentSelectionCandidates",
     "ChatDocumentBinding",
     "ChatMessage",
     "ChatMessageFile",

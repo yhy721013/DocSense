@@ -847,7 +847,8 @@ def llm_chat():
         )
         return jsonify({"error": "message超过文件对话长度上限"}), 400
     logger.info(
-        "文件对话请求参数校验通过: chatId=%s raw_file_count=%d message_length=%d",
+        "文件对话请求参数校验通过: "
+        "chatId=%s raw_requested_file_count=%d message_length=%d",
         chat_id,
         len(file_names),
         len(message),
@@ -856,8 +857,9 @@ def llm_chat():
     normalized_file_names: list[str] = []
     seen_file_names: set[str] = set()
 
-    # 对话入参中的 fileNames 是业务侧哈希文件名。这里必须在进入 AnythingLLM 前
-    # 完成“存在性校验 + 首次出现顺序去重”，否则本地历史快照与远端检索上下文会不一致。
+    # 对话入参中的 fileNames 是业务侧哈希文件名。Blueprint 这里只负责元素类型、
+    # 空白值和首次出现顺序去重；文件存在性、目录一致性以及首次空数组的自动选择，
+    # 均由 Application/Coordinator 在受理边界统一判定，避免路由层复制业务规则。
     for index, fn in enumerate(file_names):
         if not isinstance(fn, str) or not fn.strip():
             logger.warning(
@@ -879,13 +881,15 @@ def llm_chat():
         normalized_file_names.append(normalized_file_name)
 
     logger.info(
-        "文件对话引用文件校验完成: chatId=%s normalized_file_count=%d",
+        "文件对话引用文件校验完成: "
+        "chatId=%s normalized_requested_file_count=%d",
         chat_id,
         len(normalized_file_names),
     )
     if len(normalized_file_names) > CHAT_MAX_FILES_PER_REQUEST:
         logger.warning(
-            "文件对话请求被拒绝：文件数量超过上限: chatId=%s file_count=%d limit=%d",
+            "文件对话请求被拒绝：文件数量超过上限: "
+            "chatId=%s requested_file_count=%d limit=%d",
             chat_id,
             len(normalized_file_names),
             CHAT_MAX_FILES_PER_REQUEST,
@@ -950,7 +954,8 @@ def llm_chat():
         raise
 
     logger.info(
-        "文件对话运行已分配，准备创建流式响应: chatId=%s runId=%s file_count=%d",
+        "文件对话运行已分配，准备创建流式响应: "
+        "chatId=%s runId=%s requested_file_count=%d",
         chat_id,
         prepared_run.run_id,
         len(normalized_file_names),

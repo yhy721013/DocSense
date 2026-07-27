@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
 import sqlite3
+from threading import Barrier
+from unittest.mock import patch
 
 from app.services.chat import (
     RUN_FAILED,
@@ -12,11 +15,23 @@ from app.services.chat import (
     RUN_RUNNING,
     RUN_SUCCEEDED,
     ChatRunBusyError,
+    ChatDocumentCandidate,
+    ChatDocumentSelectionCandidates,
     ChatRunInactiveError,
     ChatRunLockService,
     ChatStore,
     MESSAGE_DISCARDED,
 )
+
+
+def _document_candidate(file_name: str) -> ChatDocumentCandidate:
+    """构造不依赖知识库或供应商网络的受理候选。"""
+    return ChatDocumentCandidate(
+        file_name=file_name,
+        original_name=f"{file_name}.original",
+        document_ref=f"document:{file_name}",
+        external_location=f"custom-documents/{file_name}.json",
+    )
 
 
 class ChatRunLockServiceTests(unittest.TestCase):
@@ -56,6 +71,227 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual("run-a", error.exception.active_run_id)
         self.assertEqual(RUN_SUCCEEDED, completed.status)
         self.assertEqual(RUN_ACCEPTED, second.status)
+
+    def test_new_session_uses_default_candidates_atomically(self) -> None:
+        candidates = ChatDocumentSelectionCandidates(
+            new_session_default_documents=(
+                _document_candidate("alpha.pdf"),
+                _document_candidate("beta.pdf"),
+            )
+        )
+
+        with self.assertLogs(
+            "app.services.chat.locking.lock_service",
+            level="INFO",
+        ) as captured:
+            run = self.locks.try_acquire_chat_run(
+                chat_id="chat-default",
+                run_id="run-default",
+                user_message="请总结",
+                document_candidates=candidates,
+                max_files_per_request=2,
+            )
+
+        run_input = self.store.run_inputs.get(run.run_id)
+        messages = self.store.messages.list_by_chat("chat-default")
+        self.assertIsNotNone(run_input)
+        assert run_input is not None
+        self.assertEqual(
+            ("alpha.pdf", "beta.pdf"),
+            tuple(item.file_name for item in run_input.files),
+        )
+        self.assertEqual(
+            ("alpha.pdf", "beta.pdf"),
+            tuple(item.file_name for item in messages[0].files),
+        )
+        selection_log = next(
+            message
+            for message in captured.output
+            if "受理事务已选择有效文档" in message
+        )
+        self.assertIn("run_id=run-default", selection_log)
+        self.assertIn("selection_mode=new_session_default", selection_log)
+        self.assertIn("session_created=True", selection_log)
+        self.assertIn("explicit_candidate_count=0", selection_log)
+        self.assertIn("default_candidate_count=2", selection_log)
+        self.assertIn("effective_file_count=2", selection_log)
+        self.assertNotIn("alpha.pdf", selection_log)
+        self.assertNotIn("document:alpha.pdf", selection_log)
+
+    def test_existing_session_does_not_use_default_candidates(self) -> None:
+        self.store.sessions.create_or_get(chat_id="chat-existing")
+        candidates = ChatDocumentSelectionCandidates(
+            new_session_default_documents=(
+                _document_candidate("default.pdf"),
+            )
+        )
+
+        with self.assertLogs(
+            "app.services.chat.locking.lock_service",
+            level="INFO",
+        ) as captured:
+            run = self.locks.try_acquire_chat_run(
+                chat_id="chat-existing",
+                run_id="run-existing",
+                user_message="继续",
+                document_candidates=candidates,
+                max_files_per_request=1,
+            )
+
+        run_input = self.store.run_inputs.get(run.run_id)
+        messages = self.store.messages.list_by_chat("chat-existing")
+        self.assertIsNotNone(run_input)
+        assert run_input is not None
+        self.assertEqual((), run_input.files)
+        self.assertEqual((), messages[0].files)
+        selection_log = next(
+            message
+            for message in captured.output
+            if "受理事务已选择有效文档" in message
+        )
+        self.assertIn("run_id=run-existing", selection_log)
+        self.assertIn("selection_mode=existing_session_empty", selection_log)
+        self.assertIn("session_created=False", selection_log)
+        self.assertIn("default_candidate_count=1", selection_log)
+        self.assertIn("effective_file_count=0", selection_log)
+        self.assertNotIn("default.pdf", selection_log)
+
+    def test_new_session_explicit_selection_has_distinct_safe_log(self) -> None:
+        """显式选择应使用独立模式，并且日志只记录计数而不泄漏文件身份。"""
+
+        candidates = ChatDocumentSelectionCandidates(
+            explicit_documents=(
+                _document_candidate("explicit.pdf"),
+            )
+        )
+
+        with self.assertLogs(
+            "app.services.chat.locking.lock_service",
+            level="INFO",
+        ) as captured:
+            self.locks.try_acquire_chat_run(
+                chat_id="chat-explicit",
+                run_id="run-explicit",
+                user_message="请总结",
+                document_candidates=candidates,
+                max_files_per_request=1,
+            )
+
+        selection_log = next(
+            message
+            for message in captured.output
+            if "受理事务已选择有效文档" in message
+        )
+        self.assertIn("run_id=run-explicit", selection_log)
+        self.assertIn("selection_mode=explicit", selection_log)
+        self.assertIn("session_created=True", selection_log)
+        self.assertIn("explicit_candidate_count=1", selection_log)
+        self.assertIn("default_candidate_count=0", selection_log)
+        self.assertIn("effective_file_count=1", selection_log)
+        self.assertNotIn("explicit.pdf", selection_log)
+        self.assertNotIn("document:explicit.pdf", selection_log)
+
+    def test_effective_file_limit_rolls_back_first_session_and_run(self) -> None:
+        candidates = ChatDocumentSelectionCandidates(
+            new_session_default_documents=(
+                _document_candidate("alpha.pdf"),
+                _document_candidate("beta.pdf"),
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^fileNames超过文件对话数量上限$",
+        ):
+            self.locks.try_acquire_chat_run(
+                chat_id="chat-over-limit",
+                run_id="run-over-limit",
+                user_message="请总结",
+                document_candidates=candidates,
+                max_files_per_request=1,
+            )
+
+        self.assertIsNone(self.store.sessions.get("chat-over-limit"))
+        self.assertIsNone(self.store.runs.get("run-over-limit"))
+        self.assertIsNone(self.store.run_inputs.get("run-over-limit"))
+        self.assertEqual(
+            (),
+            self.store.messages.list_by_chat("chat-over-limit"),
+        )
+
+    def test_pending_user_failure_rolls_back_session_run_and_input(self) -> None:
+        """写入待处理消息失败时，应回滚同一事务内创建的全部会话与运行事实。"""
+
+        candidates = ChatDocumentSelectionCandidates(
+            new_session_default_documents=(
+                _document_candidate("alpha.pdf"),
+            )
+        )
+
+        with patch.object(
+            self.locks,
+            "_append_user_pending",
+            side_effect=RuntimeError("injected pending message failure"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^injected pending message failure$",
+            ):
+                self.locks.try_acquire_chat_run(
+                    chat_id="chat-write-failure",
+                    run_id="run-write-failure",
+                    user_message="请总结",
+                    document_candidates=candidates,
+                    max_files_per_request=5,
+                )
+
+        self.assertIsNone(self.store.sessions.get("chat-write-failure"))
+        self.assertIsNone(self.store.runs.get("run-write-failure"))
+        self.assertIsNone(self.store.run_inputs.get("run-write-failure"))
+        self.assertEqual(
+            (),
+            self.store.messages.list_by_chat("chat-write-failure"),
+        )
+
+    def test_fifty_concurrent_first_admissions_accept_only_one_run(self) -> None:
+        worker_count = 50
+        barrier = Barrier(worker_count)
+        candidates = ChatDocumentSelectionCandidates(
+            new_session_default_documents=(
+                _document_candidate("all.pdf"),
+            )
+        )
+
+        def attempt(index: int) -> str:
+            barrier.wait()
+            try:
+                self.locks.try_acquire_chat_run(
+                    chat_id="chat-concurrent-default",
+                    run_id=f"run-concurrent-{index}",
+                    user_message=f"question-{index}",
+                    document_candidates=candidates,
+                    max_files_per_request=5,
+                )
+                return "accepted"
+            except ChatRunBusyError:
+                return "busy"
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            outcomes = list(executor.map(attempt, range(worker_count)))
+
+        self.assertEqual(1, outcomes.count("accepted"))
+        self.assertEqual(worker_count - 1, outcomes.count("busy"))
+        active_runs = self.store.runs.list_active(
+            "chat-concurrent-default"
+        )
+        self.assertEqual(1, len(active_runs))
+        run_input = self.store.run_inputs.get(active_runs[0].run_id)
+        self.assertIsNotNone(run_input)
+        assert run_input is not None
+        self.assertEqual(
+            ("all.pdf",),
+            tuple(item.file_name for item in run_input.files),
+        )
 
     def test_failed_run_releases_chat_for_next_attempt(self) -> None:
         self.locks.try_acquire_chat_run(

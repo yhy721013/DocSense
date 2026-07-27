@@ -32,6 +32,9 @@ from app.services.chat.domain.models import (
     SESSION_ERROR,
     ChatRun,
 )
+from app.services.chat.domain.document_candidates import (
+    ChatDocumentSelectionCandidates,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.locking.lease import (
     ChatRunLease,
@@ -151,9 +154,32 @@ class ChatRunLockService:
         user_message: str | None = None,
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
+        document_candidates: ChatDocumentSelectionCandidates | None = None,
+        max_files_per_request: int | None = None,
     ) -> ChatRun:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_run_id = _optional_text(run_id) or uuid.uuid4().hex
+        if document_candidates is not None and not isinstance(
+            document_candidates,
+            ChatDocumentSelectionCandidates,
+        ):
+            raise TypeError(
+                "document_candidates must be ChatDocumentSelectionCandidates "
+                "or None"
+            )
+        if document_candidates is not None and (
+            user_files or input_documents
+        ):
+            raise ValueError(
+                "document_candidates cannot be combined with legacy "
+                "document tuples"
+            )
+        if max_files_per_request is not None and (
+            isinstance(max_files_per_request, bool)
+            or not isinstance(max_files_per_request, int)
+            or max_files_per_request < 1
+        ):
+            raise ValueError("max_files_per_request must be a positive integer")
         now = _utc_now_iso()
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
 
@@ -168,7 +194,7 @@ class ChatRunLockService:
                 normalized_run_id,
                 bool(self.owner_instance_id),
             )
-            connection.execute(
+            session_insert = connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_sessions (
                     chat_id, workspace_ref, thread_ref, status,
@@ -177,6 +203,7 @@ class ChatRunLockService:
                 """,
                 (normalized_chat_id, now, now),
             )
+            session_created = session_insert.rowcount == 1
             session_row = connection.execute(
                 "SELECT status FROM chat_sessions WHERE chat_id = ?",
                 (normalized_chat_id,),
@@ -214,6 +241,76 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     active_run_id=active_row["run_id"],
                 )
+
+            effective_user_files = user_files
+            effective_input_documents = input_documents
+            explicit_candidate_count = len(input_documents)
+            default_candidate_count = 0
+            selection_mode = "legacy_input"
+            if document_candidates is not None:
+                explicit_candidate_count = len(
+                    document_candidates.explicit_documents
+                )
+                default_candidate_count = len(
+                    document_candidates.new_session_default_documents
+                )
+                if explicit_candidate_count:
+                    selection_mode = "explicit"
+                elif session_created:
+                    # 空知识库时 default 数量虽然为 0，但仍属于“首次默认范围”；
+                    # 运维日志必须保留选择原因，不能仅按最终数量误记为续聊空范围。
+                    selection_mode = "new_session_default"
+                else:
+                    selection_mode = "existing_session_empty"
+                effective_documents = (
+                    document_candidates.effective_documents(
+                        session_created=session_created
+                    )
+                )
+                effective_user_files = tuple(
+                    document.to_user_file_tuple()
+                    for document in effective_documents
+                )
+                effective_input_documents = tuple(
+                    document.to_input_tuple()
+                    for document in effective_documents
+                )
+            effective_count = len(effective_input_documents)
+            if (
+                max_files_per_request is not None
+                and effective_count > max_files_per_request
+            ):
+                logger.warning(
+                    "文件对话运行受理被拒绝：有效文件数量超过上限: "
+                    "chat_id=%s run_id=%s selection_mode=%s "
+                    "session_created=%s explicit_candidate_count=%d "
+                    "default_candidate_count=%d effective_file_count=%d limit=%d",
+                    normalized_chat_id,
+                    normalized_run_id,
+                    selection_mode,
+                    session_created,
+                    explicit_candidate_count,
+                    default_candidate_count,
+                    effective_count,
+                    max_files_per_request,
+                )
+                # 当前事务同时持有首次 session 插入；抛出异常会由连接上下文统一回滚，
+                # 不得留下只有 session 而没有 run/input/message 的半成品事实。
+                raise ValueError("fileNames超过文件对话数量上限")
+
+            logger.info(
+                "文件对话受理事务已选择有效文档: chat_id=%s run_id=%s "
+                "selection_mode=%s "
+                "session_created=%s explicit_candidate_count=%d "
+                "default_candidate_count=%d effective_file_count=%d",
+                normalized_chat_id,
+                normalized_run_id,
+                selection_mode,
+                session_created,
+                explicit_candidate_count,
+                default_candidate_count,
+                effective_count,
+            )
             connection.execute(
                 """
                 INSERT INTO chat_runs (
@@ -245,7 +342,7 @@ class ChatRunLockService:
                     connection,
                     run_id=normalized_run_id,
                     message=user_message,
-                    documents=input_documents,
+                    documents=effective_input_documents,
                     created_at=now,
                 )
                 self._append_user_pending(
@@ -253,13 +350,18 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     run_id=normalized_run_id,
                     message=user_message,
-                    files=user_files,
+                    files=effective_user_files,
                     created_at=now,
                 )
             logger.info(
-                "文件对话运行锁获取成功: chat_id=%s run_id=%s has_owner_instance=%s",
+                "文件对话运行锁获取成功: chat_id=%s run_id=%s "
+                "selection_mode=%s session_created=%s effective_file_count=%d "
+                "has_owner_instance=%s",
                 normalized_chat_id,
                 normalized_run_id,
+                selection_mode,
+                session_created,
+                effective_count,
                 bool(self.owner_instance_id),
             )
             return self._row(row)

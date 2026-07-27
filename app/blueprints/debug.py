@@ -28,10 +28,23 @@ def chat_debug_bootstrap_api():
         kb_service=services.kb_service,
     )
     data = payload.get("data") if isinstance(payload, dict) else {}
+    sessions = data.get("sessions", []) if isinstance(data, dict) else []
+    current_binding_count = 0
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        file_names = item.get("fileNames", [])
+        # bootstrap 当前保证 fileNames 为数组；这里仍采用防御性计数，避免调试日志
+        # 因未来的异常预览数据反过来影响原本可返回的调试响应。
+        if isinstance(file_names, list):
+            current_binding_count += len(file_names)
     logger.info(
-        "文件对话调试初始化数据响应已生成: ok=%s session_count=%d available_file_count=%d",
+        "文件对话调试初始化数据响应已生成: "
+        "ok=%s session_count=%d current_binding_count=%d "
+        "available_file_count=%d",
         bool(payload.get("ok")) if isinstance(payload, dict) else False,
-        len(data.get("sessions", [])) if isinstance(data, dict) else 0,
+        len(sessions),
+        current_binding_count,
         len(data.get("availableFiles", [])) if isinstance(data, dict) else 0,
     )
     return jsonify(payload)

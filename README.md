@@ -265,7 +265,8 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
-   - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件；本地保留不可变的文件绑定 revision，并以最新 revision 作为后续对话默认引用。
+   - 通过增量 update-embeddings (adds) 追加引用文件，`fileNames` 通常只含本次新增文件；本地保留不可变的文件绑定 revision，并以最新 revision 作为后续对话默认引用。
+   - 已实现首次空范围语义：受理事务首次创建 `chatId` 且调用方显式传入 `fileNames=[]` 时，把受理时刻当前实例知识库中全部可用的已解析文件冻结为本轮有效文件；仍受 `DOCSENSE_CHAT_MAX_FILES` 约束，空知识库继续允许自由对话，后续空数组不自动加入新解析文件。阶段 0～7 的代码与离线验收已关闭，公开 `/llm/chat` 已接入事务内首次判定和不可变输入持久化，并证明自动文件与显式文件复用同一资源租约、attach、binding、模型流和本地历史链；内部日志已区分请求数量、候选数量、最终有效数量和选择模式，本地调试页以 current bindings 与已提交历史为准。最终验收又通过 50 个不同 `chatId` 的 SQLite 单实例隔离、175 项 Chat 回归及发现 1,847/排除 13/执行 1,834 项的安全全仓回归；Chat SQLite 短事务 busy timeout 统一为有界 30 秒。上述证据不代表跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话首次空文件自动全量范围实施计划.md`。
    - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。

@@ -11,6 +11,10 @@ from typing import Protocol, runtime_checkable
 
 from app.ports import ChatConversationFactory, ChatDocumentRef, ChatResourceError, ChatSessionRefs
 from app.services.chat.application.command_service import ChatCommandService
+from app.services.chat.domain.document_candidates import (
+    ChatDocumentCandidate,
+    ChatDocumentSelectionCandidates,
+)
 from app.services.chat.application.document_resolver import (
     ChatDocumentResolver,
     ResolvedChatDocument,
@@ -220,6 +224,70 @@ class SynchronousChatRunExecutor:
         """路由对应的 SSE 可迭代对象关闭后释放其预留槽位。"""
         self._stream_slots.release()
 
+    def resolve_document_candidates(
+        self,
+        *,
+        chat_id: str,
+        file_names: Sequence[str],
+    ) -> ChatDocumentSelectionCandidates:
+        """冻结显式文件或仅供首次 session 使用的默认全量候选。
+
+        本方法只准备候选，不决定最终采用哪一组文档。事务外读取 session 仅用于已有会话的
+        安全快速路径：当前 session 行不会被物理删除，因此一旦读到记录，空数组无需扫描
+        全量知识库。若未读到 session，即使并发请求随后先创建了它，也只会多准备一份默认
+        候选；阶段 3 的受理事务仍必须根据实际 ``session_created`` 决定是否采用。
+
+        阶段 3 由 ``prepare_chat_run()`` 把该对象交给受理事务；本方法本身仍不推断最终
+        有效集合，也不把 selection mode 暴露给路由或供应商 Port。
+        """
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        normalized_file_names = _text_tuple(file_names, name="file_names")
+        if normalized_file_names:
+            resolved = self._document_resolver.resolve_many(
+                normalized_file_names
+            )
+            snapshots = tuple(
+                self._snapshot(document) for document in resolved
+            )
+            self._ensure_snapshot_order(
+                snapshots=snapshots,
+                expected_file_names=normalized_file_names,
+            )
+            logger.info(
+                "文件对话文档候选已冻结: chat_id=%s selection_mode=explicit "
+                "explicit_count=%d default_count=0",
+                normalized_chat_id,
+                len(resolved),
+            )
+            return ChatDocumentSelectionCandidates(
+                explicit_documents=tuple(
+                    self._candidate(document) for document in resolved
+                )
+            )
+
+        if self._store.sessions.get(normalized_chat_id) is not None:
+            logger.info(
+                "文件对话文档候选已冻结: chat_id=%s "
+                "selection_mode=existing_session_empty "
+                "explicit_count=0 default_count=0",
+                normalized_chat_id,
+            )
+            return ChatDocumentSelectionCandidates()
+
+        default_documents = self._document_resolver.resolve_all_available()
+        logger.info(
+            "文件对话文档候选已冻结: chat_id=%s "
+            "selection_mode=new_session_default "
+            "explicit_count=0 default_count=%d",
+            normalized_chat_id,
+            len(default_documents),
+        )
+        return ChatDocumentSelectionCandidates(
+            new_session_default_documents=tuple(
+                self._candidate(document) for document in default_documents
+            )
+        )
+
     def prepare_chat_run(
         self,
         *,
@@ -253,35 +321,60 @@ class SynchronousChatRunExecutor:
                 self._max_message_chars,
             )
             raise ValueError("message exceeds the configured chat message limit")
-        resolved = self._document_resolver.resolve_many(normalized_file_names)
-        snapshots = tuple(self._snapshot(document) for document in resolved)
-        if tuple(item.file_name for item in snapshots) != normalized_file_names:
-            raise ValueError("document resolver returned unexpected file order")
+        document_candidates = self.resolve_document_candidates(
+            chat_id=normalized_chat_id,
+            file_names=normalized_file_names,
+        )
         run = self._chat_commands.start_chat_run(
             chat_id=normalized_chat_id,
             user_message=normalized_message,
-            user_files=tuple(
-                (item.file_name, item.original_name) for item in snapshots
-            ),
-            input_documents=tuple(
-                (
-                    item.file_name,
-                    item.original_name,
-                    item.document.document_ref,
-                    item.document.external_location,
-                )
-                for item in snapshots
-            ),
+            document_candidates=document_candidates,
+            max_files_per_request=self._max_files_per_request,
         )
+        effective_file_count: int | str = "unknown"
+        try:
+            accepted_input = self._store.run_inputs.get(run.run_id)
+            if accepted_input is not None:
+                effective_file_count = len(accepted_input.files)
+            else:
+                logger.error(
+                    "文件对话运行已受理但日志计数未读到输入快照: "
+                    "chat_id=%s run_id=%s",
+                    run.chat_id,
+                    run.run_id,
+                )
+        except Exception:
+            # 运行和不可变输入已经在前一个原子事务中提交。这里的二次读取只服务于
+            # 可观测计数，绝不能因为日志查询瞬时失败把已受理请求伪装成 HTTP 500，
+            # 否则调用方重试可能与仍然活跃的 run 冲突。
+            logger.exception(
+                "文件对话运行已受理但日志计数读取失败，继续返回已受理运行: "
+                "chat_id=%s run_id=%s",
+                run.chat_id,
+                run.run_id,
+            )
         logger.info(
-            "文件对话运行已受理并冻结输入快照: chat_id=%s run_id=%s file_count=%d",
+            "文件对话运行已受理并冻结输入快照: "
+            "chat_id=%s run_id=%s effective_file_count=%s",
             run.chat_id,
             run.run_id,
-            len(snapshots),
+            effective_file_count,
         )
         # 命令服务会在受理事务中保存完整的消息和文档快照。将这些对象直接传给执行器会
         # 让未来工作进程依赖请求内存，因此执行路径刻意只接收持久化运行键。
         return PreparedChatRun(run_id=run.run_id, chat_id=run.chat_id)
+
+    @staticmethod
+    def _ensure_snapshot_order(
+        *,
+        snapshots: Sequence[ChatRunDocumentSnapshot],
+        expected_file_names: Sequence[str],
+    ) -> None:
+        """拒绝 Resolver 返回缺项、增项或乱序结果，保护不可变受理输入。"""
+        if tuple(item.file_name for item in snapshots) != tuple(
+            expected_file_names
+        ):
+            raise ValueError("document resolver returned unexpected file order")
 
     def execute_chat_run(self, run_id: str) -> Iterator[ChatStreamEvent]:
         """从持久化输入快照中领取并执行一条已受理运行。"""
@@ -306,7 +399,8 @@ class SynchronousChatRunExecutor:
 
         request = self._request_from_persisted_input(run_id=normalized_run_id)
         logger.info(
-            "开始领取并执行文件对话运行: chat_id=%s run_id=%s file_count=%d",
+            "开始领取并执行文件对话运行: "
+            "chat_id=%s run_id=%s effective_file_count=%d",
             request.chat_id,
             request.run_id,
             len(request.documents),
@@ -416,7 +510,8 @@ class SynchronousChatRunExecutor:
             documents = request.documents
             if request.file_names and not documents:
                 logger.warning(
-                    "文件对话运行缺少已受理文档快照: chat_id=%s run_id=%s requested_file_count=%d",
+                    "文件对话运行缺少已受理文档快照: "
+                    "chat_id=%s run_id=%s effective_file_count=%d",
                     request.chat_id,
                     request.run_id,
                     len(request.file_names),
@@ -767,6 +862,16 @@ class SynchronousChatRunExecutor:
             document=document.document,
         )
 
+    @staticmethod
+    def _candidate(document: ResolvedChatDocument) -> ChatDocumentCandidate:
+        """把 Resolver DTO 收敛为不依赖 Resolver/Database 的受理候选。"""
+        return ChatDocumentCandidate(
+            file_name=document.file_name,
+            original_name=document.original_name,
+            document_ref=document.document.document_ref,
+            external_location=document.document.external_location,
+        )
+
 
 class ChatRunEventRecorder:
     """在保留流事件的同时持久化本地权威消息。"""
@@ -805,7 +910,8 @@ class ChatRunEventRecorder:
                 # 校验；未来协调器会在这里校验实际 token/fencing 信息。
                 chat_commands.validate_execution_lease(lease=execution_lease)
             logger.info(
-                "开始记录文件对话运行事件: chat_id=%s run_id=%s file_count=%d",
+                "开始记录文件对话运行事件: "
+                "chat_id=%s run_id=%s effective_file_count=%d",
                 request.chat_id,
                 request.run_id,
                 len(request.file_names),

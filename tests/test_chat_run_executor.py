@@ -34,7 +34,14 @@ from tests.fakes import FakeChatConversationFactory
 
 
 class _StaticDocumentResolver:
+    def __init__(self, *, all_file_names=()):
+        self.all_file_names = tuple(all_file_names)
+        self.resolve_many_calls = []
+        self.resolve_all_available_calls = 0
+
     def resolve_many(self, file_names):
+        normalized_file_names = tuple(file_names)
+        self.resolve_many_calls.append(normalized_file_names)
         return tuple(
             ResolvedChatDocument(
                 file_name=file_name,
@@ -44,7 +51,22 @@ class _StaticDocumentResolver:
                     external_location=f"custom-documents/{file_name}.json",
                 ),
             )
-            for file_name in file_names
+            for file_name in normalized_file_names
+        )
+
+    def resolve_all_available(self):
+        """返回独立全量候选，并记录调用次数以验证阶段 2 选择路径。"""
+        self.resolve_all_available_calls += 1
+        return tuple(
+            ResolvedChatDocument(
+                file_name=file_name,
+                original_name=f"{file_name}.original",
+                document=ChatDocumentRef(
+                    document_ref=f"document:{file_name}",
+                    external_location=f"custom-documents/{file_name}.json",
+                ),
+            )
+            for file_name in self.all_file_names
         )
 
 
@@ -562,6 +584,394 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
+
+    def _executor(self, resolver=None) -> SynchronousChatRunExecutor:
+        """构造不连接真实供应商的同步执行器。"""
+        return SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(),
+            document_resolver=resolver or self.resolver,
+        )
+
+    def test_non_empty_candidate_scope_resolves_only_explicit_files(self) -> None:
+        resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
+        candidates = self._executor(resolver).resolve_document_candidates(
+            chat_id="candidate-explicit",
+            file_names=("explicit.pdf",),
+        )
+
+        self.assertEqual(
+            ("explicit.pdf",),
+            tuple(
+                item.file_name for item in candidates.explicit_documents
+            ),
+        )
+        self.assertEqual((), candidates.new_session_default_documents)
+        self.assertEqual([("explicit.pdf",)], resolver.resolve_many_calls)
+        self.assertEqual(0, resolver.resolve_all_available_calls)
+
+    def test_existing_session_empty_scope_skips_catalog_scan(self) -> None:
+        self.store.sessions.create_or_get(chat_id="candidate-existing")
+        resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
+
+        candidates = self._executor(resolver).resolve_document_candidates(
+            chat_id="candidate-existing",
+            file_names=(),
+        )
+
+        self.assertEqual((), candidates.explicit_documents)
+        self.assertEqual((), candidates.new_session_default_documents)
+        self.assertEqual([], resolver.resolve_many_calls)
+        self.assertEqual(0, resolver.resolve_all_available_calls)
+
+    def test_missing_session_empty_scope_prepares_default_catalog_once(self) -> None:
+        resolver = _StaticDocumentResolver(
+            all_file_names=("alpha.pdf", "beta.pdf")
+        )
+
+        candidates = self._executor(resolver).resolve_document_candidates(
+            chat_id="candidate-new",
+            file_names=(),
+        )
+
+        self.assertEqual((), candidates.explicit_documents)
+        self.assertEqual(
+            ("alpha.pdf", "beta.pdf"),
+            tuple(
+                item.file_name
+                for item in candidates.new_session_default_documents
+            ),
+        )
+        self.assertEqual([], resolver.resolve_many_calls)
+        self.assertEqual(1, resolver.resolve_all_available_calls)
+
+    def test_stage_three_applies_default_candidates_to_new_public_run(self) -> None:
+        resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
+        executor = self._executor(resolver)
+
+        prepared = executor.prepare_chat_run(
+            chat_id="candidate-stage-gate",
+            message="question",
+            file_names=(),
+        )
+
+        run_input = self.store.run_inputs.get(prepared.run_id)
+        self.assertIsNotNone(run_input)
+        assert run_input is not None
+        self.assertEqual(
+            ("all.pdf",),
+            tuple(item.file_name for item in run_input.files),
+        )
+        self.assertEqual([], resolver.resolve_many_calls)
+        self.assertEqual(1, resolver.resolve_all_available_calls)
+
+    def test_accepted_run_survives_observability_count_read_failure(
+        self,
+    ) -> None:
+        """受理后的日志计数读取失败不得把已提交运行变成调用方可见失败。"""
+
+        resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
+        executor = self._executor(resolver)
+        with patch.object(
+            self.store.run_inputs,
+            "get",
+            side_effect=RuntimeError("injected telemetry read failure"),
+        ):
+            with self.assertLogs(
+                "app.services.chat.application.run_executor",
+                level="ERROR",
+            ) as captured:
+                prepared = executor.prepare_chat_run(
+                    chat_id="20006",
+                    message="question",
+                    file_names=(),
+                )
+
+        # 退出故障注入后必须能读取并执行刚才已原子提交的事实，证明异常只影响日志。
+        accepted_input = self.store.run_inputs.get(prepared.run_id)
+        self.assertIsNotNone(accepted_input)
+        assert accepted_input is not None
+        self.assertEqual(("all.pdf",), tuple(
+            item.file_name for item in accepted_input.files
+        ))
+        self.assertEqual(
+            ["chatInfo", "textChunk", "done"],
+            [
+                event.event_type
+                for event in executor.execute_chat_run(prepared.run_id)
+            ],
+        )
+        self.assertTrue(any(
+            "日志计数读取失败，继续返回已受理运行" in message
+            for message in captured.output
+        ))
+
+    def test_failed_first_run_retry_does_not_reapply_default_candidates(
+        self,
+    ) -> None:
+        resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
+        executor = self._executor(resolver)
+        first = executor.prepare_chat_run(
+            chat_id="candidate-first-failed",
+            message="first",
+            file_names=(),
+        )
+        self.commands.fail_chat_run(
+            run_id=first.run_id,
+            error_message="first run failed",
+        )
+
+        retry = executor.prepare_chat_run(
+            chat_id="candidate-first-failed",
+            message="retry",
+            file_names=(),
+        )
+
+        first_input = self.store.run_inputs.get(first.run_id)
+        retry_input = self.store.run_inputs.get(retry.run_id)
+        self.assertIsNotNone(first_input)
+        self.assertIsNotNone(retry_input)
+        assert first_input is not None
+        assert retry_input is not None
+        self.assertEqual(("all.pdf",), tuple(
+            item.file_name for item in first_input.files
+        ))
+        self.assertEqual((), retry_input.files)
+        self.assertEqual(1, resolver.resolve_all_available_calls)
+
+    def test_default_documents_follow_same_execution_path_as_explicit_documents(
+        self,
+    ) -> None:
+        """自动全量与显式文件必须复用同一 Port、绑定和历史提交链。"""
+
+        resolver = _StaticDocumentResolver(
+            all_file_names=("alpha.pdf", "beta.pdf")
+        )
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=resolver,
+        )
+        explicit = executor.prepare_chat_run(
+            chat_id="20001",
+            message="explicit question",
+            file_names=("alpha.pdf", "beta.pdf"),
+        )
+        default = executor.prepare_chat_run(
+            chat_id="20002",
+            message="default question",
+            file_names=(),
+        )
+
+        explicit_events = list(executor.execute_chat_run(explicit.run_id))
+        default_events = list(executor.execute_chat_run(default.run_id))
+
+        expected_refs = ("document:alpha.pdf", "document:beta.pdf")
+        self.assertEqual(2, len(factory.ports))
+        self.assertEqual(0, factory.active_leases)
+        self.assertIsNot(factory.ports[0], factory.ports[1])
+        for events in (explicit_events, default_events):
+            self.assertEqual(
+                ["chatInfo", "textChunk", "done"],
+                [event.event_type for event in events],
+            )
+            self.assertTrue(events[0].data["isNewChat"])
+        for port in factory.ports:
+            self.assertEqual(1, len(port.attach_document_calls))
+            self.assertEqual(
+                expected_refs,
+                tuple(
+                    item.document_ref
+                    for item in port.attach_document_calls[0][1]
+                ),
+            )
+            self.assertEqual(expected_refs, port.stream_message_calls[0][2])
+
+        for chat_id, prepared in (
+            ("20001", explicit),
+            ("20002", default),
+        ):
+            bindings = self.store.document_bindings.list_current_by_chat(
+                chat_id
+            )
+            messages = self.store.messages.list_by_chat(chat_id)
+            leases = self.store.resource_leases.list_by_chat(chat_id)
+            self.assertEqual(
+                expected_refs,
+                tuple(item.document_ref for item in bindings),
+            )
+            self.assertEqual(
+                ("alpha.pdf.original", "beta.pdf.original"),
+                tuple(item.original_name for item in messages[0].files),
+            )
+            self.assertEqual(
+                ["document_binding", "document_binding", "thread", "workspace"],
+                sorted(item.resource_type for item in leases),
+            )
+            self.assertTrue(all(item.status == "active" for item in leases))
+            self.assertTrue(
+                all(item.run_id == prepared.run_id for item in leases)
+            )
+
+    def test_default_execution_uses_accepted_snapshot_after_catalog_changes(
+        self,
+    ) -> None:
+        """受理后知识库候选变化，不得改变已冻结运行的执行文档。"""
+
+        resolver = _StaticDocumentResolver(all_file_names=("alpha.pdf",))
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20003",
+            message="question",
+            file_names=(),
+        )
+        resolver.all_file_names = ("beta.pdf",)
+
+        events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(
+            ["chatInfo", "textChunk", "done"],
+            [event.event_type for event in events],
+        )
+        self.assertEqual(1, resolver.resolve_all_available_calls)
+        self.assertEqual(1, len(factory.ports))
+        self.assertEqual(
+            ("document:alpha.pdf",),
+            tuple(
+                item.document_ref
+                for item in factory.ports[0].attach_document_calls[0][1]
+            ),
+        )
+        self.assertEqual(
+            ("document:alpha.pdf",),
+            factory.ports[0].stream_message_calls[0][2],
+        )
+        self.assertEqual(
+            ("document:alpha.pdf",),
+            tuple(
+                item.document_ref
+                for item in self.store.document_bindings.list_current_by_chat(
+                    "20003"
+                )
+            ),
+        )
+
+    def test_later_empty_run_reuses_binding_heads_without_reattach(self) -> None:
+        """既有会话空数组只复用 current heads，不吸收新目录文件。"""
+
+        resolver = _StaticDocumentResolver(all_file_names=("alpha.pdf",))
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=resolver,
+        )
+        first = executor.prepare_chat_run(
+            chat_id="20004",
+            message="first",
+            file_names=(),
+        )
+        first_events = list(executor.execute_chat_run(first.run_id))
+        resolver.all_file_names = ("alpha.pdf", "new-beta.pdf")
+
+        second = executor.prepare_chat_run(
+            chat_id="20004",
+            message="second",
+            file_names=(),
+        )
+        second_events = list(executor.execute_chat_run(second.run_id))
+
+        second_input = self.store.run_inputs.get(second.run_id)
+        self.assertIsNotNone(second_input)
+        assert second_input is not None
+        self.assertEqual((), second_input.files)
+        self.assertEqual(1, resolver.resolve_all_available_calls)
+        self.assertTrue(first_events[0].data["isNewChat"])
+        self.assertFalse(second_events[0].data["isNewChat"])
+        self.assertEqual(2, len(factory.ports))
+        self.assertEqual([], factory.ports[1].attach_document_calls)
+        self.assertEqual(
+            ("document:alpha.pdf",),
+            factory.ports[1].stream_message_calls[0][2],
+        )
+        self.assertEqual(
+            ("alpha.pdf",),
+            tuple(
+                item.file_name
+                for item in self.store.document_bindings.list_current_by_chat(
+                    "20004"
+                )
+            ),
+        )
+        user_messages = [
+            item
+            for item in self.store.messages.list_by_chat(
+                "20004"
+            )
+            if item.role == MESSAGE_ROLE_USER
+        ]
+        self.assertEqual(
+            ("alpha.pdf",),
+            tuple(item.file_name for item in user_messages[0].files),
+        )
+        self.assertEqual((), user_messages[1].files)
+
+    def test_empty_default_range_skips_attach_and_streams_without_documents(
+        self,
+    ) -> None:
+        """空知识库首次会话不调用绑定，但仍通过同一流式执行链完成。"""
+
+        resolver = _StaticDocumentResolver()
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20005",
+            message="free question",
+            file_names=(),
+        )
+
+        events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(
+            ["chatInfo", "textChunk", "done"],
+            [event.event_type for event in events],
+        )
+        self.assertTrue(events[0].data["isNewChat"])
+        self.assertEqual(1, len(factory.ports))
+        self.assertEqual([], factory.ports[0].attach_document_calls)
+        self.assertEqual((), factory.ports[0].stream_message_calls[0][2])
+        self.assertEqual(
+            (),
+            self.store.document_bindings.list_current_by_chat(
+                "20005"
+            ),
+        )
+        messages = self.store.messages.list_by_chat("20005")
+        self.assertEqual((), messages[0].files)
+        self.assertEqual(
+            ["thread", "workspace"],
+            sorted(
+                item.resource_type
+                for item in self.store.resource_leases.list_by_chat(
+                    "20005"
+                )
+            ),
+        )
 
     def test_acceptance_freezes_input_before_stream_and_activates_resource_leases(self) -> None:
         factory = FakeChatConversationFactory(stream_contents=("answer",))

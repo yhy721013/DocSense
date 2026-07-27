@@ -44,10 +44,14 @@ class ChatDebugPreviewTests(unittest.TestCase):
             ingested_file_name="hash-alpha.pdf",
         )
 
-        result = load_chat_debug_bootstrap(
-            chat_store=self.chat_store,
-            kb_service=self.kb_service,
-        )
+        with self.assertLogs(
+            "app.services.utils.chat_debug_preview",
+            level="INFO",
+        ) as captured:
+            result = load_chat_debug_bootstrap(
+                chat_store=self.chat_store,
+                kb_service=self.kb_service,
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(10001, result["data"]["sessions"][0]["chatId"])
@@ -59,6 +63,15 @@ class ChatDebugPreviewTests(unittest.TestCase):
             "hash-alpha.pdf",
             result["data"]["availableFiles"][0]["fileName"],
         )
+        completed_log = next(
+            message
+            for message in captured.output
+            if "调试初始化数据读取完成" in message
+        )
+        self.assertIn("session_count=1", completed_log)
+        self.assertIn("current_binding_count=1", completed_log)
+        self.assertIn("available_file_count=1", completed_log)
+        self.assertNotIn("hash-alpha.pdf", completed_log)
 
     def test_deleted_session_is_hidden_from_debug_list(self) -> None:
         self.chat_store.sessions.create_or_get(chat_id="10002")

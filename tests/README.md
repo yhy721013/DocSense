@@ -6,13 +6,13 @@
 
 | 文件 | 覆盖内容 |
 | --- | --- |
-| `test_chat.py` | `/llm/chat` 路由受理、既有 SSE 事件、响应头、输入校验、并发拒绝和内部标识不泄露。 |
+| `test_chat.py` | `/llm/chat` 路由受理、首次空数组最低矩阵、既有 SSE 事件、响应头、输入校验、同会话并发拒绝、50 个不同会话完整隔离和内部标识不泄露。 |
 | `test_chat_port_contract.py` | `ChatConversationPort` 数据传输对象、异常与协议边界。 |
 | `test_anythingllm_chat_gateway.py` | AnythingLLM 对话网关的离线传输、字段归一化、流关闭和删除行为。 |
-| `test_chat_repositories.py` | SQLite 架构迁移、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
+| `test_chat_repositories.py` | SQLite 架构迁移、统一有界 busy timeout、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
 | `test_chat_resource_ids.py` | 租约标识和不透明远端引用的编码/解码。 |
 | `test_chat_run_state.py` | 同一会话互斥、执行租约、心跳、过期运行和删除准入。 |
-| `test_chat_run_executor.py` | 输入冻结、运行领取、资源租约、文档选择、流事件记录和异常收敛。 |
+| `test_chat_run_executor.py` | 输入冻结、运行领取、资源租约、文档选择、流事件记录、异常收敛，以及受理后可观测性读取故障不得误报受理失败。 |
 | `test_chat_event_repository.py` | 内部事件账本的序号、终态唯一性和事务写入。 |
 | `test_chat_dispatcher.py` | 仅以持久化 `run_id` 调度执行的协议和内联实现。 |
 | `test_chat_history_service.py` | 本地权威历史、消息过滤和标题输入。 |

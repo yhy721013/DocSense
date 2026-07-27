@@ -38,10 +38,15 @@ from app.services.chat.domain.resource_ids import (
     parse_chat_scoped_external_ref,
 )
 from app.services.chat.application.document_resolver import (
+    ChatDocumentCatalogConflictError,
     ChatDocumentNotFoundError,
     ChatDocumentResolver,
     DatabaseChatDocumentResolver,
     ResolvedChatDocument,
+)
+from app.services.chat.application.document_candidates import (
+    ChatDocumentCandidate,
+    ChatDocumentSelectionCandidates,
 )
 from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
@@ -165,6 +170,9 @@ __all__ = [
     "ChatAbortResult",
     "ChatAbortService",
     "ChatCommandService",
+    "ChatDocumentCatalogConflictError",
+    "ChatDocumentCandidate",
+    "ChatDocumentSelectionCandidates",
     "ChatDocumentNotFoundError",
     "ChatDocumentResolver",
     "ChatDeleteBusyError",

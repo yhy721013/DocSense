@@ -49,6 +49,12 @@ from app.services.chat.domain.models import (
 
 logger = logging.getLogger(__name__)
 
+# 文件对话完整执行会依次提交受理、资源租约、binding、事件和终态等多个短事务。
+# 当进程内流容量显式提高到 50 时，不同会话仍会竞争 SQLite 的唯一写锁；5 秒默认值
+# 不足以覆盖这组有界短事务的排队时间。这里保留 30 秒上限，避免无限等待，同时明确
+# 这只是单实例 SQLite 的退避窗口，不代表并行写、多实例协调或可靠队列能力。
+DEFAULT_CHAT_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+
 
 _RUN_STATUS_TRANSITIONS = {
     RUN_ACCEPTED: frozenset({RUN_RUNNING, RUN_FAILED, RUN_ABORTED}),
@@ -117,13 +123,22 @@ def _json_loads_list(value: str) -> list[Any]:
     return loaded
 
 
-def _connect(db_path: str, *, timeout_seconds: float = 5.0) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path, timeout=max(0.0, timeout_seconds))
+def _connect(
+    db_path: str,
+    *,
+    timeout_seconds: float = DEFAULT_CHAT_SQLITE_BUSY_TIMEOUT_SECONDS,
+) -> sqlite3.Connection:
+    normalized_timeout_seconds = max(0.0, float(timeout_seconds))
+    connection = sqlite3.connect(
+        db_path,
+        timeout=normalized_timeout_seconds,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     # 有界忙等待超时可使受支持的单实例模式中短暂写入冲突的结果确定。它不能替代队列
     # 或分布式锁，但可避免相邻请求提交短事务时 SQLite 立即失败。
-    connection.execute("PRAGMA busy_timeout = 5000")
+    busy_timeout_ms = round(normalized_timeout_seconds * 1000)
+    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
     return connection
 
 
