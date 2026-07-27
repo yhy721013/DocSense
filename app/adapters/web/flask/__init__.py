@@ -1,5 +1,14 @@
 """Flask 入站适配器包。"""
 
+from .analysis_requests import (
+    AnalysisRequestValidationError,
+    ParsedAnalysisRequest,
+    parse_analysis_flask_request,
+)
+from .analysis_submission import (
+    AnalysisPresentedResponse,
+    AnalysisSubmissionResponsePresenter,
+)
 from .progress_connection import ProgressConnectionRegistry
 from .progress_requests import (
     ProgressRequestValidationError,
@@ -22,6 +31,10 @@ from .weaponry_requests import (
 )
 
 __all__ = [
+    "AnalysisPresentedResponse",
+    "AnalysisRequestValidationError",
+    "AnalysisSubmissionResponsePresenter",
+    "ParsedAnalysisRequest",
     "ProgressConnectionRegistry",
     "ProgressRequestValidationError",
     "ParsedReportRequest",
@@ -30,6 +43,7 @@ __all__ = [
     "ReportRequestValidationError",
     "ReassignRequestValidationError",
     "WeaponryRequestValidationError",
+    "parse_analysis_flask_request",
     "parse_progress_subscription",
     "parse_report_request",
     "parse_reassign_request",

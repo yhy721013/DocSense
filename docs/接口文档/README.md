@@ -2,6 +2,11 @@
 
 本目录是项目对外 HTTP、SSE 与 WebSocket 契约的权威来源。任何涉及公开接口的代码改动，必须先核对此目录；若可能影响文档内容，必须先取得确认。2026-07-15 已明确批准任务受理/check-task 成功空响应体、check-task/Progress 的 `params` 元素严格对象校验，以及 Progress 显式 action 下线后返回错误消息并保持连接。2026-07-16 又明确批准 `reportId` 入站同时接受 JSON 整数和十进制整数字符串，服务端按整数值规范化；其数字部分最多为 128 位，正负号不计入、前导零计入该上限，响应中的 `reportId` 仍保持既有 JSON number。同日进一步批准报告生成请求严格拒绝顶层非对象 JSON、混合非对象 `params` 元素以及 `filePathList` 非字符串/空白元素，并使用已登记的 HTTP 400 单字段错误体；`templateDesc` 与 `requirement` 在进入领域层前沿用旧执行链的字符串化兼容行为。报告生成的 202 空体、活动/回调 Guard 409 已于 2026-07-17 在当前 Flask 路由实现。2026-07-18 进一步确认 weaponry 的 ArchitectureId 在提交、check-task、Progress、Worker 和回调中统一规范为 `1..9223372036854775807` 的数值身份，并确认 `rows` 中通过来源身份、合法分数或稳定排名、正文质量和同文档精确去重门禁的 Evidence 不做单条、总量或单文档数量/字符截断；当前选择策略不设置绝对相关性阈值且不使用独立 reranker，成功回调必须完整覆盖受理字段和 TABLE 列。阶段 1D-6 已于 2026-07-19 在当前开发分支实施 weaponry 的 202 严格空体、既有 400/404/409、同步 check-task Guard 恢复和无路由线程切换。负责人于 2026-07-25 明确同意将已批准语义在集成分支落地：`/llm/analysis` 返回 202 空响应体，`/llm/check-task` 返回 200 空响应体且严格拒绝包含非对象元素的 `params`，weaponry 的 check-task/Progress 作为既有 `businessType` 公开兼容范围，Progress 的 `data.architectureId` 保持 JSON number。上述调整没有增删任何接口参数或消息字段，内部任务、回调和调度细节不通过成功响应体公开。
 
+2026-07-27 进一步确认：file 回调进入 `outcome_unknown` 后，普通 Worker 和后台维护线程仍不得自动重发；
+新的 `/llm/check-task` 请求可以明确授权一次 at-least-once 补发，因此接收方可能收到重复业务回调，
+必须按 `fileName` 和业务结果幂等处理。同一 check-task 请求中规范化后重复的 fileName 只处理首次出现项。
+该确认不增删请求参数、响应字段、回调字段，不改变既有 HTTP 状态码或严格空成功体。
+
 ## 文件说明
 
 | 文件 | 作用 |

@@ -14,6 +14,22 @@ from app.services.core.settings import (
     MINERU_CACHE_DIR,
     OCR_CACHE_DIR,
 )
+from app.modules.analysis.domain.models import (
+    ANALYSIS_CLASSIFICATION_MODE_LEGACY,
+    ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
+    ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+    ANALYSIS_CLASSIFICATION_MODES,
+    ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+    ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    ANALYSIS_DATA_STANDARD_MODES,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    ANALYSIS_FILENAME_CONSTRAINT_MODES,
+    ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+    ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
+    ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW,
+    ANALYSIS_IDENTITY_RESELECT_MODES,
+)
 
 
 @dataclass(frozen=True)
@@ -46,47 +62,6 @@ class LLMIntegrationConfig:
     task_db_path: str
     download_timeout: float
     download_dir: str
-
-
-ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE = "topk_two_stage"
-ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE = "topk_single"
-ANALYSIS_CLASSIFICATION_MODE_LEGACY = "legacy"
-ANALYSIS_CLASSIFICATION_MODES = frozenset(
-    {
-        ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
-        ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
-        ANALYSIS_CLASSIFICATION_MODE_LEGACY,
-    }
-)
-
-ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY = "legacy"
-ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD = "scope_guard"
-ANALYSIS_FILENAME_CONSTRAINT_MODES = frozenset(
-    {
-        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
-        ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
-    }
-)
-
-ANALYSIS_DATA_STANDARD_MODE_LEGACY = "legacy"
-ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD = "scope_guard"
-ANALYSIS_DATA_STANDARD_MODES = frozenset(
-    {
-        ANALYSIS_DATA_STANDARD_MODE_LEGACY,
-        ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
-    }
-)
-
-ANALYSIS_IDENTITY_RESELECT_MODE_OFF = "off"
-ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW = "shadow"
-ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE = "enforce"
-ANALYSIS_IDENTITY_RESELECT_MODES = frozenset(
-    {
-        ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
-        ANALYSIS_IDENTITY_RESELECT_MODE_SHADOW,
-        ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
-    }
-)
 
 
 class AnalysisClassificationConfigurationError(RuntimeError):
@@ -211,6 +186,12 @@ class AnalysisClassificationConfig:
 
 CHAT_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
 REPORT_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
+ANALYSIS_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
+
+# Analysis Dispatcher 目前依赖本地 SQLite 与进程内线程。把内部时间参数限制在一周内，
+# 可以尽早暴露把毫秒误填成秒等配置错误，也避免一个错误配置让排队、停机或回调 Guard
+# 长时间失去人工可观测性。这个上限只约束后端内部运行参数，不改变任何公开接口超时语义。
+_MAX_ANALYSIS_INFRASTRUCTURE_SECONDS = 7 * 24 * 60 * 60
 
 
 class ChatInfrastructureConfigurationError(RuntimeError):
@@ -219,6 +200,10 @@ class ChatInfrastructureConfigurationError(RuntimeError):
 
 class ReportInfrastructureConfigurationError(RuntimeError):
     """报告调度或资源恢复配置不满足当前单实例安全边界时抛出。"""
+
+
+class AnalysisInfrastructureConfigurationError(RuntimeError):
+    """文件分析 Dispatcher、回调 Guard 或恢复配置不满足安全边界时抛出。"""
 
 
 @dataclass(frozen=True)
@@ -340,6 +325,102 @@ class ReportInfrastructureConfig:
         """创建不读取环境变量的安全默认配置，供离线组合测试显式注入。"""
 
         return cls(runtime_mode=REPORT_RUNTIME_MODE_SINGLE_INSTANCE)
+
+
+@dataclass(frozen=True)
+class AnalysisInfrastructureConfig:
+    """阶段 1F-5A 文件分析本地运行链的内部配置。
+
+    当前实现只安装 SQLite ``single_instance`` 调度器：持久积压事实保存在
+    ``llm_task_executions``，一条 Worker 线程负责领取新 Analysis execution，维护线程
+    只做有界 Callback Guard 冻结与资源审计补齐。它不是可靠消息队列、多实例租约或
+    ``running`` 任务接管机制；因此任何其他运行模式必须在应用装配前明确拒绝。
+    """
+
+    runtime_mode: str = ANALYSIS_RUNTIME_MODE_SINGLE_INSTANCE
+    scan_interval_seconds: float = 1.0
+    accepted_batch_size: int = 50
+    dispatch_retry_base_seconds: float = 5.0
+    dispatch_retry_max_seconds: float = 300.0
+    resource_sweep_interval_seconds: float = 30.0
+    resource_sweep_batch_size: int = 50
+    running_alert_seconds: float = 30.0
+    stop_timeout_seconds: float = 5.0
+    callback_http_timeout_seconds: float = 10.0
+    callback_lease_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        """规范化并一次性校验内部运行参数，禁止误配时静默退回默认值。"""
+
+        mode = str(self.runtime_mode or "").strip().lower()
+        if mode != ANALYSIS_RUNTIME_MODE_SINGLE_INSTANCE:
+            raise AnalysisInfrastructureConfigurationError(
+                "当前仅安装 single_instance 文件分析调度基础设施；"
+                "多实例模式必须等待共享数据库、可靠队列和分布式租约完成"
+            )
+        object.__setattr__(self, "runtime_mode", mode)
+
+        for name in (
+            "scan_interval_seconds",
+            "dispatch_retry_base_seconds",
+            "dispatch_retry_max_seconds",
+            "resource_sweep_interval_seconds",
+            "running_alert_seconds",
+            "stop_timeout_seconds",
+            "callback_http_timeout_seconds",
+            "callback_lease_seconds",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise AnalysisInfrastructureConfigurationError(
+                    f"{name} 必须是正有限数字"
+                )
+            normalized = float(value)
+            if (
+                normalized != normalized
+                or normalized in (float("inf"), float("-inf"))
+                or normalized <= 0.0
+                or normalized > _MAX_ANALYSIS_INFRASTRUCTURE_SECONDS
+            ):
+                raise AnalysisInfrastructureConfigurationError(
+                    f"{name} 必须是 0 到 {_MAX_ANALYSIS_INFRASTRUCTURE_SECONDS} "
+                    "之间的有限数字"
+                )
+            object.__setattr__(self, name, normalized)
+
+        for name in ("accepted_batch_size", "resource_sweep_batch_size"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise AnalysisInfrastructureConfigurationError(
+                    f"{name} 必须是 1~1000 的整数"
+                )
+            if value < 1 or value > 1000:
+                raise AnalysisInfrastructureConfigurationError(
+                    f"{name} 必须是 1~1000 的整数"
+                )
+
+        if self.dispatch_retry_max_seconds < self.dispatch_retry_base_seconds:
+            raise AnalysisInfrastructureConfigurationError(
+                "dispatch_retry_max_seconds 不能小于 dispatch_retry_base_seconds"
+            )
+
+        # ``required_http_lease_seconds`` 已覆盖 Requests 连接、响应读取和安全余量。
+        # Analysis 要求“严格大于”，防止恰好卡在最小预算时无法覆盖调度抖动与 Guard
+        # 条件完成；真实 HTTP 仅在 Worker 内发生，此处不发起任何网络探测。
+        required_lease = required_http_lease_seconds(
+            self.callback_http_timeout_seconds
+        )
+        if self.callback_lease_seconds <= required_lease:
+            raise AnalysisInfrastructureConfigurationError(
+                "callback_lease_seconds 必须严格大于连接、响应读取和安全余量，"
+                f"当前必须大于 {required_lease:.3f} 秒"
+            )
+
+    @classmethod
+    def single_instance(cls) -> "AnalysisInfrastructureConfig":
+        """返回不读取环境变量的安全默认配置，供离线组合测试显式注入。"""
+
+        return cls(runtime_mode=ANALYSIS_RUNTIME_MODE_SINGLE_INSTANCE)
 
 
 def _parse_timeout(raw_value: Optional[str]) -> Optional[float]:
@@ -575,5 +656,84 @@ def load_report_infrastructure_config() -> ReportInfrastructureConfig:
         max_download_bytes=_strict_report_bytes(
             "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES",
             512 * 1024 * 1024,
+        ),
+    )
+
+
+def _strict_analysis_float(name: str, default: float) -> float:
+    """读取文件分析内部浮点参数；显式空值、文本和非数值一律拒绝启动。"""
+
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisInfrastructureConfigurationError(
+            f"{name} 必须是正有限数字"
+        ) from exc
+
+
+def _strict_analysis_int(name: str, default: int) -> int:
+    """读取文件分析有界批量参数；不接受小数、布尔文本或空值。"""
+
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisInfrastructureConfigurationError(
+            f"{name} 必须是 1~1000 的整数"
+        ) from exc
+
+
+def load_analysis_infrastructure_config() -> AnalysisInfrastructureConfig:
+    """读取阶段 1F-5A Analysis Dispatcher 的严格内部运行配置。
+
+    这些变量只影响本地后台调度、资源恢复和 Callback Guard 的时间预算；它们不会新增或
+    修改 `/llm/analysis`、`/llm/check-task`、Progress、Callback 的任何公开字段或状态码。
+    """
+
+    return AnalysisInfrastructureConfig(
+        runtime_mode=os.getenv(
+            "DOCSENSE_ANALYSIS_RUNTIME_MODE",
+            ANALYSIS_RUNTIME_MODE_SINGLE_INSTANCE,
+        ),
+        scan_interval_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_DISPATCH_SCAN_INTERVAL_SECONDS",
+            1.0,
+        ),
+        accepted_batch_size=_strict_analysis_int(
+            "DOCSENSE_ANALYSIS_DISPATCH_BATCH_SIZE",
+            50,
+        ),
+        dispatch_retry_base_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_DISPATCH_RETRY_BASE_SECONDS",
+            5.0,
+        ),
+        dispatch_retry_max_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_DISPATCH_RETRY_MAX_SECONDS",
+            300.0,
+        ),
+        resource_sweep_interval_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_INTERVAL_SECONDS",
+            30.0,
+        ),
+        resource_sweep_batch_size=_strict_analysis_int(
+            "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE",
+            50,
+        ),
+        running_alert_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS",
+            30.0,
+        ),
+        stop_timeout_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS",
+            5.0,
+        ),
+        callback_http_timeout_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS",
+            10.0,
+        ),
+        callback_lease_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS",
+            30.0,
         ),
     )

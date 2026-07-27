@@ -5,6 +5,11 @@
 """
 
 from .chat import FakeChatConversationFactory, FakeChatConversationPort
+from .analysis import (
+    AnalysisFakeExpectation,
+    StrictAnalysisFakeScript,
+    StrictAnalysisPortFake,
+)
 from .knowledge_index import FakeKnowledgeIndexFactory, FakeKnowledgeIndexPort
 from .rag import (
     FakeDocumentRagFactory,
@@ -58,6 +63,7 @@ from .weaponry import (
 )
 
 __all__ = [
+    "AnalysisFakeExpectation",
     "FakeChatConversationFactory",
     "FakeChatConversationPort",
     "FakeDocumentRagFactory",
@@ -102,4 +108,6 @@ __all__ = [
     "WeaponryInvocationRecorder",
     "sample_failed_report_trace",
     "sample_report_trace",
+    "StrictAnalysisFakeScript",
+    "StrictAnalysisPortFake",
 ]

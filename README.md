@@ -35,16 +35,16 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> web adapter/application/presenter`：报告、武器谱和分类节点变更路由均已遵循 Parser → Application → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，部分文件对话协议桥接仍位于蓝图中。
+1. `blueprints -> web adapter/application/presenter`：报告、武器谱、分类节点变更和文件分析路由均已遵循 Parser → Application → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，部分文件对话协议桥接仍位于蓝图中。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
 5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
 6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
-7. `check-task -> report/weaponry application / legacy task service`：报告和武器谱分别通过
-   `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously` 与正常 Worker
-   共用 execution 级 Callback Guard；file 暂走兼容 Task Service。三类业务均保留甲方规定的
-   请求内同步恢复副作用。
+7. `check-task -> report/weaponry/analysis application`：三类业务分别通过
+   `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously`、
+   `RecoverAnalysisCallbackSynchronously` 与正常 Worker 共用 execution 级 Callback Guard；file 不再
+   回退到兼容 Task Service。三类业务均保留甲方规定的请求内同步恢复副作用。
 
 ### 2.3 analysis/report/weaponry 请求到回调的链路
 
@@ -57,9 +57,16 @@ Client Request
     -> weaponry：Parser -> 文档范围冻结 -> SubmitWeaponryTask -> SQLite accepted -> Event 唤醒
        -> 单武器谱执行 Worker -> RunWeaponryTask(task_id) -> Weaponry Ports/Adapters
        -> 两条独立维护线程执行资源恢复和 Callback Guard 过期扫描
-    -> analysis：当前仍由遗留 Service/后台线程执行
+    -> analysis：Parser -> SubmitAnalysisBatch -> SQLite 批量 accepted -> Event 唤醒
+       -> 单文件分析 Dispatcher -> RunAnalysisTask(task_id) -> Analysis Ports/Adapters
+       -> 独立维护线程执行资源恢复和 Callback Guard 过期扫描
     -> 写入任务/进度事实并按各业务 Callback Guard/兼容链回调
 ```
+
+Analysis 的上述链路已完成 1F-5B 代码接线与 1F-7B 代码/离线关闭验收。当前发布制度要求每次更新先停止
+DocSense，再由 `clean.py` 完整删除任务库并在新进程中重建空库；该流程下
+`scripts/inspect_analysis_cutover.py` 不再是每次发布的强制门禁，只保留给“保留存量数据库、从备份恢复或
+排查清理失败”的迁移诊断场景。不得在线双跑新旧链路，也不能把离线回归表述为可靠队列、多实例或生产容量证明。
 
 ## 3. 当前目录（关键部分）
 
@@ -150,15 +157,19 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `pending`：任务初始回调状态，尚未记录回调成功、失败或跳过
 - `success`：回调成功
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
+- `outcome_unknown`：请求可能已经送达但响应结果未知；后台不自动重试，file 类型可由新的 `/llm/check-task` 明确按至少一次语义补发
 - `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
-`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。
+`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending`、`failed`，以及由新的
+file check-task 请求明确授权的 `outcome_unknown` 终态结果。同一请求内规范化后重复的 fileName
+只处理首次出现项。`outcome_unknown` 补发可能产生重复业务回调，接收方必须按 fileName 和业务结果
+幂等处理；普通 Worker 和后台维护线程仍不得自动补发。
 `skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过
 check-task 自动补发。报告类型每次实际外发前还会原子复核 latest execution 并取得 Callback
 Guard 租约：同一 execution 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
 HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 
-同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID 与租约 ID 双重 CAS 写回状态并释放租约，进程中断后过期租约可由后续补发接管。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
+同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 或 `outcome_unknown` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID、attempt 与租约 fencing 条件写回状态。进程中断后的过期租约先冻结为 `outcome_unknown`，不会由后台自动接管发送；下一次新的 file check-task 可明确授权至少一次补发。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
 
 ## 5. 接口行为说明（按当前代码核对）
 

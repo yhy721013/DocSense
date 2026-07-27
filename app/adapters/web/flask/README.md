@@ -24,4 +24,12 @@ check-task 当前只完成框架无关 typed request、可靠命令服务和 Pre
 Repository、AnythingLLM、Flask 全局对象或线程；非空非对象 JSON 和旧 ID 转换异常仍由路由保留原有
 500 边界，不能被适配器擅自收紧为新 400。
 
+阶段 1F-2 新增的 `analysis_requests.py` 和 `analysis_submission.py` 已在 1F-5B 接入当前
+`app/blueprints/llm.py`。前者复刻 `/llm/analysis` 的有界 JSON 读取、400/413 校验顺序和不可变请求
+投影；后者映射既有 202 严格空体、409 与 503 结果。路由现在只执行
+`Parser → SubmitAnalysisBatch → Presenter`，不再直接受理任务、发布 Progress 或创建后台线程。
+
+该接线不改变参数、字段、Header、状态码、Progress 或 Callback；file `check-task` 的同步恢复也只使用
+新 Analysis Callback Guard 链，不能回退到遗留恢复器。真实部署仍需先通过只读切换预检，禁止新旧链路双跑。
+
 这里不得访问 SQLite、调用 Callback、操作进度 Hub 或创建后台线程；解析后的输入交给框架无关应用服务，输出通过 Presenter 映射回已确认契约。

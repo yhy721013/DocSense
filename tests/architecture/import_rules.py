@@ -87,6 +87,20 @@ _DOMAIN_STDLIB_ROOTS = frozenset(
         "unicodedata",
     }
 )
+# Analysis 的额外标准库能力按文件授予，避免为了树索引缓存而让整个 Domain 都能引入
+# 线程、时钟或路径对象。ranges/callback 只用 deepcopy 建立任务级不可变快照；
+# result_mapping 的 pathlib 只允许做纯词法文件名解析，I/O 调用由独立 AST 门禁禁止。
+_ANALYSIS_DOMAIN_FILE_STDLIB_ROOTS = {
+    "architecture_recall.py": frozenset(
+        {"collections", "threading", "time"}
+    ),
+    "architecture_tree.py": frozenset(
+        {"collections", "concurrent", "threading", "types"}
+    ),
+    "callback_payloads.py": frozenset({"copy"}),
+    "ranges.py": frozenset({"copy"}),
+    "result_mapping.py": frozenset({"pathlib"}),
+}
 _PORTS_STDLIB_ROOTS = frozenset(
     {"__future__", "dataclasses", "enum", "typing"}
 )
@@ -362,9 +376,18 @@ def _first_positive_allowlist_violation(
 def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
     context = _module_context(reference.source)
     module_name = context[0] if context is not None else ""
+    allowed_stdlib_roots = _DOMAIN_STDLIB_ROOTS
+    if module_name == "analysis":
+        allowed_stdlib_roots = (
+            _DOMAIN_STDLIB_ROOTS
+            | _ANALYSIS_DOMAIN_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
     return _first_positive_allowlist_violation(
         reference,
-        allowed_stdlib_roots=_DOMAIN_STDLIB_ROOTS,
+        allowed_stdlib_roots=allowed_stdlib_roots,
         allowed_internal_prefixes=(f"app.modules.{module_name}.domain",),
         reason="领域层只能依赖批准的标准库和本业务模块领域类型",
     )

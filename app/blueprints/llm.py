@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -16,17 +15,22 @@ from app.adapters.web import (
     normalize_report_id,
 )
 from app.adapters.web.flask import (
+    AnalysisPresentedResponse,
+    AnalysisRequestValidationError,
+    AnalysisSubmissionResponsePresenter,
     ReportRequestValidationError,
     ProgressConnectionRegistry,
     ProgressRequestValidationError,
     ReassignRequestValidationError,
     WeaponryRequestValidationError,
+    parse_analysis_flask_request,
     parse_report_request,
     parse_progress_subscription,
     parse_reassign_request,
     parse_weaponry_request,
 )
 from app.container import ApplicationServices, get_application_services
+from app.modules.analysis.domain.task_inputs import AnalysisPolicySnapshot
 from app.modules.report.domain import ReportId, ReportTaskConflictError
 from app.modules.tasks.application import ProgressSubscriptionRollbackError
 from app.modules.weaponry.application import WeaponryTaskConflictError
@@ -67,24 +71,9 @@ from app.services.chat.domain.chat_id import (
     parse_query_chat_id,
     require_public_chat_id,
 )
-from app.services.core.architecture_tree import (
-    ArchitectureTreeValidationError,
-)
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
     CHAT_MAX_MESSAGE_CHARS,
-)
-from app.services.llm_service.analysis_service import (
-    MAX_ANALYSIS_PARAMS_PER_REQUEST,
-    MAX_ANALYSIS_REQUEST_BYTES,
-    run_file_analysis_batch_task,
-    run_file_analysis_task,
-    validate_analysis_architecture_ranges,
-)
-from app.services.llm_service.task_service import (
-    TaskAdmissionBusyError,
-    TaskAlreadyProcessingError,
-    file_task_admission_block_reason,
 )
 
 
@@ -174,6 +163,49 @@ def _empty_http_response(status_code: int) -> Response:
     return response
 
 
+def _analysis_http_response(
+    presentation: AnalysisPresentedResponse,
+) -> Response:
+    """把框架无关的 Analysis 呈现值机械转换为 Flask 响应。
+
+    ``/llm/analysis`` 的成功响应是严格零字节，错误响应则继续沿用既有的单一
+    ``error`` JSON 对象。该边界不得把 batch、TaskId、lease 或任意异常细节写入响应。
+    """
+
+    if not isinstance(presentation, AnalysisPresentedResponse):
+        raise TypeError("presentation 必须是 AnalysisPresentedResponse")
+    if presentation.body is None:
+        return _empty_http_response(presentation.status_code)
+
+    response = jsonify(presentation.body)
+    response.status_code = presentation.status_code
+    return response
+
+
+def _analysis_policy_snapshot(
+    services: ApplicationServices,
+) -> AnalysisPolicySnapshot:
+    """在受理边界冻结本次 Analysis 的运行策略。
+
+    Worker 只读取持久化的 ``AnalysisTaskInputV1``，不得在后续执行时重新读取环境变量。
+    因此每次公开请求只从已验证的容器配置复制一次策略快照，并随同批量事务保存。
+    """
+
+    if not isinstance(services, ApplicationServices):
+        raise TypeError("services 必须是 ApplicationServices")
+    config = services.analysis_classification_config
+    return AnalysisPolicySnapshot(
+        classification_mode=config.mode,
+        filename_constraint_mode=config.filename_constraint_mode,
+        data_standard_mode=config.data_standard_mode,
+        identity_reselect_mode=config.identity_reselect_mode,
+        model_candidate_limit=config.model_candidate_limit,
+        classification_prompt_char_limit=config.classification_prompt_char_limit,
+        base_leaf_limit=config.base_leaf_limit,
+        parent_candidate_limit=config.parent_candidate_limit,
+    )
+
+
 def _read_json_chat_id(
     params: Dict[str, Any],
     *,
@@ -248,251 +280,56 @@ def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 @llm_bp.post("/llm/analysis")
 def llm_analysis():
+    """通过 Parser → Application → Presenter 受理文件分析批次。
+
+    路由只处理公开 HTTP 合同和一次有界唤醒，不创建后台线程、不预查任务表，也不直接
+    接触 RAG、知识库、翻译或回调。批量冲突和原子受理由 Analysis Adapter 在 SQLite
+    短事务内裁决，确保切换后只有 Dispatcher 是唯一的执行 owner。
+    """
+
     services = _services()
-    task_service = services.task_service
-    kb_service = services.kb_service
-    progress_hub = services.progress_hub
-    llm_config = services.llm_config
-    content_length = request.content_length
-    if (
-        content_length is not None
-        and content_length > MAX_ANALYSIS_REQUEST_BYTES
-    ):
-        logger.warning(
-            "文件分析请求被拒绝: 请求体过大 content_length=%s limit=%s",
-            content_length,
-            MAX_ANALYSIS_REQUEST_BYTES,
-        )
-        return jsonify({"error": "请求体过大"}), 413
+    presenter = AnalysisSubmissionResponsePresenter()
     try:
-        if content_length is None:
-            # 对 chunked/未知长度请求只读取上限加一个字节，避免为了判断超限先把
-            # 无界请求体完整载入内存。标准 WSGI 未声明流已终止时，Werkzeug 会安全
-            # 返回空数据，而不会等待无限输入。
-            raw_body = request.stream.read(
-                MAX_ANALYSIS_REQUEST_BYTES + 1
-            )
-            if len(raw_body) > MAX_ANALYSIS_REQUEST_BYTES:
-                logger.warning(
-                    "文件分析请求被拒绝: 无Content-Length请求体过大 "
-                    "body_bytes>%s",
-                    MAX_ANALYSIS_REQUEST_BYTES,
-                )
-                return jsonify({"error": "请求体过大"}), 413
-            payload = json.loads(raw_body) if raw_body else {}
-        else:
-            payload = request.get_json(silent=True)
-            if payload is None:
-                payload = {}
-    except json.JSONDecodeError:
-        payload = {}
-    except (RecursionError, UnicodeError, ValueError):
-        logger.warning(
-            "文件分析请求被拒绝: JSON结构无法安全解析"
-        )
-        return jsonify({"error": "请求JSON格式无效"}), 400
-    if not isinstance(payload, dict):
-        logger.warning(
-            "文件分析请求被拒绝: JSON顶层不是对象 type=%s",
-            type(payload).__name__,
-        )
-        return jsonify({"error": "请求JSON必须是对象"}), 400
-    try:
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (
-        TypeError,
-        ValueError,
-        RecursionError,
-        UnicodeEncodeError,
-    ):
-        logger.warning(
-            "文件分析请求被拒绝: JSON含非有限数值或非法Unicode"
-        )
-        return jsonify(
-            {"error": "请求JSON包含非法数值或Unicode字符"}
-        ), 400
-    logger.info("收到文件分析请求: payload_keys=%s", list(payload.keys()))
-    if payload.get("businessType") != "file":
-        logger.warning(
-            "文件分析请求被拒绝: businessType无效 businessType=%s",
-            payload.get("businessType"),
-        )
-        return jsonify({"error": "businessType必须为file"}), 400
+        parsed_request = parse_analysis_flask_request(request)
+    except AnalysisRequestValidationError as exc:
+        return _analysis_http_response(presenter.present_validation_error(exc))
 
-    raw_params = payload.get("params")
-    if not isinstance(raw_params, list) or not raw_params:
-        logger.warning("文件分析请求被拒绝: params为空或格式无效")
-        return jsonify({"error": "params不能为空"}), 400
-    if len(raw_params) > MAX_ANALYSIS_PARAMS_PER_REQUEST:
-        logger.warning(
-            "文件分析请求被拒绝: params数量过多 count=%s limit=%s",
-            len(raw_params),
-            MAX_ANALYSIS_PARAMS_PER_REQUEST,
-        )
-        return jsonify(
-            {
-                "error": (
-                    "params数量不能超过"
-                    f"{MAX_ANALYSIS_PARAMS_PER_REQUEST}"
-                )
-            }
-        ), 400
-    for index, item in enumerate(raw_params):
-        if not isinstance(item, dict):
-            logger.warning(
-                "文件分析请求被拒绝: params项不是对象 index=%s",
-                index,
-            )
-            return jsonify(
-                {"error": f"params[{index}]必须是对象"}
-            ), 400
-    params_list = list(raw_params)
+    analysis_submit = services.analysis_submit
+    if analysis_submit is None:
+        # 合法请求才要求新运行链已装配，避免测试夹具配置缺失改变既有 400 的优先级；
+        # 绝不回退到旧路由线程，否则会在切换后形成双执行 owner。
+        logger.error("文件分析路由缺少新运行链接线，拒绝使用遗留线程回退")
+        raise RuntimeError("应用容器未装配文件分析运行链")
 
-    seen_file_names = set()
-    for index, params in enumerate(params_list):
-        file_name = params.get("fileName")
-        if not isinstance(file_name, str) or not file_name.strip():
-            logger.warning("文件分析请求被拒绝: fileName为空 index=%s", index)
-            return jsonify({"error": "fileName不能为空"}), 400
-        normalized_name = file_name.strip()
-        if normalized_name in seen_file_names:
-            logger.warning(
-                "文件分析请求被拒绝: fileName重复 fileName=%s index=%s",
-                normalized_name,
-                index,
-            )
-            return jsonify({"error": "fileName不能重复"}), 400
-        seen_file_names.add(normalized_name)
-
-        file_path = params.get("filePath")
-        if not isinstance(file_path, str) or not file_path.strip():
-            logger.warning(
-                "文件分析请求被拒绝: filePath为空 fileName=%s index=%s",
-                normalized_name,
-                index,
-            )
-            return jsonify({"error": "filePath不能为空"}), 400
-
-        try:
-            validate_analysis_architecture_ranges(params)
-        except ArchitectureTreeValidationError as exc:
-            logger.warning(
-                "文件分析请求被拒绝: 领域树无效 index=%s error=%s",
-                index,
-                exc,
-            )
-            return jsonify(
-                {"error": f"params[{index}]: {exc}"}
-            ), 400
-
-    for params in params_list:
-        normalized_name = params["fileName"].strip()
-        existing_task = task_service.get_task("file", normalized_name)
-        block_reason = file_task_admission_block_reason(existing_task)
-        if block_reason:
-            error_message = (
-                "上一次任务回调尚未结束"
-                if block_reason == "callback_pending"
-                else "任务正在处理中"
-            )
-            logger.warning(
-                "文件分析请求被拒绝: %s fileName=%s status=%s "
-                "callback_status=%s",
-                error_message,
-                normalized_name,
-                existing_task["status"],
-                existing_task["callback_status"],
-            )
-            return jsonify({"error": error_message}), 409
-
-    submissions = [
-        (
-            params["fileName"].strip(),
-            {"businessType": "file", "params": [params]},
-            "1" if index == 0 else "0",
-        )
-        for index, params in enumerate(params_list)
-    ]
-    try:
-        tasks = task_service.create_file_tasks_if_available(submissions)
-    except TaskAlreadyProcessingError as exc:
-        error_message = (
-            "上一次任务回调尚未结束"
-            if exc.reason == "callback_pending"
-            else "任务正在处理中"
-        )
-        logger.warning(
-            "文件分析请求在原子受理阶段冲突: %s fileName=%s "
-            "status=%s callback_status=%s",
-            error_message,
-            exc.business_key,
-            exc.status,
-            exc.callback_status,
-        )
-        return jsonify({"error": error_message}), 409
-    except TaskAdmissionBusyError:
-        logger.warning("文件分析任务库持续繁忙，暂时无法受理", exc_info=True)
-        return jsonify({"error": "任务服务繁忙，请稍后重试"}), 503
-
-    for task in tasks:
-        file_name = task["business_key"]
-        progress_hub.publish(
-            "file",
-            file_name.strip(),
-            {"businessType": "file", "data": {"fileName": file_name.strip(), "progress": 0.0}},
-            task_id=task["execution_id"],
-        )
-
-    _task_fn = run_file_analysis_task if len(tasks) == 1 else run_file_analysis_batch_task
-    _task_kwargs = {
-        "task_service": task_service,
-        "progress_hub": progress_hub,
-        "request_payload": payload if len(tasks) > 1 else {"businessType": "file", "params": [params_list[0]]},
-        "download_root": llm_config.download_dir,
-        "callback_url": llm_config.callback_url or "",
-        "callback_timeout": llm_config.callback_timeout,
-        # Factory 本身只保存不可变配置和线程安全协调依赖。真正持有网络 Session 的
-        # Gateway 在后台任务线程内部按文件创建，批量任务也不会跨文件共享有状态对象。
-        "document_rag_factory": services.document_rag_factory,
-        "knowledge_index_factory": services.knowledge_index_factory,
-        "analysis_classification_mode": (
-            services.analysis_classification_config.mode
-        ),
-        "analysis_filename_constraint_mode": (
-            services.analysis_classification_config.filename_constraint_mode
-        ),
-        "analysis_data_standard_mode": (
-            services.analysis_classification_config.data_standard_mode
-        ),
-        "analysis_identity_reselect_mode": (
-            services.analysis_classification_config.identity_reselect_mode
-        ),
-    }
-    if len(tasks) == 1:
-        _task_kwargs["execution_id"] = tasks[0]["execution_id"]
-    else:
-        _task_kwargs["execution_ids"] = {
-            task["business_key"]: task["execution_id"] for task in tasks
-        }
-    worker = threading.Thread(
-        target=services.upload_task_limiter.run,
-        args=(_task_fn,),
-        kwargs=_task_kwargs,
-        daemon=True,
+    trace_id = uuid4().hex
+    command = parsed_request.to_batch_command(
+        policy_snapshot=_analysis_policy_snapshot(services),
+        trace_id=trace_id,
     )
-    worker.start()
-    logger.info("已启动后台文件分析线程: task_count=%d", len(tasks))
     logger.info(
-        "文件分析任务已受理并返回严格空响应: task_count=%d status_code=202",
-        len(tasks),
+        "文件分析请求参数校验通过，开始可靠受理: item_count=%d trace_id=%s",
+        len(command.submissions),
+        trace_id,
     )
-    # 不再将 task/execution_id 暴露给调用方；既有业务 fileName 是唯一公开关联键。
-    return _empty_http_response(202)
+    try:
+        admission = analysis_submit.execute(command)
+    except Exception as exc:
+        # 未分类基础设施错误继续由 Flask 统一呈现既有 HTML 500；不能为了“接口友好”
+        # 把不可判定的受理结果改成 202 或泄露内部异常文本。
+        logger.exception(
+            "文件分析可靠受理发生未处理异常: item_count=%d trace_id=%s",
+            len(command.submissions),
+            trace_id,
+        )
+        presenter.raise_unhandled(exc)
+
+    logger.info(
+        "文件分析可靠受理已完成: item_count=%d outcome=%s trace_id=%s",
+        len(command.submissions),
+        admission.outcome.value,
+        trace_id,
+    )
+    return _analysis_http_response(presenter.present_admission(admission))
 
 
 @llm_bp.post("/llm/generate-report")
@@ -642,7 +479,6 @@ def llm_weaponry():
 def llm_check_task():
     services = _services()
     task_service = services.task_service
-    llm_config = services.llm_config
     payload = request.get_json(silent=True) or {}
     business_type = payload.get("businessType")
     if business_type not in {"file", "report", "weaponry"}:
@@ -662,6 +498,8 @@ def llm_check_task():
 
     missing_count = 0
     callback_replayed_count = 0
+    duplicate_file_count = 0
+    processed_file_keys: set[str] = set()
     for index, params in enumerate(params_list):
         if business_type == "file":
             business_key = params.get("fileName")
@@ -672,6 +510,19 @@ def llm_check_task():
                 )
                 return jsonify({"error": "fileName不能为空"}), 400
             normalized_key = business_key.strip()
+            # 同一 HTTP 请求内的重复 fileName 只处理首次出现项。check-task 是带回调
+            # 副作用的命令；若逐项执行重复键，前一次明确失败后第二项可能立即形成新的
+            # attempt，违背调用方“一次请求只触发一轮补发”的直觉。稳定去重不改变
+            # 参数、响应体或状态码，且保留首次出现顺序。
+            if normalized_key in processed_file_keys:
+                duplicate_file_count += 1
+                logger.info(
+                    "任务查询请求跳过重复文件项: fileName=%s index=%s",
+                    normalized_key,
+                    index,
+                )
+                continue
+            processed_file_keys.add(normalized_key)
         elif business_type == "weaponry":
             architecture_id = params.get("architectureId")
             if architecture_id is None:
@@ -747,12 +598,13 @@ def llm_check_task():
                 normalized_architecture_id.value
             )
         else:
-            replayed = task_service.replay_callback_if_needed(
-                business_type,
-                normalized_key,
-                callback_url=llm_config.callback_url or "",
-                timeout=llm_config.callback_timeout,
-            )
+            analysis_callback_recovery = services.analysis_callback_recovery
+            if analysis_callback_recovery is None:
+                # 生产切换前的只读预检会阻断旧 file 活跃任务和待恢复回调。运行时若仍
+                # 缺少新恢复链，必须显式失败，不能回退到旧 replay 以免形成第二个 owner。
+                logger.error("文件 check-task 缺少新回调恢复链，拒绝使用遗留恢复器")
+                raise RuntimeError("应用容器未装配文件分析回调恢复链")
+            replayed = analysis_callback_recovery.execute(normalized_key)
         # 保持原有“恢复后重读”的一致性门禁，但不再把内部状态投影到 HTTP 响应。
         refreshed_task = task_service.get_task(business_type, normalized_key)
         if refreshed_task is None:
@@ -768,10 +620,12 @@ def llm_check_task():
 
     logger.info(
         "任务检查与必要回调恢复已完成: businessType=%s requested_count=%d "
-        "missing_count=%d callback_replayed_count=%d status_code=200",
+        "missing_count=%d duplicate_file_count=%d callback_replayed_count=%d "
+        "status_code=200",
         business_type,
         len(params_list),
         missing_count,
+        duplicate_file_count,
         callback_replayed_count,
     )
     # 公开接口只承诺检查已完成；任务状态、进度、Callback 细节继续留在内部存储。

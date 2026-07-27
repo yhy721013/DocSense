@@ -827,6 +827,34 @@ class ArchitectureRecallCandidateContractTests(unittest.TestCase):
                 prompt_overhead_chars=0,
             ).recall(signals)
 
+    def test_runtime_candidate_limits_shape_recall_instead_of_only_rejecting_it(self):
+        """冻结的小阈值必须参与召回裁剪，不能先按默认 128 生成后再整批拒绝。"""
+
+        nodes = [{"id": 1, "name": "共同信号根"}]
+        nodes.extend(
+            {
+                "id": item + 2,
+                "name": f"共同信号叶{item}",
+                "parentId": 1,
+            }
+            for item in range(30)
+        )
+        index = build_architecture_tree_index(nodes)
+        decision = recall_architecture_candidates(
+            index,
+            build_document_architecture_signals(body="共同信号"),
+            base_leaf_limit=6,
+            parent_candidate_limit=2,
+            model_candidate_limit=8,
+        )
+
+        self.assertLessEqual(len(decision.base_leaf_ids), 6)
+        self.assertLessEqual(
+            len([item for item in decision.candidates if item.node_type == "parent"]),
+            2,
+        )
+        self.assertLessEqual(len(decision.candidates), 8)
+
     def test_audit_is_body_free_and_deterministic_except_elapsed_time(self):
         index = build_architecture_tree_index(_full_feature_tree())
         unique_body = "不可写入审计的唯一正文 CVN-78"

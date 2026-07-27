@@ -14,9 +14,28 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app.container import ApplicationServices, UploadTaskLimiter
+from app.modules.analysis.adapters import (
+    AnalysisTranslationExecutionCoordinator,
+    LegacyAnalysisAuditAdapter,
+    LegacyAnalysisFilePreparationAdapter,
+    LegacyAnalysisKnowledgeAdapter,
+    LegacyAnalysisRagAdapterFactory,
+    LocalAnalysisTaskWorkspaceAdapter,
+    SQLiteAnalysisBatchCommandAdapter,
+    SQLiteAnalysisCallbackAdapter,
+    SQLiteAnalysisCallbackRecoverySource,
+    SQLiteAnalysisResourceStoreAdapter,
+    SerializedAnalysisTranslationAdapter,
+)
+from app.modules.analysis.composition import compose_analysis_application_services
+from app.modules.analysis.ports import (
+    AnalysisCallbackDelivery,
+    AnalysisCallbackDeliveryOutcome,
+    AnalysisCallbackDeliveryRequest,
+)
 from app.modules.report.adapters import (
     ReportTaskCommandCodec,
     SQLiteReportCallbackAdapter,
@@ -60,6 +79,7 @@ from app.services.chat import (
     SynchronousChatRunExecutor,
 )
 from app.services.core.config import (
+    AnalysisInfrastructureConfig,
     AnythingLLMConfig,
     LLMIntegrationConfig,
     ReportInfrastructureConfig,
@@ -85,12 +105,59 @@ from tests.fakes import (
 logger = logging.getLogger(__name__)
 
 
+class _OfflineAnalysisTranslationService:
+    """离线路由夹具的翻译替身，确保组合阶段不触发真实模型服务。"""
+
+    def translate_document(self, *args: object, **kwargs: object) -> tuple[str, str]:
+        """返回稳定空翻译；当前路由测试不会启动 Worker 调用该方法。"""
+
+        return ("", "")
+
+    def translate_text_only(
+        self,
+        text: str,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        """保留摘要翻译的输入文本，避免测试替身擅自改变业务结果。"""
+
+        return text
+
+
+def _offline_analysis_callback_transport(
+    request: AnalysisCallbackDeliveryRequest,
+) -> AnalysisCallbackDelivery:
+    """模拟严格成功投递，禁止离线路由测试访问真实 Callback 接收方。"""
+
+    return AnalysisCallbackDelivery(
+        execution=request.lease.execution,
+        lease_token=request.lease.lease_token,
+        lease_version=request.lease.lease_version,
+        outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+    )
+
+
+def _ignore_offline_analysis_callback_history(
+    _payload: object,
+    *,
+    callback_context: object,
+) -> None:
+    """离线测试不写运行目录下的非权威回调历史副本。"""
+
+    del callback_context
+
+
 def build_offline_application_services(
     runtime_directory: str | Path,
     *,
     chat_stream_contents: Iterable[str] = ("第一段", "第二段"),
     max_upload_concurrency: int = 1,
     callback_url: str | None = None,
+    analysis_callback_transport: Callable[
+        [AnalysisCallbackDeliveryRequest],
+        AnalysisCallbackDelivery,
+    ]
+    | None = None,
 ) -> ApplicationServices:
     """组装不访问网络的完整测试依赖容器。
 
@@ -99,6 +166,9 @@ def build_offline_application_services(
             分别使用独立 SQLite 文件，避免用例间状态串扰。
         chat_stream_contents: Fake 对话端口返回的流式文本片段。
         max_upload_concurrency: 上传类任务的测试并发上限。
+        callback_url: 仅用于测试 Analysis/Report/Weaponry 回调恢复的假地址。
+        analysis_callback_transport: 可选的文件 Analysis 回调替身；缺省时稳定模拟严格
+            成功投递，绝不建立真实网络连接。
 
     Returns:
         可以直接传给 ``create_app(services=...)`` 的完整依赖容器。
@@ -179,6 +249,57 @@ def build_offline_application_services(
 
     upload_task_limiter = UploadTaskLimiter(
         max_concurrency=max_upload_concurrency,
+    )
+    llm_integration_config = LLMIntegrationConfig(
+        callback_url=callback_url,
+        callback_timeout=5.0,
+        task_db_path=str(task_db_path),
+        download_timeout=5.0,
+        download_dir=str(root),
+    )
+    analysis_config = AnalysisInfrastructureConfig.single_instance()
+    analysis_task_commands = SQLiteAnalysisBatchCommandAdapter(task_service)
+    analysis_callbacks = SQLiteAnalysisCallbackAdapter(
+        task_service,
+        callback_timeout=analysis_config.callback_http_timeout_seconds,
+        lease_seconds=analysis_config.callback_lease_seconds,
+        transport=(
+            analysis_callback_transport
+            or _offline_analysis_callback_transport
+        ),
+        history_writer=_ignore_offline_analysis_callback_history,
+    )
+    # 显式注入的 Flask 测试容器不会调用 start_background_services，因此这里只构造
+    # Dispatcher、受理和同步恢复链，不会创建后台线程或执行文件/RAG/模型 I/O。
+    analysis_services = compose_analysis_application_services(
+        task_commands=analysis_task_commands,
+        progress_publisher=LatestTaskProgressPublisherAdapter(
+            task_commands=analysis_task_commands,
+            delegate=progress_adapter,
+        ),
+        workspaces=LocalAnalysisTaskWorkspaceAdapter(str(root / "analysis-tasks")),
+        files=LegacyAnalysisFilePreparationAdapter(
+            download_timeout_seconds=llm_integration_config.download_timeout,
+        ),
+        rag_factory=LegacyAnalysisRagAdapterFactory(FakeDocumentRagFactory()),
+        knowledge=LegacyAnalysisKnowledgeAdapter(FakeKnowledgeIndexFactory()),
+        audit=LegacyAnalysisAuditAdapter(task_service),
+        translation=SerializedAnalysisTranslationAdapter(
+            _OfflineAnalysisTranslationService(),
+            AnalysisTranslationExecutionCoordinator(),
+        ),
+        callbacks=analysis_callbacks,
+        callback_recovery_source=SQLiteAnalysisCallbackRecoverySource(
+            task_service
+        ),
+        resources=SQLiteAnalysisResourceStoreAdapter(task_service),
+        execution_limiter=upload_task_limiter,
+        process_guard=FileProcessSingletonGuard(
+            root / "locks" / "offline-analysis-dispatcher.lock",
+            component_name="离线文件分析 Dispatcher",
+        ),
+        config=analysis_config,
+        callback_url=callback_url or "",
     )
     weaponry_config = WeaponryInfrastructureConfig(
         runtime_mode="single_instance",
@@ -295,13 +416,7 @@ def build_offline_application_services(
         report_submit=report_submit,
         report_callback_recovery=report_callback_recovery,
         report_dispatcher=report_dispatcher,
-        llm_config=LLMIntegrationConfig(
-            callback_url=callback_url,
-            callback_timeout=5.0,
-            task_db_path=str(task_db_path),
-            download_timeout=5.0,
-            download_dir=str(root),
-        ),
+        llm_config=llm_integration_config,
         anythingllm_config=AnythingLLMConfig(
             base_url="http://anythingllm.invalid/api/v1",
             api_key="test-key",
@@ -309,6 +424,10 @@ def build_offline_application_services(
             storage_root=None,
         ),
         report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
+        analysis_submit=analysis_services.submit,
+        analysis_callback_recovery=analysis_services.callback_recovery,
+        analysis_dispatcher=analysis_services.dispatcher,
+        analysis_runtime_config=analysis_config,
         weaponry_services=weaponry_services,
     )
 
