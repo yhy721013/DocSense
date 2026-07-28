@@ -1117,11 +1117,88 @@ def _extract_data_standard_fields(
     return fields
 
 
+_LEGACY_OFFICE_PREPARED_BASENAME_RE = re.compile(
+    r"prepared-[0-9a-f]{32}\.(?:docx|pptx|xlsx)",
+    re.IGNORECASE,
+)
+
+
+def _replace_known_internal_prepared_basename(
+    text: str,
+    *,
+    internal_prepared_basename: str,
+    business_file_name: str,
+) -> str:
+    """只替换本次转换产生的精确 opaque basename，避免宽泛扫描误伤业务正文。"""
+
+    if not isinstance(text, str):
+        raise TypeError("text 必须是 str")
+    basename = _as_text(internal_prepared_basename)
+    if (
+        not text
+        or not basename
+        or Path(basename).name != basename
+        or _LEGACY_OFFICE_PREPARED_BASENAME_RE.fullmatch(basename) is None
+    ):
+        return text
+    replacement = (
+        business_file_name
+        if isinstance(business_file_name, str) and business_file_name.strip()
+        else UNKNOWN_SOURCE_VALUE
+    )
+    return re.sub(re.escape(basename), lambda _match: replacement, text, flags=re.IGNORECASE)
+
+
+def sanitize_analysis_public_result(
+    value: Any,
+    *,
+    internal_prepared_basename: str,
+    business_file_name: str,
+) -> Any:
+    """递归复制最终业务结果，并移除本 execution 的精确内部转换文件名。"""
+
+    if isinstance(value, str):
+        return _replace_known_internal_prepared_basename(
+            value,
+            internal_prepared_basename=internal_prepared_basename,
+            business_file_name=business_file_name,
+        )
+    if isinstance(value, dict):
+        return {
+            key: sanitize_analysis_public_result(
+                item,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=business_file_name,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            sanitize_analysis_public_result(
+                item,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=business_file_name,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            sanitize_analysis_public_result(
+                item,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=business_file_name,
+            )
+            for item in value
+        )
+    return value
+
+
 def map_analysis_result(
-        parsed_result: Dict[str, Any],
-        request_params: Dict[str, Any],
-        original_text: str = "",
-        resolved_architecture_id: Any = None,
+    parsed_result: Dict[str, Any],
+    request_params: Dict[str, Any],
+    original_text: str = "",
+    resolved_architecture_id: Any = None,
+    internal_prepared_basename: str = "",
 ) -> Dict[str, Any]:
     file_name = _as_text(request_params.get("fileName"))
     ranges = build_effective_analysis_ranges(request_params)
@@ -1188,6 +1265,14 @@ def map_analysis_result(
         _resolve_field(parsed_result, file_item, "source", "资料来源", "来源")
         or _extract_source(normalized_original_text)
         or UNKNOWN_SOURCE_VALUE
+    )
+    resolved_source = _replace_known_internal_prepared_basename(
+        resolved_source,
+        internal_prepared_basename=internal_prepared_basename,
+        business_file_name=(
+            _as_business_original_file_name(request_params.get("originalFileName"))
+            or file_name
+        ),
     )
     normalized_score = _normalize_source_score(raw_score)
     if resolved_source == UNKNOWN_SOURCE_VALUE:

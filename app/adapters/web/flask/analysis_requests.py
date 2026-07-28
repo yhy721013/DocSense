@@ -23,6 +23,7 @@ from app.modules.analysis.domain.models import (
 from app.modules.analysis.domain.ranges import validate_analysis_architecture_ranges
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_BUSINESS_TYPE,
+    AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisSubmissionSnapshot,
     FrozenJsonArray,
@@ -77,6 +78,7 @@ class ParsedAnalysisRequest:
         *,
         policy_snapshot: AnalysisPolicySnapshot,
         trace_id: str,
+        legacy_office_allowed_version_series: str = "26.2",
     ) -> AnalysisBatchCommand:
         """注入已冻结的运行策略后，构造后续事务 Adapter 可受理的内部命令。
 
@@ -90,6 +92,13 @@ class ParsedAnalysisRequest:
             AnalysisSubmissionSnapshot.from_frozen_params(
                 params,
                 policy_snapshot=policy_snapshot,
+                document_processing_policy=(
+                    AnalysisDocumentProcessingPolicySnapshot.for_source(
+                        str(params.get("filePath") or ""),
+                        business_file_name=str(params.get("fileName") or ""),
+                        allowed_version_series=legacy_office_allowed_version_series,
+                    )
+                ),
             )
             for params in self.params
         )

@@ -137,7 +137,13 @@ class _AnalysisKnowledgeHandoff:
             request = AnalysisTranslationRequest(
                 execution=execution,
                 kind=AnalysisTranslationKind.DOCUMENT,
-                source_path=prepared.source_path,
+                # 仅 Legacy Office 改读转换后的 OOXML；PDF/MHTML 等既有格式继续读取
+                # 原始下载文件，避免集成新能力时扩大已上线的全文翻译行为变化。
+                source_path=(
+                    prepared.processing_path
+                    if prepared.internal_prepared_basename
+                    else prepared.source_path
+                ),
             )
         else:
             summary = file_item.get("summary", "")

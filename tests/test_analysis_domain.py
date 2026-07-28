@@ -43,6 +43,33 @@ LEGACY_ANALYSIS_SERVICE_PATH = (
 class AnalysisDomainBoundaryTests(unittest.TestCase):
     """锁定 1F-1 Domain 只依赖自身和批准标准库的架构边界。"""
 
+    def test_legacy_office_internal_basename_is_removed_from_final_public_result(self) -> None:
+        """只替换本任务精确内部名，并覆盖翻译等后置填充字段。"""
+
+        internal_name = f"prepared-{'a' * 32}.xlsx"
+        other_name = f"prepared-{'b' * 32}.xlsx"
+        public = result_mapping.sanitize_analysis_public_result(
+            {
+                "fileDataItem": {
+                    "source": f"sheet from {internal_name}",
+                    "documentTranslationOne": f"translated {internal_name}",
+                    "documentTranslationTwo": other_name,
+                }
+            },
+            internal_prepared_basename=internal_name,
+            business_file_name="业务原名.xls",
+        )
+
+        self.assertEqual(
+            "sheet from 业务原名.xls",
+            public["fileDataItem"]["source"],
+        )
+        self.assertEqual(
+            "translated 业务原名.xls",
+            public["fileDataItem"]["documentTranslationOne"],
+        )
+        self.assertEqual(other_name, public["fileDataItem"]["documentTranslationTwo"])
+
     def test_domain_imports_are_framework_and_legacy_service_free(self) -> None:
         """静态检查禁止框架、数据库、HTTP、文件解析和旧服务反向依赖。"""
 

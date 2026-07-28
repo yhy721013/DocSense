@@ -261,6 +261,9 @@ class ApplicationServices:
     legacy_office_preparer: LegacyOfficePreparer = field(
         default_factory=_disabled_legacy_office_preparer
     )
+    legacy_office_config: LegacyOfficeConfig = field(
+        default_factory=LegacyOfficeConfig.disabled
+    )
     analysis_classification_config: AnalysisClassificationConfig = field(
         default_factory=AnalysisClassificationConfig.topk_two_stage
     )
@@ -308,6 +311,7 @@ class ApplicationServices:
             "anythingllm_config": self.anythingllm_config,
             "report_infrastructure_config": self.report_infrastructure_config,
             "legacy_office_preparer": self.legacy_office_preparer,
+            "legacy_office_config": self.legacy_office_config,
             "analysis_classification_config": self.analysis_classification_config,
             "chat_infrastructure_config": self.chat_infrastructure_config,
         }
@@ -393,6 +397,8 @@ class ApplicationServices:
             raise TypeError(
                 "analysis_classification_config must be AnalysisClassificationConfig"
             )
+        if not isinstance(self.legacy_office_config, LegacyOfficeConfig):
+            raise TypeError("legacy_office_config 必须是 LegacyOfficeConfig")
         analysis_bindings = (
             self.analysis_submit,
             self.analysis_callback_recovery,
@@ -1125,6 +1131,7 @@ def create_application_services() -> ApplicationServices:
         ),
         files=LegacyAnalysisFilePreparationAdapter(
             download_timeout_seconds=llm_config.download_timeout,
+            legacy_office_preparer=legacy_office_preparer,
         ),
         rag_factory=LegacyAnalysisRagAdapterFactory(document_rag_factory),
         knowledge=LegacyAnalysisKnowledgeAdapter(knowledge_index_factory),
@@ -1347,6 +1354,7 @@ def create_application_services() -> ApplicationServices:
         anythingllm_config=anythingllm_config,
         report_infrastructure_config=report_infrastructure_config,
         legacy_office_preparer=legacy_office_preparer,
+        legacy_office_config=legacy_office_config,
         analysis_classification_config=analysis_classification_config,
         chat_infrastructure_config=chat_infrastructure_config,
         analysis_submit=analysis_services.submit,

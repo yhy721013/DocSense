@@ -1,4 +1,4 @@
-"""文件准备能力的过渡 Port；具体 OCR、MinerU 与 Office 实现仍留给 1H。"""
+"""文件准备 Port；冻结 raw、processing、upload 三类任务内路径与处理策略。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from .common import AnalysisExecutionRef
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisDocumentProcessingPolicySnapshot,
+)
 
 
 def _required_text(value: object, *, name: str) -> str:
@@ -51,12 +54,24 @@ class AnalysisFilePreparationRequest:
     execution: AnalysisExecutionRef
     source_url: str
     task_root: str
+    document_processing_policy: AnalysisDocumentProcessingPolicySnapshot | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
             raise TypeError("execution 必须是 AnalysisExecutionRef")
         object.__setattr__(self, "source_url", _required_text(self.source_url, name="source_url"))
         object.__setattr__(self, "task_root", _required_text(self.task_root, name="task_root"))
+        policy = self.document_processing_policy
+        if policy is None:
+            policy = AnalysisDocumentProcessingPolicySnapshot.for_source(
+                self.source_url,
+                business_file_name=self.execution.file_name,
+            )
+            object.__setattr__(self, "document_processing_policy", policy)
+        if not isinstance(policy, AnalysisDocumentProcessingPolicySnapshot):
+            raise TypeError(
+                "document_processing_policy 必须是 AnalysisDocumentProcessingPolicySnapshot"
+            )
 
 
 @dataclass(frozen=True)
@@ -67,6 +82,8 @@ class PreparedAnalysisDocument:
     source_path: str
     upload_path: str
     original_text: str
+    processing_path: str = ""
+    internal_prepared_basename: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -77,8 +94,20 @@ class PreparedAnalysisDocument:
                 field_name,
                 _required_text(getattr(self, field_name), name=field_name),
             )
+        processing_path = self.processing_path or self.upload_path
+        object.__setattr__(
+            self,
+            "processing_path",
+            _required_text(processing_path, name="processing_path"),
+        )
         if not isinstance(self.original_text, str):
             raise TypeError("original_text 必须是 str")
+        if not isinstance(self.internal_prepared_basename, str):
+            raise TypeError("internal_prepared_basename 必须是 str")
+        basename = self.internal_prepared_basename.strip()
+        if basename and basename.replace("\\", "/").rsplit("/", 1)[-1] != basename:
+            raise ValueError("internal_prepared_basename 必须是 basename")
+        object.__setattr__(self, "internal_prepared_basename", basename)
 
 
 @runtime_checkable

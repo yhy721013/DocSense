@@ -18,8 +18,10 @@ from app.modules.analysis.application.workflow_models import AnalysisTaskComplet
 from app.modules.analysis.domain.callback_payloads import build_file_callback_payload
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
+    AnalysisTaskInputV2,
     FrozenJsonObject,
 )
 from app.modules.analysis.ports import (
@@ -169,7 +171,7 @@ class SQLiteAnalysisBatchCommandAdapter:
             if task_id in seen_task_ids:
                 raise AnalysisTaskCommandAdapterError("task_id_factory 返回了重复任务身份")
             seen_task_ids.add(task_id)
-            task_input = AnalysisTaskInputV1.from_submission(
+            task_input = AnalysisTaskInputV2.from_submission(
                 submission,
                 task_id=task_id.value,
                 batch_id=batch_id,
@@ -697,7 +699,10 @@ class SQLiteAnalysisBatchCommandAdapter:
                 batch_sequence=batch_sequence,  # type: ignore[arg-type]
             )
             schema_version = raw.get("input_schema_version")
-            if schema_version != ANALYSIS_TASK_INPUT_SCHEMA_VERSION:
+            if schema_version not in {
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+            }:
                 raise AnalysisTaskCommandAdapterError("Analysis execution输入Schema不受支持")
             payload = raw.get("input_payload")
             if not isinstance(payload, Mapping):
@@ -822,7 +827,10 @@ class SQLiteAnalysisBatchCommandAdapter:
             if (
                 require_supported_schema
                 and raw.get("input_schema_version")
-                != ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+                not in {
+                    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+                    ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+                }
             ):
                 raise AnalysisTaskCommandAdapterError(
                     "Analysis控制面输入Schema不受支持"

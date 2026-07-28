@@ -17,6 +17,11 @@ from urllib.parse import unquote, urlsplit
 
 import fitz
 
+from app.modules.document_processing import (
+    LegacyOfficeConversionError,
+    LegacyOfficePreparer,
+    is_legacy_office_path,
+)
 from app.modules.analysis.ports.files import (
     AnalysisFilePreparationRequest,
     AnalysisTaskWorkspace,
@@ -107,6 +112,7 @@ class LegacyAnalysisFilePreparationAdapter:
         normalizer: Normalizer = normalize_file_for_llm,
         upload_preparer: UploadPreparer = prepare_analysis_file_for_upload,
         text_reader: TextReader | None = None,
+        legacy_office_preparer: LegacyOfficePreparer | None = None,
     ) -> None:
         if (
             isinstance(download_timeout_seconds, bool)
@@ -130,6 +136,11 @@ class LegacyAnalysisFilePreparationAdapter:
                 raise TypeError(f"{name} 必须可调用")
         if text_reader is not None and not callable(text_reader):
             raise TypeError("text_reader 必须可调用或 None")
+        if legacy_office_preparer is not None and any(
+            not callable(getattr(legacy_office_preparer, method_name, None))
+            for method_name in ("preflight", "prepare")
+        ):
+            raise TypeError("legacy_office_preparer 必须实现 preflight/prepare")
         self._download_timeout_seconds = float(download_timeout_seconds)
         self._max_download_bytes = max_download_bytes
         self._ocr_config_loader = ocr_config_loader
@@ -137,6 +148,7 @@ class LegacyAnalysisFilePreparationAdapter:
         self._normalizer = normalizer
         self._upload_preparer = upload_preparer
         self._text_reader = text_reader or self._read_original_text
+        self._legacy_office_preparer = legacy_office_preparer
 
     def prepare(
         self,
@@ -152,7 +164,15 @@ class LegacyAnalysisFilePreparationAdapter:
         download_dir.mkdir(parents=True, exist_ok=True)
         normalized_dir.mkdir(parents=True, exist_ok=True)
 
-        suffix = self._suffix_from_url(request.source_url)
+        url_suffix = self._suffix_from_url(request.source_url)
+        business_suffix = self._safe_suffix(
+            Path(request.execution.file_name).suffix
+        )
+        suffix = (
+            business_suffix
+            if business_suffix in {".doc", ".ppt", ".xls"}
+            else url_suffix
+        )
         source_name = f"source{suffix}"
         logger.info(
             "开始准备文件分析任务输入: task_id=%s file_name=%s suffix=%s",
@@ -166,13 +186,15 @@ class LegacyAnalysisFilePreparationAdapter:
                 file_name=source_name,
                 download_dir=download_dir,
             )
-            normalized_path = self._normalize_into_task(
-                downloaded_path,
-                normalized_dir=normalized_dir,
-                task_id=str(request.execution.task_id),
+            processing_path, internal_prepared_basename = (
+                self._prepare_processing_path(
+                    downloaded_path,
+                    normalized_dir=normalized_dir,
+                    request=request,
+                )
             )
             upload_path = self._prepare_upload_path(
-                normalized_path,
+                processing_path,
                 task_root=task_root,
             )
             original_text = self._text_reader(str(upload_path))
@@ -198,9 +220,131 @@ class LegacyAnalysisFilePreparationAdapter:
         return PreparedAnalysisDocument(
             execution=request.execution,
             source_path=str(downloaded_path),
+            processing_path=str(processing_path),
             upload_path=str(upload_path),
             original_text=original_text,
+            internal_prepared_basename=internal_prepared_basename,
         )
+
+    def _prepare_processing_path(
+        self,
+        source_path: Path,
+        *,
+        normalized_dir: Path,
+        request: AnalysisFilePreparationRequest,
+    ) -> tuple[Path, str]:
+        """按受理快照选择转换或既有规范化，Legacy 失败时禁止 raw fallback。"""
+
+        policy = request.document_processing_policy
+        if policy is None:  # pragma: no cover - DTO 已保证非空，保留防御边界
+            raise AnalysisFilePreparationError("文件处理策略缺失")
+        legacy_source = is_legacy_office_path(source_path)
+        if legacy_source != policy.legacy_office_required:
+            logger.error(
+                "文件分析输入类型与处理策略不一致: task_id=%s "
+                "legacy_source=%s legacy_office_required=%s policy_fingerprint=%s",
+                request.execution.task_id,
+                legacy_source,
+                policy.legacy_office_required,
+                policy.processing_policy_fingerprint,
+            )
+            raise AnalysisFilePreparationError("文件类型与冻结处理策略不一致")
+        if not legacy_source:
+            normalized = self._normalize_into_task(
+                source_path,
+                normalized_dir=normalized_dir,
+                task_id=str(request.execution.task_id),
+            )
+            return normalized, ""
+        return self._convert_legacy_into_task(
+            source_path,
+            normalized_dir=normalized_dir,
+            request=request,
+        )
+
+    def _convert_legacy_into_task(
+        self,
+        source_path: Path,
+        *,
+        normalized_dir: Path,
+        request: AnalysisFilePreparationRequest,
+    ) -> tuple[Path, str]:
+        """转换 Legacy Office 并在清理临时 Job 前发布到 execution 专属目录。"""
+
+        preparer = self._legacy_office_preparer
+        policy = request.document_processing_policy
+        assert policy is not None
+        if preparer is None:
+            logger.error(
+                "文件分析 Legacy Office 转换能力未配置: task_id=%s policy_fingerprint=%s",
+                request.execution.task_id,
+                policy.processing_policy_fingerprint,
+            )
+            raise AnalysisFilePreparationError("Legacy Office 文件本地转换失败")
+        try:
+            runtime_version = preparer.preflight()
+            expected_series = policy.legacy_office_allowed_version_series
+            if not runtime_version or not (
+                runtime_version == expected_series
+                or runtime_version.startswith(f"{expected_series}.")
+            ):
+                raise LegacyOfficeConversionError("snapshot_version_mismatch")
+            with preparer.prepare(
+                source_path,
+                job_id=str(request.execution.task_id),
+            ) as result:
+                prepared_path = Path(result.prepared_path)
+                target_suffix = self._safe_suffix(result.target_suffix)
+                if (
+                    not result.converted
+                    or target_suffix not in {".docx", ".pptx", ".xlsx"}
+                    or not prepared_path.is_file()
+                ):
+                    raise LegacyOfficeConversionError("invalid_prepared_result")
+                # 保留转换器生成的唯一 opaque basename，既避免任务间覆盖，也允许最终
+                # Callback 对本次精确内部名称执行窄替换。复制完成后才能退出上下文清理。
+                basename = prepared_path.name
+                if Path(basename).name != basename or prepared_path.suffix.lower() != target_suffix:
+                    raise LegacyOfficeConversionError("invalid_prepared_basename")
+                target = normalized_dir / basename
+                shutil.copy2(prepared_path, target)
+            processing_path = self._require_file_within(
+                target,
+                root=normalized_dir,
+                label="Legacy Office 转换产物",
+            )
+        except LegacyOfficeConversionError as exc:
+            # 转换层 diagnostic 可能包含宿主路径或进程输出，本业务层只记录稳定错误码；
+            # 切断异常链，避免外层通用异常日志再次展开敏感细节。
+            logger.error(
+                "文件分析 Legacy Office 预处理失败: task_id=%s error_code=%s "
+                "policy_fingerprint=%s",
+                request.execution.task_id,
+                exc.code,
+                policy.processing_policy_fingerprint,
+            )
+            raise AnalysisFilePreparationError(
+                "Legacy Office 文件本地转换失败"
+            ) from None
+        except Exception as exc:
+            logger.error(
+                "文件分析 Legacy Office 预处理失败: task_id=%s error_type=%s "
+                "policy_fingerprint=%s",
+                request.execution.task_id,
+                type(exc).__name__,
+                policy.processing_policy_fingerprint,
+            )
+            raise AnalysisFilePreparationError(
+                "Legacy Office 文件本地转换失败"
+            ) from None
+        logger.info(
+            "文件分析 Legacy Office 预处理完成: task_id=%s target_suffix=%s "
+            "policy_fingerprint=%s",
+            request.execution.task_id,
+            processing_path.suffix.lower(),
+            policy.processing_policy_fingerprint,
+        )
+        return processing_path, processing_path.name
 
     def _download(
         self,

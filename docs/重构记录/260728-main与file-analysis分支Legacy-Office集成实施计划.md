@@ -6,7 +6,7 @@
 | --- | --- |
 | 编写日期 | 2026-07-28 |
 | 文档层级 | L3 分支集成与跨模块文件级实施计划 |
-| 文档状态 | 执行中：M0—M4 已完成，M5 待执行 |
+| 文档状态 | 执行中：M0—M5 已完成，M6 待执行 |
 | 当前开发分支基线 | `refactor/file-analysis@9776f711...`（M0 收口提交前） |
 | 目标主线 | `main@fb758cda...` |
 | 共同基点 | `2c886a94...` |
@@ -33,15 +33,17 @@
 | M2 转换内核与交付 | 已完成 | Windows 所有权标记修复，52 项专用测试与 23 项架构测试通过 |
 | M3 AnythingLLM 单 Sheet 协议 | 已完成 | 两组共 394 次测试调用通过，生产代码无需追加修复 |
 | M4 Report 集成 | 已完成 | 全套 16 个 Report 测试模块、194 项用例全部通过 |
-| M5—M10 | 待执行 | 严格逐阶段通过门禁后推进 |
+| M5 Stage 1F Analysis 集成 | 已完成 | 318 项 Analysis 全量回归及 116 项共享/契约回归通过，公开接口契约无变化 |
+| M6—M10 | 待执行 | 严格逐阶段通过门禁后推进 |
 
-M0—M4 的详细证据见：
+M0—M5 的详细证据见：
 
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M0执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M1执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M2执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M3执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M4执行记录.md`。
+- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M4执行记录.md`；
+- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M5执行记录.md`。
 
 ---
 

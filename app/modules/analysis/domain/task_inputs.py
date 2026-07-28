@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, TypeAlias, Union
+from typing import Any, ClassVar, Mapping, Sequence, TypeAlias, Union
 
 from .errors import AnalysisContractError
 from .architecture_tree import ArchitectureTreeValidationError
@@ -35,7 +37,12 @@ from .ranges import (
 
 
 ANALYSIS_BUSINESS_TYPE = "file"
-ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 1
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1 = 1
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 2
+ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1 = "legacy-office-v1"
+ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1 = "single-sheet-v1"
+ANALYSIS_LEGACY_OFFICE_DEFAULT_VERSION_SERIES = "26.2"
+_ANALYSIS_LEGACY_OFFICE_SUFFIXES = frozenset({".doc", ".ppt", ".xls"})
 ANALYSIS_EFFECTIVE_RANGE_KEYS = (
     "country",
     "channel",
@@ -364,6 +371,195 @@ class AnalysisPolicySnapshot:
         )
 
 
+@dataclass(frozen=True)
+class AnalysisDocumentProcessingPolicySnapshot:
+    """冻结文件预处理承诺，避免 accepted 任务在重启后读取漂移配置。
+
+    快照只保存非敏感、可审计的策略标识，不保存 LibreOffice 可执行文件路径、临时目录或
+    密钥。``legacy_office_required`` 描述当前输入是否必须先转换，不表示当前主机一定具备
+    转换能力；Worker 仍须按快照验证实际运行能力，无法满足时必须失败关闭。
+    """
+
+    legacy_office_required: bool
+    processing_profile_id: str
+    legacy_office_allowed_version_series: str
+    xlsx_sheet_policy: str
+    processing_policy_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.legacy_office_required, bool):
+            raise AnalysisContractError("legacy_office_required 必须是 bool")
+        for field_name in (
+            "processing_profile_id",
+            "legacy_office_allowed_version_series",
+            "xlsx_sheet_policy",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_text(getattr(self, field_name), name=field_name),
+            )
+        if self.processing_profile_id != ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1:
+            raise AnalysisContractError("processing_profile_id 不受支持")
+        if self.xlsx_sheet_policy != ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1:
+            raise AnalysisContractError("xlsx_sheet_policy 不受支持")
+        series_parts = self.legacy_office_allowed_version_series.split(".")
+        if len(series_parts) < 2 or any(not part.isdigit() for part in series_parts):
+            raise AnalysisContractError(
+                "legacy_office_allowed_version_series 必须是数字版本系列"
+            )
+        normalized_series = ".".join(str(int(part)) for part in series_parts)
+        object.__setattr__(
+            self,
+            "legacy_office_allowed_version_series",
+            normalized_series,
+        )
+        fingerprint = str(self.processing_policy_fingerprint or "").strip().lower()
+        if (
+            len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+        ):
+            raise AnalysisContractError("processing_policy_fingerprint 必须是 SHA-256")
+        expected = self._calculate_fingerprint(
+            legacy_office_required=self.legacy_office_required,
+            processing_profile_id=self.processing_profile_id,
+            legacy_office_allowed_version_series=normalized_series,
+            xlsx_sheet_policy=self.xlsx_sheet_policy,
+        )
+        if fingerprint != expected:
+            raise AnalysisContractError("processing_policy_fingerprint 与策略字段不一致")
+        object.__setattr__(self, "processing_policy_fingerprint", fingerprint)
+
+    @classmethod
+    def for_source(
+        cls,
+        source_url: str,
+        *,
+        business_file_name: str = "",
+        allowed_version_series: str = ANALYSIS_LEGACY_OFFICE_DEFAULT_VERSION_SERIES,
+    ) -> "AnalysisDocumentProcessingPolicySnapshot":
+        """根据受理时已冻结 URL 生成确定策略；不访问文件系统或环境变量。"""
+
+        if not isinstance(source_url, str) or not source_url.strip():
+            raise AnalysisContractError("source_url 必须是非空 str")
+        # Domain 不依赖 URL/文件系统工具；只需在去掉 query/fragment 后识别三种固定后缀。
+        # 同时处理常见的 percent-encoded 点和路径分隔符，结果只用于内部处理策略判定。
+        def suffix_of(value: str, *, strip_url_parts: bool) -> str:
+            normalized_path = str(value or "").strip()
+            if strip_url_parts:
+                normalized_path = normalized_path.split("#", 1)[0].split("?", 1)[0]
+            normalized_path = (
+                normalized_path.replace("%2E", ".")
+                .replace("%2e", ".")
+                .replace("%2F", "/")
+                .replace("%2f", "/")
+                .replace("\\", "/")
+            )
+            basename = normalized_path.rsplit("/", 1)[-1]
+            return (
+                f".{basename.rsplit('.', 1)[-1].lower()}"
+                if "." in basename
+                else ""
+            )
+
+        source_suffix = suffix_of(source_url, strip_url_parts=True)
+        business_suffix = suffix_of(business_file_name, strip_url_parts=False)
+        required = bool(
+            {source_suffix, business_suffix} & _ANALYSIS_LEGACY_OFFICE_SUFFIXES
+        )
+        profile = ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1
+        sheet_policy = ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1
+        normalized_series = str(allowed_version_series or "").strip()
+        return cls(
+            legacy_office_required=required,
+            processing_profile_id=profile,
+            legacy_office_allowed_version_series=normalized_series,
+            xlsx_sheet_policy=sheet_policy,
+            processing_policy_fingerprint=cls._calculate_fingerprint(
+                legacy_office_required=required,
+                processing_profile_id=profile,
+                legacy_office_allowed_version_series=normalized_series,
+                xlsx_sheet_policy=sheet_policy,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """生成稳定 JSON 投影，供 V2 Codec 持久化。"""
+
+        return {
+            "legacy_office_required": self.legacy_office_required,
+            "processing_profile_id": self.processing_profile_id,
+            "legacy_office_allowed_version_series": (
+                self.legacy_office_allowed_version_series
+            ),
+            "xlsx_sheet_policy": self.xlsx_sheet_policy,
+            "processing_policy_fingerprint": self.processing_policy_fingerprint,
+        }
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+    ) -> "AnalysisDocumentProcessingPolicySnapshot":
+        """严格恢复 V2 处理策略，拒绝缺项、扩展项和被篡改指纹。"""
+
+        if not isinstance(value, Mapping):
+            raise AnalysisContractError("document_processing_policy 必须是 Mapping")
+        expected_keys = frozenset(
+            {
+                "legacy_office_required",
+                "processing_profile_id",
+                "legacy_office_allowed_version_series",
+                "xlsx_sheet_policy",
+                "processing_policy_fingerprint",
+            }
+        )
+        actual_keys = frozenset(value)
+        if actual_keys != expected_keys or any(not isinstance(key, str) for key in value):
+            missing = sorted(expected_keys - actual_keys)
+            unknown = sorted(str(key) for key in actual_keys - expected_keys)
+            raise AnalysisContractError(
+                "document_processing_policy 键集合不匹配: "
+                f"missing={missing} unknown={unknown}"
+            )
+        return cls(
+            legacy_office_required=value["legacy_office_required"],  # type: ignore[arg-type]
+            processing_profile_id=value["processing_profile_id"],  # type: ignore[arg-type]
+            legacy_office_allowed_version_series=value[
+                "legacy_office_allowed_version_series"
+            ],  # type: ignore[arg-type]
+            xlsx_sheet_policy=value["xlsx_sheet_policy"],  # type: ignore[arg-type]
+            processing_policy_fingerprint=value[
+                "processing_policy_fingerprint"
+            ],  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    def _calculate_fingerprint(
+        *,
+        legacy_office_required: bool,
+        processing_profile_id: str,
+        legacy_office_allowed_version_series: str,
+        xlsx_sheet_policy: str,
+    ) -> str:
+        payload = {
+            "legacy_office_allowed_version_series": str(
+                legacy_office_allowed_version_series
+            ).strip(),
+            "legacy_office_required": legacy_office_required,
+            "processing_profile_id": str(processing_profile_id).strip(),
+            "xlsx_sheet_policy": str(xlsx_sheet_policy).strip(),
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _business_original_file_name(raw_params: FrozenJsonObject) -> tuple[bool, str]:
     """复现旧链路的 ``originalFileName`` 空值与原值保留规则。"""
 
@@ -384,6 +580,7 @@ class AnalysisSubmissionSnapshot:
     raw_params: FrozenJsonObject
     effective_ranges: FrozenJsonObject
     policy_snapshot: AnalysisPolicySnapshot
+    document_processing_policy: AnalysisDocumentProcessingPolicySnapshot
 
     def __post_init__(self) -> None:
         if not isinstance(self.raw_params, FrozenJsonObject):
@@ -392,6 +589,13 @@ class AnalysisSubmissionSnapshot:
             raise AnalysisContractError("effective_ranges 必须是 FrozenJsonObject")
         if not isinstance(self.policy_snapshot, AnalysisPolicySnapshot):
             raise AnalysisContractError("policy_snapshot 必须是 AnalysisPolicySnapshot")
+        if not isinstance(
+            self.document_processing_policy,
+            AnalysisDocumentProcessingPolicySnapshot,
+        ):
+            raise AnalysisContractError(
+                "document_processing_policy 必须是 AnalysisDocumentProcessingPolicySnapshot"
+            )
         # 受理前的 Web Adapter 已校验公开字段；这里再次守住存储边界，避免未来调用方绕过
         # Parser 后写入无法重放的 execution 输入。
         _required_text(self.raw_params.get("fileName"), name="raw_params.fileName")
@@ -433,6 +637,7 @@ class AnalysisSubmissionSnapshot:
         raw_params: Mapping[str, object],
         *,
         policy_snapshot: AnalysisPolicySnapshot,
+        document_processing_policy: AnalysisDocumentProcessingPolicySnapshot | None = None,
     ) -> "AnalysisSubmissionSnapshot":
         """深冻结请求项，并在受理时一次性计算有效范围默认值。"""
 
@@ -443,6 +648,7 @@ class AnalysisSubmissionSnapshot:
         return cls.from_frozen_params(
             frozen_params,
             policy_snapshot=policy_snapshot,
+            document_processing_policy=document_processing_policy,
         )
 
     @classmethod
@@ -451,6 +657,7 @@ class AnalysisSubmissionSnapshot:
         raw_params: FrozenJsonObject,
         *,
         policy_snapshot: AnalysisPolicySnapshot,
+        document_processing_policy: AnalysisDocumentProcessingPolicySnapshot | None = None,
     ) -> "AnalysisSubmissionSnapshot":
         """复用 Parser 已冻结参数，避免在受理链中重复复制大型嵌套容器。"""
 
@@ -460,10 +667,20 @@ class AnalysisSubmissionSnapshot:
             build_effective_analysis_ranges(raw_params.to_dict()),
             name="effective_ranges",
         )
+        resolved_processing_policy = document_processing_policy
+        if resolved_processing_policy is None:
+            resolved_processing_policy = AnalysisDocumentProcessingPolicySnapshot.for_source(
+                _required_text(raw_params.get("filePath"), name="raw_params.filePath"),
+                business_file_name=_required_text(
+                    raw_params.get("fileName"),
+                    name="raw_params.fileName",
+                ),
+            )
         return cls(
             raw_params=raw_params,
             effective_ranges=effective_ranges,
             policy_snapshot=policy_snapshot,
+            document_processing_policy=resolved_processing_policy,
         )
 
     @property
@@ -509,13 +726,17 @@ class AnalysisTaskInputV1:
     accepted_at: str
     trace_id: str
 
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1
+
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version != ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+            or self.schema_version != self.EXPECTED_SCHEMA_VERSION
         ):
-            raise AnalysisContractError("不支持的 AnalysisTaskInputV1 schema_version")
+            raise AnalysisContractError(
+                f"不支持的 {type(self).__name__} schema_version"
+            )
         object.__setattr__(self, "task_id", _required_text(self.task_id, name="task_id"))
         object.__setattr__(self, "batch_id", _validate_batch_id(self.batch_id))
         object.__setattr__(
@@ -539,6 +760,14 @@ class AnalysisTaskInputV1:
             raw_params=self.raw_params,
             effective_ranges=self.effective_ranges,
             policy_snapshot=self.policy_snapshot,
+            document_processing_policy=(
+                self.document_processing_policy
+                if isinstance(self, AnalysisTaskInputV2)
+                else AnalysisDocumentProcessingPolicySnapshot.for_source(
+                    self.file_path,
+                    business_file_name=self.file_name,
+                )
+            ),
         )
         file_name = _required_text(self.file_name, name="file_name")
         file_path = _required_text(self.file_path, name="file_path")
@@ -593,7 +822,7 @@ class AnalysisTaskInputV1:
         if not isinstance(submission, AnalysisSubmissionSnapshot):
             raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
         return cls(
-            schema_version=ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+            schema_version=cls.EXPECTED_SCHEMA_VERSION,
             task_id=task_id,
             batch_id=batch_id,
             batch_sequence=batch_sequence,
@@ -609,13 +838,81 @@ class AnalysisTaskInputV1:
         )
 
 
+@dataclass(frozen=True)
+class AnalysisTaskInputV2(AnalysisTaskInputV1):
+    """当前 Worker 输入；在 V1 业务字段之上冻结文档处理策略。"""
+
+    document_processing_policy: AnalysisDocumentProcessingPolicySnapshot
+
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(
+            self.document_processing_policy,
+            AnalysisDocumentProcessingPolicySnapshot,
+        ):
+            raise AnalysisContractError(
+                "document_processing_policy 必须是 AnalysisDocumentProcessingPolicySnapshot"
+            )
+        expected_required = (
+            AnalysisDocumentProcessingPolicySnapshot.for_source(
+                self.file_path,
+                business_file_name=self.file_name,
+            )
+            .legacy_office_required
+        )
+        if self.document_processing_policy.legacy_office_required != expected_required:
+            raise AnalysisContractError(
+                "legacy_office_required 与冻结 file_path 类型不一致"
+            )
+
+    @classmethod
+    def from_submission(
+        cls,
+        submission: AnalysisSubmissionSnapshot,
+        *,
+        task_id: str,
+        batch_id: str,
+        batch_sequence: int,
+        accepted_at: str,
+        trace_id: str,
+    ) -> "AnalysisTaskInputV2":
+        """把受理快照合成为可跨重启重放的 V2 输入。"""
+
+        if not isinstance(submission, AnalysisSubmissionSnapshot):
+            raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
+        return cls(
+            schema_version=cls.EXPECTED_SCHEMA_VERSION,
+            task_id=task_id,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
+            file_name=submission.file_name,
+            original_file_name=submission.original_file_name,
+            original_file_name_present=submission.original_file_name_present,
+            file_path=submission.file_path,
+            raw_params=submission.raw_params,
+            effective_ranges=submission.effective_ranges,
+            policy_snapshot=submission.policy_snapshot,
+            accepted_at=accepted_at,
+            trace_id=trace_id,
+            document_processing_policy=submission.document_processing_policy,
+        )
+
+
 __all__ = (
     "ANALYSIS_BUSINESS_TYPE",
     "ANALYSIS_EFFECTIVE_RANGE_KEYS",
+    "ANALYSIS_LEGACY_OFFICE_DEFAULT_VERSION_SERIES",
+    "ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION",
+    "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1",
+    "ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1",
+    "AnalysisDocumentProcessingPolicySnapshot",
     "AnalysisPolicySnapshot",
     "AnalysisSubmissionSnapshot",
     "AnalysisTaskInputV1",
+    "AnalysisTaskInputV2",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",

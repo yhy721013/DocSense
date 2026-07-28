@@ -12,9 +12,12 @@ from app.modules.analysis.adapters import (
     AnalysisTaskInputCodecError,
 )
 from app.modules.analysis.domain.task_inputs import (
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+    AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
+    AnalysisTaskInputV2,
 )
 
 
@@ -58,6 +61,35 @@ def _task_input(index: int = 1) -> AnalysisTaskInputV1:
     )
 
 
+def _task_input_v2(
+    index: int = 1,
+    *,
+    suffix: str = "xls",
+) -> AnalysisTaskInputV2:
+    """构造携带不可变文档处理策略的当前 V2 输入。"""
+
+    params = _params(extension_index=index)
+    params["filePath"] = f"https://example.invalid/files/{index}.{suffix}"
+    submission = AnalysisSubmissionSnapshot.from_request_params(
+        params,
+        policy_snapshot=AnalysisPolicySnapshot.default(),
+        document_processing_policy=(
+            AnalysisDocumentProcessingPolicySnapshot.for_source(
+                str(params["filePath"]),
+                allowed_version_series="26.2",
+            )
+        ),
+    )
+    return AnalysisTaskInputV2.from_submission(
+        submission,
+        task_id=f"analysis-task-v2-{index}",
+        batch_id=f"{index:032x}",
+        batch_sequence=1,
+        accepted_at="2026-07-28T10:00:00+08:00",
+        trace_id=f"trace-analysis-v2-{index}",
+    )
+
+
 class AnalysisTaskSnapshotTests(unittest.TestCase):
     """锁定受理时深冻结、名称语义与策略快照的边界。"""
 
@@ -76,6 +108,15 @@ class AnalysisTaskSnapshotTests(unittest.TestCase):
         self.assertNotIn("new", frozen_params["unknownExtension"])  # type: ignore[operator]
         self.assertEqual("demo.txt", submission.file_name)
         self.assertEqual("https://example.invalid/files/1.txt", submission.file_path)
+
+    def test_processing_policy_recognizes_legacy_business_name_on_extensionless_url(self) -> None:
+        """签名 URL 不带扩展名时，冻结的业务 fileName 仍必须触发本地转换。"""
+
+        policy = AnalysisDocumentProcessingPolicySnapshot.for_source(
+            "https://example.invalid/download?id=opaque-token",
+            business_file_name="customer-hash.xls",
+        )
+        self.assertTrue(policy.legacy_office_required)
 
     def test_original_file_name_preserves_missing_empty_and_explicit_value_semantics(self) -> None:
         cases = (
@@ -138,6 +179,40 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
             task_input.raw_params.to_dict(),
             restored.raw_params.to_dict(),
         )
+
+    def test_v2_round_trip_freezes_legacy_office_and_single_sheet_policy(self) -> None:
+        """当前受理必须写 V2；重启解码后不能读取新的环境开关替换策略。"""
+
+        task_input = _task_input_v2()
+        payload = AnalysisTaskInputCodec.encode(task_input)
+        restored = AnalysisTaskInputCodec.decode(payload)
+
+        self.assertEqual(ANALYSIS_TASK_INPUT_SCHEMA_VERSION, payload["schema_version"])
+        self.assertEqual(
+            list(AnalysisTaskInputCodec._V2_ENVELOPE_KEYS),  # type: ignore[attr-defined]
+            list(payload),
+        )
+        self.assertIsInstance(restored, AnalysisTaskInputV2)
+        assert isinstance(restored, AnalysisTaskInputV2)
+        self.assertTrue(restored.document_processing_policy.legacy_office_required)
+        self.assertEqual(
+            "single-sheet-v1",
+            restored.document_processing_policy.xlsx_sheet_policy,
+        )
+        self.assertEqual(task_input, restored)
+
+    def test_v1_payload_remains_readable_but_tampered_v2_policy_is_rejected(self) -> None:
+        """历史 accepted V1 可恢复；V2 指纹或策略字段被改写时必须失败关闭。"""
+
+        legacy_payload = AnalysisTaskInputCodec.encode(_task_input())
+        self.assertIsInstance(AnalysisTaskInputCodec.decode(legacy_payload), AnalysisTaskInputV1)
+
+        current_payload = AnalysisTaskInputCodec.encode(_task_input_v2())
+        current_payload["document_processing_policy"][  # type: ignore[index]
+            "xlsx_sheet_policy"
+        ] = "multi-sheet-v2"
+        with self.assertRaises(AnalysisTaskInputCodecError):
+            AnalysisTaskInputCodec.decode(current_payload)
 
     def test_payload_and_decode_result_do_not_share_mutable_references(self) -> None:
         task_input = _task_input()

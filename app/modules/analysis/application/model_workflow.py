@@ -80,6 +80,7 @@ from app.modules.analysis.domain.result_mapping import (
     _general_data_standard_leaf_id,
     _is_architecture_in_standard_range,
     map_analysis_result,
+    sanitize_analysis_public_result,
 )
 from app.modules.analysis.domain.task_inputs import AnalysisTaskInputV1, FrozenJsonObject
 from app.modules.analysis.ports import (
@@ -660,6 +661,7 @@ class _AnalysisModelWorkflow:
         *,
         original_text: str,
         architecture_id: int,
+        internal_prepared_basename: str = "",
     ) -> dict[str, Any]:
         """把模型 JSON 投影为既有持久化/回调结果，并验证映射类型。"""
 
@@ -668,10 +670,29 @@ class _AnalysisModelWorkflow:
             plan.params,
             original_text=original_text,
             resolved_architecture_id=architecture_id,
+            internal_prepared_basename=internal_prepared_basename,
         )
         if not isinstance(mapped_result, dict):
             raise AnalysisApplicationContractError("map_analysis_result 必须返回 dict")
         return mapped_result
+
+    @staticmethod
+    def sanitize_public_result(
+        mapped_result: dict[str, Any],
+        *,
+        internal_prepared_basename: str,
+        business_file_name: str,
+    ) -> dict[str, Any]:
+        """在终态/Callback 前执行最终窄脱敏，覆盖翻译字段中的内部文件名。"""
+
+        sanitized = sanitize_analysis_public_result(
+            mapped_result,
+            internal_prepared_basename=internal_prepared_basename,
+            business_file_name=business_file_name,
+        )
+        if not isinstance(sanitized, dict):  # pragma: no cover - 输入已限定为 dict
+            raise AnalysisApplicationContractError("公开结果脱敏必须返回 dict")
+        return sanitized
 
     @staticmethod
     def validate_session_transition(

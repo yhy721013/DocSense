@@ -18,7 +18,11 @@ from app.modules.tasks.ports import (
     TaskCommandPort,
 )
 
-from app.modules.analysis.domain.task_inputs import AnalysisTaskInputV1
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisDocumentProcessingPolicySnapshot,
+    AnalysisTaskInputV1,
+    AnalysisTaskInputV2,
+)
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
     AnalysisAuditPort,
@@ -191,6 +195,14 @@ class RunAnalysisTask:
                     execution=execution,
                     source_url=snapshot.file_path,
                     task_root=workspace.root_path,
+                    document_processing_policy=(
+                        snapshot.document_processing_policy
+                        if isinstance(snapshot, AnalysisTaskInputV2)
+                        else AnalysisDocumentProcessingPolicySnapshot.for_source(
+                            snapshot.file_path,
+                            business_file_name=snapshot.file_name,
+                        )
+                    ),
                 )
             )
             self._failure_convergence.require_prepared_document(prepared, execution)
@@ -218,6 +230,7 @@ class RunAnalysisTask:
                 resource_lifecycle.register(
                     task_root=workspace.root_path,
                     source_path=prepared.source_path,
+                    processing_path=prepared.processing_path,
                     upload_path=prepared.upload_path,
                     state=state,
                 )
@@ -401,6 +414,7 @@ class RunAnalysisTask:
                 plan,
                 original_text=prepared.original_text,
                 architecture_id=architecture_id,
+                internal_prepared_basename=prepared.internal_prepared_basename,
             )
             returned_rank = self._model_workflow.returned_rank(plan, architecture_id)
             self._audit_lifecycle.finalize_recall_success(
@@ -464,6 +478,15 @@ class RunAnalysisTask:
                 snapshot=snapshot,
                 prepared=prepared,
                 mapped_result=mapped_result,
+            )
+            mapped_result = self._model_workflow.sanitize_public_result(
+                mapped_result,
+                internal_prepared_basename=prepared.internal_prepared_basename,
+                business_file_name=(
+                    snapshot.original_file_name
+                    if snapshot.original_file_name.strip()
+                    else snapshot.file_name
+                ),
             )
             if not self._failure_convergence.update_progress(
                 task_execution,

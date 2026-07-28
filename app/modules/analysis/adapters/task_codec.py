@@ -1,8 +1,8 @@
 """文件分析 Worker 输入的严格 JSON Codec。
 
-此 Codec 只在持久化边界编解码 ``AnalysisTaskInputV1``，不读取数据库、不生成任务身份，
-也不尝试修复历史脏数据。未知 schema、缺少字段、额外字段以及任务身份不一致都必须失败
-关闭，避免错误 payload 被错误的 Worker 重放。
+此 Codec 在持久化边界写入 ``AnalysisTaskInputV2``，并严格兼容读取历史 V1；它不读取
+数据库、不生成任务身份，也不尝试修复历史脏数据。未知 schema、缺少字段、额外字段以及
+任务身份不一致都必须失败关闭，避免错误 payload 被错误的 Worker 重放。
 """
 
 from __future__ import annotations
@@ -16,8 +16,11 @@ from app.modules.analysis.domain.errors import AnalysisContractError
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_EFFECTIVE_RANGE_KEYS,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+    AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisTaskInputV1,
+    AnalysisTaskInputV2,
     FrozenJsonObject,
 )
 
@@ -32,9 +35,9 @@ class AnalysisTaskInputCodecError(ValueError):
 
 
 class AnalysisTaskInputCodec:
-    """严格编解码 V1 输入，保持公开 ``params`` 的未知字段和值语义。"""
+    """严格编解码 V1/V2 输入，保持公开 ``params`` 的未知字段和值语义。"""
 
-    _ENVELOPE_KEYS = (
+    _V1_ENVELOPE_KEYS = (
         "schema_version",
         "task_id",
         "batch_id",
@@ -49,13 +52,16 @@ class AnalysisTaskInputCodec:
         "accepted_at",
         "trace_id",
     )
+    _V2_ENVELOPE_KEYS = _V1_ENVELOPE_KEYS + ("document_processing_policy",)
+    # 保留历史私有测试入口；当前 V2 合同使用显式 ``_V2_ENVELOPE_KEYS``。
+    _ENVELOPE_KEYS = _V1_ENVELOPE_KEYS
 
     @classmethod
     def encode(cls, task_input: AnalysisTaskInputV1) -> dict[str, Any]:
         """投影为可持久化字典，返回值不与领域快照共享可变引用。"""
 
         if not isinstance(task_input, AnalysisTaskInputV1):
-            raise TypeError("task_input 必须是 AnalysisTaskInputV1")
+            raise TypeError("task_input 必须是 AnalysisTaskInputV1/V2")
         effective_ranges = task_input.effective_ranges.to_dict()
         raw_params = task_input.raw_params.to_dict()
         compacted_range_count = 0
@@ -81,6 +87,10 @@ class AnalysisTaskInputCodec:
             "accepted_at": task_input.accepted_at,
             "trace_id": task_input.trace_id,
         }
+        if isinstance(task_input, AnalysisTaskInputV2):
+            payload["document_processing_policy"] = (
+                task_input.document_processing_policy.to_dict()
+            )
         logger.debug(
             "文件分析任务输入已编码: task_id=%s batch_id=%s batch_sequence=%d "
             "compacted_range_count=%d",
@@ -161,14 +171,18 @@ class AnalysisTaskInputCodec:
 
         if not isinstance(payload, Mapping):
             raise AnalysisTaskInputCodecError("任务输入 payload 必须是对象")
-        cls._validate_envelope_keys(payload)
-        schema_version = payload["schema_version"]
+        schema_version = payload.get("schema_version")
         if (
             isinstance(schema_version, bool)
             or not isinstance(schema_version, int)
-            or schema_version != ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+            or schema_version
+            not in {
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+            }
         ):
             raise AnalysisTaskInputCodecError("不支持的文件分析任务输入 schema_version")
+        cls._validate_envelope_keys(payload, schema_version=schema_version)
         try:
             effective_ranges = dict(
                 cls._require_mapping(
@@ -189,35 +203,49 @@ class AnalysisTaskInputCodec:
                         )
                     # FrozenJsonObject 会再次深冻结；这里保持键位置不变并恢复调用方原值。
                     raw_params[key] = effective_ranges[key]
-            task_input = AnalysisTaskInputV1(
-                schema_version=schema_version,
-                task_id=payload["task_id"],
-                batch_id=payload["batch_id"],
-                batch_sequence=payload["batch_sequence"],
-                file_name=payload["file_name"],
-                original_file_name=payload["original_file_name"],
-                original_file_name_present=payload[
+            common_fields = {
+                "schema_version": schema_version,
+                "task_id": payload["task_id"],
+                "batch_id": payload["batch_id"],
+                "batch_sequence": payload["batch_sequence"],
+                "file_name": payload["file_name"],
+                "original_file_name": payload["original_file_name"],
+                "original_file_name_present": payload[
                     "original_file_name_present"
                 ],
-                file_path=payload["file_path"],
-                raw_params=FrozenJsonObject.from_mapping(
+                "file_path": payload["file_path"],
+                "raw_params": FrozenJsonObject.from_mapping(
                     raw_params,
                     name="raw_params",
                 ),
-                effective_ranges=FrozenJsonObject.from_mapping(
+                "effective_ranges": FrozenJsonObject.from_mapping(
                     effective_ranges,
                     name="effective_ranges",
                 ),
-                policy_snapshot=AnalysisPolicySnapshot.from_mapping(
+                "policy_snapshot": AnalysisPolicySnapshot.from_mapping(
                     cls._require_mapping(
                         payload["policy_snapshot"],
                         "policy_snapshot",
                     ),
                     name="policy_snapshot",
                 ),
-                accepted_at=payload["accepted_at"],
-                trace_id=payload["trace_id"],
-            )
+                "accepted_at": payload["accepted_at"],
+                "trace_id": payload["trace_id"],
+            }
+            if schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1:
+                task_input = AnalysisTaskInputV1(**common_fields)  # type: ignore[arg-type]
+            else:
+                task_input = AnalysisTaskInputV2(
+                    **common_fields,  # type: ignore[arg-type]
+                    document_processing_policy=(
+                        AnalysisDocumentProcessingPolicySnapshot.from_mapping(
+                            cls._require_mapping(
+                                payload["document_processing_policy"],
+                                "document_processing_policy",
+                            )
+                        )
+                    ),
+                )
         except (AnalysisContractError, TypeError, KeyError, ValueError) as exc:
             raise AnalysisTaskInputCodecError("任务输入 payload 不符合 V1 合同") from exc
 
@@ -236,13 +264,22 @@ class AnalysisTaskInputCodec:
         return task_input
 
     @classmethod
-    def _validate_envelope_keys(cls, payload: Mapping[str, object]) -> None:
+    def _validate_envelope_keys(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        schema_version: int,
+    ) -> None:
         """拒绝 schema 演进误读，不能让未知字段被旧 Worker 静默丢弃。"""
 
         if any(not isinstance(key, str) for key in payload):
             raise AnalysisTaskInputCodecError("任务输入字段名必须全部是 str")
         actual_keys = frozenset(payload)
-        expected_keys = frozenset(cls._ENVELOPE_KEYS)
+        expected_keys = frozenset(
+            cls._V1_ENVELOPE_KEYS
+            if schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1
+            else cls._V2_ENVELOPE_KEYS
+        )
         if actual_keys == expected_keys:
             return
         missing = sorted(expected_keys - actual_keys)

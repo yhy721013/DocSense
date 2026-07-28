@@ -39,7 +39,8 @@ from .workflow_models import _RagWorkflowState
 
 logger = logging.getLogger(__name__)
 
-_RESOURCE_SCHEMA_VERSION = 1
+_RESOURCE_SCHEMA_VERSION_V1 = 1
+_RESOURCE_SCHEMA_VERSION = 2
 _FINAL_CLEANUP_STATES = frozenset({"confirmed", "known_not_applied", "not_required"})
 _RECOVERABLE_CLOSE_STATES = frozenset({"confirmed", "known_not_applied"})
 
@@ -212,14 +213,17 @@ class AnalysisResourceLifecycle:
         source_path: str,
         upload_path: str,
         state: _RagWorkflowState,
+        processing_path: str | None = None,
     ) -> None:
         """在创建任何远端 RAG 资源前登记 ``tracking`` 记录。"""
 
         if self._record is not None:
             raise AnalysisResourceLifecycleError("同一 execution 不得重复登记资源记录")
+        resolved_processing_path = processing_path or upload_path
         for name, value in (
             ("task_root", task_root),
             ("source_path", source_path),
+            ("processing_path", resolved_processing_path),
             ("upload_path", upload_path),
         ):
             if not isinstance(value, str) or not value.strip():
@@ -237,6 +241,7 @@ class AnalysisResourceLifecycle:
                     self._initial_payload(
                         task_root=task_root,
                         source_path=source_path,
+                        processing_path=resolved_processing_path,
                         upload_path=upload_path,
                         state=state,
                     ),
@@ -574,6 +579,7 @@ class AnalysisResourceLifecycle:
         *,
         task_root: str,
         source_path: str,
+        processing_path: str,
         upload_path: str,
         state: _RagWorkflowState,
     ) -> dict[str, object]:
@@ -582,6 +588,7 @@ class AnalysisResourceLifecycle:
             "local": {
                 "task_root": task_root,
                 "source_path": source_path,
+                "processing_path": processing_path,
                 "upload_path": upload_path,
             },
             "rag": self._rag_payload(state),
@@ -682,7 +689,10 @@ class AnalysisResourceLifecycle:
 
     def _payload(self, record: AnalysisResourceRecord) -> dict[str, Any]:
         payload = record.record_payload.to_dict()
-        if payload.get("schema_version") != _RESOURCE_SCHEMA_VERSION:
+        if payload.get("schema_version") not in {
+            _RESOURCE_SCHEMA_VERSION_V1,
+            _RESOURCE_SCHEMA_VERSION,
+        }:
             raise AnalysisResourceLifecycleError("资源记录 schema_version 不受当前用例支持")
         for key in ("local", "rag", "audit", "knowledge", "ownership", "cleanup", "diagnosis"):
             if not isinstance(payload.get(key), Mapping):
@@ -1114,7 +1124,10 @@ class RecoverAnalysisResources:
     @staticmethod
     def _payload(record: AnalysisResourceRecord) -> dict[str, Any]:
         payload = record.record_payload.to_dict()
-        if payload.get("schema_version") != _RESOURCE_SCHEMA_VERSION:
+        if payload.get("schema_version") not in {
+            _RESOURCE_SCHEMA_VERSION_V1,
+            _RESOURCE_SCHEMA_VERSION,
+        }:
             raise ValueError("资源记录 schema_version 不受支持")
         for key in ("audit", "cleanup", "diagnosis"):
             if not isinstance(payload.get(key), Mapping):

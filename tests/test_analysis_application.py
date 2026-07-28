@@ -14,6 +14,7 @@ import unittest
 from app.modules.analysis.application import RunAnalysisOutcome, RunAnalysisTask
 from app.modules.analysis.application import run_analysis as run_analysis_module
 from app.modules.analysis.application.model_workflow import _AnalysisModelWorkflow
+from app.modules.analysis.application.knowledge_handoff import _AnalysisKnowledgeHandoff
 from app.modules.analysis.domain.architecture_recall import (
     ArchitecturePromptBudgetError,
     ArchitectureRecallCandidate,
@@ -37,6 +38,7 @@ from app.modules.analysis.ports import (
     AnalysisCallbackRequest,
     AnalysisCallbackWaitOutcome,
     AnalysisCallbackWaitResult,
+    AnalysisExecutionRef,
     AnalysisInteractionAuditReceipt,
     AnalysisKnowledgeWriteOutcome,
     AnalysisKnowledgeWriteResult,
@@ -698,6 +700,17 @@ class RunAnalysisTaskTests(unittest.TestCase):
 
         result = self._build_application(script).execute(running.task_id)
 
+        file_request = next(
+            argument
+            for operation, argument in script.calls
+            if operation == "file.prepare"
+        )
+
+        self.assertEqual(
+            running.input_snapshot.file_path,
+            file_request.source_url,
+        )
+
         trace_path = Path(__file__).with_name("fixtures") / "analysis_application_1f3s_happy_trace.json"
         expected_trace = json.loads(trace_path.read_text(encoding="utf-8"))
         self.assertEqual(RunAnalysisOutcome.SUCCEEDED, result.outcome)
@@ -763,6 +776,72 @@ class RunAnalysisTaskTests(unittest.TestCase):
             },
         )
         self.assertEqual("task.finish", script.calls[-5][0])
+        script.assert_exhausted()
+
+    def test_full_translation_uses_converted_path_only_for_legacy_office(self) -> None:
+        """Legacy 用 processing OOXML；普通格式继续使用 raw source，避免扩大行为变化。"""
+
+        task_input, _task_execution = _fixture()
+        execution = AnalysisExecutionRef(
+            task_id=TaskId(task_input.task_id),
+            file_name=task_input.file_name,
+            batch_id=task_input.batch_id,
+            batch_sequence=task_input.batch_sequence,
+        )
+        script = StrictAnalysisFakeScript()
+        ports = StrictAnalysisPortFake(script)
+        handoff = _AnalysisKnowledgeHandoff(ports, ports)
+        translation_result = AnalysisTranslationResult(
+            execution=execution,
+            kind=AnalysisTranslationKind.DOCUMENT,
+            outcome=AnalysisTranslationOutcome.SUCCEEDED,
+            document_translation_one="单语",
+            document_translation_two="双语",
+        )
+        for prepared, expected_path in (
+            (
+                PreparedAnalysisDocument(
+                    execution=execution,
+                    source_path="C:/analysis/raw.doc",
+                    processing_path=(
+                        "C:/analysis/prepared-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.docx"
+                    ),
+                    upload_path=(
+                        "C:/analysis/prepared-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.docx"
+                    ),
+                    original_text="正文",
+                    internal_prepared_basename=(
+                        "prepared-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.docx"
+                    ),
+                ),
+                "C:/analysis/prepared-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.docx",
+            ),
+            (
+                PreparedAnalysisDocument(
+                    execution=execution,
+                    source_path="C:/analysis/raw.pdf",
+                    processing_path="C:/analysis/normalized.pdf",
+                    upload_path="C:/analysis/rag-input.pdf",
+                    original_text="正文",
+                ),
+                "C:/analysis/raw.pdf",
+            ),
+        ):
+            with self.subTest(expected_path=expected_path):
+                script.expect("translation.translate", translation_result)
+                mapped_result = {"fileDataItem": {"summary": "摘要"}}
+                handoff.enrich_translations(
+                    execution=execution,
+                    snapshot=task_input,
+                    prepared=prepared,
+                    mapped_result=mapped_result,
+                )
+                request = script.calls[-1][1]
+                self.assertEqual(expected_path, request.source_path)
+                self.assertEqual(
+                    "单语",
+                    mapped_result["fileDataItem"]["documentTranslationOne"],
+                )
         script.assert_exhausted()
 
     def test_optional_resource_port_persists_close_intent_and_reaches_cleaned(self) -> None:
