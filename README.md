@@ -7,7 +7,7 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 - 文件解析：`POST /llm/analysis`
 - 报告生成：`POST /llm/generate-report`
 - 武器装备知识谱系解析：`POST /llm/weaponry`
-- 文件内容对话：`POST /llm/chat`（附加标题生成 `POST /llm/chat/title`、历史查询 `GET /llm/chat/history`、生成中断 `POST /llm/chat/abort` 及删除 `POST /llm/chat/delete`）
+- 文件内容与知识谱系类别对话：`POST /llm/chat`（附加标题生成 `POST /llm/chat/title`、历史查询 `GET /llm/chat/history`、生成中断 `POST /llm/chat/abort` 及删除 `POST /llm/chat/delete`）
 - 分类节点变更：`POST /llm/reassign`
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
@@ -158,19 +158,20 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `pending`：任务初始回调状态，尚未记录回调成功、失败或跳过
 - `success`：回调成功
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
-- `outcome_unknown`：请求可能已经送达但响应结果未知；后台不自动重试，file 类型可由新的 `/llm/check-task` 明确按至少一次语义补发
+- `outcome_unknown`：请求可能已经送达但响应结果未知；后台不自动重试，file、report、weaponry 三类业务均只能由新的 `/llm/check-task` 请求明确按至少一次语义授权补发
 - `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
 `/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending`、`failed`，以及由新的
-file check-task 请求明确授权的 `outcome_unknown` 终态结果。同一请求内规范化后重复的 fileName
-只处理首次出现项。`outcome_unknown` 补发可能产生重复业务回调，接收方必须按 fileName 和业务结果
-幂等处理；普通 Worker 和后台维护线程仍不得自动补发。
+check-task 请求明确授权的 `outcome_unknown` 终态结果。路由会在任何回调副作用前完整校验全部
+`params`，再分别按 `fileName`、规范化 `reportId` 或规范化 `architectureId` 稳定去重；同一请求中的
+每个唯一业务键最多进入一次检查和一次可能的发送权竞争。`outcome_unknown` 补发可能产生重复业务
+回调，接收方必须按对应业务键和业务结果幂等处理；普通 Worker 和后台维护线程仍不得自动补发。
 `skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过
-check-task 自动补发。报告类型每次实际外发前还会原子复核 latest execution 并取得 Callback
-Guard 租约：同一 execution 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
+check-task 自动补发。三类业务每次实际外发前都会原子复核 latest execution 并取得 Callback
+Guard 租约：同一 callback attempt 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
 HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 
-同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 或 `outcome_unknown` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID、attempt 与租约 fencing 条件写回状态。进程中断后的过期租约先冻结为 `outcome_unknown`，不会由后台自动接管发送；下一次新的 file check-task 可明确授权至少一次补发。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
+同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 或 `outcome_unknown` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID、attempt 与租约 fencing 条件写回状态。进程中断后的过期租约先冻结为 `outcome_unknown`，不会由后台自动接管发送；下一次对应业务类型的 `/llm/check-task` 请求可明确授权至少一次补发。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
 
 ## 5. 接口行为说明（按当前代码核对）
 
@@ -181,7 +182,7 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
 | WS | `/llm/progress` | 任务进度订阅（目标公开契约只保留无 action 格式） |
-| POST | `/llm/chat` | 基于指定文件内容发起对话请求（SSE 流式响应下发） |
+| POST | `/llm/chat` | 基于 `fileNames` 或 `architectureId` 冻结范围发起对话请求（SSE 流式响应下发） |
 | POST | `/llm/chat/title` | 根据指定会话的本地已提交消息生成标题 |
 | GET | `/llm/chat/history` | 查询指定会话在本地持久化的已提交消息 |
 | POST | `/llm/chat/abort` | 请求中断指定会话当前活跃的生成任务 |
@@ -276,6 +277,7 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 4. `/llm/check-task`
    - 支持 `file` / `report` / `weaponry`。
    - 支持批量检查（`params` 多项）；`params` 必须为非空对象数组，任一非对象元素会使整次请求按既有 HTTP 400 错误体失败。
+   - 去重只影响内部检查与恢复次数；单项缺失返回 HTTP 404、批量含缺失项仍返回 HTTP 200 的判定始终以原始 `params` 项数为准。
    - 负责人于 2026-07-25 明确同意后，成功响应已统一为 HTTP 200 空响应体；内部仍执行必要的同步回调补发，批量缺失项不阻断其余存在项处理，400/404 错误体保持不变。
    - 成功响应不公开任务状态、进度、回调状态、恢复结果或内部执行标识；调用方以既有业务键、Progress 与最终回调跟踪结果。
 
@@ -288,11 +290,14 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
-   - `fileNames` 表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
+   - 当前支持互斥的 `fileNames` 和 `architectureId` 两种范围模式；同一请求不能同时出现二者，同一 `chatId` 首次成功受理后会永久绑定范围模式，不能在后续请求中切换。
+   - `fileNames` 模式中，该字段表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
    - 首次创建 `chatId` 且显式传入 `fileNames=[]` 时，受理事务把当时全部可用已解析文件冻结为 `automatic_initial` Scope；空知识库会冻结空范围，后续知识库新增文件不自动吸收。首次自动范围和任意显式范围都受 `DOCSENSE_CHAT_MAX_FILES` 约束。
+   - `architectureId` 模式中，每轮都必须传入与会话绑定值相同的规范化 ID。首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续只复用首次快照，不因类别新增、删除、重新解析或重新分类而动态刷新、追加或替换成员。
    - AnythingLLM Workspace 与本地 binding heads 继续累计历史绑定，但每轮模型只接收 Effective Scope 的文档引用；累计绑定不能替代或扩大 Active Scope。
-   - `/llm/chat/history` 的用户 `files` 只展示该轮前端显式文件；空请求始终返回 `files: []`，不会把自动全量或继承范围展开到历史。Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复 Requested/Effective 两套事实。
-   - Requested/Active/Effective Scope 阶段 0～7 已完成。当前通过 204 项 Chat 回归及安全全仓发现 1,879/排除 13/执行 1,866 项；开发 Chat 库已精确清理并重建 Schema v1～v4。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md`。
+   - `/llm/chat/history` 在 `fileNames` 模式下只为 user 消息返回该轮前端显式文件，空请求固定为 `files: []`；在 `architectureId` 模式下，user 消息只返回规范化后的 JSON number `architectureId`，不返回 `files`；assistant 消息不返回任一范围字段。
+   - 不可变会话 Binding、Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复冻结的 Effective Scope。当前持久化迁移已到 Schema v5；v5 在既有 Requested/Active/Effective Scope 的 Schema v4 基础上增加 architecture 模式绑定、运行输入与历史字段互斥约束。
+   - Requested/Active/Effective Scope 阶段 0～7 已完成，architecture 类别文件对话阶段 0～7 也已完成并通过离线关闭验收。后者完成 248 项 Chat、85 项合同/网关/架构、142 项相邻模块回归；安全全仓发现 2,033 项、排除 13 项、执行 2,020 项，失败 0、错误 0、2 项既有平台条件跳过。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md` 和 `docs/重构记录/260728-知识谱系类别文件对话详细实施计划.md`。
    - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
