@@ -81,8 +81,8 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
             record = self._knowledge_base.get_document_record(file_name)
             if not record:
                 logger.warning(
-                    "文件对话文档解析失败：未找到已解析文件: file_name=%s",
-                    file_name,
+                    "文件对话文档解析失败：未找到已解析文件: index=%d",
+                    index,
                 )
                 raise ChatDocumentNotFoundError(file_name)
             resolved.append(self._resolve_record(file_name=file_name, record=record))
@@ -194,8 +194,7 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
             document_ref = f"document:{anything_doc_id}"
         if not document_ref:
             logger.warning(
-                "文件对话文档解析失败：文件缺少文档引用: file_name=%s",
-                file_name,
+                "文件对话文档解析失败：文件缺少文档引用",
             )
             raise ValueError(f"文件 {file_name} 缺少可用于对话的文档引用")
 
@@ -204,8 +203,7 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
             external_location = f"custom-documents/{anything_doc_id}.json"
         if not external_location:
             logger.warning(
-                "文件对话文档解析失败：文件缺少文档位置: file_name=%s",
-                file_name,
+                "文件对话文档解析失败：文件缺少文档位置",
             )
             raise ValueError(f"文件 {file_name} 缺少可用于对话的文档位置")
 

@@ -82,6 +82,15 @@ class ChatRunStreamRequest:
     file_names: tuple[str, ...] = ()
     file_original_names: tuple[str, ...] = ()
     documents: tuple["ChatRunDocumentSnapshot", ...] = ()
+    # ``file_names`` 表示本次模型调用实际采用的活动范围；下面两个字段只表示
+    # 前端本轮显式传入的文件。两者必须分离，否则空数组自动选择全量文件时，
+    # 历史接口会错误暴露庞大的有效范围。
+    #
+    # ``None`` 仅用于兼容直接构造该 DTO 的既有内部测试/调用方：未提供时沿用
+    # 历史行为，将有效范围视为显式请求。持久化恢复路径始终明确传入元组，
+    # 因而真正的空请求会保持为空，不会触发该兼容分支。
+    requested_file_names: tuple[str, ...] | None = None
+    requested_file_original_names: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -113,6 +122,58 @@ class ChatRunStreamRequest:
             raise ValueError(
                 "file_names and file_original_names must have the same length"
             )
+        if (
+            self.requested_file_names is None
+            and self.requested_file_original_names is None
+        ):
+            requested_file_names = self.file_names
+            requested_file_original_names = self.file_original_names
+        elif (
+            self.requested_file_names is None
+            or self.requested_file_original_names is None
+        ):
+            raise ValueError(
+                "requested_file_names and requested_file_original_names "
+                "must be provided together"
+            )
+        else:
+            requested_file_names = _text_tuple(
+                self.requested_file_names,
+                name="requested_file_names",
+            )
+            requested_file_original_names = _text_tuple(
+                self.requested_file_original_names,
+                name="requested_file_original_names",
+            )
+        if len(requested_file_names) != len(requested_file_original_names):
+            raise ValueError(
+                "requested_file_names and requested_file_original_names "
+                "must have the same length"
+            )
+        # 非空的前端选择会完整替换活动范围，因此受理完成后两套顺序必须一致。
+        # 空请求则允许有效范围来自首次全量快照或已有活动范围。
+        if requested_file_names and requested_file_names != self.file_names:
+            raise ValueError(
+                "non-empty requested_file_names must match effective file_names"
+            )
+        if (
+            requested_file_original_names
+            and requested_file_original_names != self.file_original_names
+        ):
+            raise ValueError(
+                "non-empty requested_file_original_names must match "
+                "effective file_original_names"
+            )
+        object.__setattr__(
+            self,
+            "requested_file_names",
+            requested_file_names,
+        )
+        object.__setattr__(
+            self,
+            "requested_file_original_names",
+            requested_file_original_names,
+        )
         documents = tuple(self.documents)
         if any(not isinstance(item, ChatRunDocumentSnapshot) for item in documents):
             raise TypeError("documents must contain ChatRunDocumentSnapshot")
@@ -331,11 +392,19 @@ class SynchronousChatRunExecutor:
             document_candidates=document_candidates,
             max_files_per_request=self._max_files_per_request,
         )
+        requested_file_count: int | str = "unknown"
         effective_file_count: int | str = "unknown"
+        selection_mode = "unknown"
+        effective_scope_revision_id = "unknown"
         try:
             accepted_input = self._store.run_inputs.get(run.run_id)
             if accepted_input is not None:
+                requested_file_count = len(accepted_input.requested_files)
                 effective_file_count = len(accepted_input.files)
+                selection_mode = accepted_input.selection_mode
+                effective_scope_revision_id = (
+                    accepted_input.effective_scope_revision_id
+                )
             else:
                 logger.error(
                     "文件对话运行已受理但日志计数未读到输入快照: "
@@ -355,10 +424,15 @@ class SynchronousChatRunExecutor:
             )
         logger.info(
             "文件对话运行已受理并冻结输入快照: "
-            "chat_id=%s run_id=%s effective_file_count=%s",
+            "chat_id=%s run_id=%s requested_file_count=%s "
+            "effective_file_count=%s selection_mode=%s "
+            "scope_revision_id=%s",
             run.chat_id,
             run.run_id,
+            requested_file_count,
             effective_file_count,
+            selection_mode,
+            effective_scope_revision_id,
         )
         # 命令服务会在受理事务中保存完整的消息和文档快照。将这些对象直接传给执行器会
         # 让未来工作进程依赖请求内存，因此执行路径刻意只接收持久化运行键。
@@ -400,10 +474,14 @@ class SynchronousChatRunExecutor:
         request = self._request_from_persisted_input(run_id=normalized_run_id)
         logger.info(
             "开始领取并执行文件对话运行: "
-            "chat_id=%s run_id=%s effective_file_count=%d",
+            "chat_id=%s run_id=%s requested_file_count=%d "
+            "effective_file_count=%d selection_mode=%s scope_revision_id=%s",
             request.chat_id,
             request.run_id,
+            len(run_input.requested_files),
             len(request.documents),
+            run_input.selection_mode,
+            run_input.effective_scope_revision_id,
         )
         try:
             execution_lease = self._chat_commands.issue_execution_lease(
@@ -489,6 +567,12 @@ class SynchronousChatRunExecutor:
             file_names=tuple(item.file_name for item in snapshots),
             file_original_names=tuple(item.original_name for item in snapshots),
             documents=snapshots,
+            requested_file_names=tuple(
+                item.file_name for item in run_input.requested_files
+            ),
+            requested_file_original_names=tuple(
+                item.original_name for item in run_input.requested_files
+            ),
         )
 
     def stream_chat_run(
@@ -911,9 +995,11 @@ class ChatRunEventRecorder:
                 chat_commands.validate_execution_lease(lease=execution_lease)
             logger.info(
                 "开始记录文件对话运行事件: "
-                "chat_id=%s run_id=%s effective_file_count=%d",
+                "chat_id=%s run_id=%s requested_file_count=%d "
+                "effective_file_count=%d",
                 request.chat_id,
                 request.run_id,
+                len(request.requested_file_names),
                 len(request.file_names),
             )
             self._append_user_pending(
@@ -1142,7 +1228,12 @@ class ChatRunEventRecorder:
             role=MESSAGE_ROLE_USER,
             content=request.message,
             status=MESSAGE_PENDING,
-            files=tuple(zip(request.file_names, request.file_original_names)),
+            files=tuple(
+                zip(
+                    request.requested_file_names,
+                    request.requested_file_original_names,
+                )
+            ),
         )
 
     def _commit_user(self, message_id: str) -> None:

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
+from app.services.chat.domain.document_scope import ChatRequestedFile
+
 
 SESSION_ACTIVE = "active"
 SESSION_DELETING = "deleting"
@@ -196,6 +198,9 @@ class ChatRunInput:
     message: str
     files: tuple[ChatRunInputFile, ...]
     created_at: str
+    requested_files: tuple[ChatRequestedFile, ...] = ()
+    effective_scope_revision_id: str = ""
+    selection_mode: str = "legacy_input"
 
 
 @dataclass(frozen=True)

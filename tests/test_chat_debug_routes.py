@@ -47,8 +47,10 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertEqual(data["data"]["sessions"][0]["chatId"], 10001)
         self.assertEqual(data["data"]["availableFiles"][0]["fileName"], "alpha.pdf")
 
-    def test_auto_selected_files_appear_from_bindings_and_local_history(self):
-        """调试页不能因调用方原始空数组而把成功会话显示成无文件。"""
+    def test_active_scope_replaces_debug_selection_while_bindings_accumulate(
+        self,
+    ):
+        """调试选择跟随 Active Scope，历史与累计绑定保持各自语义。"""
 
         self.kb_service.save_document_record(
             "beta.pdf",
@@ -78,6 +80,18 @@ class ChatDebugRouteTests(unittest.TestCase):
             },
         )
         chat_response.get_data()
+        replace_response = self.client.post(
+            "/llm/chat",
+            json={
+                "businessType": "chat",
+                "params": {
+                    "chatId": 10002,
+                    "fileNames": ["beta.pdf"],
+                    "message": "只看 Beta",
+                },
+            },
+        )
+        replace_response.get_data()
 
         with self.assertLogs(
             "app.blueprints.debug",
@@ -96,19 +110,18 @@ class ChatDebugRouteTests(unittest.TestCase):
             for item in bootstrap["data"]["sessions"]
             if item["chatId"] == 10002
         )
-        self.assertEqual(["alpha.pdf", "beta.pdf"], session["fileNames"])
+        self.assertEqual(["beta.pdf"], session["fileNames"])
         history = history_response.get_json()
-        self.assertEqual(
-            [{"name": "Alpha 原名.pdf"}, {"name": "Beta 原名.pdf"}],
-            history[0]["files"],
-        )
+        self.assertEqual([], history[0]["files"])
+        self.assertEqual([{"name": "Beta 原名.pdf"}], history[2]["files"])
         response_log = next(
             message
             for message in captured.output
             if "调试初始化数据响应已生成" in message
         )
         self.assertIn("session_count=1", response_log)
-        self.assertIn("current_binding_count=2", response_log)
+        self.assertIn("active_scope_member_count=1", response_log)
+        self.assertIn("workspace_binding_count=2", response_log)
         self.assertNotIn("alpha.pdf", response_log)
 
     def test_chat_page_renders_shell(self):
@@ -142,6 +155,7 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn('const CHAT_DELETE_URL = "/llm/chat/delete";', html)
         self.assertIn("function loadBootstrap()", html)
         self.assertIn("function renderSessionList(sessions)", html)
+        self.assertIn("活动范围文件数：", html)
         self.assertIn("function toggleFilePicker()", html)
         self.assertIn("function renderSelectedFiles()", html)
         self.assertIn("function renderFilePickerOptions(files)", html)

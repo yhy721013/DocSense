@@ -6,13 +6,13 @@
 
 | 文件 | 覆盖内容 |
 | --- | --- |
-| `test_chat.py` | `/llm/chat` 路由受理、首次空数组最低矩阵、既有 SSE 事件、响应头、输入校验、同会话并发拒绝、50 个不同会话完整隔离和内部标识不泄露。 |
+| `test_chat.py` | `/llm/chat` 路由受理、Requested/Active/Effective 范围矩阵、history requested 投影、既有 SSE 事件、响应头、输入校验、同会话并发拒绝、50 个不同会话完整隔离和内部标识不泄露。 |
 | `test_chat_port_contract.py` | `ChatConversationPort` 数据传输对象、异常与协议边界。 |
 | `test_anythingllm_chat_gateway.py` | AnythingLLM 对话网关的离线传输、字段归一化、流关闭和删除行为。 |
 | `test_chat_repositories.py` | SQLite 架构迁移、统一有界 busy timeout、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
 | `test_chat_resource_ids.py` | 租约标识和不透明远端引用的编码/解码。 |
-| `test_chat_run_state.py` | 同一会话互斥、执行租约、心跳、过期运行和删除准入。 |
-| `test_chat_run_executor.py` | 输入冻结、运行领取、资源租约、文档选择、流事件记录、异常收敛，以及受理后可观测性读取故障不得误报受理失败。 |
+| `test_chat_run_state.py` | 同一会话互斥、Scope Head 原子受理、首次/显式 50 并发唯一更新、全事实回滚、1,000 文件历史压力、执行租约、心跳、过期运行和删除准入。 |
+| `test_chat_run_executor.py` | Requested/Effective 输入冻结与 run-id 重启式恢复、Workspace 累计绑定和模型范围隔离、失败后 Scope 复用、资源租约、流事件记录及异常收敛。 |
 | `test_chat_event_repository.py` | 内部事件账本的序号、终态唯一性和事务写入。 |
 | `test_chat_dispatcher.py` | 仅以持久化 `run_id` 调度执行的协议和内联实现。 |
 | `test_chat_history_service.py` | 本地权威历史、消息过滤和标题输入。 |
@@ -21,8 +21,11 @@
 | `test_chat_delete_service.py` | 删除状态机、同步清理要求和失败保留。 |
 | `test_chat_stream_presenter.py` | 领域事件到冻结 SSE 文本的格式化与关闭回调。 |
 | `test_chat_infrastructure.py` | 当前持久化/调度/租约能力边界，防止 SQLite 被误用为可靠队列。 |
-| `test_chat_debug_preview.py`、`test_chat_debug_routes.py` | 本地调试预览和调试路由。 |
+| `test_chat_debug_preview.py`、`test_chat_debug_routes.py` | 本地调试 `fileNames` 对齐 Active Scope、Workspace bindings 独立脱敏计数、公开 history requested 语义和调试路由。 |
 | `test_dependency_container.py` | 容器装配、工厂隔离、传输惰性创建和能力校验。 |
+| `test_chat_scope_contract_assets.py` | Requested/Active/Effective Scope 分离的阶段 0 黄金资产；冻结最后显式范围、禁止自动吸收、history 仅展示显式请求及公开字段零增删。 |
+| `test_chat_document_scope.py` | Scope Revision/Head/Decision 不可变 DTO、严格内部 Schema、重复身份拒绝及 Requested→Active→Effective 纯状态机。 |
+| `test_chat_scope_repositories.py` | SQLite Schema v4、Scope Revision/Member/Head、CAS、run/chat 完整性、requested/effective run input Codec、源 run 清理隔离及 50 会话持久化隔离。 |
 
 `fakes/` 子目录保存端口替身，具体见其 README。
 

@@ -5,6 +5,20 @@ from app.services.chat.domain.document_candidates import (
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_SELECTION_ACTIVE_REUSE,
+    CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL,
+    CHAT_SCOPE_SELECTION_EXPLICIT,
+    CHAT_SCOPE_SELECTION_MODES,
+    CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL,
+    CHAT_SCOPE_SOURCE_EXPLICIT,
+    CHAT_SCOPE_SOURCE_MODES,
+    ChatRequestedFile,
+    ChatScopeDecision,
+    ChatScopeHead,
+    ChatScopeRevision,
+    decide_chat_document_scope,
+)
 from app.services.chat.domain.chat_id import (
     chat_id_public_value,
     chat_id_storage_key,
@@ -69,8 +83,12 @@ __all__ = [
     "ChatMessage",
     "ChatMessageFile",
     "ChatResourceLease",
+    "ChatRequestedFile",
     "ChatRun",
     "ChatRunEvent",
+    "ChatScopeDecision",
+    "ChatScopeHead",
+    "ChatScopeRevision",
     "ChatSession",
     "ChatStreamEvent",
     "chat_id_public_value",
@@ -85,6 +103,13 @@ __all__ = [
     "CLEANUP_JOB_SUCCEEDED",
     "CLEANUP_REASON_DELETE_CHAT",
     "CLEANUP_REASON_TEMPORARY_THREAD",
+    "CHAT_SCOPE_SELECTION_ACTIVE_REUSE",
+    "CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL",
+    "CHAT_SCOPE_SELECTION_EXPLICIT",
+    "CHAT_SCOPE_SELECTION_MODES",
+    "CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL",
+    "CHAT_SCOPE_SOURCE_EXPLICIT",
+    "CHAT_SCOPE_SOURCE_MODES",
     "LEASE_ACTIVE",
     "LEASE_CLEANUP_FAILED",
     "LEASE_CLEANUP_PENDING",
@@ -116,4 +141,5 @@ __all__ = [
     "SESSION_DELETING",
     "SESSION_ERROR",
     "SESSION_STATUSES",
+    "decide_chat_document_scope",
 ]

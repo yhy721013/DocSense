@@ -871,9 +871,8 @@ def llm_chat():
         normalized_file_name = fn.strip()
         if normalized_file_name in seen_file_names:
             logger.debug(
-                "文件对话请求去重重复文件名: chatId=%s fileName=%s index=%s",
+                "文件对话请求去重重复文件名: chatId=%s index=%s",
                 chat_id,
-                normalized_file_name,
                 index,
             )
             continue

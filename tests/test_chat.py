@@ -413,10 +413,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             ("hash-alpha.pdf", "hash-beta.pdf"),
             tuple(item.file_name for item in run_input.files),
         )
-        self.assertEqual(
-            ("Alpha 原名.pdf", "Beta 原名.pdf"),
-            tuple(item.original_name for item in messages[0].files),
-        )
+        self.assertEqual((), messages[0].files)
         self.assertEqual(
             {"document:doc-alpha", "document:doc-beta"},
             {item.document_ref for item in bindings},
@@ -449,10 +446,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(200, history_response.status_code)
         history = history_response.get_json()
-        self.assertEqual(
-            [{"name": "Alpha 原名.pdf"}, {"name": "Beta 原名.pdf"}],
-            history[0]["files"],
-        )
+        self.assertEqual([], history[0]["files"])
         leases = self.services.chat_store.resource_leases.list_by_chat("1012")
         self.assertEqual(
             ["document_binding", "document_binding", "thread", "workspace"],
@@ -504,7 +498,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             if "受理事务已选择有效文档" in message
         )
         self.assertIn("run_id=", selection_log)
-        self.assertIn("selection_mode=new_session_default", selection_log)
+        self.assertIn("selection_mode=automatic_initial", selection_log)
         self.assertIn("session_created=True", selection_log)
         self.assertIn("default_candidate_count=2", selection_log)
         self.assertIn("effective_file_count=2", selection_log)
@@ -820,10 +814,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             if item.role == "user"
         ]
         self.assertEqual(2, len(user_messages))
-        self.assertEqual(
-            ("hash-alpha.pdf",),
-            tuple(item.file_name for item in user_messages[0].files),
-        )
+        self.assertEqual((), user_messages[0].files)
         self.assertEqual((), user_messages[1].files)
 
     def test_replaced_business_file_creates_a_new_document_binding_revision(self) -> None:
@@ -973,9 +964,7 @@ class ChatDifferentSessionConcurrencyTests(unittest.TestCase):
             ])
             self.assertEqual(f"question-{index}", messages[0].content)
             self.assertEqual("第一段第二段", messages[1].content)
-            self.assertEqual(("shared.pdf",), tuple(
-                item.file_name for item in messages[0].files
-            ))
+            self.assertEqual((), messages[0].files)
             run_ids.add(messages[0].run_id)
 
             run_input = self.services.chat_store.run_inputs.get(

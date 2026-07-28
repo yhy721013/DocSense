@@ -21,6 +21,14 @@
 | `260727-文件对话首次空文件自动全量阶段5执行记录.md` | 阶段 5 路由、日志与调试一致性：区分原请求/候选/最终有效数量，记录脱敏选择模式和事务上下文；调试页以 current bindings 与本地 committed history 为准，并通过 169 项 Chat 及 59 项网关/架构回归。 |
 | `260727-文件对话首次空文件自动全量阶段6执行记录.md` | 阶段 6 离线全面回归：补齐上限等值、目录整体拒绝和 50 个不同会话完整隔离，修复 SQLite 5 秒 busy timeout 导致的并发 500；174 项 Chat、59 项网关/架构及发现 1,846/排除 13/执行 1,833 项安全全仓回归通过。 |
 | `260727-文件对话首次空文件自动全量阶段7关闭验收执行记录.md` | 阶段 7 最终关闭：修复受理后日志计数读取故障误报，完成契约与代码审计、175 项 Chat、67 项契约/网关/容器/架构及发现 1,847/排除 13/执行 1,834 项安全全仓回归；代码与 SQLite 单实例离线计划关闭。 |
+| `260728-文件对话请求与活动范围分离阶段0执行记录.md` | Requested/Active/Effective Scope 后续改造的阶段 0：冻结最后显式范围、禁止自动吸收、history 仅展示前端显式文件及公开字段零增删；11 项黄金/契约与 178 项 Chat 基线通过，生产代码和接口文档尚未切换。 |
+| `260728-文件对话请求与活动范围分离阶段1执行记录.md` | 阶段 1 纯领域实现：新增 Scope Revision/Head/Decision、Requested File、严格 Schema v1、重复身份门禁和 Requested→Active→Effective 状态机；38 项定向及 186 项 Chat 回归通过，生产链尚未切换。 |
+| `260728-文件对话请求与活动范围分离阶段2执行记录.md` | 阶段 2 SQLite Schema v4 与 Repository：新增 Scope Revision/Member/Head、CAS、requested/effective run input Codec、完整性触发器、源 run 清理隔离和 50 会话持久化隔离；61 项定向及 196 项 Chat 回归通过。 |
+| `260728-文件对话请求与活动范围分离阶段3执行记录.md` | 阶段 3 原子受理状态机：在同一 SQLite 事务内提交 Scope Revision/Head、requested/effective run input 和 pending message；同会话 50 首次/显式并发均唯一受理，超限与故障全量回滚，198 项 Chat 回归通过。 |
+| `260728-文件对话请求与活动范围分离阶段4执行记录.md` | 阶段 4 执行、绑定与恢复：Worker 仅凭 run_id 恢复 requested/effective；Workspace 累计绑定不扩大模型范围，显式失败后空请求仍复用最后 accepted 范围；41 项执行器、203 项 Chat 与 59 项网关/容器/架构回归通过。 |
+| `260728-文件对话请求与活动范围分离阶段5执行记录.md` | 阶段 5 历史、日志与调试一致性：history 只投影 requested，1,000 个 effective 文件不扩大空请求历史；调试 `fileNames` 校正为 Active Scope，bindings 独立脱敏计数且不新增 JSON 字段；204 项 Chat 回归通过。 |
+| `260728-文件对话请求与活动范围分离阶段6执行记录.md` | 阶段 6 开发 Chat 库精确清理与安全全仓回归：空库重建 Schema v1～v4，发现 1,879/排除 13/执行 1,866 项全部通过；证据限定为 Windows、SQLite 单实例与离线 Fake。 |
+| `260728-文件对话请求与活动范围分离阶段7关闭验收执行记录.md` | 阶段 7 最终关闭：同步权威接口文档且公开字段零增删，完成 204 项 Chat、70 项契约/网关/容器/架构、1,866 项安全全仓及静态审计；开发分支 SQLite 单实例离线计划关闭。 |
 | `260715-阶段1A-1接口契约基线执行记录.md` | check-task/Progress 当前与目标契约分层、离线测试结果，以及已确认的严格 params/action 错误连接策略。 |
 | `260715-阶段1A-2模块骨架与架构边界执行记录.md` | tasks/Flask Adapter 包骨架、AST 导入门禁、规则自证、完整回归结果与 1A-3 后续边界。 |
 | `260716-阶段1A-3内部任务契约执行记录.md` | 不可变 Task/Progress DTO、三类 Port、两个应用服务、Fake 契约测试、波次 1A 门禁与完整回归。 |

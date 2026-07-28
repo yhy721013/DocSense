@@ -19,7 +19,8 @@ def load_chat_debug_bootstrap(
     logger.info("开始读取文件对话调试初始化数据")
     try:
         sessions = []
-        current_binding_count = 0
+        active_scope_member_count = 0
+        workspace_binding_count = 0
         for item in chat_store.sessions.list_all():
             if item.status == "deleted":
                 continue
@@ -33,22 +34,37 @@ def load_chat_debug_bootstrap(
                     item.chat_id,
                 )
                 continue
-            # 会话文件选择只读取当前 binding heads；历史附件由页面随后调用
-            # `/llm/chat/history` 从本地 committed 消息读取。两者都不依赖调用方
-            # 本次传入的空数组，也不读取 AnythingLLM Thread 历史。
+            # `fileNames` 是既有调试接口字段，不能增加新的前后端参数。本次把其
+            # 语义校正为 Active Scope，使调试页恢复会话时发送的文件范围与模型
+            # 实际范围一致；Workspace bindings 只作为独立计数记录到脱敏日志，
+            # 不再冒充当前范围。
+            current_scope = chat_store.scopes.get_current_revision(
+                item.chat_id
+            )
+            active_file_names = (
+                []
+                if current_scope is None
+                else [
+                    member.file_name
+                    for member in current_scope.members
+                ]
+            )
+            if current_scope is None:
+                logger.warning(
+                    "调试页会话缺少活动范围，按空活动范围展示: chat_id=%s",
+                    item.chat_id,
+                )
             current_bindings = (
                 chat_store.document_bindings.list_current_by_chat(
                     item.chat_id
                 )
             )
-            current_binding_count += len(current_bindings)
+            active_scope_member_count += len(active_file_names)
+            workspace_binding_count += len(current_bindings)
             sessions.append(
                 {
                     "chatId": public_chat_id,
-                    "fileNames": [
-                        document.file_name
-                        for document in current_bindings
-                    ],
+                    "fileNames": active_file_names,
                     "createdAt": item.created_at,
                     "updatedAt": item.updated_at,
                 }
@@ -70,9 +86,11 @@ def load_chat_debug_bootstrap(
 
     logger.info(
         "文件对话调试初始化数据读取完成: "
-        "session_count=%d current_binding_count=%d available_file_count=%d",
+        "session_count=%d active_scope_member_count=%d "
+        "workspace_binding_count=%d available_file_count=%d",
         len(sessions),
-        current_binding_count,
+        active_scope_member_count,
+        workspace_binding_count,
         len(available_files),
     )
     return {
