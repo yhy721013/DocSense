@@ -80,6 +80,24 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _interface_authority_sha256(raw_bytes: bytes) -> str:
+    """计算跨平台稳定的接口权威文档摘要。
+
+    Git 在 Windows ``core.autocrlf=true`` 环境会把仓库中的 LF 转成 CRLF；如果直接对工作树
+    字节求摘要，同一份接口文档会在 Windows 与 Linux 得到不同结果。这里仅规范化 UTF-8 BOM
+    和换行编码，不裁剪空白、不改写正文，确保任何真实文字变化仍会触发契约门禁。
+    """
+
+    if not isinstance(raw_bytes, bytes):
+        raise TypeError("raw_bytes 必须是 bytes")
+    canonical_text = (
+        raw_bytes.decode("utf-8-sig")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest().upper()
+
+
 class AnalysisContractAssetTests(unittest.TestCase):
     """覆盖 1F-0 不可改变的公开契约、纯规则黄金和遗留事实清单。"""
 
@@ -136,7 +154,7 @@ class AnalysisContractAssetTests(unittest.TestCase):
 
         authority = self.contract["interfaceAuthority"]
         interface_path = _ROOT / authority["path"]
-        observed_sha256 = hashlib.sha256(interface_path.read_bytes()).hexdigest().upper()
+        observed_sha256 = _interface_authority_sha256(interface_path.read_bytes())
 
         self.assertEqual(1, self.contract["schemaVersion"])
         self.assertEqual("1F-0", self.contract["stage"])
@@ -147,6 +165,19 @@ class AnalysisContractAssetTests(unittest.TestCase):
             self.contract,
             json.loads(_canonical_json(self.contract)),
         )
+
+    def test_interface_authority_hash_is_stable_across_platform_line_endings(
+        self,
+    ) -> None:
+        """LF、CRLF 与 UTF-8 BOM 只能是存储差异，不能改变接口契约身份。"""
+
+        lf_document = "# 接口文档\n\n字段：fileName\n".encode("utf-8")
+        crlf_document = lf_document.replace(b"\n", b"\r\n")
+        bom_crlf_document = b"\xef\xbb\xbf" + crlf_document
+
+        expected = _interface_authority_sha256(lf_document)
+        self.assertEqual(expected, _interface_authority_sha256(crlf_document))
+        self.assertEqual(expected, _interface_authority_sha256(bom_crlf_document))
 
     def test_submission_validation_and_limit_responses_are_exact(self) -> None:
         """验证所有已冻结的同步校验错误均只保留既有 error 字段。"""

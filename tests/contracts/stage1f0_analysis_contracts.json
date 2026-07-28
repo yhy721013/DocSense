@@ -5,7 +5,7 @@
   "publicContractChanged": true,
   "interfaceAuthority": {
     "path": "docs/接口文档/文件处理和报告生成.md",
-    "sha256": "0F47A2BDA8C01D39C3C610345E18129DC7C538886E513975C04F6BAC9B17F3F6",
+    "sha256": "C6656AFB77C7CA6C560F6791C51D5BD3F3A2B7D5F451069BA1BBB94F6DD1A538",
     "lastApprovedAt": "2026-07-27",
     "approvedChange": "GJB兜底定向选择通用要求；file outcome_unknown可由新的check-task按at-least-once语义显式补发，同请求重复fileName只处理一次"
   },
