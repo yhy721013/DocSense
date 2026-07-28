@@ -1,5 +1,9 @@
 # `main` 与 `refactor/file-analysis` Legacy Office 集成 M10 准备检查记录
 
+> 后续状态：本记录描述的是首次准备检查时的暂停事实。负责人随后确认 Windows 离线包和
+> macOS Apple Silicon Preflight 已完成外部验证；最新关闭结论以
+> `260728-main与file-analysis分支Legacy-Office集成M10执行记录.md` 为准。
+
 ## 1. 检查结论
 
 M10“真实平台认证与发布”尚未执行，当前因真实环境和交付资产不足而暂停。M0～M9 的代码与

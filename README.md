@@ -387,7 +387,8 @@ LibreOffice。仓库中的
   默认值为 `true`；环境变量完全缺失时的代码安全默认值为 `false`。关闭时不探测
   LibreOffice，但 `.doc/.ppt/.xls` 任务会明确失败，禁止原样上传。
 - `DOCSENSE_LIBREOFFICE_EXECUTABLE`：可选的 `soffice` 绝对路径；为空时依次检查
-  Windows/macOS 标准安装路径和 `PATH`。
+  Windows/macOS 标准安装路径和 `PATH`。Windows 非标准安装必须指向控制台入口
+  `soffice.com`，不要指向可能等待 GUI/管道退出的 `soffice.exe`；标准安装留空即可自动选择。
 - `DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES=26.2`：允许的稳定版本系列。
   功能开启后，应用在公开路由/后台线程启动前执行 `--version` 门禁；缺失、
   `LibreOfficeDev`、空值或非 26.2.x 均 fail-fast。

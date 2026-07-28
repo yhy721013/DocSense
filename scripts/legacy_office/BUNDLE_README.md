@@ -12,8 +12,9 @@ DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES=26.2
 ```
 
 如果使用非标准安装位置，还需把 `DOCSENSE_LIBREOFFICE_EXECUTABLE` 设置为 `soffice`
-可执行文件的绝对路径。DocSense 启动时会再次执行版本门禁；缺失、`LibreOfficeDev`
-或非稳定 26.2.x 均拒绝启动。
+可执行文件的绝对路径；Windows 必须指向控制台入口 `soffice.com`，不要指向
+`soffice.exe`。标准安装留空即可按受控顺序发现。DocSense 启动时会再次执行版本门禁；
+缺失、`LibreOfficeDev` 或非稳定 26.2.x 均拒绝启动。
 
 ## macOS Apple Silicon
 

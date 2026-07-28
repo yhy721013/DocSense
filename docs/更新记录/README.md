@@ -16,7 +16,8 @@
 | `260728-main与file-analysis分支Legacy-Office集成M7执行记录.md` | 完成共享业务回归，并增加无删除入口的 XLSX Folder 只读库存治理。 |
 | `260728-main与file-analysis分支Legacy-Office集成M8执行记录.md` | 同步接口语义、README、索引和契约资产，不增删任何公开字段。 |
 | `260728-main与file-analysis分支Legacy-Office集成M9执行记录.md` | 完成九组离线关闭门禁和发现 1,986/排除 13/执行 1,973 项安全全仓验收。 |
-| `260728-main与file-analysis分支Legacy-Office集成M10准备检查记录.md` | 记录真实平台、离线包、LibreOffice 与发布窗口不足的停止条件和恢复输入；M10 尚未执行。 |
+| `260728-main与file-analysis分支Legacy-Office集成M10准备检查记录.md` | 记录首次真实平台、离线包、LibreOffice 与发布窗口不足的停止条件；已由后续 M10 执行记录接续。 |
+| `260728-main与file-analysis分支Legacy-Office集成M10执行记录.md` | 记录负责人外部实机验收、本机 Windows 26.2.5.2 启动门禁、远端漂移检查和最终快进条件。 |
 
 ## 文件对话相关文件
 

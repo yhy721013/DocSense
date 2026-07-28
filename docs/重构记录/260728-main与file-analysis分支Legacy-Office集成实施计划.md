@@ -6,7 +6,7 @@
 | --- | --- |
 | 编写日期 | 2026-07-28 |
 | 文档层级 | L3 分支集成与跨模块文件级实施计划 |
-| 文档状态 | 执行中：M0—M9 已完成，M10 因真实环境和交付资产不足暂停 |
+| 文档状态 | M0—M10 已完成，待 `refactor/file-analysis` 严格快进和合并后复核 |
 | 当前开发分支基线 | `refactor/file-analysis@9776f711...`（M0 收口提交前） |
 | 目标主线 | `main@fb758cda...` |
 | 共同基点 | `2c886a94...` |
@@ -38,7 +38,7 @@
 | M7 共享业务回归与存储治理 | 已完成 | 191 项共享回归通过，新增无删除入口的 XLSX Folder 只读库存工具 |
 | M8 接口文档与项目记录 | 已完成 | 35 项契约与配置测试通过，仅同步已确认语义和接口权威摘要 |
 | M9 离线关闭验收 | 已完成 | 九组门禁通过；安全全仓发现 1,986、排除 13、执行 1,973，零失败零错误 |
-| M10 真实平台认证与发布 | 已暂停 | 当前无 LibreOffice、离线包、SHA256SUMS 或 macOS 目标机；等待真实服务和受控发布窗口 |
+| M10 真实平台认证与发布准备 | 已完成 | 外部实机验收、本机 26.2.5.2 启动门禁、128 项定向及发现 1,986/排除 13/执行 1,973 项全仓回归通过 |
 
 M0—M9 的详细证据见：
 
@@ -52,7 +52,8 @@ M0—M9 的详细证据见：
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M7执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M8执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M9执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M10准备检查记录.md`（准备检查，M10 未完成）。
+- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M10准备检查记录.md`（首次准备检查）；
+- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M10执行记录.md`。
 
 ---
 
