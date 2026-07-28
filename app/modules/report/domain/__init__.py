@@ -41,6 +41,7 @@ from .rules import (
     build_report_prompt,
     build_report_result,
     ensure_report_html,
+    sanitize_public_report_content,
 )
 
 __all__ = [
@@ -80,4 +81,5 @@ __all__ = [
     "build_report_prompt",
     "build_report_result",
     "ensure_report_html",
+    "sanitize_public_report_content",
 ]

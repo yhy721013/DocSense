@@ -963,6 +963,59 @@ class WeaponryAnythingLLMRetrievalAdapterTests(unittest.TestCase):
                     )
                 )
 
+    def test_retrieval_accepts_two_legacy_documents_with_unique_opaque_ingested_names(
+        self,
+    ) -> None:
+        """同分类 legacy 文件经唯一 OOXML 名入库后可形成无冲突的来源范围。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            task_id = TaskId("retrieval-legacy-opaque-names")
+            runtime = _FakeAnythingRuntime()
+            adapter, _ = self._adapter(
+                str(Path(directory) / "tasks.sqlite3"),
+                runtime,
+                task_id,
+            )
+            first = WeaponryDocumentSnapshot(
+                sequence_no=1,
+                document_key="doc-a",
+                file_name="first-business.doc",
+                original_name="甲方第一份.doc",
+                ingested_file_name=(
+                    "prepared-0123456789abcdef0123456789abcdef.docx"
+                ),
+                source_architecture_id=7,
+                external_document_ref="custom-documents/a.json",
+                anything_document_id="provider-a",
+            )
+            second = WeaponryDocumentSnapshot(
+                sequence_no=2,
+                document_key="doc-b",
+                file_name="second-business.doc",
+                original_name="甲方第二份.doc",
+                ingested_file_name=(
+                    "prepared-fedcba9876543210fedcba9876543210.docx"
+                ),
+                source_architecture_id=7,
+                external_document_ref="custom-documents/b.json",
+                anything_document_id="provider-b",
+            )
+
+            scope = adapter.open_scope(
+                OpenTargetEvidenceScope(
+                    task_id=task_id,
+                    document_scope=_scope(first, second),
+                    policy=_policy(),
+                )
+            )
+
+            self.assertEqual(task_id, scope.task_id)
+            self.assertEqual(
+                ("custom-documents/a.json", "custom-documents/b.json"),
+                runtime.workspace_locations[scope.scope_ref],
+            )
+            self.assertTrue(adapter.close_scope(scope).success)
+
     def test_retrieval_still_rejects_title_only_source_identity(self) -> None:
         """同名 title 不是权威位置，不能借 URL 兼容重新进入身份判定。"""
 

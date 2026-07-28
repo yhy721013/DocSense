@@ -20,11 +20,15 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.documents import (
+    AnythingLLMDocumentClient,
+    XlsxFolderCleanupToken,
+)
 from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
     AnythingLLMTransportError,
+    AnythingLLMUploadRejectedError,
 )
 from app.integrations.anythingllm.models import (
     AnythingLLMDocument,
@@ -33,6 +37,7 @@ from app.integrations.anythingllm.models import (
     AnythingLLMWorkspace,
     DOCSENSE_SOURCE_MARKER_PREFIX,
     normalize_source_marker,
+    parse_xlsx_sheet_location,
 )
 from app.integrations.anythingllm.policies import (
     DEFAULT_EMBEDDING_ATTEMPTS,
@@ -418,6 +423,7 @@ class _AnythingLLMRagSession:
         self._bound_locations: set[str] = set()
         self._pinned_location: Optional[str] = None
         self._global_document_cleanup_required = False
+        self._pending_folder_cleanup_tokens: list[XlsxFolderCleanupToken] = []
         self._analyse_started = False
         self._analyse_succeeded = False
         self._fresh_conversation_attempt_count = 0
@@ -729,6 +735,33 @@ class _AnythingLLMRagSession:
             )
             if document_cleanup_error:
                 cleanup_errors.append(document_cleanup_error)
+        for token in tuple(self._pending_folder_cleanup_tokens):
+            try:
+                self._document_client.delete_xlsx_folder(
+                    token,
+                    user_id=self._user_id,
+                )
+                self._record_lifecycle_event(
+                    operation="global_document_folder_delete",
+                    attempt=2,
+                    success=True,
+                    external_ref=token.value,
+                )
+                self._pending_folder_cleanup_tokens.remove(token)
+            except Exception as exc:
+                error_message = self._safe_error(
+                    exc,
+                    fallback="恢复清理 XLSX 上传目录失败",
+                )
+                cleanup_errors.append(error_message)
+                self._record_lifecycle_event(
+                    operation="global_document_folder_delete",
+                    attempt=2,
+                    success=False,
+                    external_ref=token.value,
+                    failure_stage="upload_cleanup_unknown",
+                    error_message=error_message,
+                )
 
         try:
             self._workspace_client.delete_workspace(
@@ -806,6 +839,50 @@ class _AnythingLLMRagSession:
                     user_id=self._user_id,
                     metadata={"docSource": self._source_marker},
                 )
+        except AnythingLLMUploadRejectedError as exc:
+            if exc.cleanup_attempted:
+                self._record_lifecycle_event(
+                    operation="global_document_folder_delete",
+                    attempt=1,
+                    success=exc.cleanup_confirmed,
+                    external_ref=exc.folder_cleanup_token or None,
+                    failure_stage=(
+                        None if exc.cleanup_confirmed else "upload_cleanup_unknown"
+                    ),
+                    error_message=(
+                        None
+                        if exc.cleanup_confirmed
+                        else "XLSX 多 Sheet 上传清理结果未确认"
+                    ),
+                )
+            if (
+                exc.folder_cleanup_token
+                and exc.cleanup_attempted
+                and not exc.cleanup_confirmed
+            ):
+                self._pending_folder_cleanup_tokens.append(
+                    XlsxFolderCleanupToken(exc.folder_cleanup_token)
+                )
+            error_message = self._safe_error(
+                exc,
+                fallback="文档上传响应不符合单 Sheet 协议",
+            )
+            failure_stage = (
+                "upload_protocol"
+                if exc.cleanup_confirmed
+                else "upload_outcome_unknown"
+            )
+            self._record_lifecycle_event(
+                operation="document_upload",
+                attempt=1,
+                success=False,
+                failure_stage=failure_stage,
+                error_message=error_message,
+            )
+            raise self._operation_error(
+                error_message,
+                failure_stage=failure_stage,
+            ) from exc
         except AnythingLLMProtocolError as exc:
             error_message = self._safe_error(
                 exc,
@@ -1397,10 +1474,16 @@ class _AnythingLLMRagSession:
         location = str(getattr(document, "location", "") or "").strip()
         cleanup_error = ""
         try:
-            self._document_client.delete_document(
-                location,
-                user_id=self._user_id,
-            )
+            if parse_xlsx_sheet_location(location) is not None:
+                self._document_client.delete_document_artifact(
+                    location,
+                    user_id=self._user_id,
+                )
+            else:
+                self._document_client.delete_document(
+                    location,
+                    user_id=self._user_id,
+                )
             self._record_lifecycle_event(
                 operation="global_document_delete",
                 attempt=1,

@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Callable, Sequence
 from urllib.parse import unquote, urlsplit
 
+from app.modules.document_processing import (
+    LegacyOfficePreparer,
+    is_legacy_office_path,
+)
 from app.modules.report.domain.errors import (
     ReportArtifactError,
     ReportInputError,
@@ -56,6 +60,7 @@ class LegacyReportFileAdapter:
         normalizer: Normalizer = normalize_file_for_llm,
         upload_preparer: UploadPreparer = prepare_upload_files,
         word_extractor: WordExtractor = extract_text_from_word,
+        legacy_office_preparer: LegacyOfficePreparer | None = None,
     ) -> None:
         if not isinstance(artifacts, LocalReportArtifactAdapter):
             raise TypeError("artifacts 必须是 LocalReportArtifactAdapter")
@@ -79,6 +84,10 @@ class LegacyReportFileAdapter:
         ):
             if not callable(dependency):
                 raise TypeError(f"{name} 必须可调用")
+        if legacy_office_preparer is not None and not callable(
+            getattr(legacy_office_preparer, "prepare", None)
+        ):
+            raise TypeError("legacy_office_preparer 必须实现 prepare")
         self._artifacts = artifacts
         self._download_timeout = float(download_timeout)
         self._max_download_bytes = max_download_bytes
@@ -86,6 +95,7 @@ class LegacyReportFileAdapter:
         self._normalizer = normalizer
         self._upload_preparer = upload_preparer
         self._word_extractor = word_extractor
+        self._legacy_office_preparer = legacy_office_preparer
 
     def download_source(self, command: ReportSourceDownload) -> ReportArtifactRef:
         """在 Worker 执行时下载一个源文件，并保留请求顺序。"""
@@ -136,6 +146,8 @@ class LegacyReportFileAdapter:
         )
         scope = self._scope_for(source)
         source_path = self._artifacts.resolve_path(source)
+        if is_legacy_office_path(source_path):
+            return self._convert_legacy_source(source, source_path, scope)
         try:
             normalized_value = self._normalizer(str(source_path))
             if not isinstance(normalized_value, str) or not normalized_value.strip():
@@ -164,6 +176,66 @@ class LegacyReportFileAdapter:
             "报告源文件规范化完成: task_id=%s sequence_no=%s bytes=%d",
             source.task_id,
             source.sequence_no,
+            artifact.size_bytes or 0,
+        )
+        return artifact
+
+    def _convert_legacy_source(
+        self,
+        source: ReportArtifactRef,
+        source_path: Path,
+        scope,
+    ) -> ReportArtifactRef:
+        """把 legacy Office 源转为任务内 OOXML Artifact；失败禁止 raw fallback。"""
+
+        preparer = self._legacy_office_preparer
+        if preparer is None:
+            logger.error(
+                "报告 legacy Office 转换能力未配置: task_id=%s sequence_no=%s",
+                source.task_id,
+                source.sequence_no,
+            )
+            raise ReportInputError("报告源文件本地转换失败")
+
+        try:
+            job_id = f"report-{source.task_id.value}-{source.sequence_no}"
+            with preparer.prepare(source_path, job_id=job_id) as result:
+                prepared_path = Path(result.prepared_path)
+                if not result.converted or not prepared_path.is_file():
+                    raise ValueError("legacy Office 转换未返回有效 OOXML 文件")
+                suffix = self._safe_suffix(result.target_suffix)
+                if not suffix:
+                    raise ValueError("legacy Office 转换未返回有效目标扩展名")
+                artifact = self._artifacts.publish_file(
+                    scope,
+                    category=ReportArtifactCategory.NORMALIZED_SOURCE,
+                    source_path=prepared_path,
+                    file_name=(
+                        f"{source.sequence_no:04d}-normalized{suffix}"
+                    ),
+                    sequence_no=source.sequence_no,
+                )
+        except Exception as exc:
+            if isinstance(exc, ReportInputError):
+                raise
+            logger.warning(
+                "报告 legacy Office 本地转换失败: "
+                "task_id=%s sequence_no=%s error_type=%s",
+                source.task_id,
+                source.sequence_no,
+                type(exc).__name__,
+            )
+            # 底层异常可能包含 LibreOffice stdout、profile 或宿主绝对路径。核心转换层已
+            # 负责截断和脱敏诊断；报告应用层会用 logger.exception 记录这里的异常，因此
+            # 必须切断异常链，避免敏感细节被二次展开。
+            raise ReportInputError("报告源文件本地转换失败") from None
+
+        logger.info(
+            "报告 legacy Office 本地转换完成: "
+            "task_id=%s sequence_no=%s target_suffix=%s bytes=%d",
+            source.task_id,
+            source.sequence_no,
+            suffix,
             artifact.size_bytes or 0,
         )
         return artifact
@@ -232,6 +304,12 @@ class LegacyReportFileAdapter:
         if not isinstance(command, ReportTemplateDownload):
             raise TypeError("command 必须是 ReportTemplateDownload")
         suffix = self._suffix_from_url(command.template_url, fallback=".docx")
+        if suffix == ".doc":
+            logger.warning(
+                "报告 legacy Word 模板不在支持范围: task_id=%s",
+                command.scope.task_id,
+            )
+            raise ReportTemplateError("报告模板仅支持 .docx 格式")
         try:
             artifact = self._download_and_publish(
                 url=command.template_url,

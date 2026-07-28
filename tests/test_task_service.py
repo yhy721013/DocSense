@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -1868,6 +1869,72 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "context_create",
                 "conversation_create",
             ])
+
+    def test_unknown_folder_cleanup_token_is_internal_audit_only(self):
+        """XLSX 恢复 token 可持久审计，但不得混入对外任务结果 payload。"""
+        cleanup_token = "v1.internal-xlsx-folder-cleanup-token"
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task = service.create_file_task("demo.xlsx", {"businessType": "file"})
+            trace = RagExecutionTrace(
+                context_name="analysis-demo",
+                context_ref="context-001",
+                conversation_ref="conversation-001",
+                attempts=(),
+                failure_stage="upload_outcome_unknown",
+                error_message="XLSX 多 Sheet 上传清理结果未确认",
+                lifecycle_events=(
+                    RagLifecycleEvent(
+                        sequence_no=1,
+                        operation="global_document_folder_delete",
+                        attempt=1,
+                        success=False,
+                        external_ref=cleanup_token,
+                        failure_stage="upload_cleanup_unknown",
+                        error_message="XLSX 多 Sheet 上传清理结果未确认",
+                    ),
+                    RagLifecycleEvent(
+                        sequence_no=2,
+                        operation="document_upload",
+                        attempt=1,
+                        success=False,
+                        external_ref=None,
+                        failure_stage="upload_outcome_unknown",
+                        error_message="当前仅支持单 Sheet XLSX",
+                    ),
+                ),
+            )
+
+            interaction = service.create_llm_interaction_with_trace(
+                business_type="file",
+                business_key="demo.xlsx",
+                execution_id=task["execution_id"],
+                prompt="提取文档字段",
+                trace=trace,
+                status="failed",
+            )
+            callback_payload = {
+                "businessType": "file",
+                "data": {"fileName": "demo.xlsx", "status": "3"},
+            }
+            service.mark_business_result(
+                "file",
+                "demo.xlsx",
+                callback_payload,
+                status="3",
+                execution_id=task["execution_id"],
+            )
+
+            events = service.get_llm_interaction_lifecycle_events(
+                interaction.interaction_id
+            )
+            persisted_task = service.get_task("file", "demo.xlsx")
+
+        self.assertEqual(cleanup_token, events[0]["external_ref"])
+        self.assertNotIn(
+            cleanup_token,
+            json.dumps(persisted_task["result_payload"], ensure_ascii=False),
+        )
 
     def test_lifecycle_append_is_idempotent_and_updates_cleanup_atomically(self):
         """重复提交相同关闭事件不产生重复行，清理状态保持同一确定结果。"""

@@ -1,5 +1,6 @@
 import unittest
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -9,6 +10,7 @@ from app.ports import (
     RagPromptKind,
     RagSource,
 )
+from app.modules.document_processing import LegacyOfficeConversionError
 from app.services.core.architecture_tree import build_architecture_tree_index
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.analysis_service import (
@@ -30,7 +32,67 @@ from tests.fakes.knowledge_index import (
     FakeKnowledgeIndexFactory,
     FakeKnowledgeIndexPort,
 )
-from tests.fakes.rag import FakeDocumentRagFactory, FakeRagOutcome
+from tests.fakes.rag import (
+    FakeDocumentRagFactory,
+    FakeDocumentRagSession,
+    FakeRagOutcome,
+)
+
+
+class _OfficePreparation:
+    def __init__(
+        self,
+        *,
+        original_path: Path,
+        prepared_path: Path,
+        converted: bool,
+    ) -> None:
+        self.original_path = original_path
+        self.prepared_path = prepared_path
+        self.converted = converted
+        self.source_suffix = original_path.suffix.lower()
+        self.target_suffix = prepared_path.suffix.lower()
+        self.libreoffice_version = (
+            "LibreOffice 26.2.5.2" if converted else None
+        )
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.closed = True
+        if self.converted:
+            self.prepared_path.unlink(missing_ok=True)
+
+
+class _RecordingOfficePreparer:
+    def __init__(
+        self,
+        converted_paths: dict[str, Path] | None = None,
+        *,
+        fail_suffixes: set[str] | None = None,
+    ) -> None:
+        self.converted_paths = converted_paths or {}
+        self.fail_suffixes = {
+            item.lower() for item in (fail_suffixes or set())
+        }
+        self.calls: list[tuple[Path, str]] = []
+        self.results: list[_OfficePreparation] = []
+
+    def prepare(self, source_path, *, job_id: str):
+        source = Path(source_path)
+        self.calls.append((source, job_id))
+        if source.suffix.lower() in self.fail_suffixes:
+            raise LegacyOfficeConversionError("test_conversion_failure")
+        prepared = self.converted_paths.get(source.suffix.lower(), source)
+        result = _OfficePreparation(
+            original_path=source,
+            prepared_path=prepared,
+            converted=prepared != source,
+        )
+        self.results.append(result)
+        return result
 
 
 class LLMAnalysisServiceTests(unittest.TestCase):
@@ -717,6 +779,47 @@ class LLMAnalysisServiceTests(unittest.TestCase):
         self.assertEqual(result["fileDataItem"]["source"], "未明确数据来源")
         self.assertEqual(result["fileDataItem"]["score"], 55)
 
+    def test_map_analysis_result_replaces_exact_known_legacy_internal_source(self):
+        internal_name = "prepared-0123456789abcdef0123456789abcdef.docx"
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "score": 95,
+                    "source": internal_name,
+                }
+            },
+            {
+                "fileName": "customer-hash.doc",
+                "originalFileName": "甲方原始名称.doc",
+                "architectureList": [{"id": 10, "name": "测试"}],
+            },
+            internal_prepared_basename=internal_name,
+        )
+
+        self.assertEqual(
+            result["fileDataItem"]["source"],
+            "甲方原始名称.doc",
+        )
+
+    def test_map_analysis_result_keeps_unrelated_source_with_internal_name_known(self):
+        internal_name = "prepared-0123456789abcdef0123456789abcdef.docx"
+        result = map_analysis_result(
+            {
+                "fileDataItem": {
+                    "score": 95,
+                    "source": "简氏防务",
+                }
+            },
+            {
+                "fileName": "customer-hash.doc",
+                "originalFileName": "甲方原始名称.doc",
+                "architectureList": [{"id": 10, "name": "测试"}],
+            },
+            internal_prepared_basename=internal_name,
+        )
+
+        self.assertEqual(result["fileDataItem"]["source"], "简氏防务")
+
     def test_map_analysis_result_defaults_missing_source_to_unknown_and_forces_score_55(self):
         request_params = {
             "fileName": "sample.txt",
@@ -1370,6 +1473,339 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 execution_id=task["execution_id"],
                 analysis_classification_mode="legacy",
             )
+
+    def test_legacy_office_uses_converted_ooxml_for_all_internal_consumers(self):
+        with workspace_tempdir() as tmp:
+            file_name = "legacy-source.doc"
+            original_name = "甲方原始名称.doc"
+            legacy_path = Path(tmp, file_name)
+            legacy_path.write_bytes(
+                b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1test"
+            )
+            converted_path = Path(
+                tmp,
+                "private",
+                "prepared-0123456789abcdef0123456789abcdef.docx",
+            )
+            converted_path.parent.mkdir()
+            converted_path.write_bytes(b"fake-ooxml")
+            preparer = _RecordingOfficePreparer(
+                {".doc": converted_path}
+            )
+            request_payload = self._stage9_request(
+                file_name,
+                [{"id": 9551, "name": "Legacy候选", "parentId": 9550}],
+            )
+            request_payload["params"][0]["originalFileName"] = original_name
+            request_payload["params"][0]["enableFullTranslation"] = True
+            task_service = LLMTaskService(
+                db_path=f"{tmp}/tasks.sqlite3"
+            )
+            task = task_service.create_file_task(
+                file_name,
+                request_payload,
+            )
+            model_payload = json.loads(
+                self._stage9_model_response(file_name, 9551)
+            )
+            model_payload["fileDataItem"].update(
+                {
+                    "source": (
+                        f"《{converted_path.name}》"
+                        "（第 2 页）"
+                    ),
+                    "score": 95,
+                    "summary": (
+                        "阶段 9 测试摘要引用 "
+                        f"{converted_path.name}"
+                    ),
+                    "documentOverview": (
+                        "转换文档概述："
+                        f"{converted_path.name}"
+                    ),
+                }
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=json.dumps(model_payload, ensure_ascii=False),
+                        sources=(
+                            RagSource(
+                                document_ref="document:legacy",
+                                text="converted evidence",
+                            ),
+                        ),
+                    )
+                ]
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+            normalized_paths: list[str] = []
+            upload_paths: list[str] = []
+            read_paths: list[str] = []
+            rag_paths: list[str] = []
+            translation_paths: list[str] = []
+            original_analyse = FakeDocumentRagSession.analyse
+
+            def capture_analyse(session, path, *args, **kwargs):
+                rag_paths.append(path)
+                result = original_analyse(session, path, *args, **kwargs)
+                return replace(
+                    result,
+                    prepared_document=replace(
+                        result.prepared_document,
+                        ingested_file_name=Path(path).name,
+                    ),
+                )
+
+            def capture_translation(result, path, *_args, **_kwargs):
+                translation_paths.append(path)
+                return {
+                    **result,
+                    "fileDataItem": {
+                        **result["fileDataItem"],
+                        "documentTranslationOne": (
+                            "<p>单语译文引用 "
+                            f"{converted_path.name}</p>"
+                        ),
+                        "documentTranslationTwo": (
+                            "<p>双语译文引用 "
+                            f"{converted_path.name}</p>"
+                        ),
+                    },
+                }
+
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "download_to_temp_file",
+                    return_value=str(legacy_path),
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "normalize_file_for_llm",
+                    side_effect=lambda path: normalized_paths.append(path)
+                    or path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "prepare_analysis_file_for_upload",
+                    side_effect=lambda path, *_args: upload_paths.append(path)
+                    or path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "_read_original_text",
+                    side_effect=lambda path: read_paths.append(path)
+                    or "converted body",
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "enrich_with_translations",
+                    side_effect=capture_translation,
+                ),
+                patch.object(
+                    FakeDocumentRagSession,
+                    "analyse",
+                    new=capture_analyse,
+                ),
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_task,
+                )
+
+                run_file_analysis_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                    execution_id=task["execution_id"],
+                    legacy_office_preparer=preparer,
+                    analysis_classification_mode="legacy",
+                )
+
+            current = task_service.get_task("file", file_name)
+            stored_document = next(
+                iter(knowledge_factory.ports[0]._documents_by_key.values())
+            )
+            interaction = task_service.get_llm_interactions(
+                "file",
+                file_name,
+            )[0]
+            attempts = task_service.get_llm_interaction_attempts(
+                interaction["id"]
+            )
+
+        expected_path = str(converted_path)
+        self.assertEqual([(legacy_path, task["execution_id"])], preparer.calls)
+        self.assertEqual([expected_path], normalized_paths)
+        self.assertEqual([expected_path], upload_paths)
+        self.assertEqual([expected_path], read_paths)
+        self.assertEqual([expected_path], rag_paths)
+        self.assertEqual([expected_path], translation_paths)
+        self.assertTrue(preparer.results[0].closed)
+        self.assertFalse(converted_path.exists())
+        self.assertEqual("2", current["status"])
+        self.assertEqual(
+            file_name,
+            current["result_payload"]["data"]["fileDataItem"]["fileName"],
+        )
+        self.assertEqual(file_name, stored_document.metadata["file_name"])
+        self.assertEqual(
+            original_name,
+            stored_document.metadata["original_name"],
+        )
+        self.assertEqual(
+            "《甲方原始名称.doc》（第 2 页）",
+            current["result_payload"]["data"]["fileDataItem"]["source"],
+        )
+        self.assertEqual(
+            "阶段 9 测试摘要引用 甲方原始名称.doc",
+            current["result_payload"]["data"]["fileDataItem"]["summary"],
+        )
+        self.assertEqual(
+            "转换文档概述：甲方原始名称.doc",
+            current["result_payload"]["data"]["fileDataItem"][
+                "documentOverview"
+            ],
+        )
+        self.assertEqual(
+            "<p>单语译文引用 甲方原始名称.doc</p>",
+            current["result_payload"]["data"]["fileDataItem"][
+                "documentTranslationOne"
+            ],
+        )
+        self.assertEqual(
+            "<p>双语译文引用 甲方原始名称.doc</p>",
+            current["result_payload"]["data"]["fileDataItem"][
+                "documentTranslationTwo"
+            ],
+        )
+        self.assertEqual(
+            converted_path.name,
+            stored_document.metadata["ingested_file_name"],
+        )
+        self.assertIn(converted_path.name, attempts[0]["raw_response"])
+        self.assertNotIn(
+            converted_path.name,
+            json.dumps(current["result_payload"], ensure_ascii=False),
+        )
+
+    def test_batch_continues_after_legacy_conversion_failure_without_remote_side_effects(self):
+        with workspace_tempdir() as tmp:
+            file_names = ("broken.doc", "next.txt")
+            Path(tmp, file_names[0]).write_bytes(
+                b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1broken"
+            )
+            Path(tmp, file_names[1]).write_text(
+                "next document",
+                encoding="utf-8",
+            )
+            request_payload = {
+                "businessType": "file",
+                "params": [
+                    self._stage9_request(
+                        file_names[0],
+                        [{"id": 9561, "name": "坏源候选", "parentId": 9560}],
+                    )["params"][0],
+                    self._stage9_request(
+                        file_names[1],
+                        [{"id": 9562, "name": "后续候选", "parentId": 9560}],
+                    )["params"][0],
+                ],
+            }
+            task_service = LLMTaskService(
+                db_path=f"{tmp}/tasks.sqlite3"
+            )
+            accepted = [
+                task_service.create_file_task(
+                    params["fileName"],
+                    {"businessType": "file", "params": [params]},
+                    status="1" if index == 0 else "0",
+                )
+                for index, params in enumerate(request_payload["params"])
+            ]
+            preparer = _RecordingOfficePreparer(
+                fail_suffixes={".doc"}
+            )
+            rag_factory = FakeDocumentRagFactory(
+                analyse_outcomes=[
+                    FakeRagOutcome(
+                        text=self._stage9_model_response(
+                            file_names[1],
+                            9562,
+                        ),
+                        sources=(
+                            RagSource(
+                                document_ref="document:next",
+                                text="next evidence",
+                            ),
+                        ),
+                    )
+                ]
+            )
+            knowledge_factory = FakeKnowledgeIndexFactory()
+
+            with (
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "download_to_temp_file",
+                    side_effect=lambda _url, name, *_args, **_kwargs: str(
+                        Path(tmp, name)
+                    ),
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "normalize_file_for_llm",
+                    side_effect=lambda path: path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "prepare_analysis_file_for_upload",
+                    side_effect=lambda path, *_args: path,
+                ),
+                patch(
+                    "app.services.llm_service.analysis_service."
+                    "enrich_with_translations",
+                    side_effect=lambda result, *_args, **_kwargs: result,
+                ),
+            ):
+                from app.services.llm_service.analysis_service import (
+                    run_file_analysis_batch_task,
+                )
+
+                run_file_analysis_batch_task(
+                    task_service=task_service,
+                    progress_hub=LLMProgressHub(),
+                    request_payload=request_payload,
+                    download_root=tmp,
+                    callback_url="",
+                    callback_timeout=5,
+                    document_rag_factory=rag_factory,
+                    knowledge_index_factory=knowledge_factory,
+                    execution_ids={
+                        item["business_key"]: item["execution_id"]
+                        for item in accepted
+                    },
+                    legacy_office_preparer=preparer,
+                    analysis_classification_mode="legacy",
+                )
+
+            failed = task_service.get_task("file", file_names[0])
+            succeeded = task_service.get_task("file", file_names[1])
+
+        self.assertEqual("3", failed["status"])
+        self.assertEqual("解析失败", failed["result_payload"]["msg"])
+        self.assertEqual("2", succeeded["status"])
+        self.assertEqual(1, len(rag_factory.ports))
+        self.assertEqual(1, len(knowledge_factory.ports))
+        self.assertEqual(
+            [".doc", ".txt"],
+            [path.suffix for path, _job_id in preparer.calls],
+        )
 
     def test_stage9_success_audits_then_transfers_prepared_document(self):
         """成功路径应审计一次上传所得文档，并在转交后保留全局实体。"""

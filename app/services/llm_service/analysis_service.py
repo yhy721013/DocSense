@@ -7,6 +7,7 @@ import math
 import re
 import time
 import unicodedata
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,12 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import fitz
 
+from app.modules.document_processing import (
+    LegacyOfficeConfig,
+    LegacyOfficeConversionError,
+    LegacyOfficePreparer,
+    LibreOfficeLegacyOfficePreparer,
+)
 from app.ports import (
     CollectionSpec,
     DocumentRagFactory,
@@ -760,6 +767,100 @@ def _resolve_field(parsed_result: Dict[str, Any], file_item: Dict[str, Any], *al
     return ""
 
 
+_LEGACY_OFFICE_PREPARED_BASENAME_RE = re.compile(
+    r"prepared-[0-9a-f]{32}\.(?:docx|pptx|xlsx)",
+    re.IGNORECASE,
+)
+
+
+def _replace_known_internal_prepared_basename(
+    text: str,
+    *,
+    internal_prepared_basename: str,
+    business_file_name: str,
+) -> str:
+    """只替换本次 Legacy Office 任务明确产生的精确内部 basename。
+
+    调用方必须同时提供本次转换结果的 ``prepared-<uuid>.ooxml`` basename。替换按该
+    完整随机名称的大小写不敏感字面值进行，不扫描宽泛的 ``prepared-*``，因此既能移除
+    HTML、Markdown、路径或页码引用中的实际内部名，也不会改写其他任务的内部名或正常
+    业务文本。
+    """
+
+    if not isinstance(text, str):
+        raise TypeError("text 必须是 str")
+    basename = _as_text(internal_prepared_basename)
+    if (
+        not text
+        or not basename
+        or Path(basename).name != basename
+        or _LEGACY_OFFICE_PREPARED_BASENAME_RE.fullmatch(basename) is None
+    ):
+        return text
+
+    replacement = (
+        business_file_name
+        if isinstance(business_file_name, str) and business_file_name.strip()
+        else UNKNOWN_SOURCE_VALUE
+    )
+    exact_pattern = re.compile(
+        re.escape(basename),
+        re.IGNORECASE,
+    )
+    sanitized, replacements = exact_pattern.subn(
+        lambda _match: replacement,
+        text,
+    )
+    return sanitized if replacements else text
+
+
+def _sanitize_analysis_public_result(
+    value: Any,
+    *,
+    internal_prepared_basename: str,
+    business_file_name: str,
+) -> Any:
+    """递归复制公开分析结果，并移除本次任务的精确内部 OOXML 名。
+
+    该函数只用于最终业务结果，不处理 RAG trace、生命周期审计或永久知识库 metadata。
+    """
+
+    if isinstance(value, str):
+        return _replace_known_internal_prepared_basename(
+            value,
+            internal_prepared_basename=internal_prepared_basename,
+            business_file_name=business_file_name,
+        )
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_analysis_public_result(
+                item,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=business_file_name,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_analysis_public_result(
+                item,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=business_file_name,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _sanitize_analysis_public_result(
+                item,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=business_file_name,
+            )
+            for item in value
+        )
+    return value
+
+
 def _split_delimited_items(raw_value: Any) -> list[str]:
     """把模型可能返回的数组或多种分隔字符串拆成保持顺序的条目。"""
     if raw_value in (None, "", [], {}):
@@ -1313,6 +1414,7 @@ def map_analysis_result(
         request_params: Dict[str, Any],
         original_text: str = "",
         resolved_architecture_id: Any = None,
+        internal_prepared_basename: str = "",
 ) -> Dict[str, Any]:
     file_name = _as_text(request_params.get("fileName"))
     ranges = build_effective_analysis_ranges(request_params)
@@ -1394,6 +1496,23 @@ def map_analysis_result(
         or _extract_source(normalized_original_text)
         or UNKNOWN_SOURCE_VALUE
     )
+    sanitized_source = _replace_known_internal_prepared_basename(
+        resolved_source,
+        internal_prepared_basename=internal_prepared_basename,
+        business_file_name=(
+            _as_business_original_file_name(
+                request_params.get("originalFileName"),
+            )
+            or file_name
+        ),
+    )
+    if sanitized_source != resolved_source:
+        logger.warning(
+            "分析来源字段命中本任务内部转换文件名，已替换为业务文件名: "
+            "file_name=%s",
+            file_name,
+        )
+    resolved_source = sanitized_source
     normalized_score = _normalize_source_score(raw_score)
     if resolved_source == UNKNOWN_SOURCE_VALUE:
         normalized_score = 55
@@ -3918,6 +4037,8 @@ def _execute_file_analysis_task(
     document_rag_factory: DocumentRagFactory,
     knowledge_index_factory: KnowledgeIndexFactory,
     execution_id: str,
+    legacy_office_preparer: LegacyOfficePreparer,
+    office_preparation_stack: ExitStack,
     analysis_classification_mode: str = "topk_two_stage",
     analysis_filename_constraint_mode: str = (
         ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
@@ -3976,6 +4097,7 @@ def _execute_file_analysis_task(
     workflow_started_at = time.perf_counter()
     analysis_prompt = ""
     original_text = ""
+    internal_prepared_basename = ""
     tree_index: ArchitectureTreeIndex | None = None
     recall_decision: ArchitectureRecallDecision | None = None
     recall_audit_fields: Dict[str, Any] | None = None
@@ -4103,9 +4225,24 @@ def _execute_file_analysis_task(
         )
         _publish_progress(progress_hub, file_name, 0.35)
 
-        llm_file_path = downloaded_path
+        office_preparation = office_preparation_stack.enter_context(
+            legacy_office_preparer.prepare(
+                downloaded_path,
+                job_id=execution_id,
+            )
+        )
+        llm_file_path = str(office_preparation.prepared_path)
+        if office_preparation.converted:
+            internal_prepared_basename = Path(llm_file_path).name
+        # MHTML/PDF 等既有格式的全文翻译继续读取原始下载文件；仅 legacy Office
+        # 改为读取本地转换后的 OOXML，避免改变已上线预处理语义。
+        translation_file_path = (
+            llm_file_path
+            if office_preparation.converted
+            else downloaded_path
+        )
         try:
-            llm_file_path = normalize_file_for_llm(downloaded_path)
+            llm_file_path = normalize_file_for_llm(llm_file_path)
         except Exception as exc:  # 归一化是增强能力，原文件仍是合法的降级输入。
             logger.warning(
                 "MHTML 归一化失败，降级使用原文件: file_name=%s error_type=%s",
@@ -4117,11 +4254,22 @@ def _execute_file_analysis_task(
         original_text = _read_original_text(llm_file_path)
     except Exception as exc:
         error_message = _safe_task_error(exc, fallback="文件预处理失败")
-        logger.exception(
-            "文件分析预处理失败: file_name=%s execution_id=%s",
-            file_name,
-            execution_id,
-        )
+        if isinstance(exc, LegacyOfficeConversionError):
+            # 转换器已经在其边界内记录截断、脱敏诊断。这里不能用 logger.exception
+            # 展开底层异常链，否则本地临时路径可能被二次写入通用业务日志。
+            logger.error(
+                "文件分析 Legacy Office 预处理失败: "
+                "file_name=%s execution_id=%s error_code=%s",
+                file_name,
+                execution_id,
+                exc.code,
+            )
+        else:
+            logger.exception(
+                "文件分析预处理失败: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
         _finalize_file_failure(
             task_service=task_service,
             progress_hub=progress_hub,
@@ -5242,6 +5390,7 @@ def _execute_file_analysis_task(
                 params,
                 original_text=original_text,
                 resolved_architecture_id=architecture_id,
+                internal_prepared_basename=internal_prepared_basename,
             )
             _log_analysis_content_warnings(
                 parsed_result,
@@ -5631,9 +5780,20 @@ def _execute_file_analysis_task(
             _publish_progress(progress_hub, file_name, 0.65)
             enriched_result = enrich_with_translations(
                 mapped_result,
-                downloaded_path,
+                translation_file_path,
                 params.get("enableFullTranslation", True),
             )
+            public_result = _sanitize_analysis_public_result(
+                enriched_result,
+                internal_prepared_basename=internal_prepared_basename,
+                business_file_name=original_name,
+            )
+            if public_result != enriched_result:
+                logger.warning(
+                    "分析公开结果命中本任务内部转换文件名，已执行最终出站替换: "
+                    "file_name=%s",
+                    file_name,
+                )
             task_service.update_task_progress(
                 "file",
                 file_name,
@@ -5645,7 +5805,7 @@ def _execute_file_analysis_task(
             _publish_progress(progress_hub, file_name, 0.95)
             callback_payload = build_file_callback_payload(
                 file_name,
-                enriched_result,
+                public_result,
                 status="2",
             )
             task_service.mark_business_result(
@@ -5718,6 +5878,7 @@ def run_file_analysis_task(
     document_rag_factory: DocumentRagFactory,
     knowledge_index_factory: KnowledgeIndexFactory,
     execution_id: str,
+    legacy_office_preparer: LegacyOfficePreparer | None = None,
     analysis_classification_mode: str = "topk_two_stage",
     analysis_filename_constraint_mode: str = (
         ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
@@ -5731,22 +5892,36 @@ def run_file_analysis_task(
     契约错误等尚未创建外部资源的异常，确保后台线程不会让任务永久停留在处理中。若未来
     在内部增加新的外部副作用，必须先把相应审计和补偿加入状态机，不能依赖本兜底处理。
     """
-    try:
-        _execute_file_analysis_task(
-            task_service=task_service,
-            progress_hub=progress_hub,
-            request_payload=request_payload,
-            download_root=download_root,
-            callback_url=callback_url,
-            callback_timeout=callback_timeout,
-            document_rag_factory=document_rag_factory,
-            knowledge_index_factory=knowledge_index_factory,
-            execution_id=execution_id,
-            analysis_classification_mode=analysis_classification_mode,
-            analysis_filename_constraint_mode=analysis_filename_constraint_mode,
-            analysis_data_standard_mode=analysis_data_standard_mode,
-            analysis_identity_reselect_mode=analysis_identity_reselect_mode,
+    resolved_legacy_office_preparer = (
+        legacy_office_preparer
+        if legacy_office_preparer is not None
+        else LibreOfficeLegacyOfficePreparer(
+            LegacyOfficeConfig.disabled(
+                jobs_root=Path(download_root) / ".office_conversion_jobs",
+            )
         )
+    )
+    try:
+        # 转换产物必须覆盖 RAG、本地正文读取、永久知识库转交和全文翻译的完整
+        # 生命周期；ExitStack 让巨大状态机无需把每个早退分支改写为显式清理。
+        with ExitStack() as office_preparation_stack:
+            _execute_file_analysis_task(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                request_payload=request_payload,
+                download_root=download_root,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+                document_rag_factory=document_rag_factory,
+                knowledge_index_factory=knowledge_index_factory,
+                execution_id=execution_id,
+                legacy_office_preparer=resolved_legacy_office_preparer,
+                office_preparation_stack=office_preparation_stack,
+                analysis_classification_mode=analysis_classification_mode,
+                analysis_filename_constraint_mode=analysis_filename_constraint_mode,
+                analysis_data_standard_mode=analysis_data_standard_mode,
+                analysis_identity_reselect_mode=analysis_identity_reselect_mode,
+            )
     except (TaskExecutionConflictError, TaskStateConflictError):
         logger.warning(
             "文件分析worker执行身份已失效，停止且不写入当前任务: execution_id=%s",
@@ -5860,6 +6035,7 @@ def run_file_analysis_batch_task(
     document_rag_factory: DocumentRagFactory,
     knowledge_index_factory: KnowledgeIndexFactory,
     execution_ids: Mapping[str, str],
+    legacy_office_preparer: LegacyOfficePreparer | None = None,
     analysis_classification_mode: str = "topk_two_stage",
     analysis_filename_constraint_mode: str = (
         ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
@@ -5903,6 +6079,7 @@ def run_file_analysis_batch_task(
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
             execution_id=execution_id,
+            legacy_office_preparer=legacy_office_preparer,
             analysis_classification_mode=analysis_classification_mode,
             analysis_filename_constraint_mode=analysis_filename_constraint_mode,
             analysis_data_standard_mode=analysis_data_standard_mode,
