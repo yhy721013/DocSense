@@ -40,6 +40,12 @@ if (-not (Test-Path $PythonBin)) {
     $PythonBin = Join-Path $RootDir ".venv/bin/python"
 }
 if (-not (Test-Path $PythonBin)) {
+    $PythonBin = Join-Path $RootDir "venv\Scripts\python.exe"
+}
+if (-not (Test-Path $PythonBin)) {
+    $PythonBin = Join-Path $RootDir "venv/bin/python"
+}
+if (-not (Test-Path $PythonBin)) {
     $PythonBin = "python"
 }
 

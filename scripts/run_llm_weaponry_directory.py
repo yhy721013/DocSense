@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import csv
 import json
 import logging
@@ -15,10 +16,6 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
-
-import requests
-from dotenv import load_dotenv
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -223,10 +220,19 @@ class QuietDirectoryHandler(SimpleHTTPRequestHandler):
 
 
 def load_env() -> None:
+    """加载本地环境文件，并保留调用方已显式传入的环境变量。
+
+    该目录测试脚本的 ``--dry-run`` 被设计为只依赖 Python 标准库，因此这里不能
+    在模块导入阶段强制要求 ``python-dotenv``。正常项目虚拟环境中仍优先使用
+    python-dotenv；当脚本由精简的系统 Python 启动时，则退化为读取本项目所需的
+    简单 ``KEY=VALUE`` 配置，且始终遵守 ``override=False`` 的覆盖规则。
+    """
+
     global RUNTIME_DIR, TASK_DB, KB_DB
-    load_dotenv(ROOT / ".env", override=False)
-    if not (ROOT / ".env").exists():
-        load_dotenv(ROOT / ".env.example", override=False)
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        env_path = ROOT / ".env.example"
+    _load_env_file(env_path)
 
     RUNTIME_DIR = Path(os.getenv("DOCSENSE_RUNTIME_DIR", str(ROOT / ".runtime"))).expanduser()
     if not RUNTIME_DIR.is_absolute():
@@ -241,6 +247,55 @@ def load_env() -> None:
             os.getenv("KNOWLEDGE_BASE_DB_PATH", str(RUNTIME_DIR / "knowledge_base.sqlite3")),
         )
     ).expanduser().resolve()
+
+
+def _load_env_file(env_path: Path) -> None:
+    """按“调用方环境优先”规则加载环境文件。
+
+    fallback 解析器只处理仓库现有配置文件采用的 ``KEY=VALUE`` 形式；复杂 dotenv
+    语法仍交由 python-dotenv 处理。这样既不削弱正式虚拟环境的能力，也可保证
+    不访问服务的 dry-run 在依赖精简的诊断环境中正常执行。
+    """
+
+    if not env_path.is_file():
+        return
+
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError:
+        logger.debug(
+            "未安装 python-dotenv，目录测试脚本使用标准库加载环境文件: path=%s",
+            env_path,
+        )
+        for line_no, raw_line in enumerate(
+            env_path.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                logger.debug(
+                    "忽略无法按 KEY=VALUE 解析的环境配置行: path=%s line_no=%d",
+                    env_path,
+                    line_no,
+                )
+                continue
+            key, value = stripped.split("=", 1)
+            normalized_key = key.strip()
+            if not normalized_key or normalized_key in os.environ:
+                continue
+            normalized_value = value.strip()
+            if (
+                len(normalized_value) >= 2
+                and normalized_value[0] == normalized_value[-1]
+                and normalized_value[0] in {"'", '"'}
+            ):
+                normalized_value = normalized_value[1:-1]
+            os.environ[normalized_key] = normalized_value
+        return
+
+    load_dotenv(env_path, override=False)
 
 
 def default_base_url() -> str:
@@ -321,7 +376,7 @@ def generated_architecture_base() -> int:
 def architecture_id_used(architecture_id: int) -> bool:
     if not KB_DB.exists():
         return False
-    with sqlite3.connect(KB_DB) as conn:
+    with closing(sqlite3.connect(KB_DB)) as conn, conn:
         workspace = conn.execute(
             "select 1 from workspaces where architecture_id=? limit 1",
             (architecture_id,),
@@ -345,6 +400,10 @@ def allocate_architecture_ids(files: list[Path], base: int) -> dict[Path, int]:
 
 
 def request_json(method: str, base_url: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 60) -> dict[str, Any]:
+    # dry-run 只生成计划，不应因为系统 Python 未安装 HTTP 依赖而无法执行；真实请求
+    # 路径再延迟导入 requests，缺失依赖时仍会在首次联网前明确失败。
+    import requests
+
     response = requests.request(f"{method}", f"{base_url.rstrip('/')}{path}", json=payload, timeout=timeout)
     try:
         body = response.json()
@@ -368,7 +427,7 @@ def get_task_snapshot(
     if not TASK_DB.exists():
         return None
     try:
-        with sqlite3.connect(TASK_DB) as conn:
+        with closing(sqlite3.connect(TASK_DB)) as conn, conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
@@ -645,7 +704,7 @@ def build_weaponry_payload(
 
 
 def kb_records_for(architecture_id: int) -> list[dict[str, Any]]:
-    with sqlite3.connect(KB_DB) as conn:
+    with closing(sqlite3.connect(KB_DB)) as conn, conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -700,7 +759,7 @@ def get_weaponry_interaction_audits(task_id: str) -> list[dict[str, Any]]:
     if not TASK_DB.exists():
         raise RuntimeError(f"TASK_DB 不存在: {TASK_DB}")
     try:
-        with sqlite3.connect(TASK_DB) as conn:
+        with closing(sqlite3.connect(TASK_DB)) as conn, conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """

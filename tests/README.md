@@ -6,13 +6,13 @@
 
 | 文件 | 覆盖内容 |
 | --- | --- |
-| `test_chat.py` | `/llm/chat` 路由受理、既有 SSE 事件、响应头、输入校验、并发拒绝和内部标识不泄露。 |
+| `test_chat.py` | `/llm/chat` 路由受理、Requested/Active/Effective 范围矩阵、history requested 投影、既有 SSE 事件、响应头、输入校验、同会话并发拒绝、50 个不同会话完整隔离和内部标识不泄露。 |
 | `test_chat_port_contract.py` | `ChatConversationPort` 数据传输对象、异常与协议边界。 |
 | `test_anythingllm_chat_gateway.py` | AnythingLLM 对话网关的离线传输、字段归一化、流关闭和删除行为。 |
-| `test_chat_repositories.py` | SQLite 架构迁移、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
+| `test_chat_repositories.py` | SQLite 架构迁移、统一有界 busy timeout、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
 | `test_chat_resource_ids.py` | 租约标识和不透明远端引用的编码/解码。 |
-| `test_chat_run_state.py` | 同一会话互斥、执行租约、心跳、过期运行和删除准入。 |
-| `test_chat_run_executor.py` | 输入冻结、运行领取、资源租约、文档选择、流事件记录和异常收敛。 |
+| `test_chat_run_state.py` | 同一会话互斥、Scope Head 原子受理、首次/显式 50 并发唯一更新、全事实回滚、1,000 文件历史压力、执行租约、心跳、过期运行和删除准入。 |
+| `test_chat_run_executor.py` | Requested/Effective 输入冻结与 run-id 重启式恢复、Workspace 累计绑定和模型范围隔离、失败后 Scope 复用、资源租约、流事件记录及异常收敛。 |
 | `test_chat_event_repository.py` | 内部事件账本的序号、终态唯一性和事务写入。 |
 | `test_chat_dispatcher.py` | 仅以持久化 `run_id` 调度执行的协议和内联实现。 |
 | `test_chat_history_service.py` | 本地权威历史、消息过滤和标题输入。 |
@@ -21,8 +21,11 @@
 | `test_chat_delete_service.py` | 删除状态机、同步清理要求和失败保留。 |
 | `test_chat_stream_presenter.py` | 领域事件到冻结 SSE 文本的格式化与关闭回调。 |
 | `test_chat_infrastructure.py` | 当前持久化/调度/租约能力边界，防止 SQLite 被误用为可靠队列。 |
-| `test_chat_debug_preview.py`、`test_chat_debug_routes.py` | 本地调试预览和调试路由。 |
+| `test_chat_debug_preview.py`、`test_chat_debug_routes.py` | 本地调试 `fileNames` 对齐 Active Scope、Workspace bindings 独立脱敏计数、公开 history requested 语义和调试路由。 |
 | `test_dependency_container.py` | 容器装配、工厂隔离、传输惰性创建和能力校验。 |
+| `test_chat_scope_contract_assets.py` | Requested/Active/Effective Scope 分离的阶段 0 黄金资产；冻结最后显式范围、禁止自动吸收、history 仅展示显式请求及公开字段零增删。 |
+| `test_chat_document_scope.py` | Scope Revision/Head/Decision 不可变 DTO、严格内部 Schema、重复身份拒绝及 Requested→Active→Effective 纯状态机。 |
+| `test_chat_scope_repositories.py` | SQLite Schema v4、Scope Revision/Member/Head、CAS、run/chat 完整性、requested/effective run input Codec、源 run 清理隔离及 50 会话持久化隔离。 |
 
 `fakes/` 子目录保存端口替身，具体见其 README。
 
@@ -389,6 +392,119 @@ Repository/UoW 前的等待会占用后续远端预算；lease 过期时间必�
 已经进入的本地锁等待，因此“同步硬截止”和数据库权威时间属于后续多实例阶段，不能由本阶段离线
 测试宣称完成。
 
+## 阶段 1F-0 文件分析契约、黄金与现状资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| contracts/stage1f0_analysis_contracts.json | 1F-0 的接口文档摘要、Analysis 202/400/409/413/503/500 兼容矩阵、file check-task/Progress/callback、范围默认值、领域树、召回、Prompt、身份重选、字段映射、阶段顺序、副作用和遗留引用清单。 |
+| test_analysis_contract_assets.py | 显式离线容器下的字节级空成功体、既有错误结构、SQLite 忙、未捕获 500、callback、Progress 和全部算法黄金；不启动 run.py，不连接真实 AnythingLLM、模型或回调服务。 |
+
+1F-0 只建立后续垂直切片迁移的可执行基线，不创建 Analysis 新模块、不改生产路由、
+任务 Schema、后台线程或任何公开接口。接口文档仍是唯一公开契约权威；资产 SHA-256
+只用于让后续文档变更进入显式评审。
+
+## 阶段 1F-1 Analysis Domain 与纯规则迁移
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| test_analysis_domain.py | 静态验证 Analysis Domain 不依赖 Flask、SQLite、HTTP、文件解析器、旧服务或集成层；验证旧领域树/召回模块与新 Domain 是同一模块对象，并验证旧服务导出委托到 Domain。 |
+| test_architecture_boundaries.py | 验证 Analysis 四层包骨架、README 与既有架构边界规则持续存在。 |
+| test_analysis_contract_assets.py 及 test_analysis*.py | 继续验证 1F-0 公开契约、算法黄金及文件分析相关离线回归，确保纯规则迁移不改变既有输出。 |
+
+1F-1 只迁移确定性规则和既有进程内只读缓存。旧 `analysis_service` 仍负责任务 I/O、资源、
+回调和兼容导出；为保持历史可观测性，结果映射的既有诊断日志仍保留在该旧服务边界，Domain
+本身不写日志、不访问外部资源。没有修改路由、任务 Schema、请求/响应字段、状态码、callback、
+Progress 或接口文档。
+
+## 阶段 1F-2 Analysis Port、任务 Codec 与初始未接线 Web Adapter
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| test_analysis_task_adapter.py | `AnalysisSubmissionSnapshot`/`AnalysisTaskInputV1` 的深冻结、原始文件名语义、策略快照、严格 V1 Codec、重复 JSON 键/损坏范围/未知 schema/身份拒绝及 50 个并发输入隔离。 |
+| test_analysis_ports.py、tests/fakes/analysis.py | 九类 Analysis Port 的显式 RAG 生命周期、两阶段/追加审计、Resource CAS、Callback Guard、运行时 Protocol、按 execution 并发脚本和严格身份关联。 |
+| test_analysis_web_adapters.py | Parser/Presenter 对 1F-0 400/413/202/409/503 黄金映射、内部身份不外泄、冻结快照复用、意外异常不误报 400，以及 1F-5B 当前 Blueprint 的唯一新链路 AST 门禁。 |
+| test_analysis_translation_isolation.py | 移除全局任务 callback、全文/摘要共享翻译临界区、注入式协调器串行化、旧字段映射兼容及空结果失败分类。 |
+
+1F-2 当时只准备后续组合所需的内部边界。后续 1F-5B 已将 Parser、Presenter、Codec 和 Submit 用例接入
+`/llm/analysis`，但翻译锁仍只保护当前单进程的共享 Translator/MinerU 输出目录，不能解释为分布式锁、
+多实例部署或可靠任务队列。
+
+## 阶段 1F-3 Analysis Application 与任务级 I/O
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_analysis_application.py` | 只接收 `TaskId` 的 Application：领取/stale、受理快照、既有 Progress、召回审计前置、阶段顺序、单终态、交互审计硬门禁、知识库三态、翻译降级、RAG close 和 Factory 退出故障。 |
+| `test_analysis_production_adapters.py` | 任务目录/OCR 缓存边界、越界下载拒绝、遗留知识库三态、任务级 RAG 文档绑定和 Transport 释放，以及临时 SQLite 的召回/交互/close 审计落库。 |
+
+这些测试只使用临时目录、临时 SQLite、严格 Fake 和替身 Transport。它们证明 Application 的单任务
+编排与 fail-closed 收口，不代表新链路已经接入 Worker、Dispatcher、资源恢复、Callback、可靠队列或
+多实例部署；`/llm/analysis` 仍执行遗留链路。
+
+## 阶段 1F-3S Analysis Application 等价拆分
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `fixtures/analysis_application_1f3s_happy_trace.json` | 拆分前冻结的单候选成功路径：31 个 Port 调用顺序、RAG Prompt digest、recall payload 稳定字段、交互 attempt、知识库幂等键和文档身份；不冻结单调时钟耗时。 |
+| `test_analysis_application.py` | 继续覆盖既有成功/故障矩阵，并新增公开 `__all__`、`RunAnalysisTask` 构造签名和结构化成功轨迹差分，确保拆分不改变公开 Application 入口或副作用。 |
+| `test_architecture_boundaries.py` | 新增 1F-3S AST 门禁：473 行 Facade 的 700 行上限、四协作器装配、禁止 Prompt/分类/结果映射回流、协作器反向依赖禁止及各职责真实 Port 算法。 |
+
+1F-3S 只拆分 `app/modules/analysis/application/` 内部实现。五个协作器没有跨 execution 可变状态，
+没有新增线程、锁、缓存、重试或队列；离线轨迹证明的是行为等价，不代表新链路已经接入生产路由、
+Dispatcher、可靠队列或多实例运行时。
+
+## 阶段 1F-4 Analysis 批量原子受理与顺序协调
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_analysis_batch.py` | 追加式 `batch_id`/`batch_sequence` Schema 与部分唯一索引、32 项整批提交/任一投影失败回滚、首项 `1` 后续 `0` 的旧公开投影、Codec/领取/持久扫描、活动任务与 Callback Guard 冲突、已过期旧回调租约清理、SQLite busy、50 同键/不同键并发、跨批连续全局调度序号、提交后单次唤醒及唤醒失败后的持久发现。 |
+| `test_task_service.py`、`test_analysis_task_adapter.py`、`test_analysis_ports.py`、`test_analysis_application.py`、`test_analysis_web_adapters.py`、`test_architecture_boundaries.py` | 共同回归旧任务控制面、Analysis Port/Codec/Application、路由唯一新链路 AST 门禁和架构边界，防止新批量事实破坏公开 file 契约。 |
+
+1F-4 的测试只使用临时 SQLite、严格 Fake 和受控 SQLite 故障注入。它证明单实例 SQLite 写事务中的
+批量原子性与持久发现基础；不证明真实 Dispatcher 已运行、Callback/资源恢复已闭环、可靠队列、多实例
+一致性或生产吞吐已经完成。1F-4 当时的路由仍走遗留线程；后续 1F-5B 已切到新受理链，公开接口文档、
+请求/响应参数、状态码、Progress 与 Callback 均未修改。
+
+## 阶段 1F-6 Analysis 资源与 Callback 闭环
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_analysis_resource_recovery.py` | 新 execution 的资源记录、同状态 CAS、审计确认后的收口、未知 close 结果隔离，以及恢复审计追加的有限退避/最终隔离。 |
+| `test_analysis_callback_guard.py` | 仅 latest 终态 execution 可恢复、空 URL 显式 skipped、未知 HTTP 结果冻结、以及 50 个并发恢复调用至多一次 HTTP。 |
+| `test_analysis_application.py` | Resource/Callback 可选依赖在终态提交后的调用顺序、资源 close 的 intent/running/result/audit 事实，以及未注入时的既有兼容编排行为。 |
+| `test_task_service.py`、`test_analysis_ports.py`、`test_analysis_production_adapters.py`、`test_architecture_boundaries.py` | SQLite 资源事实、Port 契约、Adapter 边界和 Facade 规模/依赖方向的联合回归。 |
+
+1F-6 的离线测试只用临时 SQLite、严格 Fake 和替身 HTTP Transport。资源恢复仅补有证明的审计追加，
+不能自动重放 RAG close/delete；Callback 恢复只复用 Guard 并重读 latest 候选一次，不能重跑模型、RAG
+或知识库。1F-6 当时的组件尚未接入 Worker、Container、Dispatcher 或公开路由；后续 1F-5B 已完成
+唯一新链路接线。SQLite 验证仅覆盖当前 `single_instance` 事实，不代表可靠队列或多实例部署已完成；公开
+接口文档、请求/响应、状态码、Progress 与 Callback 载荷均未修改。
+
+## 阶段 1F-7A Analysis 隔离与存量库只读门禁
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_analysis_stage1f7a.py` | 一个共享 `RunAnalysisTask` 实例下 50 个不同 TaskId 并发执行；冻结输入、任务目录、Progress、RAG、翻译、Callback Guard、资源 CAS/close 审计全部按任务隔离，并以 AST 禁止新 Analysis 模块导入旧 `analysis_service` / Worker。 |
+| `test_analysis_cutover_preflight.py` | `inspect_analysis_cutover.py` 的 ready/阻断/缺 Schema 三种退出路径、稳定有界且脱敏的 JSON、只读 SQLite 边界、以及绝不初始化缺失 Schema。 |
+| 既有 `test_analysis_application.py`、`test_analysis_production_adapters.py`、`test_analysis_resource_recovery.py`、`test_analysis_callback_guard.py`、`test_analysis_batch.py`、`test_analysis_translation_isolation.py` | 文件、模型、审计、知识库、翻译、Callback、资源恢复、SQLite 事务/唤醒/并发的故障矩阵复核。 |
+
+1F-7A 提供离线验收和保留存量数据库时的只读门禁。脚本没有 `--apply`，阻断项必须人工处置；它不启动
+`run.py`，不连接真实 AnythingLLM、模型、OCR、知识库或 Callback。当前发布制度每次更新均停服并由
+`clean.py` 清库重建，日常发布无需对空库重复运行预检；保留存量库、备份恢复或清理结果存疑时，仍须确认
+五类硬阻断均为零并人工核对 `newAcceptedExecutions`。离线验证不等于 production ready。
+
+## 阶段 1F-5B 唯一生产链路由接线
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `test_analysis_web_adapters.py`、`test_analysis_contract_assets.py` | 当前 `/llm/analysis` 的 Parser → Submit → Presenter AST、严格空 202、400/409/413/503/500 映射、内部身份不外泄和新 batch 持久化。 |
+| `test_stage1a1_check_task_contract.py` | file `check-task` 的严格空 200、同一新 Callback Guard 恢复、空 URL/失败/成功收口、同请求重复 fileName 稳定去重，以及历史无 batch 身份终态绝不回退到旧恢复器。 |
+| `test_routes.py`、`test_dependency_container.py` | 受理后只唤醒 Dispatcher、不创建路由线程、策略快照持久化、RAG/知识库租约不进入请求线程。 |
+
+本阶段验证的是代码接线和临时 SQLite/Fake 行为。当前清库发布必须先停止 DocSense，确认 `clean.py`
+成功退出后再启动新版本；`test_clean_runtime.py` 验证运行时目录外的兼容数据库覆盖项也会删除，且文件
+占用不会被伪装成成功。保留存量库时才运行 `inspect_analysis_cutover.py` 并关闭全部五类阻断项。
+禁止启动 `run.py` 代替发布编排，禁止在线双跑。
+
 ## 推荐验证流程
 
 1. 先运行文件对话范围测试：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_chat*.py" -q`。
@@ -422,7 +538,28 @@ Repository/UoW 前的等待会占用后续远端预算；lease 过期时间必�
 29. 运行阶段 1E-6 组合根、公开路由与关闭联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_domain tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_anythingllm_adapter tests.test_reassign_application tests.test_reassign_recovery tests.test_reassign_recovery_sqlite tests.test_reassign_diagnostic_script tests.test_dependency_container tests.test_routes tests.test_architecture_boundaries tests.test_database_service -q`。
 30. 运行阶段 1E-7 恢复实现下沉联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_recovery tests.test_reassign_recovery_sqlite tests.test_reassign_recovery_collaborators tests.test_reassign_diagnostic_script tests.test_routes tests.test_architecture_boundaries -q`。
 31. 运行阶段 1E 整体审查修复回归：`venv\Scripts\python.exe -B -m unittest tests.test_stage1e0_reassign_contract_assets tests.test_reassign_strict_fakes tests.test_reassign_sqlite_adapter tests.test_reassign_recovery_sqlite tests.test_reassign_recovery_collaborators tests.test_reassign_recovery tests.test_reassign_ports tests.test_reassign_fake_repository tests.test_reassign_domain tests.test_reassign_diagnostic_script tests.test_reassign_application tests.test_reassign_anythingllm_adapter tests.test_database_service tests.test_architecture_boundaries -q`。
-32. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
+32. 运行阶段 1F-0 契约与黄金资产：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_contract_assets -q`。
+33. 运行阶段 1F-1 Domain、架构与兼容回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_domain tests.test_architecture_boundaries tests.test_analysis_contract_assets tests.test_analysis_prompts tests.test_architecture_tree tests.test_architecture_recall_service tests.test_range_defaults tests.test_analysis_scope_guard tests.test_analysis_identity_reselect -q`。
+34. 运行阶段 1F-2 Port、Codec、Web Adapter 与翻译隔离回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_task_adapter tests.test_analysis_ports tests.test_analysis_web_adapters tests.test_analysis_translation_isolation tests.test_architecture_boundaries tests.test_analysis_contract_assets -q`。
+35. 运行阶段 1F-3 Application、任务级 I/O 与架构回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_application tests.test_analysis_production_adapters tests.test_analysis_task_adapter tests.test_analysis_ports tests.test_analysis_web_adapters tests.test_analysis_translation_isolation tests.test_analysis_domain tests.test_analysis_contract_assets tests.test_architecture_boundaries -q`。
+36. 运行阶段 1F-3R 审查修复回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_application tests.test_analysis_production_adapters tests.test_analysis_ports tests.test_task_service tests.test_anythingllm_rag_gateway tests.test_rag_port_contract tests.test_architecture_boundaries -q`。
+37. 运行阶段 1F-3S 等价拆分回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_application tests.test_analysis_production_adapters tests.test_analysis_ports tests.test_task_service tests.test_anythingllm_rag_gateway tests.test_rag_port_contract tests.test_architecture_boundaries -q`；该命令同时覆盖结构化轨迹和 AST 门禁。
+38. 运行阶段 1F-4 批量受理联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_batch tests.test_analysis_task_adapter tests.test_analysis_ports tests.test_analysis_application tests.test_analysis_web_adapters tests.test_task_service tests.test_report_task_adapter tests.test_weaponry_task_adapter tests.test_architecture_boundaries -q`。
+39. 运行文件分析定向发现回归：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_analysis*.py" -q`；安全全仓回归应动态发现后精确排除 7 个 `test_local_scripts.LocalScriptTests.*`、5 个 `test_test_assets.LLMTestAssetsTests.*` 和 `test_migrate_analysis_security.AnalysisSecurityMigrationTests.test_apply_is_idempotent_and_preserves_callback_metadata_and_audit`，再覆盖所有其余用例。
+40. 运行阶段 1F-6 资源与 Callback 联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_analysis_batch tests.test_analysis_resource_recovery tests.test_analysis_callback_guard tests.test_analysis_application tests.test_analysis_ports tests.test_analysis_production_adapters tests.test_architecture_boundaries -q`。
+41. 运行阶段 1F-7A 隔离与门禁回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_cutover_preflight tests.test_analysis_stage1f7a tests.test_analysis_application tests.test_analysis_resource_recovery tests.test_analysis_callback_guard tests.test_analysis_batch tests.test_analysis_production_adapters tests.test_analysis_translation_isolation tests.test_architecture_boundaries -q`；再运行 `venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_analysis*.py" -q`。
+42. 运行 1F-6/1F-7A 全面复核修复回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_callback_guard tests.test_analysis_resource_recovery tests.test_analysis_cutover_preflight tests.test_analysis_ports tests.test_task_service tests.test_report_callback_guard tests.test_weaponry_stage1d6 tests.test_architecture_boundaries -q`；重点验证 Callback attempt fencing、资源不可逆状态机、毒记录隔离和只读预检句柄释放。
+43. 运行阶段 1F-5B 路由接线回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_web_adapters tests.test_analysis_contract_assets tests.test_stage1a1_check_task_contract tests.test_routes tests.test_dependency_container -q`。
+44. 运行阶段 1F-7B 关闭验收：先执行上述 1F 定向矩阵和 `test_analysis*.py` 发现回归；再动态发现
+    `test*.py`，逐项排除本文件“执行限制”中的 13 个测试 ID，并报告发现、排除、执行、成功、失败、错误和
+    跳过数量。2026-07-27 的结果为发现 1,752 项、排除 13 项、执行/成功 1,739 项、失败 0 项、错误 0 项、
+    跳过 0 项；完整排除清单、分组和环境边界见
+    `docs/更新记录/260727-阶段1F-7B关闭验收执行记录.md`。
+45. 运行阶段 1F 关闭后审查修复回归：重点覆盖 `test_analysis_callback_guard.py`、
+    `test_analysis_resource_recovery.py`、`test_analysis_dispatcher.py`、
+    `test_stage1a1_check_task_contract.py` 和 `test_clean_runtime.py`；2026-07-27 的安全全仓结果为
+    发现 1,758 项、排除 13 项、执行/成功 1,745 项、失败 0 项、错误 0 项、跳过 0 项。
+46. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
 
 ## 执行限制
 

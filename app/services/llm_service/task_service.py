@@ -136,6 +136,60 @@ class TaskAdmissionBusyError(RuntimeError):
     """任务库在受理时持续繁忙，调用方可安全稍后重试。"""
 
 
+@dataclass(frozen=True)
+class AnalysisBatchTaskAdmission:
+    """一条待写入 Analysis 批次的内部 execution 事实。
+
+    该值对象只描述 SQLite 事务所需的最小字段，不导入 Analysis Domain 或 Web DTO，避免
+    兼容 ``LLMTaskService`` 反向依赖业务分层。调用方仍必须在事务外完成 Codec 往返校验；
+    本服务会在事务内再次核对 task、批次、序号和公开投影身份，防止错误的 Adapter 绕过
+    原子边界。
+    """
+
+    execution_id: str
+    business_key: str
+    input_schema_version: int
+    input_payload: Mapping[str, Any]
+    projection_request_payload: Mapping[str, Any]
+    initial_public_status: str
+    trace_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "execution_id",
+            _required_internal_text(self.execution_id, name="execution_id"),
+        )
+        object.__setattr__(
+            self,
+            "business_key",
+            _required_internal_text(self.business_key, name="business_key"),
+        )
+        if (
+            isinstance(self.input_schema_version, bool)
+            or not isinstance(self.input_schema_version, int)
+            or self.input_schema_version <= 0
+        ):
+            raise ValueError("input_schema_version必须是正整数")
+        if not isinstance(self.input_payload, Mapping):
+            raise TypeError("input_payload必须是Mapping")
+        if not isinstance(self.projection_request_payload, Mapping):
+            raise TypeError("projection_request_payload必须是Mapping")
+        object.__setattr__(
+            self,
+            "initial_public_status",
+            _required_internal_text(
+                self.initial_public_status,
+                name="initial_public_status",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "trace_id",
+            _required_internal_text(self.trace_id, name="trace_id"),
+        )
+
+
 class TaskExecutionConflictError(RuntimeError):
     """任务写入携带的执行身份已不是当前业务键对应的执行。"""
 
@@ -247,7 +301,30 @@ _CALLBACK_DELIVERY_OUTCOMES = frozenset(
 _REPORT_RESOURCE_STATES = frozenset(
     {"tracking", "cleanup_pending", "audit_pending", "cleaned", "quarantined"}
 )
+# Analysis 资源记录与 Report 复用同一组状态，但表和业务身份严格隔离。这里保留
+# 独立常量，避免未来任一模块扩展状态时意外放宽另一模块的 SQLite 写入边界。
+_ANALYSIS_RESOURCE_STATES = frozenset(
+    {"tracking", "cleanup_pending", "audit_pending", "cleaned", "quarantined"}
+)
+_ANALYSIS_RESOURCE_TRANSITIONS = {
+    "tracking": frozenset(
+        {"tracking", "cleanup_pending", "audit_pending", "quarantined"}
+    ),
+    "cleanup_pending": frozenset(
+        {"cleanup_pending", "audit_pending", "cleaned", "quarantined"}
+    ),
+    "audit_pending": frozenset({"audit_pending", "cleaned", "quarantined"}),
+    # cleaned/quarantined 是不可逆终态。终态证据只能追加到独立审计记录，不能通过
+    # 同状态更新悄悄递增版本或改写已有资源现场。
+    "cleaned": frozenset(),
+    "quarantined": frozenset(),
+}
 _TASK_COMMAND_SQLITE_TIMEOUT_SECONDS = 30.0
+# 1F-4 只为新文件分析 execution 追加批次元数据。这里保留局部常量而不导入
+# ``app.modules.analysis.domain``，避免兼容 SQLite Service 反向依赖业务领域层。
+_ANALYSIS_BATCH_BUSINESS_TYPE = "file"
+_MAX_ANALYSIS_BATCH_ITEMS = 32
+_ANALYSIS_BATCH_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _required_internal_text(value: object, *, name: str) -> str:
@@ -623,6 +700,8 @@ class LLMTaskService:
                     input_schema_version INTEGER NOT NULL
                         CHECK (input_schema_version >= 1),
                     input_payload TEXT NOT NULL,
+                    batch_id TEXT,
+                    batch_sequence INTEGER,
                     dispatch_sequence INTEGER,
                     dispatch_failure_count INTEGER NOT NULL DEFAULT 0
                         CHECK (dispatch_failure_count >= 0),
@@ -649,6 +728,18 @@ class LLMTaskService:
             )
             # 旧开发库只做增量补列；历史测试数据无需业务迁移，但仍要分配稳定序号，
             # 使后续扫描不再依赖可能回拨的应用时钟或并发事务提交先后。
+            self._ensure_column(
+                conn,
+                table="llm_task_executions",
+                column="batch_id",
+                definition="TEXT",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_task_executions",
+                column="batch_sequence",
+                definition="INTEGER",
+            )
             self._ensure_column(
                 conn,
                 table="llm_task_executions",
@@ -684,6 +775,17 @@ class LLMTaskService:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_task_executions_dispatch_sequence
                 ON llm_task_executions (dispatch_sequence)
+                """
+            )
+            # 新 Analysis execution 使用共享 batch_id + 请求内连续 sequence 表示顺序。
+            # 历史 report/weaponry/旧 file 行保持 NULL，不受该部分索引约束；SQLite 的
+            # CHECK/跨行连续性由 1F-4 Adapter 在同一短事务内双重校验，不能为此重建表。
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_llm_task_executions_file_batch_sequence
+                ON llm_task_executions (business_type, batch_id, batch_sequence)
+                WHERE business_type = 'file' AND batch_id IS NOT NULL
                 """
             )
             conn.execute(
@@ -847,6 +949,41 @@ class LLMTaskService:
                 """
                 CREATE INDEX IF NOT EXISTS idx_report_resource_records_ready_recovery
                 ON report_resource_records (
+                    state, next_recovery_at, updated_at, execution_id
+                )
+                """
+            )
+            # 1F-6 为新 Analysis execution 追加独立的资源恢复事实。它不回填、更不
+            # 修改旧 ``rag_resource_leases``：旧租约缺少可证明的所有权/清理结果，只能
+            # 在切换前做只读诊断，不能被新链路猜测性迁移或自动删除。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS analysis_resource_records (
+                    execution_id TEXT PRIMARY KEY,
+                    business_type TEXT NOT NULL CHECK (business_type = 'file'),
+                    business_key TEXT NOT NULL,
+                    state TEXT NOT NULL
+                        CHECK (state IN (
+                            'tracking', 'cleanup_pending', 'audit_pending',
+                            'cleaned', 'quarantined'
+                        )),
+                    record_payload TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+                    recovery_deferral_count INTEGER NOT NULL DEFAULT 0
+                        CHECK (recovery_deferral_count >= 0),
+                    next_recovery_at TEXT,
+                    last_recovery_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (execution_id)
+                        REFERENCES llm_task_executions(execution_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_analysis_resource_records_ready_recovery
+                ON analysis_resource_records (
                     state, next_recovery_at, updated_at, execution_id
                 )
                 """
@@ -1230,6 +1367,9 @@ class LLMTaskService:
             "business_key": row["business_key"],
             "input_schema_version": row["input_schema_version"],
             "input_payload": self._deserialize(row["input_payload"]),
+            "batch_id": row["batch_id"],
+            "batch_sequence": row["batch_sequence"],
+            "dispatch_sequence": row["dispatch_sequence"],
             "execution_state": row["execution_state"],
             "public_status": row["public_status"],
             "progress": _strict_execution_progress(row["progress"]),
@@ -1252,7 +1392,8 @@ class LLMTaskService:
         return conn.execute(
             """
             SELECT execution_id, business_type, business_key,
-                   input_schema_version, input_payload, execution_state,
+                   input_schema_version, input_payload, batch_id, batch_sequence,
+                   dispatch_sequence, execution_state,
                    public_status, progress, message, result_payload,
                    callback_status, callback_outcome, trace_id,
                    created_at, started_at, completed_at, updated_at
@@ -1516,6 +1657,341 @@ class LLMTaskService:
             result["execution"] = accepted_execution
         return result
 
+    def create_analysis_batch_if_allowed(
+        self,
+        *,
+        batch_id: str,
+        admissions: Sequence[AnalysisBatchTaskAdmission],
+        accepted_at: str,
+    ) -> Dict[str, Any]:
+        """在一个短 ``BEGIN IMMEDIATE`` 事务中原子受理一批文件分析 execution。
+
+        这是 1F-4 的唯一 Analysis 批量写入口。所有 JSON/Codec 校验都由调用方在锁外
+        完成；本方法只在锁内复核活动投影、Callback Guard、批次身份、连续全局调度序号，
+        并同时写入 ``llm_task_executions`` 与 ``llm_tasks``。任何插入、投影或读回校验
+        失败都会回滚整批，绝不留下前半批 execution。
+
+        返回的 ``outcome`` 是内部分类，不能直接当作 HTTP 状态码。成功后由 Application
+        负责一次有界唤醒；该事务不发布 Progress、不创建线程，也不进行文件、HTTP 或模型 I/O。
+        """
+
+        normalized_batch_id = _required_internal_text(batch_id, name="batch_id")
+        if not _ANALYSIS_BATCH_ID_PATTERN.fullmatch(normalized_batch_id):
+            raise ValueError("batch_id必须是32位小写十六进制字符串")
+        normalized_admissions = tuple(admissions)
+        if not normalized_admissions:
+            raise ValueError("admissions不能为空")
+        if len(normalized_admissions) > _MAX_ANALYSIS_BATCH_ITEMS:
+            raise ValueError(
+                f"admissions数量不能超过{_MAX_ANALYSIS_BATCH_ITEMS}"
+            )
+        if any(
+            not isinstance(item, AnalysisBatchTaskAdmission)
+            for item in normalized_admissions
+        ):
+            raise TypeError("admissions只能包含AnalysisBatchTaskAdmission")
+        execution_ids = tuple(item.execution_id for item in normalized_admissions)
+        business_keys = tuple(item.business_key for item in normalized_admissions)
+        if len(set(execution_ids)) != len(execution_ids):
+            raise ValueError("admissions.execution_id不得重复")
+        if len(set(business_keys)) != len(business_keys):
+            raise ValueError("admissions.business_key不得重复")
+
+        accepted_time = _aware_datetime(accepted_at, name="accepted_at")
+        normalized_accepted_at = accepted_time.isoformat()
+        accepted_epoch = accepted_time.timestamp()
+
+        # 序列化及 Analysis 输入的身份复核必须在写锁外完成。这样因 Codec 或请求投影
+        # 损坏失败时不会占用 SQLite 控制面锁，也不会形成“已受理但无法执行”的半事实。
+        prepared: list[tuple[AnalysisBatchTaskAdmission, str, str, int]] = []
+        for index, admission in enumerate(normalized_admissions, start=1):
+            expected_public_status = "1" if index == 1 else "0"
+            if admission.initial_public_status != expected_public_status:
+                raise ValueError(
+                    "Analysis批次首项必须使用公开处理中状态1，后续项必须使用等待状态0"
+                )
+            input_payload = dict(admission.input_payload)
+            if (
+                input_payload.get("task_id") != admission.execution_id
+                or input_payload.get("batch_id") != normalized_batch_id
+                or input_payload.get("batch_sequence") != index
+                or input_payload.get("file_name") != admission.business_key
+                or input_payload.get("accepted_at") != normalized_accepted_at
+                or input_payload.get("trace_id") != admission.trace_id
+            ):
+                raise ValueError("Analysis任务输入与批次受理身份不一致")
+            projection_payload = dict(admission.projection_request_payload)
+            projection_params = projection_payload.get("params")
+            if (
+                projection_payload.get("businessType") != _ANALYSIS_BATCH_BUSINESS_TYPE
+                or not isinstance(projection_params, list)
+                or len(projection_params) != 1
+                or not isinstance(projection_params[0], Mapping)
+                or _required_internal_text(
+                    projection_params[0].get("fileName"),
+                    name="projection.fileName",
+                )
+                != admission.business_key
+            ):
+                raise ValueError("Analysis任务公开投影与业务键不一致")
+            prepared.append(
+                (
+                    admission,
+                    self._serialize(input_payload),
+                    self._serialize(projection_payload),
+                    index,
+                )
+            )
+
+        outcome = ""
+        accepted_executions: tuple[Dict[str, Any], ...] = ()
+        first_dispatch_sequence: int | None = None
+        try:
+            with self._immediate_connection() as conn:
+                # 必须在同一个写事务内逐项检查，而不是依赖路由层的 get_task 预查。请求
+                # 顺序即冲突优先级；这样未来切路由后仍保持既有首个冲突项的公开错误语义。
+                for admission, _, _, _ in prepared:
+                    guard = conn.execute(
+                        """
+                        SELECT owner_execution_id, state, deadline_at
+                        FROM callback_delivery_guards
+                        WHERE business_type = ? AND business_key = ?
+                        """,
+                        (_ANALYSIS_BATCH_BUSINESS_TYPE, admission.business_key),
+                    ).fetchone()
+                    guard_state = guard["state"] if guard is not None else "idle"
+                    if guard_state not in _CALLBACK_GUARD_STATES:
+                        raise RuntimeError("callback Guard 存在未知状态")
+                    if guard_state == "sending":
+                        if _callback_guard_deadline_expired(
+                            guard["deadline_at"],
+                            observed_at=accepted_time,
+                        ):
+                            owner_execution_id = str(
+                                guard["owner_execution_id"] or ""
+                            ).strip()
+                            if not owner_execution_id:
+                                raise RuntimeError(
+                                    "sending callback Guard 缺少 owner_execution_id"
+                                )
+                            transitioned = self._transition_callback_guard_to_unknown(
+                                conn,
+                                business_type=_ANALYSIS_BATCH_BUSINESS_TYPE,
+                                business_key=admission.business_key,
+                                owner_execution_id=owner_execution_id,
+                                now=normalized_accepted_at,
+                                reason=(
+                                    "callback lease expired before analysis batch submission"
+                                ),
+                            )
+                            if not transitioned:
+                                raise RuntimeError(
+                                    "Analysis受理时过期callback Guard未能冻结为outcome_unknown"
+                                )
+                            outcome = "callback_outcome_unknown"
+                        else:
+                            outcome = "callback_sending"
+                    elif guard_state == "outcome_unknown":
+                        outcome = "callback_outcome_unknown"
+                    if outcome:
+                        break
+
+                    current = conn.execute(
+                        """
+                        SELECT execution_id, status, callback_status,
+                               callback_claim_id, callback_claim_expires_at
+                        FROM llm_tasks
+                        WHERE business_type = ? AND business_key = ?
+                        """,
+                        (_ANALYSIS_BATCH_BUSINESS_TYPE, admission.business_key),
+                    ).fetchone()
+                    if current is None:
+                        continue
+                    callback_claim_in_flight = (
+                        bool(current["callback_claim_id"])
+                        and float(current["callback_claim_expires_at"] or 0)
+                        > accepted_epoch
+                    )
+                    block_reason = file_task_admission_block_reason(
+                        {
+                            "status": current["status"],
+                            "callback_status": current["callback_status"],
+                        },
+                        callback_delivery_in_flight=callback_claim_in_flight,
+                    )
+                    if block_reason == "processing":
+                        outcome = "active_conflict"
+                        break
+                    if block_reason == "callback_pending":
+                        outcome = "callback_pending"
+                        break
+
+                if not outcome:
+                    # ``BEGIN IMMEDIATE`` 已经串行化不同请求的控制面写入。一次查询后
+                    # 为整批预留连续区间，避免批内任务被其他请求交叉插入并破坏顺序。
+                    first_dispatch_sequence = int(
+                        conn.execute(
+                            """
+                            SELECT COALESCE(MAX(dispatch_sequence), 0) + 1
+                            FROM llm_task_executions
+                            """
+                        ).fetchone()[0]
+                    )
+                    persisted_rows: list[Dict[str, Any]] = []
+                    for admission, serialized_input, serialized_projection, sequence in prepared:
+                        dispatch_sequence = first_dispatch_sequence + sequence - 1
+                        conn.execute(
+                            """
+                            INSERT INTO llm_task_executions (
+                                execution_id, business_type, business_key,
+                                input_schema_version, input_payload,
+                                batch_id, batch_sequence, dispatch_sequence,
+                                execution_state, public_status, progress, message,
+                                result_payload, callback_status, callback_outcome,
+                                trace_id, created_at, started_at, completed_at, updated_at
+                            )
+                            VALUES (?, 'file', ?, ?, ?, ?, ?, ?, 'accepted', ?, 0,
+                                    '', NULL, 'pending', '', ?, ?, NULL, NULL, ?)
+                            """,
+                            (
+                                admission.execution_id,
+                                admission.business_key,
+                                admission.input_schema_version,
+                                serialized_input,
+                                normalized_batch_id,
+                                sequence,
+                                dispatch_sequence,
+                                admission.initial_public_status,
+                                admission.trace_id,
+                                normalized_accepted_at,
+                                normalized_accepted_at,
+                            ),
+                        )
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO llm_tasks (
+                                business_type, business_key, execution_id,
+                                request_payload, status, progress, message,
+                                result_payload, callback_status, callback_attempts,
+                                last_callback_error, callback_claim_id,
+                                callback_claim_expires_at, created_at, updated_at
+                            )
+                            VALUES ('file', ?, ?, ?, ?, 0, '', NULL, 'pending', 0,
+                                    '', '', 0, ?, ?)
+                            ON CONFLICT(business_type, business_key) DO UPDATE SET
+                                execution_id = excluded.execution_id,
+                                request_payload = excluded.request_payload,
+                                status = excluded.status,
+                                progress = excluded.progress,
+                                message = excluded.message,
+                                result_payload = excluded.result_payload,
+                                callback_status = excluded.callback_status,
+                                callback_attempts = excluded.callback_attempts,
+                                last_callback_error = excluded.last_callback_error,
+                                callback_claim_id = excluded.callback_claim_id,
+                                callback_claim_expires_at =
+                                    excluded.callback_claim_expires_at,
+                                created_at = excluded.created_at,
+                                updated_at = excluded.updated_at
+                            -- 事务内预查只能说明此刻未被阻断；条件写再收紧为旧文件
+                            -- 受理的完成态集合，防止未来新增状态或异常写入被静默覆盖。
+                            -- 同时清理已过期的旧回调租约，避免它残留在新 execution 上。
+                            WHERE llm_tasks.status IN ('2', '3')
+                              AND llm_tasks.callback_status
+                                  IN ('success', 'failed', 'skipped')
+                              AND (
+                                  llm_tasks.callback_claim_id = ''
+                                  OR llm_tasks.callback_claim_expires_at <= ?
+                              )
+                            """,
+                            (
+                                admission.business_key,
+                                admission.execution_id,
+                                serialized_projection,
+                                admission.initial_public_status,
+                                normalized_accepted_at,
+                                normalized_accepted_at,
+                                accepted_epoch,
+                            ),
+                        )
+                        if cursor.rowcount != 1:
+                            raise RuntimeError("Analysis批次最新任务投影条件写未命中")
+                        row = self._select_task_execution_row(
+                            conn,
+                            admission.execution_id,
+                        )
+                        if row is None:
+                            raise RuntimeError("Analysis批次受理后未读取到execution")
+                        persisted_rows.append(self._row_to_task_execution(row))
+
+                    if len(persisted_rows) != len(prepared):
+                        raise RuntimeError("Analysis批次execution插入数量不一致")
+                    for (
+                        (admission, _, _, sequence),
+                        execution,
+                    ) in zip(prepared, persisted_rows):
+                        expected_dispatch_sequence = (
+                            first_dispatch_sequence + sequence - 1
+                        )
+                        if (
+                            execution["execution_id"] != admission.execution_id
+                            or execution["business_type"]
+                            != _ANALYSIS_BATCH_BUSINESS_TYPE
+                            or execution["business_key"] != admission.business_key
+                            or execution["batch_id"] != normalized_batch_id
+                            or execution["batch_sequence"] != sequence
+                            or execution["dispatch_sequence"]
+                            != expected_dispatch_sequence
+                            or execution["execution_state"] != "accepted"
+                        ):
+                            raise RuntimeError("Analysis批次execution读回身份或顺序不一致")
+                        projection = conn.execute(
+                            """
+                            SELECT execution_id
+                            FROM llm_tasks
+                            WHERE business_type = 'file' AND business_key = ?
+                            """,
+                            (admission.business_key,),
+                        ).fetchone()
+                        if (
+                            projection is None
+                            or projection["execution_id"] != admission.execution_id
+                        ):
+                            raise RuntimeError("Analysis批次最新任务投影owner不一致")
+                    accepted_executions = tuple(persisted_rows)
+                    outcome = "accepted"
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                logger.warning(
+                    "文件分析批次原子受理遇到SQLite繁忙: batch_id=%s item_count=%d",
+                    normalized_batch_id,
+                    len(prepared),
+                )
+                raise TaskAdmissionBusyError("任务库繁忙，请稍后重试") from exc
+            raise
+
+        if outcome == "accepted":
+            logger.info(
+                "文件分析批次已原子受理: batch_id=%s item_count=%d "
+                "first_dispatch_sequence=%d",
+                normalized_batch_id,
+                len(accepted_executions),
+                first_dispatch_sequence,
+            )
+        else:
+            # 活动任务/Guard 冲突是调用方可预期的 409 分支，不应在高并发重试时淹没
+            # 默认告警输出；仍以 INFO 保留 batch、数量和稳定 outcome 供诊断检索。
+            logger.info(
+                "文件分析批次未受理: batch_id=%s item_count=%d outcome=%s",
+                normalized_batch_id,
+                len(prepared),
+                outcome,
+            )
+        result: Dict[str, Any] = {"outcome": outcome}
+        if accepted_executions:
+            result["executions"] = accepted_executions
+        return result
+
     def validate_callback_delivery_guard(
         self,
         *,
@@ -1660,6 +2136,81 @@ class LLMTaskService:
         with self._connection() as conn:
             row = self._select_task_execution_row(conn, normalized_execution_id)
         return self._row_to_task_execution(row) if row is not None else None
+
+    def get_analysis_task_execution_control_record(
+        self,
+        execution_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """读取 Analysis 控制面身份，不加载和反序列化可能很大的输入快照。
+
+        expected 写、latest 检查和领取前冷却只需要 execution、业务键与批次身份。把这些
+        高频操作与 ``input_payload`` 解码分开，既降低大领域树任务的 CPU/内存放大，也让
+        后续毒快照收敛可以在不信任坏 payload 的前提下完成。
+        """
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT execution_id, business_type, business_key,
+                       input_schema_version, batch_id, batch_sequence,
+                       dispatch_sequence, execution_state
+                FROM llm_task_executions
+                WHERE execution_id = ?
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_analysis_callback_recovery_record(
+        self,
+        business_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """读取文件回调同步恢复所需的最小权威投影。
+
+        恢复回调不需要原始请求或 execution 输入快照。这里在一个只读连接中联结 latest
+        投影与 execution 身份，只反序列化最终回调 payload，避免大请求放大读取成本，
+        也防止无关的损坏输入阻断一个仍可安全补发的终态结果。
+        """
+
+        normalized_business_key = _required_internal_text(
+            business_key,
+            name="business_key",
+        )
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT task.execution_id, task.status, task.result_payload,
+                       task.callback_status, task.callback_attempts, task.updated_at,
+                       execution.business_type AS execution_business_type,
+                       execution.business_key AS execution_business_key,
+                       execution.batch_id, execution.batch_sequence,
+                       execution.execution_state
+                FROM llm_tasks AS task
+                LEFT JOIN llm_task_executions AS execution
+                  ON execution.execution_id = task.execution_id
+                WHERE task.business_type = 'file' AND task.business_key = ?
+                """,
+                (normalized_business_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "execution_id": row["execution_id"],
+            "status": row["status"],
+            "result_payload": self._deserialize(row["result_payload"]),
+            "callback_status": row["callback_status"],
+            "callback_attempts": int(row["callback_attempts"]),
+            "updated_at": row["updated_at"],
+            "execution_business_type": row["execution_business_type"],
+            "execution_business_key": row["execution_business_key"],
+            "batch_id": row["batch_id"],
+            "batch_sequence": row["batch_sequence"],
+            "execution_state": row["execution_state"],
+        }
 
     def claim_task_execution(self, execution_id: str) -> Dict[str, Any]:
         """条件领取一次 accepted execution，并返回可判定的幂等分类。"""
@@ -2100,12 +2651,16 @@ class LLMTaskService:
         lease_seconds: float,
         acquired_at: str,
         allow_failed_retry: bool = False,
+        allow_outcome_unknown_retry: bool = False,
+        expected_callback_attempts: int | None = None,
     ) -> Dict[str, Any]:
         """原子复核 latest owner 并取得带 fencing token 的回调发送权。
 
         该事务是 HTTP 投递的唯一授权点。调用方在事务外执行的 ``is_latest`` 只能减少
         无效请求，不能替代这里的复核。过期 sending 租约不会被自动重抢，因为旧 HTTP
-        请求是否到达接收方已经无法证明；此时直接冻结为 ``outcome_unknown``。
+        请求是否到达接收方已经无法证明；后台路径必须冻结为 ``outcome_unknown``。
+        只有 file ``/llm/check-task`` 可以显式请求 at-least-once 补发，并继续受
+        callback_attempts、latest owner、Guard owner 与 fencing token 约束。
         """
 
         execution_id = _required_internal_text(
@@ -2138,6 +2693,34 @@ class LLMTaskService:
             raise ValueError("lease_seconds必须是正有限数字")
         if not isinstance(allow_failed_retry, bool):
             raise TypeError("allow_failed_retry必须是bool")
+        if not isinstance(allow_outcome_unknown_retry, bool):
+            raise TypeError("allow_outcome_unknown_retry必须是bool")
+        if expected_callback_attempts is not None and (
+            isinstance(expected_callback_attempts, bool)
+            or not isinstance(expected_callback_attempts, int)
+            or expected_callback_attempts < 0
+        ):
+            raise ValueError("expected_callback_attempts必须是非负整数或None")
+        if expected_callback_attempts is not None and not allow_failed_retry:
+            raise ValueError(
+                "expected_callback_attempts只允许用于同步失败恢复"
+            )
+        if allow_outcome_unknown_retry and (
+            normalized_business_type != _ANALYSIS_BATCH_BUSINESS_TYPE
+            or not allow_failed_retry
+            or expected_callback_attempts is None
+        ):
+            raise ValueError(
+                "outcome_unknown显式补发只允许file check-task携带attempt快照"
+            )
+        if (
+            normalized_business_type == _ANALYSIS_BATCH_BUSINESS_TYPE
+            and allow_failed_retry
+            and expected_callback_attempts is None
+        ):
+            raise ValueError(
+                "Analysis同步失败恢复必须携带expected_callback_attempts"
+            )
         acquired_time = _aware_datetime(acquired_at, name="acquired_at")
         normalized_acquired_at = acquired_time.isoformat()
         deadline_at = (
@@ -2149,7 +2732,7 @@ class LLMTaskService:
             execution = self._select_task_execution_row(conn, execution_id)
             latest = conn.execute(
                 """
-                SELECT execution_id, status
+                SELECT execution_id, status, callback_status, callback_attempts
                 FROM llm_tasks
                 WHERE business_type = ? AND business_key = ?
                 """,
@@ -2162,6 +2745,14 @@ class LLMTaskService:
                 or latest is None
                 or latest["execution_id"] != execution_id
             ):
+                result["outcome"] = "stale"
+            elif (
+                expected_callback_attempts is not None
+                and int(latest["callback_attempts"]) != expected_callback_attempts
+            ):
+                # 首个恢复者取得租约时会在同一事务内递增 callback_attempts。等待者必须
+                # 继续使用首次读取的 attempt 快照，不能把同一批并发请求滚动成下一轮
+                # 明确失败重试。
                 result["outcome"] = "stale"
             elif (
                 execution["execution_state"] not in {"succeeded", "failed"}
@@ -2182,7 +2773,10 @@ class LLMTaskService:
                 and not allow_failed_retry
             ):
                 result["outcome"] = "already_completed"
-            elif execution["callback_status"] == "outcome_unknown":
+            elif (
+                execution["callback_status"] == "outcome_unknown"
+                and not allow_outcome_unknown_retry
+            ):
                 result["outcome"] = "outcome_unknown"
             # 并发调用者可能在等待 ``BEGIN IMMEDIATE`` 写锁期间，观察到前一个调用者已将
             # execution 标记为 sending。sending 不是损坏状态，后续必须继续读取 Guard，
@@ -2191,6 +2785,7 @@ class LLMTaskService:
                 "pending",
                 "failed",
                 "sending",
+                "outcome_unknown",
             }:
                 raise RuntimeError("execution 存在未知 callback_status")
             else:
@@ -2205,7 +2800,19 @@ class LLMTaskService:
                 ).fetchone()
                 if guard is not None and guard["state"] not in _CALLBACK_GUARD_STATES:
                     raise RuntimeError("callback Guard 存在未知状态")
-                if guard is not None and guard["state"] == "outcome_unknown":
+                explicit_unknown_retry = (
+                    allow_outcome_unknown_retry
+                    and execution["callback_status"] == "outcome_unknown"
+                    and latest["callback_status"] == "outcome_unknown"
+                    and guard is not None
+                    and guard["state"] == "outcome_unknown"
+                    and guard["owner_execution_id"] == execution_id
+                )
+                if (
+                    guard is not None
+                    and guard["state"] == "outcome_unknown"
+                    and not explicit_unknown_retry
+                ):
                     result["outcome"] = "outcome_unknown"
                 elif guard is not None and guard["state"] == "sending":
                     deadline_text = guard["deadline_at"]
@@ -2315,6 +2922,28 @@ class LLMTaskService:
                         guard["state"] if guard is not None else "missing",
                     )
                     result["outcome"] = "outcome_unknown"
+                elif (
+                    execution["callback_status"] == "outcome_unknown"
+                    and not explicit_unknown_retry
+                ):
+                    # 未知结果的 execution、latest 投影与 Guard owner 必须一致，才允许
+                    # 显式 at-least-once 补发。人工改库或旧版本残留继续 fail closed。
+                    logger.critical(
+                        "callback outcome_unknown事实不一致，拒绝显式补发: "
+                        "business_type=%s business_key=%s execution_id=%s "
+                        "projection_status=%s guard_state=%s guard_owner=%s",
+                        normalized_business_type,
+                        normalized_business_key,
+                        execution_id,
+                        latest["callback_status"],
+                        guard["state"] if guard is not None else "missing",
+                        (
+                            guard["owner_execution_id"]
+                            if guard is not None
+                            else "missing"
+                        ),
+                    )
+                    result["outcome"] = "outcome_unknown"
                 else:
                     previous_version = int(guard["lease_version"]) if guard else 0
                     fencing_token = previous_version + 1
@@ -2343,6 +2972,11 @@ class LLMTaskService:
                             ),
                         )
                     else:
+                        expected_guard_state = (
+                            "outcome_unknown"
+                            if explicit_unknown_retry
+                            else "idle"
+                        )
                         cursor = conn.execute(
                             """
                             UPDATE callback_delivery_guards
@@ -2353,7 +2987,8 @@ class LLMTaskService:
                                 released_at = NULL, released_by = '',
                                 release_reason = '', updated_at = ?
                             WHERE business_type = ? AND business_key = ?
-                              AND state = 'idle' AND lease_version = ?
+                              AND state = ? AND lease_version = ?
+                              AND (? = 'idle' OR owner_execution_id = ?)
                             """,
                             (
                                 execution_id,
@@ -2364,7 +2999,10 @@ class LLMTaskService:
                                 normalized_acquired_at,
                                 normalized_business_type,
                                 normalized_business_key,
+                                expected_guard_state,
                                 previous_version,
+                                expected_guard_state,
+                                execution_id,
                             ),
                         )
                         if cursor.rowcount != 1:
@@ -2404,6 +3042,17 @@ class LLMTaskService:
                             "deadline_at": deadline_at,
                         }
                     )
+                    if explicit_unknown_retry:
+                        logger.warning(
+                            "file check-task 已显式授权 outcome_unknown 至少一次补发，"
+                            "接收方可能收到重复业务回调: business_key=%s "
+                            "execution_id=%s expected_callback_attempts=%s "
+                            "fencing_token=%s",
+                            normalized_business_key,
+                            execution_id,
+                            expected_callback_attempts,
+                            fencing_token,
+                        )
 
         logger.info(
             "callback Guard 获取完成: business_type=%s business_key=%s "
@@ -2525,7 +3174,7 @@ class LLMTaskService:
                 )
                 if execution_cursor.rowcount != 1:
                     raise RuntimeError("callback 完成时 execution 身份不存在")
-                conn.execute(
+                projection_cursor = conn.execute(
                     """
                     UPDATE llm_tasks
                     SET callback_status = ?, last_callback_error = ?, updated_at = ?
@@ -2541,6 +3190,11 @@ class LLMTaskService:
                         execution_id,
                     ),
                 )
+                if projection_cursor.rowcount != 1:
+                    # 三份权威事实必须在同一事务共同完成。若 latest 投影异常丢失或已
+                    # 切换，抛错会回滚 Guard 与 execution 更新；外部 HTTP 可能已送达，
+                    # 调用方不得在当前请求内再次发送。
+                    raise RuntimeError("callback 完成时最新投影不存在或已切换")
                 completed = True
 
         if not completed:
@@ -3370,6 +4024,516 @@ class LLMTaskService:
             ).fetchall()
         return tuple(str(row["execution_id"]) for row in rows)
 
+    @staticmethod
+    def _row_to_analysis_resource_record(row: sqlite3.Row) -> Dict[str, Any]:
+        """把 Analysis 资源恢复行转换成 Adapter 可验证的普通快照。
+
+        JSON 损坏不能降级为“没有资源”。调用方必须保留现场并通过明确错误进入诊断或
+        隔离流程，避免错误地对可能仍存在的外部 Context/Document 发起删除。
+        """
+
+        try:
+            payload = json.loads(row["record_payload"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("analysis资源恢复记录JSON已损坏") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("analysis资源恢复记录payload必须是对象")
+        return {
+            "execution_id": row["execution_id"],
+            "business_type": row["business_type"],
+            "business_key": row["business_key"],
+            "batch_id": row["batch_id"],
+            "batch_sequence": row["batch_sequence"],
+            "state": row["state"],
+            "record_payload": payload,
+            "version": int(row["version"]),
+            "recovery_deferral_count": int(row["recovery_deferral_count"]),
+            "next_recovery_at": row["next_recovery_at"],
+            "last_recovery_reason": row["last_recovery_reason"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    @staticmethod
+    def _select_analysis_resource_record(
+        conn: sqlite3.Connection,
+        execution_id: str,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            """
+            SELECT resource.execution_id, resource.business_type, resource.business_key,
+                   execution.batch_id, execution.batch_sequence, resource.state,
+                   resource.record_payload, resource.version,
+                   resource.recovery_deferral_count, resource.next_recovery_at,
+                   resource.last_recovery_reason, resource.created_at, resource.updated_at
+            FROM analysis_resource_records AS resource
+            JOIN llm_task_executions AS execution
+              ON execution.execution_id = resource.execution_id
+            WHERE resource.execution_id = ?
+            """,
+            (execution_id,),
+        ).fetchone()
+
+    def create_analysis_resource_record(
+        self,
+        *,
+        execution_id: str,
+        business_type: str,
+        business_key: str,
+        state: str,
+        record_payload: Mapping[str, Any],
+        created_at: str,
+    ) -> Dict[str, Any]:
+        """在首个远端 RAG 操作前幂等登记新 Analysis execution 的资源事实。
+
+        只允许带 1F-4 批次身份的新 file execution 写入本表。这样未来切换前的旧线程
+        任务不会被误认为新链路资源，更不会被恢复器错误处理。
+        """
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        normalized_business_type = _required_internal_text(
+            business_type,
+            name="business_type",
+        )
+        if normalized_business_type != _ANALYSIS_BATCH_BUSINESS_TYPE:
+            raise ValueError("analysis资源记录的business_type必须是file")
+        normalized_business_key = _required_internal_text(
+            business_key,
+            name="business_key",
+        )
+        normalized_state = _required_internal_text(state, name="state")
+        if normalized_state != "tracking":
+            raise ValueError("analysis资源记录创建只能进入tracking")
+        if not isinstance(record_payload, Mapping):
+            raise TypeError("record_payload必须是Mapping")
+        serialized_payload = self._serialize(dict(record_payload))
+        normalized_created_at = _aware_datetime(
+            created_at,
+            name="created_at",
+        ).isoformat()
+
+        with self._immediate_connection() as conn:
+            execution = self._select_task_execution_row(
+                conn,
+                normalized_execution_id,
+            )
+            if (
+                execution is None
+                or execution["business_type"] != normalized_business_type
+                or execution["business_key"] != normalized_business_key
+                or not str(execution["batch_id"] or "").strip()
+                or execution["batch_sequence"] is None
+            ):
+                raise ValueError("analysis资源记录与新execution身份不一致")
+            existing = self._select_analysis_resource_record(
+                conn,
+                normalized_execution_id,
+            )
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO analysis_resource_records (
+                        execution_id, business_type, business_key, state,
+                        record_payload, version, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, 'tracking', ?, 0, ?, ?)
+                    """,
+                    (
+                        normalized_execution_id,
+                        normalized_business_type,
+                        normalized_business_key,
+                        serialized_payload,
+                        normalized_created_at,
+                        normalized_created_at,
+                    ),
+                )
+                existing = self._select_analysis_resource_record(
+                    conn,
+                    normalized_execution_id,
+                )
+            elif (
+                existing["business_type"] != normalized_business_type
+                or existing["business_key"] != normalized_business_key
+            ):
+                raise ValueError("analysis资源记录幂等键发生身份冲突")
+            if existing is None:  # pragma: no cover - INSERT 后的防御性检查。
+                raise RuntimeError("analysis资源记录创建后不可见")
+            result = self._row_to_analysis_resource_record(existing)
+
+        logger.info(
+            "analysis任务资源已登记: execution_id=%s business_key=%s state=%s version=%s",
+            normalized_execution_id,
+            normalized_business_key,
+            result["state"],
+            result["version"],
+        )
+        return result
+
+    def get_analysis_resource_record(
+        self,
+        execution_id: str,
+    ) -> Dict[str, Any] | None:
+        """只读获取一份 Analysis 资源事实，不执行外部恢复或清理。"""
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        with self._connection() as conn:
+            row = self._select_analysis_resource_record(
+                conn,
+                normalized_execution_id,
+            )
+        return self._row_to_analysis_resource_record(row) if row is not None else None
+
+    def get_analysis_resource_control_record(
+        self,
+        execution_id: str,
+    ) -> Dict[str, Any] | None:
+        """读取资源恢复控制面字段，不解析可能已损坏的业务 payload。"""
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        with self._connection() as conn:
+            row = self._select_analysis_resource_record(
+                conn,
+                normalized_execution_id,
+            )
+        if row is None:
+            return None
+        raw_payload = row["record_payload"]
+        payload_bytes = str(raw_payload).encode("utf-8", errors="replace")
+        return {
+            "execution_id": row["execution_id"],
+            "business_type": row["business_type"],
+            "business_key": row["business_key"],
+            "batch_id": row["batch_id"],
+            "batch_sequence": row["batch_sequence"],
+            "state": row["state"],
+            "version": int(row["version"]),
+            "payload_bytes": len(payload_bytes),
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        }
+
+    def quarantine_analysis_resource_recovery_record(
+        self,
+        *,
+        execution_id: str,
+        business_type: str,
+        business_key: str,
+        expected_state: str,
+        expected_version: int,
+        reason: str,
+        updated_at: str,
+    ) -> bool:
+        """在不解析 payload 的前提下 CAS 隔离毒化或不可恢复的资源记录。
+
+        原始 ``record_payload`` 保持字节级不变，便于后续人工取证；隔离原因写入恢复控制
+        字段。该入口不执行 RAG、文件或网络补偿，也不允许复活终态记录。
+        """
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        normalized_business_type = _required_internal_text(
+            business_type,
+            name="business_type",
+        )
+        normalized_business_key = _required_internal_text(
+            business_key,
+            name="business_key",
+        )
+        normalized_expected_state = _required_internal_text(
+            expected_state,
+            name="expected_state",
+        )
+        if normalized_business_type != _ANALYSIS_BATCH_BUSINESS_TYPE:
+            raise ValueError("analysis资源隔离的business_type必须是file")
+        if normalized_expected_state not in {
+            "tracking",
+            "cleanup_pending",
+            "audit_pending",
+        }:
+            raise ValueError("只有非终态analysis资源记录可以被恢复器隔离")
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 0
+        ):
+            raise ValueError("expected_version必须是非负整数")
+        normalized_reason = _required_internal_text(reason, name="reason")[:256]
+        normalized_updated_at = _aware_datetime(
+            updated_at,
+            name="updated_at",
+        ).isoformat()
+
+        payload_sha256 = ""
+        payload_bytes = 0
+        with self._immediate_connection() as conn:
+            row = self._select_analysis_resource_record(
+                conn,
+                normalized_execution_id,
+            )
+            if row is None:
+                return False
+            raw_payload = str(row["record_payload"])
+            encoded_payload = raw_payload.encode("utf-8", errors="replace")
+            payload_sha256 = hashlib.sha256(encoded_payload).hexdigest()
+            payload_bytes = len(encoded_payload)
+            cursor = conn.execute(
+                """
+                UPDATE analysis_resource_records
+                SET state = 'quarantined', version = version + 1,
+                    recovery_deferral_count =
+                        CASE WHEN recovery_deferral_count < 1
+                             THEN 1 ELSE recovery_deferral_count END,
+                    next_recovery_at = ?,
+                    last_recovery_reason = ?, updated_at = ?
+                WHERE execution_id = ? AND business_type = ? AND business_key = ?
+                  AND state = ? AND version = ?
+                  AND state IN ('tracking', 'cleanup_pending', 'audit_pending')
+                """,
+                (
+                    normalized_updated_at,
+                    normalized_reason,
+                    normalized_updated_at,
+                    normalized_execution_id,
+                    normalized_business_type,
+                    normalized_business_key,
+                    normalized_expected_state,
+                    expected_version,
+                ),
+            )
+            quarantined = cursor.rowcount == 1
+
+        logger.log(
+            logging.CRITICAL if quarantined else logging.WARNING,
+            "analysis资源恢复记录隔离完成: execution_id=%s state=%s version=%s "
+            "quarantined=%s payload_bytes=%s payload_sha256=%s reason=%s",
+            normalized_execution_id,
+            normalized_expected_state,
+            expected_version,
+            quarantined,
+            payload_bytes,
+            payload_sha256[:16],
+            normalized_reason,
+        )
+        return quarantined
+
+    def advance_analysis_resource_record(
+        self,
+        *,
+        execution_id: str,
+        business_type: str,
+        business_key: str,
+        expected_state: str,
+        expected_version: int,
+        target_state: str,
+        record_payload: Mapping[str, Any],
+        updated_at: str,
+    ) -> Dict[str, Any] | None:
+        """以 ``state + version`` CAS 推进或补充 Analysis 资源事实。
+
+        同状态更新用于“先有 Context、后有 Document”的分段引用持久化；即使状态文本
+        不变，版本也必须递增，确保并发恢复者不会覆盖已经写入的外部身份。
+        """
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        normalized_business_type = _required_internal_text(
+            business_type,
+            name="business_type",
+        )
+        if normalized_business_type != _ANALYSIS_BATCH_BUSINESS_TYPE:
+            raise ValueError("analysis资源记录的business_type必须是file")
+        normalized_business_key = _required_internal_text(
+            business_key,
+            name="business_key",
+        )
+        normalized_expected_state = _required_internal_text(
+            expected_state,
+            name="expected_state",
+        )
+        normalized_target_state = _required_internal_text(
+            target_state,
+            name="target_state",
+        )
+        if (
+            normalized_expected_state not in _ANALYSIS_RESOURCE_STATES
+            or normalized_target_state not in _ANALYSIS_RESOURCE_STATES
+        ):
+            raise ValueError("analysis资源记录state无效")
+        if (
+            normalized_target_state
+            not in _ANALYSIS_RESOURCE_TRANSITIONS[normalized_expected_state]
+        ):
+            raise ValueError(
+                "非法analysis资源状态迁移: "
+                f"{normalized_expected_state} -> {normalized_target_state}"
+            )
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 0
+        ):
+            raise ValueError("expected_version必须是非负整数")
+        if not isinstance(record_payload, Mapping):
+            raise TypeError("record_payload必须是Mapping")
+        serialized_payload = self._serialize(dict(record_payload))
+        normalized_updated_at = _aware_datetime(
+            updated_at,
+            name="updated_at",
+        ).isoformat()
+
+        with self._immediate_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE analysis_resource_records
+                SET state = ?, record_payload = ?, version = version + 1,
+                    recovery_deferral_count = 0, next_recovery_at = NULL,
+                    last_recovery_reason = '',
+                    updated_at = ?
+                WHERE execution_id = ? AND business_type = ? AND business_key = ?
+                  AND state = ? AND version = ?
+                """,
+                (
+                    normalized_target_state,
+                    serialized_payload,
+                    normalized_updated_at,
+                    normalized_execution_id,
+                    normalized_business_type,
+                    normalized_business_key,
+                    normalized_expected_state,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._select_analysis_resource_record(
+                conn,
+                normalized_execution_id,
+            )
+            if row is None:  # pragma: no cover - UPDATE 后的防御性检查。
+                raise RuntimeError("analysis资源记录更新后不可见")
+            return self._row_to_analysis_resource_record(row)
+
+    def defer_analysis_resource_recovery(
+        self,
+        execution_id: str,
+        *,
+        expected_version: int,
+        retry_at: str,
+        reason: str,
+    ) -> Dict[str, Any] | None:
+        """为可恢复 Analysis 记录设置有限退避；未知/隔离记录不会被重新排队。"""
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 0
+        ):
+            raise ValueError("expected_version必须是非负整数")
+        normalized_retry_at = _aware_datetime(
+            retry_at,
+            name="retry_at",
+        ).isoformat()
+        normalized_reason = _required_internal_text(reason, name="reason")
+        if len(normalized_reason) > 256:
+            raise ValueError("reason长度不能超过256")
+        updated_at = _utc_now_iso()
+
+        with self._immediate_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE analysis_resource_records
+                SET recovery_deferral_count = recovery_deferral_count + 1,
+                    next_recovery_at = ?, last_recovery_reason = ?,
+                    version = version + 1, updated_at = ?
+                WHERE execution_id = ? AND version = ?
+                  AND state IN ('tracking', 'cleanup_pending', 'audit_pending')
+                """,
+                (
+                    normalized_retry_at,
+                    normalized_reason,
+                    updated_at,
+                    normalized_execution_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._select_analysis_resource_record(
+                conn,
+                normalized_execution_id,
+            )
+            if row is None:  # pragma: no cover - UPDATE 后的防御性检查。
+                raise RuntimeError("analysis资源恢复延期后记录不可见")
+            result = self._row_to_analysis_resource_record(row)
+
+        logger.info(
+            "analysis资源恢复已延期: execution_id=%s version=%s retry_at=%s reason=%s",
+            normalized_execution_id,
+            result["version"],
+            normalized_retry_at,
+            normalized_reason,
+        )
+        return result
+
+    def list_recoverable_analysis_resource_ids(
+        self,
+        *,
+        limit: int,
+        ready_at: str | None = None,
+    ) -> tuple[str, ...]:
+        """有界扫描到期 Analysis 资源记录，不读取或重放 ``running`` execution。"""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit必须是1~1000的整数")
+        normalized_ready_at = _aware_datetime(
+            ready_at or _utc_now_iso(),
+            name="ready_at",
+        ).isoformat()
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT resource.execution_id
+                FROM analysis_resource_records AS resource
+                JOIN llm_task_executions AS execution
+                  ON execution.execution_id = resource.execution_id
+                WHERE execution.business_type = 'file'
+                  AND execution.batch_id IS NOT NULL
+                  AND execution.batch_sequence IS NOT NULL
+                  AND (
+                      resource.state IN ('cleanup_pending', 'audit_pending')
+                      OR (
+                          resource.state = 'tracking'
+                          AND execution.execution_state
+                              IN ('succeeded', 'failed', 'stale')
+                      )
+                  )
+                  AND (
+                      resource.next_recovery_at IS NULL
+                      OR julianday(resource.next_recovery_at) <= julianday(?)
+                  )
+                ORDER BY resource.updated_at, resource.execution_id
+                LIMIT ?
+                """,
+                (normalized_ready_at, limit),
+            ).fetchall()
+        return tuple(str(row["execution_id"]) for row in rows)
+
     def defer_accepted_task_execution(
         self,
         execution_id: str,
@@ -3420,6 +4584,243 @@ class LLMTaskService:
         )
         return deferred
 
+    def defer_accepted_task_execution_with_backoff(
+        self,
+        execution_id: str,
+        *,
+        retry_base_seconds: float,
+        retry_max_seconds: float,
+        reason: str,
+        now: str | None = None,
+    ) -> bool:
+        """原子记录 accepted 调度失败并根据持久计数计算下一次领取时间。
+
+        退避次数必须以数据库中的 ``dispatch_failure_count`` 为准，而不能依赖 Worker
+        内存：进程重启后内存会丢失，未来替换为共享 Repository 后多个 Dispatcher 也不应
+        因各自本地计数而把同一任务重新变成热循环。当前 SQLite ``BEGIN IMMEDIATE`` 把
+        读取计数、计算 ``next_dispatch_at`` 与条件写锁在同一短事务内；本方法绝不触碰
+        ``running`` 或终态 execution。
+        """
+
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        for name, value in (
+            ("retry_base_seconds", retry_base_seconds),
+            ("retry_max_seconds", retry_max_seconds),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name}必须是数字")
+            normalized = float(value)
+            if not math.isfinite(normalized) or normalized <= 0.0:
+                raise ValueError(f"{name}必须是正有限数字")
+        normalized_base = float(retry_base_seconds)
+        normalized_max = float(retry_max_seconds)
+        if normalized_max < normalized_base:
+            raise ValueError("retry_max_seconds不能小于retry_base_seconds")
+        normalized_reason = _required_internal_text(reason, name="reason")
+        if len(normalized_reason) > 256:
+            raise ValueError("reason长度不能超过256")
+        reference_at = _aware_datetime(
+            _utc_now_iso() if now is None else now,
+            name="now",
+        )
+
+        failure_count: int | None = None
+        retry_at: str | None = None
+        with self._immediate_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT dispatch_failure_count
+                FROM llm_task_executions
+                WHERE execution_id = ? AND execution_state = 'accepted'
+                """,
+                (normalized_execution_id,),
+            ).fetchone()
+            if row is None:
+                deferred = False
+            else:
+                raw_count = row["dispatch_failure_count"]
+                if (
+                    isinstance(raw_count, bool)
+                    or not isinstance(raw_count, int)
+                    or raw_count < 0
+                ):
+                    raise RuntimeError("dispatch_failure_count持久化数据无效")
+                failure_count = raw_count + 1
+                # Python 的大整数不会溢出，但无界指数没有业务价值。指数达到 60 后
+                # 已经远超本配置允许的时间范围，直接使用 max 可保持固定计算成本。
+                exponent = min(failure_count - 1, 60)
+                delay_seconds = min(
+                    normalized_max,
+                    normalized_base * (2.0**exponent),
+                )
+                retry_at = (
+                    reference_at + timedelta(seconds=delay_seconds)
+                ).isoformat()
+                cursor = conn.execute(
+                    """
+                    UPDATE llm_task_executions
+                    SET dispatch_failure_count = ?,
+                        next_dispatch_at = ?,
+                        last_dispatch_error = ?,
+                        updated_at = ?
+                    WHERE execution_id = ?
+                      AND execution_state = 'accepted'
+                      AND dispatch_failure_count = ?
+                    """,
+                    (
+                        failure_count,
+                        retry_at,
+                        normalized_reason,
+                        reference_at.isoformat(),
+                        normalized_execution_id,
+                        raw_count,
+                    ),
+                )
+                deferred = cursor.rowcount == 1
+
+        logger.log(
+            logging.WARNING if deferred else logging.DEBUG,
+            "任务领取前指数退避记录完成: execution_id=%s deferred=%s "
+            "failure_count=%s retry_at=%s reason=%s",
+            normalized_execution_id,
+            deferred,
+            failure_count if failure_count is not None else "-",
+            retry_at or "-",
+            normalized_reason,
+        )
+        return deferred
+
+    def fail_accepted_analysis_task_execution_if_current(
+        self,
+        *,
+        expected_execution_id: str,
+        expected_business_key: str,
+        message: str,
+        reason: str,
+        execution_result_payload: Mapping[str, Any],
+        projection_result_payload: Mapping[str, Any],
+    ) -> bool:
+        """把无法解码的新 Analysis accepted 快照原子收敛为公开失败。
+
+        本方法是 Analysis 专用控制面：它不读取 ``input_payload``，但必须在同一写事务中
+        证明记录属于带批次身份的新 file execution，且仍是公开最新 owner。旧兼容 file、
+        running、终态或已被新任务替代的记录都不能被这里改写。
+        """
+
+        execution_id = _required_internal_text(
+            expected_execution_id,
+            name="expected_execution_id",
+        )
+        business_key = _required_internal_text(
+            expected_business_key,
+            name="expected_business_key",
+        )
+        if not isinstance(message, str):
+            raise TypeError("message必须是str")
+        normalized_reason = _required_internal_text(reason, name="reason")
+        if len(normalized_reason) > 256:
+            raise ValueError("reason长度不能超过256")
+        if not isinstance(execution_result_payload, Mapping):
+            raise TypeError("execution_result_payload必须是Mapping")
+        if not isinstance(projection_result_payload, Mapping):
+            raise TypeError("projection_result_payload必须是Mapping")
+        serialized_execution_result = self._serialize(
+            dict(execution_result_payload)
+        )
+        serialized_projection_result = self._serialize(
+            dict(projection_result_payload)
+        )
+
+        finished = False
+        marked_stale = False
+        with self._immediate_connection() as conn:
+            execution = self._select_task_execution_row(conn, execution_id)
+            latest = conn.execute(
+                """
+                SELECT execution_id
+                FROM llm_tasks
+                WHERE business_type = 'file' AND business_key = ?
+                """,
+                (business_key,),
+            ).fetchone()
+            if (
+                execution is not None
+                and execution["business_type"] == "file"
+                and execution["business_key"] == business_key
+                and execution["batch_id"] is not None
+                and execution["batch_sequence"] is not None
+                and execution["dispatch_sequence"] is not None
+                and execution["execution_state"] == "accepted"
+                and latest is not None
+                and latest["execution_id"] == execution_id
+            ):
+                now = _utc_now_iso()
+                execution_cursor = conn.execute(
+                    """
+                    UPDATE llm_task_executions
+                    SET execution_state = 'failed', public_status = '3',
+                        progress = 1, message = ?, result_payload = ?,
+                        dispatch_failure_count = dispatch_failure_count + 1,
+                        next_dispatch_at = NULL, last_dispatch_error = ?,
+                        completed_at = ?, updated_at = ?
+                    WHERE execution_id = ? AND execution_state = 'accepted'
+                    """,
+                    (
+                        message,
+                        serialized_execution_result,
+                        normalized_reason,
+                        now,
+                        now,
+                        execution_id,
+                    ),
+                )
+                projection_cursor = conn.execute(
+                    """
+                    UPDATE llm_tasks
+                    SET status = '3', progress = 1, message = ?,
+                        result_payload = ?, updated_at = ?
+                    WHERE business_type = 'file' AND business_key = ?
+                      AND execution_id = ?
+                    """,
+                    (
+                        message,
+                        serialized_projection_result,
+                        now,
+                        business_key,
+                        execution_id,
+                    ),
+                )
+                if (
+                    execution_cursor.rowcount != 1
+                    or projection_cursor.rowcount != 1
+                ):
+                    raise RuntimeError("Analysis毒任务终态与公开投影未能原子同步")
+                finished = True
+            if not finished:
+                marked_stale = self._mark_execution_stale_if_superseded(
+                    conn,
+                    execution=execution,
+                    latest=latest,
+                    execution_id=execution_id,
+                    business_type="file",
+                    business_key=business_key,
+                )
+
+        logger.log(
+            logging.ERROR if finished else logging.INFO,
+            "Analysis毒快照条件收敛完成: execution_id=%s business_key=%s "
+            "finished=%s marked_stale=%s reason=%s",
+            execution_id,
+            business_key,
+            finished,
+            marked_stale,
+            normalized_reason,
+        )
+        return finished
+
     def list_accepted_task_execution_ids(
         self,
         business_type: str,
@@ -3455,6 +4856,122 @@ class LLMTaskService:
                 (normalized_business_type, normalized_ready_at, limit),
             ).fetchall()
         return tuple(row["execution_id"] for row in rows)
+
+    def list_accepted_analysis_task_execution_ids(
+        self,
+        *,
+        limit: int,
+        ready_at: str | None = None,
+    ) -> tuple[str, ...]:
+        """按全局调度序号扫描已受理的新 Analysis 批次任务。
+
+        旧 file 兼容链没有 ``batch_id``，不能被未来 1F Dispatcher 当作可由新
+        ``RunAnalysisTask`` 处理的 execution。单独收窄查询条件可防止切换前后的两条链
+        路互相误领；它也不把 ``running`` 重置为 ``accepted``。
+        """
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit必须是正整数")
+        normalized_ready_at = _aware_datetime(
+            ready_at or _utc_now_iso(),
+            name="ready_at",
+        ).isoformat()
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT execution_id
+                FROM llm_task_executions
+                WHERE business_type = 'file'
+                  AND batch_id IS NOT NULL
+                  AND batch_sequence IS NOT NULL
+                  AND execution_state = 'accepted'
+                  AND (
+                      next_dispatch_at IS NULL
+                      OR julianday(next_dispatch_at) <= julianday(?)
+                  )
+                ORDER BY dispatch_sequence
+                LIMIT ?
+                """,
+                (normalized_ready_at, limit),
+            ).fetchall()
+        return tuple(str(row["execution_id"]) for row in rows)
+
+    def inspect_analysis_task_execution_queue(
+        self,
+        *,
+        running_sample_limit: int,
+    ) -> Dict[str, Any]:
+        """只读汇总带批次身份的新 Analysis execution。
+
+        文件分析切换期间，旧 ``file`` 兼容链与新批次链共享业务类型。诊断若直接复用
+        通用 ``file`` 汇总，会把旧 accepted/running 误显示为新 Dispatcher 的积压，甚至
+        诱导运维人员错误接管。这里与 ``list_accepted_analysis_task_execution_ids`` 保持
+        相同的 batch 身份边界，只做观测，绝不重置任何 ``running`` 记录。
+        """
+
+        if (
+            isinstance(running_sample_limit, bool)
+            or not isinstance(running_sample_limit, int)
+            or running_sample_limit < 1
+            or running_sample_limit > 1000
+        ):
+            raise ValueError("running_sample_limit必须是1~1000的整数")
+
+        with self._connection() as conn:
+            aggregate = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN execution_state = 'accepted' THEN 1 ELSE 0 END)
+                        AS accepted_count,
+                    SUM(CASE WHEN execution_state = 'running' THEN 1 ELSE 0 END)
+                        AS running_count,
+                    MIN(CASE WHEN execution_state = 'accepted' THEN created_at END)
+                        AS oldest_accepted_at,
+                    MIN(
+                        CASE WHEN execution_state = 'running'
+                        THEN COALESCE(started_at, created_at) END
+                    ) AS oldest_running_at
+                FROM llm_task_executions
+                WHERE business_type = 'file'
+                  AND batch_id IS NOT NULL
+                  AND batch_sequence IS NOT NULL
+                  AND execution_state IN ('accepted', 'running')
+                """
+            ).fetchone()
+            running_rows = conn.execute(
+                """
+                SELECT execution_id
+                FROM llm_task_executions
+                WHERE business_type = 'file'
+                  AND batch_id IS NOT NULL
+                  AND batch_sequence IS NOT NULL
+                  AND execution_state = 'running'
+                ORDER BY COALESCE(started_at, created_at), execution_id
+                LIMIT ?
+                """,
+                (running_sample_limit,),
+            ).fetchall()
+
+        if aggregate is None:  # pragma: no cover - SQLite aggregate 恒返回一行。
+            raise RuntimeError("Analysis任务队列汇总查询未返回结果")
+        result: Dict[str, Any] = {
+            "business_type": "file",
+            "accepted_count": int(aggregate["accepted_count"] or 0),
+            "running_count": int(aggregate["running_count"] or 0),
+            "oldest_accepted_at": aggregate["oldest_accepted_at"],
+            "oldest_running_at": aggregate["oldest_running_at"],
+            "running_execution_ids": tuple(
+                str(row["execution_id"]) for row in running_rows
+            ),
+        }
+        logger.debug(
+            "Analysis任务队列只读汇总完成: accepted=%d running=%d "
+            "running_sample_count=%d",
+            result["accepted_count"],
+            result["running_count"],
+            len(result["running_execution_ids"]),
+        )
+        return result
 
     def inspect_task_execution_queue(
         self,
@@ -5204,6 +6721,69 @@ class LLMTaskService:
             item["success"] = bool(item["success"])
             events.append(item)
         return events
+
+    def get_llm_interaction_by_execution(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+        audit_idempotency_key: str,
+    ) -> Dict[str, Any] | None:
+        """按审计幂等键和 execution 精确读取单条交互。
+
+        恢复任务只需要确认一个 execution 的原子审计是否已提交。不能先读取同一业务键的
+        全部历史 Prompt、响应和来源再在 Python 中过滤，否则重复分析同名文件时，恢复成本
+        会随历史总量无界增长。``audit_idempotency_key`` 已有唯一索引，其余条件用于再次
+        校验业务归属，避免错误调用跨任务串读。
+        """
+
+        normalized_business_type = _required_internal_text(
+            business_type,
+            name="business_type",
+        )
+        normalized_business_key = _required_internal_text(
+            business_key,
+            name="business_key",
+        )
+        normalized_execution_id = _required_internal_text(
+            execution_id,
+            name="execution_id",
+        )
+        normalized_audit_key = _required_internal_text(
+            audit_idempotency_key,
+            name="audit_idempotency_key",
+        )
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, business_type, business_key, workspace_name,
+                       execution_id, audit_schema_version,
+                       audit_idempotency_key, trace_digest, trace_id,
+                       workspace_slug, thread_slug, prompt, response,
+                       sources_json, status, error_message,
+                       workspace_cleanup_status, workspace_cleanup_error,
+                       created_at, completed_at
+                FROM llm_interactions
+                WHERE audit_idempotency_key = ?
+                  AND execution_id = ?
+                  AND business_type = ?
+                  AND business_key = ?
+                LIMIT 1
+                """,
+                (
+                    normalized_audit_key,
+                    normalized_execution_id,
+                    normalized_business_type,
+                    normalized_business_key,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        interaction = dict(row)
+        interaction["sources"] = self._deserialize(
+            interaction.pop("sources_json")
+        ) or []
+        return interaction
 
     def get_llm_interactions(
         self,

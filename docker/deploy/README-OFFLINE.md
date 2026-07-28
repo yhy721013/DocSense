@@ -270,6 +270,33 @@ docker compose up -d --force-recreate docsense
 docker compose logs --tail 100 docsense
 ```
 
+文件分析 Dispatcher 的 1F-5A 内部运行参数也已显式写入 `.env.docker`：
+
+```ini
+DOCSENSE_ANALYSIS_RUNTIME_MODE=single_instance
+DOCSENSE_ANALYSIS_DISPATCH_SCAN_INTERVAL_SECONDS=1
+DOCSENSE_ANALYSIS_DISPATCH_BATCH_SIZE=50
+DOCSENSE_ANALYSIS_DISPATCH_RETRY_BASE_SECONDS=5
+DOCSENSE_ANALYSIS_DISPATCH_RETRY_MAX_SECONDS=300
+DOCSENSE_ANALYSIS_RESOURCE_SWEEP_INTERVAL_SECONDS=30
+DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE=50
+DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS=30
+DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS=5
+DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS=10
+DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS=30
+```
+
+- 该 Dispatcher 只允许 `single_instance`：它依赖本地 SQLite、进程锁和进程内线程；设置
+  `distributed`、`multi_instance` 或其他值会使容器在组合根阶段拒绝启动，不能把它当作可靠队列或
+  多实例开关。
+- `DISPATCH_BATCH_SIZE` 与 `RESOURCE_SWEEP_BATCH_SIZE` 只限制单次扫描量，不限制 SQLite 中可持久保存的
+  accepted 积压量。领取前基础设施错误按 base/max 执行持久化指数退避，避免单个坏任务热循环。
+- Callback lease 必须严格大于 HTTP timeout 加连接、响应读取和安全余量；任何非法数值或超时关系都会
+  fail fast，不会静默退回默认值。
+- 当前公开 `/llm/analysis` 与 file 类型 `/llm/check-task` 已接入阶段 1F 唯一运行链。
+  Dispatcher 只扫描带 `batch_id`/`batch_sequence` 的新 file execution，不领取旧任务，也不得
+  手工制造并行双跑。任何部署阶段都不得手工制造并行双跑。
+
 ### 2.7 验证
 
 - DocSense 调试页：http://localhost:5001/debug/callback
@@ -339,11 +366,22 @@ docker compose down
 ### 清理测试数据
 
 ```powershell
-docker exec -it docsense-app python clean.py
+cd D:\DocSense\docker
+docker compose stop docsense
+docker compose run --rm --no-deps docsense python clean.py
+docker compose up -d docsense
 ```
 
-> 注意：`clean.py` 的 API 清理功能（删除 AnythingLLM 工作区）正常工作；
+> 必须先停止 DocSense，且 `clean.py` 必须以退出码 0 完成后才能启动新版本。脚本会
+> 删除 `DOCSENSE_RUNTIME_DIR`，并显式删除通过 `DOCSENSE_LLM_TASK_DB`、
+> `DOCSENSE_KNOWLEDGE_BASE_DB`/`KNOWLEDGE_BASE_DB_PATH`、`DOCSENSE_CHAT_DB`
+> 配置在运行时目录外的数据库；文件占用或删除失败会非零退出。其 API 清理功能
+> 会删除 AnythingLLM 工作区；
 > 物理文件清理会因为 AnythingLLM 在另一个容器中而跳过（无影响）。
+>
+> 当前项目约定每次代码更新均执行上述停服清库重建，因此
+> `scripts/inspect_analysis_cutover.py` 不是日常发布强制步骤。只有保留存量任务库、
+> 从备份恢复或怀疑清理未成功时，才在停服窗口运行该只读预检并处置全部阻断项。
 
 ### 更新代码（最常见操作）
 

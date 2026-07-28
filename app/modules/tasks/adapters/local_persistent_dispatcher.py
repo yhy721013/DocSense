@@ -201,6 +201,9 @@ class LocalPersistentTaskDispatcher:
         maintenance_tasks: tuple[LocalPersistentMaintenanceTask, ...] = (),
         execution_limiter: TaskExecutionPermitPort | None = None,
         process_guard: ProcessSingletonGuardPort | None = None,
+        startup_gate: Callable[[], None] | None = None,
+        accepted_deferral_handler: Callable[[TaskId, str], bool] | None = None,
+        fatal_error_handler: Callable[[str], None] | None = None,
         event_logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], datetime] = _utc_now,
@@ -232,6 +235,14 @@ class LocalPersistentTaskDispatcher:
             ProcessSingletonGuardPort,
         ):
             raise TypeError("process_guard 必须实现 ProcessSingletonGuardPort")
+        if startup_gate is not None and not callable(startup_gate):
+            raise TypeError("startup_gate 必须可调用或为 None")
+        if accepted_deferral_handler is not None and not callable(
+            accepted_deferral_handler
+        ):
+            raise TypeError("accepted_deferral_handler 必须可调用或为 None")
+        if fatal_error_handler is not None and not callable(fatal_error_handler):
+            raise TypeError("fatal_error_handler 必须可调用或为 None")
         if event_logger is not None and not isinstance(event_logger, logging.Logger):
             raise TypeError("event_logger 必须是 logging.Logger 或 None")
         if not callable(monotonic) or not callable(wall_clock):
@@ -244,6 +255,14 @@ class LocalPersistentTaskDispatcher:
         self._maintenance_tasks = tasks
         self._execution_limiter = execution_limiter
         self._process_guard = process_guard
+        self._startup_gate = startup_gate
+        # 少数业务需要把受理前失败的退避时间与自身持久化计数放在同一事务内计算。
+        # 内核只保留“失败后必须持久化冷却”的通用语义；未注入时继续使用既有固定
+        # retry_at 行为，避免 Report/Weaponry 的已验证链路发生行为变化。
+        self._accepted_deferral_handler = accepted_deferral_handler
+        # 生产组合根可以把不可恢复的线程退出升级为进程退出，让编排器重启并重新扫描
+        # 已持久化 accepted 事实。默认不注入，保证离线测试和其他业务的既有行为不变。
+        self._fatal_error_handler = fatal_error_handler
         self._logger = event_logger or logger
         self._monotonic = monotonic
         self._wall_clock = wall_clock
@@ -301,6 +320,21 @@ class LocalPersistentTaskDispatcher:
 
         if not isinstance(task_id, TaskId):
             raise TypeError("task_id 必须是 TaskId")
+        self._signal_wakeup(task_id)
+
+    def wake_up(self) -> None:
+        """发送不携带业务身份的常量空间唤醒信号。
+
+        某些批量受理器只需要通知“持久积压可能变了”，并不会向 Dispatcher 暴露每个
+        execution 的内部 TaskId。Event 只缩短下一次扫描等待，不是可靠队列；即使该
+        信号丢失，Worker 仍会按固定周期从 Repository 重新发现 accepted 事实。
+        """
+
+        self._signal_wakeup(None)
+
+    def _signal_wakeup(self, task_id: TaskId | None) -> None:
+        """在同一处维护带/不带任务身份的唤醒计数和生命周期门禁。"""
+
         with self._state_lock:
             self._raise_if_forked_locked()
             if self._lifecycle_state in {
@@ -319,7 +353,7 @@ class LocalPersistentTaskDispatcher:
         self._logger.debug(
             "%s Dispatcher 已接收常量空间唤醒: task_id=%s merged=%s",
             self._settings.business_label,
-            task_id,
+            task_id or "-",
             already_pending,
         )
 
@@ -347,6 +381,12 @@ class LocalPersistentTaskDispatcher:
                             "单实例进程锁已被其他进程占用"
                         )
                     self._guard_acquired = True
+
+                # 启动门禁必须位于跨进程锁之后、后台线程之前。业务模块可在这里完成
+                # 必须串行化的外部资源准备；若门禁失败，统一异常路径会释放进程锁，
+                # Worker 尚未创建，因此不会领取到依赖尚未就绪的任务。
+                if self._startup_gate is not None:
+                    self._startup_gate()
 
                 self._owner_pid = os.getpid()
                 self._stop_event.clear()
@@ -687,8 +727,9 @@ class LocalPersistentTaskDispatcher:
                             self._settings.business_label,
                             exc_info=True,
                         )
-                        with self._state_lock:
-                            self._fatal_error = "execution_limiter_release_failed"
+                        self._record_fatal_error(
+                            "execution_limiter_release_failed"
+                        )
                         self._stop_event.set()
                         self._wake_event.set()
                         completed_scan = False
@@ -709,20 +750,27 @@ class LocalPersistentTaskDispatcher:
 
         if not failures:
             return False
-        retry_at = (
-            self._aware_wall_now()
-            + timedelta(seconds=self._settings.dispatch_failure_retry_seconds)
-        ).isoformat()
+        retry_at = None
+        if self._accepted_deferral_handler is None:
+            retry_at = (
+                self._aware_wall_now()
+                + timedelta(seconds=self._settings.dispatch_failure_retry_seconds)
+            ).isoformat()
         infrastructure_failure = False
         for task_id, reason in failures:
             try:
-                deferred = self._task_commands.defer_accepted(
-                    task_id,
-                    retry_at=retry_at,
-                    reason=reason,
-                )
+                if self._accepted_deferral_handler is not None:
+                    # 自定义处理器必须自行在持久化事务内计算 retry_at；不能把内核中
+                    # 读取到的易失内存计数当成跨重启或未来多实例下的退避事实。
+                    deferred = self._accepted_deferral_handler(task_id, reason)
+                else:
+                    deferred = self._task_commands.defer_accepted(
+                        task_id,
+                        retry_at=retry_at or "",
+                        reason=reason,
+                    )
                 if not isinstance(deferred, bool):
-                    raise TypeError("defer_accepted 必须返回 bool")
+                    raise TypeError("accepted 失败冷却处理器必须返回 bool")
                 if deferred:
                     with self._state_lock:
                         self._accepted_deferral_count += 1
@@ -803,10 +851,31 @@ class LocalPersistentTaskDispatcher:
         self._stop_event.set()
         self._wake_event.set()
         with self._state_lock:
-            if not self._fatal_error:
-                self._fatal_error = message
             if self._lifecycle_state not in {_STATE_STOPPED, _STATE_CLOSED}:
                 self._lifecycle_state = _STATE_STOPPING
+        self._record_fatal_error(message)
+
+    def _record_fatal_error(self, message: str) -> None:
+        """只记录并通知一次不可恢复故障，避免多个线程重复终止同一进程。"""
+
+        should_notify = False
+        with self._state_lock:
+            if not self._fatal_error:
+                self._fatal_error = message
+                should_notify = True
+        if not should_notify or self._fatal_error_handler is None:
+            return
+        try:
+            self._fatal_error_handler(message)
+        except Exception:
+            # 终止处理器本身失败时仍保持 fatal/readiness=false；不能让异常覆盖原始
+            # 故障或阻止其余线程按 stop_event 收口。
+            self._logger.critical(
+                "%s Dispatcher 致命故障处理器执行失败: fatal_error=%s",
+                self._settings.business_label,
+                message,
+                exc_info=True,
+            )
 
     def _complete_stop_if_finished(self) -> None:
         if not self._all_finished():

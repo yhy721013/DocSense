@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from app.modules.tasks.adapters.local_persistent_dispatcher import (
     LocalPersistentDispatcherSettings,
@@ -112,6 +112,7 @@ class LocalWeaponryTaskDispatcher:
         config: WeaponryInfrastructureConfig,
         execution_limiter: TaskExecutionPermitPort | None = None,
         process_guard: ProcessSingletonGuardPort | None = None,
+        startup_gate: Callable[[], None] | None = None,
         monotonic=time.monotonic,
         wall_clock=_utc_now,
     ) -> None:
@@ -176,6 +177,7 @@ class LocalWeaponryTaskDispatcher:
             ),
             execution_limiter=execution_limiter,
             process_guard=process_guard,
+            startup_gate=startup_gate,
             event_logger=logger,
             monotonic=monotonic,
             wall_clock=wall_clock,

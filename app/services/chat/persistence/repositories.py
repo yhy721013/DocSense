@@ -11,6 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
+from app.services.chat.domain.document_candidates import ChatDocumentCandidate
+from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_SELECTION_MODES,
+    CHAT_SCOPE_SOURCE_MODES,
+    ChatRequestedFile,
+    ChatScopeHead,
+    ChatScopeRevision,
+)
 from app.services.chat.domain.models import (
     CLEANUP_JOB_FAILED,
     CLEANUP_JOB_PENDING,
@@ -48,6 +56,12 @@ from app.services.chat.domain.models import (
 
 
 logger = logging.getLogger(__name__)
+
+# 文件对话完整执行会依次提交受理、资源租约、binding、事件和终态等多个短事务。
+# 当进程内流容量显式提高到 50 时，不同会话仍会竞争 SQLite 的唯一写锁；5 秒默认值
+# 不足以覆盖这组有界短事务的排队时间。这里保留 30 秒上限，避免无限等待，同时明确
+# 这只是单实例 SQLite 的退避窗口，不代表并行写、多实例协调或可靠队列能力。
+DEFAULT_CHAT_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 
 
 _RUN_STATUS_TRANSITIONS = {
@@ -117,13 +131,22 @@ def _json_loads_list(value: str) -> list[Any]:
     return loaded
 
 
-def _connect(db_path: str, *, timeout_seconds: float = 5.0) -> sqlite3.Connection:
-    connection = sqlite3.connect(db_path, timeout=max(0.0, timeout_seconds))
+def _connect(
+    db_path: str,
+    *,
+    timeout_seconds: float = DEFAULT_CHAT_SQLITE_BUSY_TIMEOUT_SECONDS,
+) -> sqlite3.Connection:
+    normalized_timeout_seconds = max(0.0, float(timeout_seconds))
+    connection = sqlite3.connect(
+        db_path,
+        timeout=normalized_timeout_seconds,
+    )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     # 有界忙等待超时可使受支持的单实例模式中短暂写入冲突的结果确定。它不能替代队列
     # 或分布式锁，但可避免相邻请求提交短事务时 SQLite 立即失败。
-    connection.execute("PRAGMA busy_timeout = 5000")
+    busy_timeout_ms = round(normalized_timeout_seconds * 1000)
+    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
     return connection
 
 
@@ -553,10 +576,262 @@ def _add_integrity_triggers_and_refine_cleanup_job_identity(
     )
 
 
+def _add_chat_scope_revisions(connection: sqlite3.Connection) -> None:
+    """增加 Requested/Active/Effective Scope 所需的 Schema v4。
+
+    本迁移必须先保持阶段 2 的旧生产链可运行，因此新增 run input 字段使用
+    ``legacy_input``/空引用作为过渡默认值。阶段 3 切换后，新受理运行必须显式写入
+   三种正式 selection mode 和 Scope Revision；阶段 6 会按已确认方案停服清理开发库。
+    """
+    connection.execute(
+        """
+        CREATE TABLE chat_scope_revisions (
+            scope_revision_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            source_mode TEXT NOT NULL CHECK (
+                source_mode IN ('automatic_initial', 'explicit')
+            ),
+            source_run_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE chat_scope_members (
+            scope_revision_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            file_name TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            document_ref TEXT NOT NULL,
+            external_location TEXT NOT NULL,
+            PRIMARY KEY(scope_revision_id, ordinal),
+            UNIQUE(scope_revision_id, file_name),
+            UNIQUE(scope_revision_id, document_ref),
+            UNIQUE(scope_revision_id, external_location),
+            FOREIGN KEY(scope_revision_id)
+                REFERENCES chat_scope_revisions(scope_revision_id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE chat_scope_heads (
+            chat_id TEXT PRIMARY KEY,
+            scope_revision_id TEXT NOT NULL UNIQUE,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(chat_id) REFERENCES chat_sessions(chat_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(scope_revision_id)
+                REFERENCES chat_scope_revisions(scope_revision_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        ALTER TABLE chat_run_inputs
+        ADD COLUMN requested_files_json TEXT NOT NULL DEFAULT '[]'
+        """
+    )
+    connection.execute(
+        """
+        ALTER TABLE chat_run_inputs
+        ADD COLUMN effective_scope_revision_id TEXT NOT NULL DEFAULT ''
+        """
+    )
+    connection.execute(
+        """
+        ALTER TABLE chat_run_inputs
+        ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'legacy_input'
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX idx_chat_scope_revisions_chat_created
+        ON chat_scope_revisions(chat_id, created_at, scope_revision_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX idx_chat_scope_members_revision_ordinal
+        ON chat_scope_members(scope_revision_id, ordinal)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_scope_revision_run_chat_insert
+        BEFORE INSERT ON chat_scope_revisions
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_runs
+            WHERE run_id = NEW.source_run_id AND chat_id = NEW.chat_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_scope_revision source_run_id does not belong to chat_id'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_scope_revision_immutable
+        BEFORE UPDATE ON chat_scope_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_scope_revision is immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_scope_member_immutable
+        BEFORE UPDATE ON chat_scope_members
+        BEGIN
+            SELECT RAISE(ABORT, 'chat_scope_member is immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_scope_head_revision_chat_insert
+        BEFORE INSERT ON chat_scope_heads
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_scope_revisions
+            WHERE scope_revision_id = NEW.scope_revision_id
+              AND chat_id = NEW.chat_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_scope_head revision does not belong to chat_id'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_scope_head_revision_chat_update
+        BEFORE UPDATE OF chat_id, scope_revision_id ON chat_scope_heads
+        WHEN NOT EXISTS (
+            SELECT 1 FROM chat_scope_revisions
+            WHERE scope_revision_id = NEW.scope_revision_id
+              AND chat_id = NEW.chat_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_scope_head revision does not belong to chat_id'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_run_input_scope_chat_insert
+        BEFORE INSERT ON chat_run_inputs
+        WHEN NEW.effective_scope_revision_id != '' AND NOT EXISTS (
+            SELECT 1
+            FROM chat_runs AS run
+            JOIN chat_scope_revisions AS revision
+              ON revision.scope_revision_id =
+                 NEW.effective_scope_revision_id
+            WHERE run.run_id = NEW.run_id
+              AND run.chat_id = revision.chat_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_run_input scope does not belong to run chat_id'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_run_input_scope_chat_update
+        BEFORE UPDATE OF run_id, effective_scope_revision_id
+        ON chat_run_inputs
+        WHEN NEW.effective_scope_revision_id != '' AND NOT EXISTS (
+            SELECT 1
+            FROM chat_runs AS run
+            JOIN chat_scope_revisions AS revision
+              ON revision.scope_revision_id =
+                 NEW.effective_scope_revision_id
+            WHERE run.run_id = NEW.run_id
+              AND run.chat_id = revision.chat_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_run_input scope does not belong to run chat_id'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_run_input_scope_mode_insert
+        BEFORE INSERT ON chat_run_inputs
+        WHEN NOT (
+            (
+                NEW.effective_scope_revision_id = ''
+                AND NEW.selection_mode = 'legacy_input'
+            )
+            OR
+            (
+                NEW.effective_scope_revision_id != ''
+                AND NEW.selection_mode IN (
+                    'automatic_initial', 'explicit', 'active_scope_reuse'
+                )
+                AND NEW.files_json = '[]'
+            )
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_run_input scope mode or legacy payload is invalid'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_run_input_scope_mode_update
+        BEFORE UPDATE OF
+            files_json, effective_scope_revision_id, selection_mode
+        ON chat_run_inputs
+        WHEN NOT (
+            (
+                NEW.effective_scope_revision_id = ''
+                AND NEW.selection_mode = 'legacy_input'
+            )
+            OR
+            (
+                NEW.effective_scope_revision_id != ''
+                AND NEW.selection_mode IN (
+                    'automatic_initial', 'explicit', 'active_scope_reuse'
+                )
+                AND NEW.files_json = '[]'
+            )
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_run_input scope mode or legacy payload is invalid'
+            );
+        END
+        """
+    )
+
+
 _CHAT_SCHEMA_MIGRATIONS = (
     (1, _create_chat_authority_schema),
     (2, _add_chat_constraints_and_indexes),
     (3, _add_integrity_triggers_and_refine_cleanup_job_identity),
+    (4, _add_chat_scope_revisions),
 )
 
 
@@ -946,10 +1221,9 @@ class ChatDocumentBindingRepository(_Repository):
                 ),
             )
             logger.info(
-                "文件版本已绑定到本地对话: chat_id=%s file_name=%s "
+                "文件版本已绑定到本地对话: chat_id=%s "
                 "has_document_ref=%s binding_id=%s",
                 normalized_chat_id,
-                normalized_file_name,
                 bool(normalized_document_ref),
                 binding.binding_id,
             )
@@ -1303,6 +1577,254 @@ class ChatRunRepository(_Repository):
         )
 
 
+def chat_scope_revision_id_for_run(run_id: str) -> str:
+    """由内部 run 身份生成稳定 Scope Revision 身份。"""
+    return f"{_required_text(run_id, name='run_id')}:scope"
+
+
+class ChatScopeRepository(_Repository):
+    """不可变 Scope Revision、成员和当前 Head 的 SQLite Repository。"""
+
+    def get_head(self, chat_id: str) -> ChatScopeHead | None:
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        with self._connection() as connection:
+            return self.get_head_in_transaction(
+                connection,
+                chat_id=normalized_chat_id,
+            )
+
+    def get_revision(
+        self,
+        scope_revision_id: str,
+    ) -> ChatScopeRevision | None:
+        normalized_revision_id = _required_text(
+            scope_revision_id,
+            name="scope_revision_id",
+        )
+        with self._connection() as connection:
+            return self.get_revision_in_transaction(
+                connection,
+                scope_revision_id=normalized_revision_id,
+            )
+
+    def get_current_revision(self, chat_id: str) -> ChatScopeRevision | None:
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        with self._connection() as connection:
+            head = self.get_head_in_transaction(
+                connection,
+                chat_id=normalized_chat_id,
+            )
+            if head is None:
+                return None
+            revision = self.get_revision_in_transaction(
+                connection,
+                scope_revision_id=head.scope_revision_id,
+            )
+            if revision is None or revision.chat_id != normalized_chat_id:
+                raise ValueError("chat scope head points to invalid revision")
+            return revision
+
+    def list_revisions_by_chat(
+        self,
+        chat_id: str,
+    ) -> tuple[ChatScopeRevision, ...]:
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT scope_revision_id
+                FROM chat_scope_revisions
+                WHERE chat_id = ?
+                ORDER BY created_at ASC, scope_revision_id ASC
+                """,
+                (normalized_chat_id,),
+            ).fetchall()
+            revisions: list[ChatScopeRevision] = []
+            for row in rows:
+                revision = self.get_revision_in_transaction(
+                    connection,
+                    scope_revision_id=row["scope_revision_id"],
+                )
+                if revision is None:
+                    raise ValueError("chat scope revision disappeared")
+                revisions.append(revision)
+            return tuple(revisions)
+
+    def append_and_set_head(
+        self,
+        *,
+        revision: ChatScopeRevision,
+        expected_current_revision_id: str | None,
+    ) -> ChatScopeHead:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self.append_and_set_head_in_transaction(
+                connection,
+                revision=revision,
+                expected_current_revision_id=expected_current_revision_id,
+            )
+
+    @staticmethod
+    def append_and_set_head_in_transaction(
+        connection: sqlite3.Connection,
+        *,
+        revision: ChatScopeRevision,
+        expected_current_revision_id: str | None,
+    ) -> ChatScopeHead:
+        """在调用方事务内追加 Revision，并以 CAS 方式切换 Head。"""
+        if not isinstance(connection, sqlite3.Connection):
+            raise TypeError("connection must be sqlite3.Connection")
+        if not isinstance(revision, ChatScopeRevision):
+            raise TypeError("revision must be ChatScopeRevision")
+        expected_revision_id = (
+            None
+            if expected_current_revision_id is None
+            else _required_text(
+                expected_current_revision_id,
+                name="expected_current_revision_id",
+            )
+        )
+        connection.execute(
+            """
+            INSERT INTO chat_scope_revisions (
+                scope_revision_id, chat_id, source_mode,
+                source_run_id, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                revision.scope_revision_id,
+                revision.chat_id,
+                revision.source_mode,
+                revision.source_run_id,
+                revision.created_at,
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO chat_scope_members (
+                scope_revision_id, ordinal, file_name, original_name,
+                document_ref, external_location
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (
+                    revision.scope_revision_id,
+                    ordinal,
+                    member.file_name,
+                    member.original_name,
+                    member.document_ref,
+                    member.external_location,
+                )
+                for ordinal, member in enumerate(revision.members)
+            ),
+        )
+        if expected_revision_id is None:
+            connection.execute(
+                """
+                INSERT INTO chat_scope_heads (
+                    chat_id, scope_revision_id, updated_at
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    revision.chat_id,
+                    revision.scope_revision_id,
+                    revision.created_at,
+                ),
+            )
+        else:
+            updated = connection.execute(
+                """
+                UPDATE chat_scope_heads
+                SET scope_revision_id = ?, updated_at = ?
+                WHERE chat_id = ? AND scope_revision_id = ?
+                """,
+                (
+                    revision.scope_revision_id,
+                    revision.created_at,
+                    revision.chat_id,
+                    expected_revision_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("chat scope head compare-and-set conflict")
+        logger.info(
+            "文件对话活动范围版本已追加并切换 Head: "
+            "chat_id=%s scope_revision_id=%s source_mode=%s member_count=%d",
+            revision.chat_id,
+            revision.scope_revision_id,
+            revision.source_mode,
+            len(revision.members),
+        )
+        return ChatScopeHead(
+            chat_id=revision.chat_id,
+            scope_revision_id=revision.scope_revision_id,
+            updated_at=revision.created_at,
+        )
+
+    @staticmethod
+    def get_head_in_transaction(
+        connection: sqlite3.Connection,
+        *,
+        chat_id: str,
+    ) -> ChatScopeHead | None:
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        row = connection.execute(
+            "SELECT * FROM chat_scope_heads WHERE chat_id = ?",
+            (normalized_chat_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return ChatScopeHead(
+            chat_id=row["chat_id"],
+            scope_revision_id=row["scope_revision_id"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def get_revision_in_transaction(
+        connection: sqlite3.Connection,
+        *,
+        scope_revision_id: str,
+    ) -> ChatScopeRevision | None:
+        normalized_revision_id = _required_text(
+            scope_revision_id,
+            name="scope_revision_id",
+        )
+        row = connection.execute(
+            """
+            SELECT * FROM chat_scope_revisions
+            WHERE scope_revision_id = ?
+            """,
+            (normalized_revision_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        member_rows = connection.execute(
+            """
+            SELECT * FROM chat_scope_members
+            WHERE scope_revision_id = ?
+            ORDER BY ordinal ASC
+            """,
+            (normalized_revision_id,),
+        ).fetchall()
+        return ChatScopeRevision(
+            scope_revision_id=row["scope_revision_id"],
+            chat_id=row["chat_id"],
+            source_mode=row["source_mode"],
+            source_run_id=row["source_run_id"],
+            members=tuple(
+                ChatDocumentCandidate(
+                    file_name=member["file_name"],
+                    original_name=member["original_name"],
+                    document_ref=member["document_ref"],
+                    external_location=member["external_location"],
+                )
+                for member in member_rows
+            ),
+            created_at=row["created_at"],
+        )
+
+
 class ChatRunInputRepository(_Repository):
     """不可变请求时 `chat_run_inputs` 快照的仓储。"""
 
@@ -1313,16 +1835,78 @@ class ChatRunInputRepository(_Repository):
                 "SELECT * FROM chat_run_inputs WHERE run_id = ?",
                 (normalized_run_id,),
             ).fetchone()
-        return self._row(row) if row is not None else None
+            return self._row(connection, row) if row is not None else None
 
     @staticmethod
-    def _row(row: sqlite3.Row) -> ChatRunInput:
+    def _row(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> ChatRunInput:
         files: list[ChatRunInputFile] = []
-        for index, raw_file in enumerate(_json_loads_list(row["files_json"])):
-            if not isinstance(raw_file, Mapping):
-                raise ValueError(f"chat_run_inputs.files_json[{index}] must be object")
-            files.append(
+        effective_scope_revision_id = _optional_text(
+            row["effective_scope_revision_id"]
+        )
+        if effective_scope_revision_id:
+            revision = ChatScopeRepository.get_revision_in_transaction(
+                connection,
+                scope_revision_id=effective_scope_revision_id,
+            )
+            if revision is None:
+                raise ValueError(
+                    "chat_run_inputs references missing scope revision"
+                )
+            files.extend(
                 ChatRunInputFile(
+                    file_name=member.file_name,
+                    original_name=member.original_name,
+                    document_ref=member.document_ref,
+                    external_location=member.external_location,
+                )
+                for member in revision.members
+            )
+        else:
+            for index, raw_file in enumerate(
+                _json_loads_list(row["files_json"])
+            ):
+                if not isinstance(raw_file, Mapping):
+                    raise ValueError(
+                        f"chat_run_inputs.files_json[{index}] must be object"
+                    )
+                files.append(
+                    ChatRunInputFile(
+                        file_name=_required_text(
+                            str(raw_file.get("file_name") or ""),
+                            name="file_name",
+                        ),
+                        original_name=_required_text(
+                            str(raw_file.get("original_name") or ""),
+                            name="original_name",
+                        ),
+                        document_ref=_required_text(
+                            str(raw_file.get("document_ref") or ""),
+                            name="document_ref",
+                        ),
+                        external_location=_optional_text(
+                            str(raw_file.get("external_location") or ""),
+                        ),
+                    )
+                )
+        requested_files: list[ChatRequestedFile] = []
+        for index, raw_file in enumerate(
+            _json_loads_list(row["requested_files_json"])
+        ):
+            if not isinstance(raw_file, Mapping):
+                raise ValueError(
+                    "chat_run_inputs.requested_files_json"
+                    f"[{index}] must be object"
+                )
+            if set(raw_file) != {"file_name", "original_name"}:
+                raise ValueError(
+                    "chat_run_inputs.requested_files_json"
+                    f"[{index}] fields are invalid"
+                )
+            requested_files.append(
+                ChatRequestedFile(
                     file_name=_required_text(
                         str(raw_file.get("file_name") or ""),
                         name="file_name",
@@ -1331,20 +1915,36 @@ class ChatRunInputRepository(_Repository):
                         str(raw_file.get("original_name") or ""),
                         name="original_name",
                     ),
-                    document_ref=_required_text(
-                        str(raw_file.get("document_ref") or ""),
-                        name="document_ref",
-                    ),
-                    external_location=_optional_text(
-                        str(raw_file.get("external_location") or ""),
-                    ),
                 )
+            )
+        if len({item.file_name for item in requested_files}) != len(
+            requested_files
+        ):
+            raise ValueError(
+                "chat_run_inputs.requested_files_json "
+                "contains duplicate file_name"
+            )
+        selection_mode = _required_text(
+            row["selection_mode"],
+            name="selection_mode",
+        )
+        if effective_scope_revision_id:
+            if selection_mode not in CHAT_SCOPE_SELECTION_MODES:
+                raise ValueError(
+                    "chat_run_inputs selection_mode is invalid for scope input"
+                )
+        elif selection_mode != "legacy_input":
+            raise ValueError(
+                "chat_run_inputs without scope must use legacy_input"
             )
         return ChatRunInput(
             run_id=row["run_id"],
             message=row["message"],
             files=tuple(files),
             created_at=row["created_at"],
+            requested_files=tuple(requested_files),
+            effective_scope_revision_id=effective_scope_revision_id,
+            selection_mode=selection_mode,
         )
 
 

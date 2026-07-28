@@ -472,6 +472,50 @@ class InMemoryProgressAdapterConcurrencyTests(unittest.TestCase):
             any("persistent_owner_changed" in item for item in captured.output)
         )
 
+    def test_latest_publisher_exposes_guarded_port_for_analysis_worker(self) -> None:
+        """Analysis 可复用同一 latest Adapter，且调用方 Guard 仍先于持久化查询。"""
+
+        hub = LLMProgressHub()
+        delegate = InMemoryProgressAdapter(hub)
+        commands = MagicMock(spec=TaskCommandPort)
+        commands.is_latest.return_value = True
+        publisher = LatestTaskProgressPublisherAdapter(
+            task_commands=commands,
+            delegate=delegate,
+        )
+        key = ProgressKey("file", "analysis-001.txt")
+        publication = ProgressPublication(
+            key=key,
+            expected_task_id=TaskId("analysis-progress-task-1"),
+            progress=0.1,
+            message="开始处理",
+            internal_state="accepted",
+        )
+
+        caller_guard = MagicMock(return_value=False)
+        self.assertFalse(
+            publisher.publish_guarded(
+                publication,
+                is_current=caller_guard,
+            )
+        )
+        caller_guard.assert_called_once_with()
+        commands.is_latest.assert_not_called()
+        self.assertIsNone(delegate.get_latest(key))
+
+        caller_guard = MagicMock(return_value=True)
+        self.assertTrue(
+            publisher.publish_guarded(
+                publication,
+                is_current=caller_guard,
+            )
+        )
+        commands.is_latest.assert_called_once_with(
+            TaskId("analysis-progress-task-1"),
+            TaskBusinessRef("file", "analysis-001.txt"),
+        )
+        self.assertEqual(TaskId("analysis-progress-task-1"), delegate.get_latest(key).task_id)
+
 
 if __name__ == "__main__":
     unittest.main()

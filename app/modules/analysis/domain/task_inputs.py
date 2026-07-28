@@ -1,0 +1,623 @@
+"""文件分析受理快照与 Worker 输入的不可变领域模型。
+
+公开 ``params`` 对象允许携带调用方扩展字段，且这些字段在后台执行期间不能与 Flask 请求、
+其他任务或调用方持有的可变字典共享引用。本模块因此把 JSON 值深冻结，再把执行策略、
+有效范围和任务身份固定为 ``AnalysisTaskInputV1``。它不读取环境变量、不生成 TaskId，
+也不访问数据库或文件系统。
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence, TypeAlias, Union
+
+from .errors import AnalysisContractError
+from .architecture_tree import ArchitectureTreeValidationError
+from .models import (
+    ANALYSIS_CLASSIFICATION_MODES,
+    ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+    ANALYSIS_DATA_STANDARD_MODES,
+    ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    ANALYSIS_FILENAME_CONSTRAINT_MODES,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    ANALYSIS_IDENTITY_RESELECT_MODES,
+    ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+    MAX_ANALYSIS_MODEL_CALLS,
+    MAX_ANALYSIS_PARAMS_PER_REQUEST,
+    MAX_ANALYSIS_PHASE_CALLS,
+    MAX_ANALYSIS_PROMPT_CHARS,
+)
+from .ranges import (
+    build_effective_analysis_ranges,
+    validate_analysis_architecture_ranges,
+)
+
+
+ANALYSIS_BUSINESS_TYPE = "file"
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 1
+ANALYSIS_EFFECTIVE_RANGE_KEYS = (
+    "country",
+    "channel",
+    "format",
+    "maturity",
+    "security",
+    "architectureList",
+    "architectureStandardList",
+)
+
+# 这些范围在旧链路中会回填服务端默认值，因此持久化快照不得为空；channel 与标准树
+# 则允许调用方明确不选择，必须继续保留空数组语义。
+_ANALYSIS_REQUIRED_EFFECTIVE_RANGE_KEYS = frozenset(
+    {"country", "format", "maturity", "security", "architectureList"}
+)
+
+JsonScalar: TypeAlias = None | bool | int | float | str
+FrozenJsonValue: TypeAlias = Union[
+    JsonScalar,
+    "FrozenJsonArray",
+    "FrozenJsonObject",
+]
+
+
+def _required_text(value: object, *, name: str, preserve: bool = False) -> str:
+    """校验非空文本；公开字段可选择保留原始首尾空白。"""
+
+    if not isinstance(value, str) or not value.strip():
+        raise AnalysisContractError(f"{name} 必须是非空 str")
+    return value if preserve else value.strip()
+
+
+def _positive_int(value: object, *, name: str, maximum: int | None = None) -> int:
+    """严格校验内部计数，显式拒绝 Python ``bool`` 伪装的整数。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AnalysisContractError(f"{name} 必须是正整数")
+    if maximum is not None and value > maximum:
+        raise AnalysisContractError(f"{name} 不能超过 {maximum}")
+    return value
+
+
+def _validate_batch_id(value: object) -> str:
+    """校验内部 128 位批次身份，避免把业务字段误当作批次键。"""
+
+    if not isinstance(value, str) or len(value) != 32:
+        raise AnalysisContractError("batch_id 必须是 32 位小写十六进制字符串")
+    allowed = set("0123456789abcdef")
+    if any(character not in allowed for character in value):
+        raise AnalysisContractError("batch_id 必须是 32 位小写十六进制字符串")
+    return value
+
+
+def _freeze_json_value(value: object, *, path: str) -> FrozenJsonValue:
+    """递归深复制严格 JSON 值，拒绝 NaN、Infinity 和 Python 专有对象。"""
+
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AnalysisContractError(f"{path} 不能包含 NaN 或 Infinity")
+        return value
+    if isinstance(value, Mapping):
+        items: list[tuple[str, FrozenJsonValue]] = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise AnalysisContractError(f"{path} 的对象键必须是 str")
+            items.append((key, _freeze_json_value(item, path=f"{path}.{key}")))
+        return FrozenJsonObject(tuple(items))
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return FrozenJsonArray(
+            tuple(
+                _freeze_json_value(item, path=f"{path}[{index}]")
+                for index, item in enumerate(value)
+            )
+        )
+    raise AnalysisContractError(
+        f"{path} 只能包含严格 JSON 类型，实际为 {type(value).__name__}"
+    )
+
+
+def _thaw_json_value(value: FrozenJsonValue) -> Any:
+    """生成无共享引用的普通 JSON 对象，仅供 Codec 或兼容投影使用。"""
+
+    if isinstance(value, FrozenJsonObject):
+        return value.to_dict()
+    if isinstance(value, FrozenJsonArray):
+        return value.to_list()
+    return value
+
+
+def _validate_frozen_json_value(value: object, *, path: str) -> None:
+    """防止调用方绕过工厂方法，直接向快照塞入可变对象。"""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AnalysisContractError(f"{path} 不能包含 NaN 或 Infinity")
+        return
+    if isinstance(value, (FrozenJsonArray, FrozenJsonObject)):
+        return
+    raise AnalysisContractError(f"{path} 必须是已经冻结的严格 JSON 值")
+
+
+@dataclass(frozen=True)
+class FrozenJsonArray:
+    """保持数组原始顺序的递归不可变 JSON 值。"""
+
+    values: tuple[FrozenJsonValue, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.values, (tuple, list)):
+            raise AnalysisContractError("FrozenJsonArray.values 必须是有序序列")
+        values = tuple(self.values)
+        for index, value in enumerate(values):
+            _validate_frozen_json_value(value, path=f"FrozenJsonArray[{index}]")
+        object.__setattr__(self, "values", values)
+
+    def to_list(self) -> list[Any]:
+        """返回普通列表，调用方修改返回值不会污染冻结快照。"""
+
+        return [_thaw_json_value(value) for value in self.values]
+
+
+@dataclass(frozen=True)
+class FrozenJsonObject:
+    """保持对象插入顺序、未知扩展键和空值语义的不可变 JSON 对象。"""
+
+    items: tuple[tuple[str, FrozenJsonValue], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, (tuple, list)):
+            raise AnalysisContractError("FrozenJsonObject.items 必须是有序键值序列")
+        items: list[tuple[str, FrozenJsonValue]] = []
+        seen: set[str] = set()
+        for item in tuple(self.items):
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise AnalysisContractError(
+                    "FrozenJsonObject.items 必须包含二元键值对"
+                )
+            key, value = item
+            if not isinstance(key, str):
+                raise AnalysisContractError("FrozenJsonObject 键必须是 str")
+            if key in seen:
+                raise AnalysisContractError(
+                    f"FrozenJsonObject 包含重复键: {key}"
+                )
+            seen.add(key)
+            _validate_frozen_json_value(value, path=f"FrozenJsonObject.{key}")
+            items.append((key, value))
+        object.__setattr__(self, "items", tuple(items))
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+        *,
+        name: str = "json_object",
+    ) -> "FrozenJsonObject":
+        """冻结请求或持久化 JSON 对象，拒绝不可序列化值。"""
+
+        if not isinstance(value, Mapping):
+            raise AnalysisContractError(f"{name} 必须是 Mapping")
+        frozen = _freeze_json_value(value, path=name)
+        if not isinstance(frozen, FrozenJsonObject):  # pragma: no cover - 防御分支
+            raise AnalysisContractError(f"{name} 必须是 JSON 对象")
+        return frozen
+
+    def get(
+        self,
+        key: str,
+        default: FrozenJsonValue | None = None,
+    ) -> FrozenJsonValue | None:
+        """按键读取冻结值，不把内部元组暴露给调用方。"""
+
+        for item_key, value in self.items:
+            if item_key == key:
+                return value
+        return default
+
+    def contains(self, key: str) -> bool:
+        """区分字段缺失与显式 ``null``，保留旧 Analysis 的可选字段语义。"""
+
+        return any(item_key == key for item_key, _ in self.items)
+
+    def to_dict(self) -> dict[str, Any]:
+        """返回深复制普通字典，供旧兼容调用和 JSON Codec 使用。"""
+
+        return {key: _thaw_json_value(value) for key, value in self.items}
+
+
+@dataclass(frozen=True)
+class AnalysisPolicySnapshot:
+    """执行时必须固定的分类和模型调用预算，禁止 Worker 重读环境变量。"""
+
+    classification_mode: str
+    filename_constraint_mode: str
+    data_standard_mode: str
+    identity_reselect_mode: str
+    model_candidate_limit: int
+    classification_prompt_char_limit: int
+    base_leaf_limit: int
+    parent_candidate_limit: int
+    max_phase_calls: int = MAX_ANALYSIS_PHASE_CALLS
+    max_model_calls: int = MAX_ANALYSIS_MODEL_CALLS
+
+    def __post_init__(self) -> None:
+        if self.classification_mode not in ANALYSIS_CLASSIFICATION_MODES:
+            raise AnalysisContractError("classification_mode 不受支持")
+        if self.filename_constraint_mode not in ANALYSIS_FILENAME_CONSTRAINT_MODES:
+            raise AnalysisContractError("filename_constraint_mode 不受支持")
+        if self.data_standard_mode not in ANALYSIS_DATA_STANDARD_MODES:
+            raise AnalysisContractError("data_standard_mode 不受支持")
+        if self.identity_reselect_mode not in ANALYSIS_IDENTITY_RESELECT_MODES:
+            raise AnalysisContractError("identity_reselect_mode 不受支持")
+        model_candidate_limit = _positive_int(
+            self.model_candidate_limit,
+            name="model_candidate_limit",
+            maximum=128,
+        )
+        classification_prompt_char_limit = _positive_int(
+            self.classification_prompt_char_limit,
+            name="classification_prompt_char_limit",
+            maximum=MAX_ANALYSIS_PROMPT_CHARS,
+        )
+        base_leaf_limit = _positive_int(
+            self.base_leaf_limit,
+            name="base_leaf_limit",
+            maximum=64,
+        )
+        parent_candidate_limit = _positive_int(
+            self.parent_candidate_limit,
+            name="parent_candidate_limit",
+            maximum=16,
+        )
+        if base_leaf_limit + parent_candidate_limit > model_candidate_limit:
+            raise AnalysisContractError(
+                "base_leaf_limit 与 parent_candidate_limit 之和不能超过 model_candidate_limit"
+            )
+        if self.max_phase_calls != MAX_ANALYSIS_PHASE_CALLS:
+            raise AnalysisContractError("max_phase_calls 必须匹配当前固定合同")
+        if self.max_model_calls != MAX_ANALYSIS_MODEL_CALLS:
+            raise AnalysisContractError("max_model_calls 必须匹配当前固定合同")
+        object.__setattr__(self, "model_candidate_limit", model_candidate_limit)
+        object.__setattr__(
+            self,
+            "classification_prompt_char_limit",
+            classification_prompt_char_limit,
+        )
+        object.__setattr__(self, "base_leaf_limit", base_leaf_limit)
+        object.__setattr__(self, "parent_candidate_limit", parent_candidate_limit)
+
+    @classmethod
+    def default(cls) -> "AnalysisPolicySnapshot":
+        """返回与当前无环境变量配置完全一致的默认策略快照。"""
+
+        return cls(
+            classification_mode=ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
+            filename_constraint_mode=ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+            data_standard_mode=ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+            identity_reselect_mode=ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+            model_candidate_limit=128,
+            classification_prompt_char_limit=MAX_ANALYSIS_PROMPT_CHARS,
+            base_leaf_limit=64,
+            parent_candidate_limit=16,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """生成稳定、仅含 JSON 原始类型的 Codec 投影。"""
+
+        return {
+            "classification_mode": self.classification_mode,
+            "filename_constraint_mode": self.filename_constraint_mode,
+            "data_standard_mode": self.data_standard_mode,
+            "identity_reselect_mode": self.identity_reselect_mode,
+            "model_candidate_limit": self.model_candidate_limit,
+            "classification_prompt_char_limit": self.classification_prompt_char_limit,
+            "base_leaf_limit": self.base_leaf_limit,
+            "parent_candidate_limit": self.parent_candidate_limit,
+            "max_phase_calls": self.max_phase_calls,
+            "max_model_calls": self.max_model_calls,
+        }
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+        *,
+        name: str = "policy_snapshot",
+    ) -> "AnalysisPolicySnapshot":
+        """从持久化 Codec 投影严格恢复策略快照。
+
+        策略字段决定 Worker 的模型调用边界，缺失字段会导致恢复时重新读取运行时配置，
+        未知字段则可能掩盖错误版本的 payload。因此这里使用精确键集合校验，遇到不认识
+        的输入一律拒绝，而不是静默忽略。
+        """
+
+        if not isinstance(value, Mapping):
+            raise AnalysisContractError(f"{name} 必须是 Mapping")
+        if any(not isinstance(key, str) for key in value):
+            raise AnalysisContractError(f"{name} 的键必须全部是 str")
+        expected_keys = frozenset(cls.default().to_dict())
+        actual_keys = frozenset(value)
+        if actual_keys != expected_keys:
+            missing = sorted(expected_keys - actual_keys)
+            unknown = sorted(actual_keys - expected_keys)
+            raise AnalysisContractError(
+                f"{name} 键集合不匹配: missing={missing} unknown={unknown}"
+            )
+        return cls(
+            classification_mode=value["classification_mode"],
+            filename_constraint_mode=value["filename_constraint_mode"],
+            data_standard_mode=value["data_standard_mode"],
+            identity_reselect_mode=value["identity_reselect_mode"],
+            model_candidate_limit=value["model_candidate_limit"],
+            classification_prompt_char_limit=value[
+                "classification_prompt_char_limit"
+            ],
+            base_leaf_limit=value["base_leaf_limit"],
+            parent_candidate_limit=value["parent_candidate_limit"],
+            max_phase_calls=value["max_phase_calls"],
+            max_model_calls=value["max_model_calls"],
+        )
+
+
+def _business_original_file_name(raw_params: FrozenJsonObject) -> tuple[bool, str]:
+    """复现旧链路的 ``originalFileName`` 空值与原值保留规则。"""
+
+    present = raw_params.contains("originalFileName")
+    # 这里只读取单个字段，不能为了取得文件名而深复制完整 architectureList。
+    # 对非常规 JSON 值仍先解冻再执行旧链路的 ``str(value)``，保持历史兼容语义。
+    raw_value = _thaw_json_value(raw_params.get("originalFileName"))
+    if raw_value is None:
+        return present, ""
+    original_name = raw_value if isinstance(raw_value, str) else str(raw_value)
+    return present, original_name if original_name.strip() else ""
+
+
+@dataclass(frozen=True)
+class AnalysisSubmissionSnapshot:
+    """单个公开 ``params`` 项在受理前冻结的纯领域输入。"""
+
+    raw_params: FrozenJsonObject
+    effective_ranges: FrozenJsonObject
+    policy_snapshot: AnalysisPolicySnapshot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.raw_params, FrozenJsonObject):
+            raise AnalysisContractError("raw_params 必须是 FrozenJsonObject")
+        if not isinstance(self.effective_ranges, FrozenJsonObject):
+            raise AnalysisContractError("effective_ranges 必须是 FrozenJsonObject")
+        if not isinstance(self.policy_snapshot, AnalysisPolicySnapshot):
+            raise AnalysisContractError("policy_snapshot 必须是 AnalysisPolicySnapshot")
+        # 受理前的 Web Adapter 已校验公开字段；这里再次守住存储边界，避免未来调用方绕过
+        # Parser 后写入无法重放的 execution 输入。
+        _required_text(self.raw_params.get("fileName"), name="raw_params.fileName")
+        _required_text(self.raw_params.get("filePath"), name="raw_params.filePath")
+        self._validate_effective_ranges()
+
+    def _validate_effective_ranges(self) -> None:
+        """校验受理快照的固定范围 Schema，拒绝无法独立重放的毒记录。"""
+
+        actual_keys = tuple(key for key, _ in self.effective_ranges.items)
+        if frozenset(actual_keys) != frozenset(ANALYSIS_EFFECTIVE_RANGE_KEYS):
+            missing = sorted(set(ANALYSIS_EFFECTIVE_RANGE_KEYS) - set(actual_keys))
+            unknown = sorted(set(actual_keys) - set(ANALYSIS_EFFECTIVE_RANGE_KEYS))
+            raise AnalysisContractError(
+                f"effective_ranges 键集合不匹配: missing={missing} unknown={unknown}"
+            )
+        for key in ANALYSIS_EFFECTIVE_RANGE_KEYS:
+            value = self.effective_ranges.get(key)
+            if not isinstance(value, FrozenJsonArray):
+                raise AnalysisContractError(f"effective_ranges.{key} 必须是数组")
+            if key in _ANALYSIS_REQUIRED_EFFECTIVE_RANGE_KEYS and not value.values:
+                raise AnalysisContractError(f"effective_ranges.{key} 不能为空")
+            if any(
+                not isinstance(item, FrozenJsonObject) or not item.items
+                for item in value.values
+            ):
+                raise AnalysisContractError(
+                    f"effective_ranges.{key} 只能包含非空对象"
+                )
+        try:
+            validate_analysis_architecture_ranges(self.effective_ranges.to_dict())
+        except ArchitectureTreeValidationError as exc:
+            # 统一收口为领域合同错误；原始异常只作为 cause 保留，不进入公开响应。
+            raise AnalysisContractError("effective_ranges 领域树无效") from exc
+
+    @classmethod
+    def from_request_params(
+        cls,
+        raw_params: Mapping[str, object],
+        *,
+        policy_snapshot: AnalysisPolicySnapshot,
+    ) -> "AnalysisSubmissionSnapshot":
+        """深冻结请求项，并在受理时一次性计算有效范围默认值。"""
+
+        frozen_params = FrozenJsonObject.from_mapping(
+            raw_params,
+            name="analysis_params",
+        )
+        return cls.from_frozen_params(
+            frozen_params,
+            policy_snapshot=policy_snapshot,
+        )
+
+    @classmethod
+    def from_frozen_params(
+        cls,
+        raw_params: FrozenJsonObject,
+        *,
+        policy_snapshot: AnalysisPolicySnapshot,
+    ) -> "AnalysisSubmissionSnapshot":
+        """复用 Parser 已冻结参数，避免在受理链中重复复制大型嵌套容器。"""
+
+        if not isinstance(raw_params, FrozenJsonObject):
+            raise TypeError("raw_params 必须是 FrozenJsonObject")
+        effective_ranges = FrozenJsonObject.from_mapping(
+            build_effective_analysis_ranges(raw_params.to_dict()),
+            name="effective_ranges",
+        )
+        return cls(
+            raw_params=raw_params,
+            effective_ranges=effective_ranges,
+            policy_snapshot=policy_snapshot,
+        )
+
+    @property
+    def file_name(self) -> str:
+        """返回用于 Task 最新投影的规范业务键，不回写原始请求。"""
+
+        return _required_text(self.raw_params.get("fileName"), name="raw_params.fileName")
+
+    @property
+    def file_path(self) -> str:
+        """返回旧链路实际下载前使用的去首尾空白路径。"""
+
+        return _required_text(self.raw_params.get("filePath"), name="raw_params.filePath")
+
+    @property
+    def original_file_name(self) -> str:
+        """返回旧回调源展示所需的原始业务文件名语义。"""
+
+        return _business_original_file_name(self.raw_params)[1]
+
+    @property
+    def original_file_name_present(self) -> bool:
+        """保留字段缺失与显式空值的差异，供后续审计或兼容判断使用。"""
+
+        return _business_original_file_name(self.raw_params)[0]
+
+
+@dataclass(frozen=True)
+class AnalysisTaskInputV1:
+    """从 ``llm_task_executions`` 解码后可独立重放的完整文件分析输入。"""
+
+    schema_version: int
+    task_id: str
+    batch_id: str
+    batch_sequence: int
+    file_name: str
+    original_file_name: str
+    original_file_name_present: bool
+    file_path: str
+    raw_params: FrozenJsonObject
+    effective_ranges: FrozenJsonObject
+    policy_snapshot: AnalysisPolicySnapshot
+    accepted_at: str
+    trace_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version != ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+        ):
+            raise AnalysisContractError("不支持的 AnalysisTaskInputV1 schema_version")
+        object.__setattr__(self, "task_id", _required_text(self.task_id, name="task_id"))
+        object.__setattr__(self, "batch_id", _validate_batch_id(self.batch_id))
+        object.__setattr__(
+            self,
+            "batch_sequence",
+            _positive_int(
+                self.batch_sequence,
+                name="batch_sequence",
+                maximum=MAX_ANALYSIS_PARAMS_PER_REQUEST,
+            ),
+        )
+        if not isinstance(self.raw_params, FrozenJsonObject):
+            raise AnalysisContractError("raw_params 必须是 FrozenJsonObject")
+        if not isinstance(self.effective_ranges, FrozenJsonObject):
+            raise AnalysisContractError("effective_ranges 必须是 FrozenJsonObject")
+        if not isinstance(self.policy_snapshot, AnalysisPolicySnapshot):
+            raise AnalysisContractError("policy_snapshot 必须是 AnalysisPolicySnapshot")
+        # Worker 反序列化入口必须重放与受理快照完全相同的范围校验，不能只校验类型后
+        # 接受被篡改或旧进程写坏的 effective_ranges。
+        AnalysisSubmissionSnapshot(
+            raw_params=self.raw_params,
+            effective_ranges=self.effective_ranges,
+            policy_snapshot=self.policy_snapshot,
+        )
+        file_name = _required_text(self.file_name, name="file_name")
+        file_path = _required_text(self.file_path, name="file_path")
+        raw_file_name = _required_text(
+            self.raw_params.get("fileName"),
+            name="raw_params.fileName",
+        )
+        raw_file_path = _required_text(
+            self.raw_params.get("filePath"),
+            name="raw_params.filePath",
+        )
+        if file_name != raw_file_name or file_path != raw_file_path:
+            raise AnalysisContractError("任务身份与 raw_params.fileName/filePath 不一致")
+        if not isinstance(self.original_file_name, str):
+            raise AnalysisContractError("original_file_name 必须是 str")
+        if not isinstance(self.original_file_name_present, bool):
+            raise AnalysisContractError("original_file_name_present 必须是 bool")
+        expected_present, expected_original_name = _business_original_file_name(
+            self.raw_params
+        )
+        if (
+            self.original_file_name_present != expected_present
+            or self.original_file_name != expected_original_name
+        ):
+            raise AnalysisContractError("original_file_name 与 raw_params 不一致")
+        object.__setattr__(self, "file_name", file_name)
+        object.__setattr__(self, "file_path", file_path)
+        object.__setattr__(
+            self,
+            "accepted_at",
+            _required_text(self.accepted_at, name="accepted_at", preserve=True),
+        )
+        object.__setattr__(
+            self,
+            "trace_id",
+            _required_text(self.trace_id, name="trace_id", preserve=True),
+        )
+
+    @classmethod
+    def from_submission(
+        cls,
+        submission: AnalysisSubmissionSnapshot,
+        *,
+        task_id: str,
+        batch_id: str,
+        batch_sequence: int,
+        accepted_at: str,
+        trace_id: str,
+    ) -> "AnalysisTaskInputV1":
+        """把受理快照与数据库分配的内部身份合成 Worker 唯一输入。"""
+
+        if not isinstance(submission, AnalysisSubmissionSnapshot):
+            raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
+        return cls(
+            schema_version=ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+            task_id=task_id,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
+            file_name=submission.file_name,
+            original_file_name=submission.original_file_name,
+            original_file_name_present=submission.original_file_name_present,
+            file_path=submission.file_path,
+            raw_params=submission.raw_params,
+            effective_ranges=submission.effective_ranges,
+            policy_snapshot=submission.policy_snapshot,
+            accepted_at=accepted_at,
+            trace_id=trace_id,
+        )
+
+
+__all__ = (
+    "ANALYSIS_BUSINESS_TYPE",
+    "ANALYSIS_EFFECTIVE_RANGE_KEYS",
+    "ANALYSIS_TASK_INPUT_SCHEMA_VERSION",
+    "AnalysisPolicySnapshot",
+    "AnalysisSubmissionSnapshot",
+    "AnalysisTaskInputV1",
+    "FrozenJsonArray",
+    "FrozenJsonObject",
+    "FrozenJsonValue",
+    "JsonScalar",
+)

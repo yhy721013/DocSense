@@ -32,6 +32,13 @@ from app.services.chat.domain.models import (
     SESSION_ERROR,
     ChatRun,
 )
+from app.services.chat.domain.document_candidates import (
+    ChatDocumentSelectionCandidates,
+)
+from app.services.chat.domain.document_scope import (
+    ChatScopeRevision,
+    decide_chat_document_scope,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.locking.lease import (
     ChatRunLease,
@@ -42,10 +49,12 @@ from app.services.chat.locking.lease import (
 from app.services.chat.persistence.event_repository import ChatRunEventRepository
 from app.services.chat.persistence.repositories import (
     ChatRunRepository,
+    ChatScopeRepository,
     _connection_scope,
     _optional_text,
     _required_text,
     _utc_now_iso,
+    chat_scope_revision_id_for_run,
     ensure_chat_schema,
 )
 
@@ -151,9 +160,32 @@ class ChatRunLockService:
         user_message: str | None = None,
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
+        document_candidates: ChatDocumentSelectionCandidates | None = None,
+        max_files_per_request: int | None = None,
     ) -> ChatRun:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_run_id = _optional_text(run_id) or uuid.uuid4().hex
+        if document_candidates is not None and not isinstance(
+            document_candidates,
+            ChatDocumentSelectionCandidates,
+        ):
+            raise TypeError(
+                "document_candidates must be ChatDocumentSelectionCandidates "
+                "or None"
+            )
+        if document_candidates is not None and (
+            user_files or input_documents
+        ):
+            raise ValueError(
+                "document_candidates cannot be combined with legacy "
+                "document tuples"
+            )
+        if max_files_per_request is not None and (
+            isinstance(max_files_per_request, bool)
+            or not isinstance(max_files_per_request, int)
+            or max_files_per_request < 1
+        ):
+            raise ValueError("max_files_per_request must be a positive integer")
         now = _utc_now_iso()
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
 
@@ -168,7 +200,7 @@ class ChatRunLockService:
                 normalized_run_id,
                 bool(self.owner_instance_id),
             )
-            connection.execute(
+            session_insert = connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_sessions (
                     chat_id, workspace_ref, thread_ref, status,
@@ -177,6 +209,7 @@ class ChatRunLockService:
                 """,
                 (normalized_chat_id, now, now),
             )
+            session_created = session_insert.rowcount == 1
             session_row = connection.execute(
                 "SELECT status FROM chat_sessions WHERE chat_id = ?",
                 (normalized_chat_id,),
@@ -214,6 +247,122 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     active_run_id=active_row["run_id"],
                 )
+
+            history_user_files = user_files
+            effective_input_documents = input_documents
+            explicit_candidate_count = len(input_documents)
+            default_candidate_count = 0
+            selection_mode = "legacy_input"
+            effective_scope_revision_id = ""
+            scope_decision = None
+            current_scope_head = None
+            if document_candidates is not None:
+                explicit_candidate_count = len(
+                    document_candidates.explicit_documents
+                )
+                default_candidate_count = len(
+                    document_candidates.new_session_default_documents
+                )
+                current_scope_head = (
+                    ChatScopeRepository.get_head_in_transaction(
+                        connection,
+                        chat_id=normalized_chat_id,
+                    )
+                )
+                if session_created:
+                    if current_scope_head is not None:
+                        raise ValueError(
+                            "new chat session unexpectedly has scope head"
+                        )
+                    current_scope_documents = None
+                else:
+                    if current_scope_head is None:
+                        logger.error(
+                            "既有文件对话缺少活动范围 Head，受理失败关闭: "
+                            "chat_id=%s run_id=%s",
+                            normalized_chat_id,
+                            normalized_run_id,
+                        )
+                        raise ValueError(
+                            "existing chat session is missing active scope"
+                        )
+                    current_scope_revision = (
+                        ChatScopeRepository.get_revision_in_transaction(
+                            connection,
+                            scope_revision_id=(
+                                current_scope_head.scope_revision_id
+                            ),
+                        )
+                    )
+                    if (
+                        current_scope_revision is None
+                        or current_scope_revision.chat_id
+                        != normalized_chat_id
+                    ):
+                        raise ValueError(
+                            "chat scope head points to invalid revision"
+                        )
+                    current_scope_documents = (
+                        current_scope_revision.members
+                    )
+                scope_decision = decide_chat_document_scope(
+                    session_created=session_created,
+                    requested_documents=(
+                        document_candidates.explicit_documents
+                    ),
+                    automatic_initial_documents=(
+                        document_candidates.new_session_default_documents
+                    ),
+                    current_scope_documents=current_scope_documents,
+                )
+                selection_mode = scope_decision.selection_mode
+                history_user_files = tuple(
+                    (
+                        requested.file_name,
+                        requested.original_name,
+                    )
+                    for requested in scope_decision.requested_files
+                )
+                effective_input_documents = tuple(
+                    document.to_input_tuple()
+                    for document in scope_decision.effective_documents
+                )
+            effective_count = len(effective_input_documents)
+            if (
+                max_files_per_request is not None
+                and effective_count > max_files_per_request
+            ):
+                logger.warning(
+                    "文件对话运行受理被拒绝：有效文件数量超过上限: "
+                    "chat_id=%s run_id=%s selection_mode=%s "
+                    "session_created=%s explicit_candidate_count=%d "
+                    "default_candidate_count=%d effective_file_count=%d limit=%d",
+                    normalized_chat_id,
+                    normalized_run_id,
+                    selection_mode,
+                    session_created,
+                    explicit_candidate_count,
+                    default_candidate_count,
+                    effective_count,
+                    max_files_per_request,
+                )
+                # 当前事务同时持有首次 session 插入；抛出异常会由连接上下文统一回滚，
+                # 不得留下只有 session 而没有 run/input/message 的半成品事实。
+                raise ValueError("fileNames超过文件对话数量上限")
+
+            logger.info(
+                "文件对话受理事务已选择有效文档: chat_id=%s run_id=%s "
+                "selection_mode=%s "
+                "session_created=%s explicit_candidate_count=%d "
+                "default_candidate_count=%d effective_file_count=%d",
+                normalized_chat_id,
+                normalized_run_id,
+                selection_mode,
+                session_created,
+                explicit_candidate_count,
+                default_candidate_count,
+                effective_count,
+            )
             connection.execute(
                 """
                 INSERT INTO chat_runs (
@@ -240,12 +389,53 @@ class ChatRunLockService:
             ).fetchone()
             if row is None:
                 raise ValueError("chat_run was not created")
+            if scope_decision is not None:
+                if scope_decision.creates_scope_revision:
+                    revision = ChatScopeRevision(
+                        scope_revision_id=chat_scope_revision_id_for_run(
+                            normalized_run_id
+                        ),
+                        chat_id=normalized_chat_id,
+                        source_mode=scope_decision.scope_source_mode,
+                        source_run_id=normalized_run_id,
+                        members=scope_decision.effective_documents,
+                        created_at=now,
+                    )
+                    ChatScopeRepository.append_and_set_head_in_transaction(
+                        connection,
+                        revision=revision,
+                        expected_current_revision_id=(
+                            None
+                            if current_scope_head is None
+                            else current_scope_head.scope_revision_id
+                        ),
+                    )
+                    effective_scope_revision_id = (
+                        revision.scope_revision_id
+                    )
+                else:
+                    if current_scope_head is None:
+                        raise ValueError(
+                            "active scope reuse requires current scope head"
+                        )
+                    effective_scope_revision_id = (
+                        current_scope_head.scope_revision_id
+                    )
             if user_message is not None:
                 self._append_run_input(
                     connection,
                     run_id=normalized_run_id,
                     message=user_message,
-                    documents=input_documents,
+                    documents=(
+                        ()
+                        if effective_scope_revision_id
+                        else effective_input_documents
+                    ),
+                    requested_files=history_user_files,
+                    effective_scope_revision_id=(
+                        effective_scope_revision_id
+                    ),
+                    selection_mode=selection_mode,
                     created_at=now,
                 )
                 self._append_user_pending(
@@ -253,13 +443,21 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     run_id=normalized_run_id,
                     message=user_message,
-                    files=user_files,
+                    files=history_user_files,
                     created_at=now,
                 )
             logger.info(
-                "文件对话运行锁获取成功: chat_id=%s run_id=%s has_owner_instance=%s",
+                "文件对话运行锁获取成功: chat_id=%s run_id=%s "
+                "selection_mode=%s session_created=%s "
+                "requested_file_count=%d effective_file_count=%d "
+                "scope_revision_id=%s has_owner_instance=%s",
                 normalized_chat_id,
                 normalized_run_id,
+                selection_mode,
+                session_created,
+                len(history_user_files),
+                effective_count,
+                effective_scope_revision_id,
                 bool(self.owner_instance_id),
             )
             return self._row(row)
@@ -897,6 +1095,9 @@ class ChatRunLockService:
         message: str,
         documents: tuple[tuple[str, str, str, str], ...],
         created_at: str,
+        requested_files: tuple[tuple[str, str], ...] = (),
+        effective_scope_revision_id: str = "",
+        selection_mode: str = "legacy_input",
     ) -> None:
         normalized_message = _required_text(message, name="user_message")
         normalized_documents = tuple(
@@ -918,10 +1119,38 @@ class ChatRunLockService:
             normalized_documents
         ):
             raise ValueError("input_documents contains duplicate file_name")
+        normalized_requested_files = tuple(
+            {
+                "file_name": _required_text(file_name, name="file_name"),
+                "original_name": _required_text(
+                    original_name,
+                    name="original_name",
+                ),
+            }
+            for file_name, original_name in requested_files
+        )
+        if len(
+            {item["file_name"] for item in normalized_requested_files}
+        ) != len(normalized_requested_files):
+            raise ValueError("requested_files contains duplicate file_name")
+        normalized_scope_revision_id = _optional_text(
+            effective_scope_revision_id
+        )
+        normalized_selection_mode = _required_text(
+            selection_mode,
+            name="selection_mode",
+        )
+        if normalized_scope_revision_id and normalized_documents:
+            raise ValueError(
+                "scope run input cannot duplicate effective documents"
+            )
         connection.execute(
             """
-            INSERT INTO chat_run_inputs (run_id, message, files_json, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO chat_run_inputs (
+                run_id, message, files_json, created_at,
+                requested_files_json, effective_scope_revision_id,
+                selection_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -932,6 +1161,13 @@ class ChatRunLockService:
                     separators=(",", ":"),
                 ),
                 created_at,
+                json.dumps(
+                    normalized_requested_files,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                normalized_scope_revision_id,
+                normalized_selection_mode,
             ),
         )
 

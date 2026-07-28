@@ -35,16 +35,16 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> web adapter/application/presenter`：报告、武器谱和分类节点变更路由均已遵循 Parser → Application → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，部分文件对话协议桥接仍位于蓝图中。
+1. `blueprints -> web adapter/application/presenter`：报告、武器谱、分类节点变更和文件分析路由均已遵循 Parser → Application → Presenter；其他路由仍按阶段从遗留 Service/线程链迁移，部分文件对话协议桥接仍位于蓝图中。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
 5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
 6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
-7. `check-task -> report/weaponry application / legacy task service`：报告和武器谱分别通过
-   `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously` 与正常 Worker
-   共用 execution 级 Callback Guard；file 暂走兼容 Task Service。三类业务均保留甲方规定的
-   请求内同步恢复副作用。
+7. `check-task -> report/weaponry/analysis application`：三类业务分别通过
+   `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously`、
+   `RecoverAnalysisCallbackSynchronously` 与正常 Worker 共用 execution 级 Callback Guard；file 不再
+   回退到兼容 Task Service。三类业务均保留甲方规定的请求内同步恢复副作用。
 
 ### 2.3 analysis/report/weaponry 请求到回调的链路
 
@@ -57,9 +57,16 @@ Client Request
     -> weaponry：Parser -> 文档范围冻结 -> SubmitWeaponryTask -> SQLite accepted -> Event 唤醒
        -> 单武器谱执行 Worker -> RunWeaponryTask(task_id) -> Weaponry Ports/Adapters
        -> 两条独立维护线程执行资源恢复和 Callback Guard 过期扫描
-    -> analysis：当前仍由遗留 Service/后台线程执行
+    -> analysis：Parser -> SubmitAnalysisBatch -> SQLite 批量 accepted -> Event 唤醒
+       -> 单文件分析 Dispatcher -> RunAnalysisTask(task_id) -> Analysis Ports/Adapters
+       -> 独立维护线程执行资源恢复和 Callback Guard 过期扫描
     -> 写入任务/进度事实并按各业务 Callback Guard/兼容链回调
 ```
+
+Analysis 的上述链路已完成 1F-5B 代码接线与 1F-7B 代码/离线关闭验收。当前发布制度要求每次更新先停止
+DocSense，再由 `clean.py` 完整删除任务库并在新进程中重建空库；该流程下
+`scripts/inspect_analysis_cutover.py` 不再是每次发布的强制门禁，只保留给“保留存量数据库、从备份恢复或
+排查清理失败”的迁移诊断场景。不得在线双跑新旧链路，也不能把离线回归表述为可靠队列、多实例或生产容量证明。
 
 ## 3. 当前目录（关键部分）
 
@@ -150,15 +157,19 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `pending`：任务初始回调状态，尚未记录回调成功、失败或跳过
 - `success`：回调成功
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
+- `outcome_unknown`：请求可能已经送达但响应结果未知；后台不自动重试，file 类型可由新的 `/llm/check-task` 明确按至少一次语义补发
 - `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
-`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending` 或 `failed` 的终态结果。
+`/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending`、`failed`，以及由新的
+file check-task 请求明确授权的 `outcome_unknown` 终态结果。同一请求内规范化后重复的 fileName
+只处理首次出现项。`outcome_unknown` 补发可能产生重复业务回调，接收方必须按 fileName 和业务结果
+幂等处理；普通 Worker 和后台维护线程仍不得自动补发。
 `skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过
 check-task 自动补发。报告类型每次实际外发前还会原子复核 latest execution 并取得 Callback
 Guard 租约：同一 execution 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
 HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 
-同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID 与租约 ID 双重 CAS 写回状态并释放租约，进程中断后过期租约可由后续补发接管。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
+同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 或 `outcome_unknown` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID、attempt 与租约 fencing 条件写回状态。进程中断后的过期租约先冻结为 `outcome_unknown`，不会由后台自动接管发送；下一次新的 file check-task 可明确授权至少一次补发。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
 
 ## 5. 接口行为说明（按当前代码核对）
 
@@ -275,7 +286,11 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
-   - 通过增量 update-embeddings (adds) 追加引用文件，fileNames 仅含本次新增文件；本地保留不可变的文件绑定 revision，并以最新 revision 作为后续对话默认引用。
+   - `fileNames` 表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
+   - 首次创建 `chatId` 且显式传入 `fileNames=[]` 时，受理事务把当时全部可用已解析文件冻结为 `automatic_initial` Scope；空知识库会冻结空范围，后续知识库新增文件不自动吸收。首次自动范围和任意显式范围都受 `DOCSENSE_CHAT_MAX_FILES` 约束。
+   - AnythingLLM Workspace 与本地 binding heads 继续累计历史绑定，但每轮模型只接收 Effective Scope 的文档引用；累计绑定不能替代或扩大 Active Scope。
+   - `/llm/chat/history` 的用户 `files` 只展示该轮前端显式文件；空请求始终返回 `files: []`，不会把自动全量或继承范围展开到历史。Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复 Requested/Effective 两套事实。
+   - Requested/Active/Effective Scope 阶段 0～7 已完成。当前通过 204 项 Chat 回归及安全全仓发现 1,879/排除 13/执行 1,866 项；开发 Chat 库已精确清理并重建 Schema v1～v4。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md`。
    - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
@@ -408,8 +423,9 @@ Weaponry 可选配置：
 
 - `WEAPONRY_ANALYSE_MODE`：已删除的迁移期模式选择器。新链固定为 `file_aggregate_v1`；不配置或遗留值 `2` 可启动，旧值 `1` 及其他值会在应用装配阶段明确拒绝，不会切回遗留流程。
 - `WEAPONRY_TERMS_RULE_CONTEXT_ENABLED`：是否启用可拔除的术语规则辅助上下文，默认 `false`；关闭时不读取其余术语专属配置，也不产生术语 Provider I/O。
-- `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则专用 AnythingLLM workspace 名称，默认 `weaponry-terms-rules`。
-- `WEAPONRY_TERMS_CATALOG_FINGERPRINT`：启用术语辅助时必填，用于把只读术语目录版本冻结到 execution 策略；当前新链不会自动上传、移动或删除术语文档。本地 `terms/` 内容变更不会自动同步到已配置的在线术语 workspace。
+- `WEAPONRY_TERMS_WORKSPACE_NAME`：术语规则版本化 AnythingLLM workspace 的基础名称，默认 `weaponry-terms-rules`；实际名称会自动追加目录内容摘要前缀。
+- `WEAPONRY_TERMS_DIR`：本地术语卡目录，默认 `terms`。启用术语辅助时，服务端严格读取其中的 `term_rule_*.md`，按排序后的相对路径、`card_id` 和 UTF-8 内容自动生成 `terms-manifest-v1:sha256:<digest>` 指纹；不再读取或要求人工 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`。
+- Weaponry 取得本地单实例锁后、启动 Worker 前，会幂等准备该指纹对应的独立版本化 workspace：只补齐缺失规则卡并精确验证完整性，不修改目标文档 workspace，也不自动删除旧版本。上传或绑定结果无法确认时会持久化隔离并阻止 Worker 启动，禁止盲目重放。旧 execution 继续按其冻结指纹读取旧版本；升级前的人工指纹只读回退到原 workspace。
 - `DOCSENSE_WEAPONRY_TERMS_CANDIDATE_TOP_N`：每个 `INPUT` 字段或每个普通 `TABLE` 列独立检索的规则卡候选数，默认 `5`。
 - `DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS`：单个业务字段最终注入的全部压缩规则文本总预算，默认 `1200`。服务端先完整保留所有命中列的核心合同；若该预算连全部核心合同都无法容纳，则本次术语辅助整体降级为空并记录 `terms_rule_context_budget_insufficient`，不会只截掉靠后的列。
 - `DOCSENSE_WEAPONRY_*`：武器谱单实例 Dispatcher、维护扫描、清理超时/租约、供应商能力指纹和固定 score/rank、引用型正文筛选、Extraction 策略。默认值及必填项见 `.env.example`；这些变量均为内部运行配置，不属于公开接口。
@@ -463,7 +479,7 @@ python run.py
 
 - `/debug/chat` 不写入也不依赖 `${DOCSENSE_RUNTIME_DIR}/call_back.json`
 - 页面直接联调正式接口 `POST /llm/chat`、`GET /llm/chat/history`、`POST /llm/chat/delete`
-- 页面左侧展示本地 `chat_sessions.sqlite3` 中的会话，文件选择来自 `knowledge_base.sqlite3` 中已解析文件记录
+- 页面左侧展示本地 `chat_sessions.sqlite3` 中的会话及 Active Scope 文件数，文件选择来自 `knowledge_base.sqlite3` 中已解析文件记录；累计 Workspace bindings 不作为当前模型范围
 - 文件选择器以“已选标签 + 添加文件面板”展示，支持勾选与取消勾选
 - SSE 主输出在聊天主区域实时显示，调试事件收纳于折叠详情中
 - 该调试页仅用于本地联调文件对话模块，不参与甲方真实回调链路
@@ -709,7 +725,7 @@ zsh scripts/test_llm_weaponry_directory.sh "测试文件-水面装备" \
 2. 先执行带 `--dry-run` 的目录 wrapper，核对扫描文件、输出目录和临时 `architectureId`。runner 会读取知识库映射并自动避开已存在的 ID；如使用自定义 `--architecture-base`，仍应检查 dry-run manifest 是否符合预期。
 3. 去掉 `--dry-run` 执行目录 wrapper。未提供 `--static-base` 时，runner 会自动为目标目录启动临时静态文件服务；提供该参数时才复用调用方已有的文件服务。
 4. runner 对每个目标 PDF 串行提交 `/llm/analysis`、调用 `/llm/check-task` 触发必要的回调恢复并从同一任务 SQLite 轮询终态、核验当前临时分类的文档隔离，再提交 `/llm/weaponry` 并按相同方式轮询。默认请求模板中的 75 个字段由脚本内置，调用方无需手工逐字段构造；只有显式传入 `--verify-forced-empty-contract` 时才改用最小合同探针。
-5. 术语规则辅助默认关闭。若联调时显式启用，需提前准备独立的只读术语 workspace，并配置 `WEAPONRY_TERMS_WORKSPACE_NAME` 与 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`；新链不会自动上传、移动或删除术语文档，也不会修改目标文档 workspace。本地 `terms/` 规则更新后，部署方必须用更新后的规则卡重新索引该只读术语 workspace，更新 `WEAPONRY_TERMS_CATALOG_FINGERPRINT`，重启 DocSense，并提交全新的 execution 验证单位格式。验证日志中的 `policy_id` 应为 `terms-rules-column-compact-v2`，并应逐字段列出实际命中的 `card_ids`。历史任务的回调补发只会重发已持久化的 `result_payload`，不会重新执行模型抽取，也不会自动补齐新单位格式。
+5. 术语规则辅助默认关闭。显式启用后只需配置本地 `WEAPONRY_TERMS_DIR` 和稳定的 `WEAPONRY_TERMS_WORKSPACE_NAME` 基础名称；服务端在启动期自动计算内容指纹、创建或复用对应的版本化 workspace、上传缺失规则卡并验证绑定完整性。可先执行 `venv\Scripts\python.exe -B scripts\sync_weaponry_terms_catalog.py --dry-run` 只读查看计划，再用 `--apply` 调用同一协调器显式同步；`--apply` 会取得与在线服务相同的 Weaponry 单实例锁，锁被占用时拒绝并发写入。运行链不会修改目标文档 workspace，也不会自动删除旧术语版本。验证日志中的 `policy_id` 应为 `terms-rules-column-compact-v2`，并应逐字段列出实际命中的 `card_ids`。历史任务的回调补发只会重发已持久化的 `result_payload`，不会重新执行模型抽取，也不会自动补齐新单位格式。
 6. runner 持续写出 `qwen3-4b-new.csv`、`qwen3-4b-new.md`、来源核验表、manifest 和逐文件快照；来源核验表用于确认装备事实来源不是 `term_rule_*.md`。
 
 Windows 与 macOS 可按各自环境选择对应脚本。

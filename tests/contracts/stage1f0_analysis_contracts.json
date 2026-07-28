@@ -1,0 +1,813 @@
+{
+  "schemaVersion": 1,
+  "stage": "1F-0",
+  "frozenAt": "2026-07-26",
+  "publicContractChanged": true,
+  "interfaceAuthority": {
+    "path": "docs/接口文档/文件处理和报告生成.md",
+    "sha256": "C6656AFB77C7CA6C560F6791C51D5BD3F3A2B7D5F451069BA1BBB94F6DD1A538",
+    "lastApprovedAt": "2026-07-27",
+    "approvedChange": "GJB兜底定向选择通用要求；file outcome_unknown可由新的check-task按at-least-once语义显式补发，同请求重复fileName只处理一次"
+  },
+  "analysisSubmission": {
+    "method": "POST",
+    "path": "/llm/analysis",
+    "limits": {
+      "requestBytes": 67108864,
+      "paramsMax": 32,
+      "tree": {
+        "maxNodeCount": 10000,
+        "maxDepth": 128,
+        "maxNameChars": 256,
+        "maxPathChars": 2048,
+        "maxPathNameChars": 2048,
+        "maxRemarkChars": 4096,
+        "maxTotalTextChars": 2000000
+      },
+      "model": {
+        "promptChars": 32000,
+        "phaseCalls": 2,
+        "totalCalls": 4
+      }
+    },
+    "success": {
+      "status": 202,
+      "body": ""
+    },
+    "validationCases": [
+      {
+        "id": "nonObjectJson",
+        "payload": [
+          "file"
+        ],
+        "status": 400,
+        "body": {
+          "error": "请求JSON必须是对象"
+        }
+      },
+      {
+        "id": "invalidBusinessType",
+        "payload": {
+          "businessType": "wrong",
+          "params": [
+            {}
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "businessType必须为file"
+        }
+      },
+      {
+        "id": "missingParams",
+        "payload": {
+          "businessType": "file"
+        },
+        "status": 400,
+        "body": {
+          "error": "params不能为空"
+        }
+      },
+      {
+        "id": "nonObjectParamsElement",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "valid.txt",
+              "filePath": "http://127.0.0.1:8000/valid.txt"
+            },
+            "not-an-object"
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[1]必须是对象"
+        }
+      },
+      {
+        "id": "missingFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "filePath": "http://127.0.0.1:8000/missing-name.txt"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "fileName不能为空"
+        }
+      },
+      {
+        "id": "missingFilePath",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "missing-path.txt"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "filePath不能为空"
+        }
+      },
+      {
+        "id": "duplicateFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "duplicate.txt",
+              "filePath": "http://127.0.0.1:8000/a.txt"
+            },
+            {
+              "fileName": "duplicate.txt",
+              "filePath": "http://127.0.0.1:8000/b.txt"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "fileName不能重复"
+        }
+      },
+      {
+        "id": "malformedArchitectureTree",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "invalid-tree.txt",
+              "filePath": "http://127.0.0.1:8000/invalid-tree.txt",
+              "architectureList": [
+                {}
+              ]
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0]: architectureList[0].id 必须是 64 位整数"
+        }
+      }
+    ],
+    "tooManyParams": {
+      "status": 400,
+      "body": {
+        "error": "params数量不能超过32"
+      }
+    },
+    "oversizedRequest": {
+      "status": 413,
+      "body": {
+        "error": "请求体过大"
+      }
+    },
+    "conflicts": [
+      {
+        "id": "activeTask",
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        }
+      },
+      {
+        "id": "callbackPending",
+        "status": 409,
+        "body": {
+          "error": "上一次任务回调尚未结束"
+        }
+      }
+    ],
+    "databaseBusy": {
+      "status": 503,
+      "body": {
+        "error": "任务服务繁忙，请稍后重试"
+      }
+    },
+    "unhandledFailure": {
+      "status": 500,
+      "contentTypePrefix": "text/html",
+      "bodyContains": "Internal Server Error"
+    },
+    "forbiddenSuccessFields": [
+      "task",
+      "tasks",
+      "taskId",
+      "task_id",
+      "executionId",
+      "execution_id",
+      "batchId",
+      "batch_id",
+      "lease",
+      "runId",
+      "run_id"
+    ]
+  },
+  "fileCheckTask": {
+    "method": "POST",
+    "path": "/llm/check-task",
+    "success": {
+      "status": 200,
+      "body": ""
+    },
+    "singleMissing": {
+      "status": 404,
+      "body": {
+        "error": "任务不存在"
+      }
+    },
+    "callbackRecovery": "file pending/failed终态回调在同步检查中按既有规则恢复；outcome_unknown仅由新的check-task按at-least-once语义显式补发，恢复结果不写入成功响应"
+  },
+  "fileProgress": {
+    "transport": "WebSocket",
+    "path": "/llm/progress",
+    "message": {
+      "businessType": "file",
+      "data": {
+        "progress": 0.35,
+        "fileName": "golden-progress.pdf"
+      }
+    }
+  },
+  "fileCallbacks": {
+    "success": {
+      "fileName": "golden.pdf",
+      "status": "2",
+      "sha256": "170f750e5c63ae0cfcb743102f78ade86123b1c4f4d424b39e35957531074bce"
+    },
+    "failure": {
+      "businessType": "file",
+      "data": {
+        "fileName": "golden.pdf",
+        "status": "3"
+      },
+      "msg": "解析失败"
+    }
+  },
+  "algorithmGoldens": {
+    "policyDefaults": {
+      "mode": "topk_two_stage",
+      "filenameConstraintMode": "scope_guard",
+      "dataStandardMode": "scope_guard",
+      "identityReselectMode": "enforce"
+    },
+    "ranges": {
+      "defaultSha256": "b94afa038654e2c903b82af7e7e442390efe9f0423adcc836fa7b2e7c3800d88",
+      "defaultCounts": {
+        "architectureList": 11,
+        "architectureStandardList": 0,
+        "channel": 0,
+        "country": 5,
+        "format": 3,
+        "maturity": 3,
+        "security": 1
+      },
+      "defaultArchitectureIds": [
+        101,
+        102,
+        103,
+        10301,
+        10302,
+        10303,
+        104,
+        105,
+        10501,
+        10502,
+        106
+      ],
+      "explicitRequest": {
+        "country": [
+          {
+            "key": "99",
+            "value": "测试国"
+          }
+        ],
+        "channel": [
+          {
+            "key": "07",
+            "value": "测试来源"
+          }
+        ],
+        "format": [
+          {
+            "key": "88",
+            "value": "测试格式"
+          }
+        ],
+        "maturity": [
+          {
+            "key": "77",
+            "value": "测试成熟度"
+          }
+        ],
+        "security": [
+          {
+            "key": "66",
+            "value": "测试密级"
+          }
+        ],
+        "architectureList": [
+          {
+            "id": 900,
+            "name": "测试节点"
+          }
+        ],
+        "architectureStandardList": [
+          {
+            "id": 901,
+            "name": "测试标准"
+          }
+        ]
+      },
+      "explicitExpected": {
+        "country": [
+          {
+            "key": "99",
+            "value": "测试国"
+          }
+        ],
+        "channel": [
+          {
+            "key": "07",
+            "value": "测试来源"
+          }
+        ],
+        "format": [
+          {
+            "key": "88",
+            "value": "测试格式"
+          }
+        ],
+        "maturity": [
+          {
+            "key": "77",
+            "value": "测试成熟度"
+          }
+        ],
+        "security": [
+          {
+            "key": "66",
+            "value": "测试密级"
+          }
+        ],
+        "architectureList": [
+          {
+            "id": 900,
+            "name": "测试节点"
+          }
+        ],
+        "architectureStandardList": [
+          {
+            "id": 901,
+            "name": "测试标准"
+          }
+        ]
+      },
+      "explicitSha256": "a8afb791a355502fdd69fc7d609c3fa430a542225312d2fd8b7906d1e1d628df"
+    },
+    "tree": {
+      "nodes": [
+        {
+          "id": 1,
+          "name": "装备",
+          "parentId": null,
+          "pathName": "装备"
+        },
+        {
+          "id": 10,
+          "name": "水面舰艇",
+          "parentId": 1,
+          "pathName": "装备/水面舰艇",
+          "remark": "水面作战舰艇"
+        },
+        {
+          "id": 11,
+          "name": "航空母舰",
+          "parentId": 10,
+          "pathName": "装备/水面舰艇/航空母舰",
+          "remark": "航母舰载机平台"
+        },
+        {
+          "id": 12,
+          "name": "驱逐舰",
+          "parentId": 10,
+          "pathName": "装备/水面舰艇/驱逐舰",
+          "remark": "水面防空舰艇"
+        }
+      ],
+      "fingerprint": "68664f87755ccbb110c03c5eafcbe67dca11a1c2e7496b4af206741ab7741ff5",
+      "rootIds": [
+        1
+      ],
+      "leafIds": [
+        11,
+        12
+      ],
+      "ancestorsOf11": [
+        1,
+        10
+      ],
+      "leafDescendantsOf10": [
+        11,
+        12
+      ],
+      "siblingsOf11": [
+        12
+      ]
+    },
+    "recall": {
+      "signalsInput": {
+        "filename": "CVN-78资料.pdf",
+        "originalFilename": "",
+        "title": "福特级航空母舰",
+        "headings": [],
+        "identifiers": [],
+        "body": "CVN-78 航空母舰舰载机平台"
+      },
+      "expectedSignals": {
+        "filename": "CVN-78资料.pdf",
+        "originalFilename": "",
+        "title": "福特级航空母舰",
+        "headings": [],
+        "identifiers": [
+          "cvn-78"
+        ],
+        "bodyExcerpt": "CVN-78 航空母舰舰载机平台"
+      },
+      "expectedDecision": {
+        "candidateIds": [
+          11
+        ],
+        "candidateNodeTypes": [
+          "leaf"
+        ],
+        "candidateRanks": [
+          1
+        ],
+        "candidateChannelRanks": [
+          [
+            [
+              "exact",
+              1
+            ],
+            [
+              "lexical",
+              1
+            ],
+            [
+              "tree",
+              1
+            ]
+          ]
+        ],
+        "directExactIds": [
+          11
+        ],
+        "directTreeIds": [
+          11
+        ],
+        "channelRankings": [
+          [
+            "exact",
+            [
+              11
+            ]
+          ],
+          [
+            "lexical",
+            [
+              11
+            ]
+          ],
+          [
+            "tree",
+            [
+              11
+            ]
+          ],
+          [
+            "rule",
+            []
+          ]
+        ],
+        "candidateProjectionChars": 74,
+        "promptChars": 1098,
+        "queryDigest": "27d76e2d3fafbb89d38b53b7a608961909f21bad114a388b347854fdc700d176"
+      }
+    },
+    "prompts": {
+      "classification": {
+        "request": {
+          "fileName": "golden.pdf",
+          "originalFileName": "CVN 78 class.pdf"
+        },
+        "candidates": [
+          {
+            "id": 101,
+            "name": "基础数据",
+            "parentId": 100,
+            "path": "1/100/101",
+            "pathName": "海军装备/CVN-78/基础数据",
+            "nodeType": "leaf",
+            "remark": "装备固有属性。",
+            "internalScore": 0.98
+          },
+          {
+            "id": 100,
+            "pathName": "海军装备/CVN-78",
+            "node_type": "parent",
+            "remark": ""
+          }
+        ],
+        "expectedLength": 591,
+        "sha256": "6a03ff8126963d67e6b67023f0e894d41ffbf500a7791866d2b44d900fd4ae6e",
+        "expectedProjection": [
+          {
+            "id": 101,
+            "pathName": "海军装备/CVN-78/基础数据",
+            "nodeType": "leaf",
+            "remark": "装备固有属性。"
+          },
+          {
+            "id": 100,
+            "pathName": "海军装备/CVN-78",
+            "nodeType": "parent"
+          }
+        ]
+      },
+      "extraction": {
+        "request": {
+          "fileName": "golden.pdf",
+          "originalFileName": "CVN 78 class.pdf",
+          "architectureList": [
+            {
+              "id": 999,
+              "pathName": "不得进入抽取提示词"
+            }
+          ],
+          "architectureStandardList": [
+            {
+              "id": 201,
+              "pathName": "同样不得决定扩展字段"
+            }
+          ],
+          "country": [
+            {
+              "key": "02",
+              "value": "美国"
+            }
+          ],
+          "format": [
+            {
+              "key": "03",
+              "value": "文档类"
+            }
+          ]
+        },
+        "resolvedArchitectureId": 101,
+        "resolvedArchitecturePathName": "海军装备/CVN-78/基础数据",
+        "resolvedArchitecturePathNodeNames": [
+          "基础数据",
+          "CVN-78",
+          "海军装备"
+        ],
+        "resolvedArchitectureNodeType": "leaf",
+        "expectedLength": 6196,
+        "sha256": "84d2722dcfb1bec232433b4c7aafc51642c8ca9727cb1bb536ed63315360cc95"
+      },
+      "identityReselect": {
+        "initialResult": {
+          "architectureId": 999
+        },
+        "confirmedIdentityContext": {
+          "identifier": "CVN-68",
+          "matchedParentId": 6800,
+          "matchedParentPath": "海军装备/航空母舰/CVN-68",
+          "evidenceSources": [
+            "originalFileName",
+            "title"
+          ]
+        },
+        "candidates": [
+          {
+            "id": 6800,
+            "pathName": "海军装备/航空母舰/CVN-68",
+            "nodeType": "parent",
+            "remark": "CVN-68 单舰资料。"
+          },
+          {
+            "id": 6801,
+            "pathName": "海军装备/航空母舰/CVN-68/基础数据",
+            "nodeType": "leaf"
+          },
+          {
+            "id": 6802,
+            "pathName": "海军装备/航空母舰/CVN-68/战技指标",
+            "nodeType": "leaf"
+          },
+          {
+            "id": 6803,
+            "pathName": "海军装备/航空母舰/CVN-68/运用数据",
+            "nodeType": "leaf"
+          },
+          {
+            "id": 6804,
+            "pathName": "海军装备/航空母舰/CVN-68/效能数据",
+            "nodeType": "leaf"
+          },
+          {
+            "id": 6805,
+            "pathName": "海军装备/航空母舰/CVN-68/编制数据",
+            "nodeType": "leaf"
+          },
+          {
+            "id": 6806,
+            "pathName": "海军装备/航空母舰/CVN-68/保障数据",
+            "nodeType": "leaf"
+          },
+          {
+            "id": 6807,
+            "pathName": "海军装备/航空母舰/CVN-68/部署数据",
+            "nodeType": "leaf"
+          }
+        ],
+        "expectedLength": 1144,
+        "sha256": "1faa80176dac52839be92c02baf1a69e0e25f2477a8e7167a9f8bfedaec5784f",
+        "expectedContext": {
+          "identifier": "CVN-68",
+          "matchedParentId": 6800,
+          "matchedParentPath": "海军装备/航空母舰/CVN-68",
+          "evidenceSources": [
+            "originalFileName",
+            "title"
+          ]
+        },
+        "expectedCandidateCount": 8
+      }
+    },
+    "mapping": {
+      "request": {
+        "fileName": "golden.pdf",
+        "originalFileName": "GJB 9001C-2017 质量管理体系要求.pdf",
+        "country": [
+          {
+            "key": "02",
+            "value": "美国"
+          }
+        ],
+        "channel": [
+          {
+            "key": "02",
+            "value": "装发"
+          }
+        ],
+        "maturity": [
+          {
+            "key": "02",
+            "value": "阶段成果"
+          }
+        ],
+        "security": [
+          {
+            "key": "02",
+            "value": "公开"
+          }
+        ],
+        "format": [
+          {
+            "key": "03",
+            "value": "文档类"
+          }
+        ],
+        "architectureList": [
+          {
+            "id": 100,
+            "name": "海军装备",
+            "parentId": null,
+            "pathName": "海军装备"
+          },
+          {
+            "id": 101,
+            "name": "基础数据",
+            "parentId": 100,
+            "pathName": "海军装备/基础数据"
+          }
+        ],
+        "architectureStandardList": [
+          {
+            "id": 201,
+            "name": "国家军用标准",
+            "parentId": null,
+            "pathName": "数据标准/国家军用标准"
+          }
+        ]
+      },
+      "parsedResult": {
+        "architectureId": 101,
+        "country": "美国",
+        "channel": "装发",
+        "maturity": "阶段成果",
+        "security": "公开",
+        "format": "文档类",
+        "资料年代": "2025-08-25",
+        "摘要": "这是用于冻结字段映射的资料摘要。",
+        "原文链接": "https://example.invalid/golden",
+        "语种": "中文",
+        "文件概述": "黄金映射用例。",
+        "score": 85,
+        "keyword": "航母,资料,黄金,映射,测试"
+      },
+      "originalText": "密级：公开\n正文。",
+      "expected": {
+        "country": "美国",
+        "channel": "装发",
+        "maturity": "阶段成果",
+        "security": "公开",
+        "format": "文档类",
+        "architectureId": 101,
+        "fileDataItem": {
+          "fileName": "golden.pdf",
+          "dataTime": "2025-08-25",
+          "keyword": "基础数据, 海军装备, 资料, 映射",
+          "summary": "这是用于冻结字段映射的资料摘要。",
+          "score": 55,
+          "source": "未明确数据来源",
+          "fileNo": "",
+          "originalLink": "https://example.invalid/golden",
+          "language": "中文",
+          "documentOverview": "黄金映射用例。",
+          "relatedTechnology": "",
+          "equipmentModel": "",
+          "associatedEquipment": "",
+          "dataFormat": "文档类",
+          "originalText": "密级：公开\n正文。",
+          "documentTranslationOne": "",
+          "documentTranslationTwo": ""
+        }
+      }
+    }
+  },
+  "legacyInventory": {
+    "stageOrder": [
+      "request_validation",
+      "domain_tree_validation",
+      "legacy_task_precheck",
+      "atomic_task_acceptance",
+      "initial_progress_publication",
+      "route_thread_dispatch",
+      "single_or_batch_execution",
+      "task_state_and_progress",
+      "document_download_and_preparation",
+      "rag_classification_and_extraction",
+      "knowledge_persistence",
+      "translation",
+      "callback_delivery"
+    ],
+    "externalSideEffects": [
+      "SQLite task admission and latest projection",
+      "Progress Hub publication",
+      "daemon thread creation",
+      "file download and normalization",
+      "task-scoped RAG Session",
+      "knowledge index persistence",
+      "translation service",
+      "task status and callback persistence",
+      "callback HTTP delivery"
+    ],
+    "references": [
+      {
+        "path": "app/blueprints/llm.py",
+        "symbols": [
+          "def llm_analysis",
+          "create_file_tasks_if_available",
+          "threading.Thread",
+          "run_file_analysis_task",
+          "run_file_analysis_batch_task",
+          "replay_callback_if_needed"
+        ]
+      },
+      {
+        "path": "app/services/llm_service/analysis_service.py",
+        "symbols": [
+          "def _execute_file_analysis_task",
+          "def run_file_analysis_task",
+          "def run_file_analysis_batch_task",
+          "def _submit_callback",
+          "get_translation_service"
+        ]
+      },
+      {
+        "path": "app/services/llm_service/task_service.py",
+        "symbols": [
+          "def create_file_tasks_if_available",
+          "def replay_callback_if_needed"
+        ]
+      }
+    ]
+  }
+}

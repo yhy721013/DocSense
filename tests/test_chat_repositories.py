@@ -27,6 +27,12 @@ from app.services.chat import (
     ChatStore,
     ensure_chat_schema,
 )
+from app.services.chat.persistence.repositories import (
+    DEFAULT_CHAT_SQLITE_BUSY_TIMEOUT_SECONDS,
+    _connect,
+)
+
+
 class ChatRepositorySchemaTests(unittest.TestCase):
     def test_schema_initialization_is_repeatable_and_creates_authoritative_tables(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -58,6 +64,21 @@ class ChatRepositorySchemaTests(unittest.TestCase):
             self.assertIn("chat_cleanup_jobs", table_names)
             self.assertIn("chat_schema_migrations", table_names)
             self.assertNotIn("chats", table_names)
+
+    def test_sqlite_connection_uses_one_bounded_busy_timeout(self) -> None:
+        """连接参数和 PRAGMA 必须共享同一个有界等待值，避免配置口径漂移。"""
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            connection = _connect(f"{tmp}/chat.sqlite3")
+            try:
+                busy_timeout_ms = connection.execute(
+                    "PRAGMA busy_timeout"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+        self.assertEqual(30.0, DEFAULT_CHAT_SQLITE_BUSY_TIMEOUT_SECONDS)
+        self.assertEqual(30_000, busy_timeout_ms)
 
     def test_repository_source_does_not_depend_on_anythingllm(self) -> None:
         chat_dir = Path(__file__).resolve().parents[1] / "app" / "services" / "chat"
