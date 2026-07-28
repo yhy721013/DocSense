@@ -67,3 +67,20 @@ POSIX 权限位测试。随机临时目录和日志均已删除，最终 `soffic
 M10 代码、文档、外部实机验收和本地关闭门禁已经完成。剩余 Git 操作仅允许在再次确认两个工作树
 干净、远端引用无漂移且祖先关系成立后，以 `git merge --ff-only merge/file-analysis` 把结果回归到
 `refactor/file-analysis`；禁止用普通 merge 掩盖意外分叉。
+
+## 6. `refactor/file-analysis` 快进回归
+
+最终 Git 操作已按上述限制完成：
+
+1. 快进前再次确认两个工作树均干净，`refactor/file-analysis@6f5c64f...` 是
+   `merge/file-analysis@699444a...` 的严格祖先；
+2. 在原工作树执行 `git merge --ff-only merge/file-analysis`，Git 明确返回 `Fast-forward`；
+3. 快进没有产生新 merge commit，没有改写 `80345dd` 的双父历史；
+4. 快进后两个分支同时指向 M10 提交 `699444a...`；
+5. 在 `refactor/file-analysis` 工作树重新执行 128 项 Legacy Office、容器、架构和契约门禁，
+   结果为 0 failure、0 error、2 个平台条件 Skip；
+6. 合并后工作树干净，`soffice*` 残留进程为 0。
+
+本次分支集成至此完成。`merge/file-analysis` 仅保留为可审计的集成引用；后续若继续保留该引用，
+应与 `refactor/file-analysis` 同步到本关闭记录提交。是否推送远端或删除临时集成分支属于后续
+仓库治理操作，不影响本地快进结果。
