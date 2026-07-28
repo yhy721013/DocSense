@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 from app.integrations.anythingllm.documents import (
     AnythingLLMDocumentClient,
     XlsxFolderCleanupToken,
+    XlsxFolderInventoryItem,
 )
 from app.integrations.anythingllm.errors import (
     AnythingLLMCleanupUncertainError,
@@ -434,6 +435,113 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
         self.assertEqual("location_sha256", document.identity_source)
         self.transport.get_json.assert_not_called()
         self.transport.delete_json.assert_not_called()
+
+    def test_regular_markdown_pdf_and_docx_uploads_keep_single_file_protocol(
+        self,
+    ) -> None:
+        """库存能力不得让普通格式误入 XLSX Folder 查询或清理分支。"""
+
+        for suffix in (".md", ".pdf", ".docx"):
+            with self.subTest(suffix=suffix):
+                self.transport.reset_mock()
+                file_path = Path(self.temp_directory.name) / f"ordinary{suffix}"
+                file_path.write_bytes(b"ordinary-document")
+                location = f"custom-documents/ordinary{suffix}-doc-id.json"
+                self.transport.post_multipart.return_value = {
+                    "documents": [
+                        {
+                            "id": f"document-{suffix[1:]}",
+                            "location": location,
+                        }
+                    ]
+                }
+
+                document = self.client.upload_document(str(file_path))
+
+                self.assertEqual(location, document.location)
+                self.transport.post_multipart.assert_called_once()
+                self.transport.get_json.assert_not_called()
+                self.transport.delete_json.assert_not_called()
+
+    def test_xlsx_folder_inventory_is_strict_and_read_only(self) -> None:
+        """库存只能发起 GET，并返回按 Folder 排序的完整成员快照。"""
+
+        first_folder = "prepared-a.xlsx-6f2a"
+        second_folder = "prepared-b.xlsx-7e3b"
+        self.transport.get_json.side_effect = [
+            {
+                "localFiles": {
+                    "items": [
+                        {"name": "ordinary.pdf-id.json", "type": "file"},
+                        {"name": second_folder, "type": "folder"},
+                        {"name": first_folder, "type": "folder"},
+                    ]
+                }
+            },
+            {
+                "folder": first_folder,
+                "documents": [{"name": "sheet-summary.json"}],
+                "error": None,
+            },
+            {
+                "folder": second_folder,
+                "documents": [
+                    {"name": "sheet-details.json"},
+                    {"name": "sheet-summary.json"},
+                ],
+                "error": None,
+            },
+        ]
+
+        with self.assertLogs(
+            "app.integrations.anythingllm.documents",
+            level="INFO",
+        ) as captured_logs:
+            inventory = self.client.list_xlsx_folder_inventory(user_id=7)
+
+        self.assertEqual(
+            (
+                XlsxFolderInventoryItem(
+                    folder_name=first_folder,
+                    member_locations=(f"{first_folder}/sheet-summary.json",),
+                ),
+                XlsxFolderInventoryItem(
+                    folder_name=second_folder,
+                    member_locations=(
+                        f"{second_folder}/sheet-details.json",
+                        f"{second_folder}/sheet-summary.json",
+                    ),
+                ),
+            ),
+            inventory,
+        )
+        self.assertEqual(3, self.transport.get_json.call_count)
+        self.transport.post_json.assert_not_called()
+        self.transport.post_multipart.assert_not_called()
+        self.transport.delete_json.assert_not_called()
+        self.assertIn("folder_count=2", "\n".join(captured_logs.output))
+        self.assertIn("member_count=3", "\n".join(captured_logs.output))
+
+    def test_xlsx_folder_inventory_rejects_ambiguous_root_identity(self) -> None:
+        """受控名称若不是 Folder 或发生大小写重复，必须协议失败。"""
+
+        folder = "prepared-a.xlsx-6f2a"
+        invalid_items = (
+            [{"name": folder, "type": "file"}],
+            [
+                {"name": folder, "type": "folder"},
+                {"name": folder.upper(), "type": "folder"},
+            ],
+        )
+        for items in invalid_items:
+            with self.subTest(items=items):
+                self.transport.reset_mock()
+                self.transport.get_json.return_value = {
+                    "localFiles": {"items": items}
+                }
+                with self.assertRaises(AnythingLLMProtocolError):
+                    self.client.list_xlsx_folder_inventory()
+                self.transport.delete_json.assert_not_called()
 
     def test_upload_rejects_multi_sheet_after_confirmed_folder_cleanup(self) -> None:
         """多 Sheet 必须完整识别成员、删除整次上传后再稳定失败。"""
