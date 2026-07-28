@@ -15,6 +15,7 @@
 | `260728-main与file-analysis分支Legacy-Office集成M6执行记录.md` | 验收部署默认值、共享 Preparer、Preflight 和启动失败资源回收。 |
 | `260728-main与file-analysis分支Legacy-Office集成M7执行记录.md` | 完成共享业务回归，并增加无删除入口的 XLSX Folder 只读库存治理。 |
 | `260728-main与file-analysis分支Legacy-Office集成M8执行记录.md` | 同步接口语义、README、索引和契约资产，不增删任何公开字段。 |
+| `260728-main与file-analysis分支Legacy-Office集成M9执行记录.md` | 完成九组离线关闭门禁和发现 1,986/排除 13/执行 1,973 项安全全仓验收。 |
 
 ## 文件对话相关文件
 

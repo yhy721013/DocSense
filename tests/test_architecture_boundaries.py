@@ -551,11 +551,17 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
     def test_route_tests_do_not_construct_uninjected_production_applications(self) -> None:
         """只有显式生命周期用例可以调用无参 create_app，其他测试必须注入离线容器。"""
 
+        # 仅生产容器所有权测试可以刻意构造无参应用工厂：一项验证正常启动和退出钩子，
+        # 另一项验证启动失败后的补偿关闭。白名单使用精确文件名和方法名，防止范围扩散。
         allowed = {
             (
                 "test_dependency_container.py",
                 "test_production_owned_container_starts_once_and_registers_close",
-            )
+            ),
+            (
+                "test_dependency_container.py",
+                "test_production_start_failure_closes_owned_container_without_atexit",
+            ),
         }
         violations: list[str] = []
         for source_path in sorted((ROOT / "tests").glob("test_*.py")):
