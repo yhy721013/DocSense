@@ -110,6 +110,226 @@ class _RacingRecoverySource:
 
 
 class ReportCallbackRecoveryTests(unittest.TestCase):
+    def test_new_check_task_can_explicitly_retry_outcome_unknown(self) -> None:
+        """新的显式请求可重试 unknown；同一轮结果未知时仍保持冻结。"""
+
+        with workspace_tempdir() as runtime_directory:
+            service = LLMTaskService(str(Path(runtime_directory) / "tasks.sqlite3"))
+            adapter = LegacyTaskCommandAdapter(
+                service,
+                ReportTaskCommandCodec(),
+                task_id_factory=lambda: TaskId("report-recovery-unknown"),
+            )
+            created = adapter.create_if_allowed(_command(_submission()))
+            assert created.execution is not None
+            _finish_terminal(adapter, created.execution)
+            source = SQLiteReportCallbackRecoverySource(service)
+            transport_outcomes = iter(
+                (
+                    ReportCallbackDeliveryOutcome.DELIVERY_OUTCOME_UNKNOWN,
+                    ReportCallbackDeliveryOutcome.SUCCESS,
+                )
+            )
+            transport_calls = 0
+
+            def transport(_payload: dict[str, object]) -> ReportCallbackDeliveryResult:
+                nonlocal transport_calls
+                transport_calls += 1
+                outcome = next(transport_outcomes)
+                return ReportCallbackDeliveryResult(outcome, outcome.value)
+
+            recovery = RecoverReportCallbackSynchronously(
+                source=source,
+                callbacks=SQLiteReportCallbackAdapter(
+                    service,
+                    callback_url="http://callback.local/result",
+                    callback_timeout=5,
+                    lease_seconds=30,
+                    transport=transport,
+                ),
+            )
+            with patch(
+                "app.modules.report.adapters.callback_guard."
+                "save_callback_history_payload"
+            ):
+                first = recovery.execute(
+                    ReportId.from_public_value(132),
+                    request_trace_id="report-unknown-first",
+                )
+                frozen = service.get_task("report", "132")
+                second = recovery.execute(
+                    ReportId.from_public_value(132),
+                    request_trace_id="report-unknown-retry",
+                )
+                completed = service.get_task("report", "132")
+                attempt_events = service.list_callback_delivery_attempt_events(
+                    business_type="report",
+                    business_key="132",
+                )
+
+        self.assertFalse(first)
+        assert frozen is not None
+        self.assertEqual("outcome_unknown", frozen["callback_status"])
+        self.assertTrue(second)
+        self.assertEqual(2, transport_calls)
+        assert completed is not None
+        self.assertEqual("success", completed["callback_status"])
+        retry_authorization = next(
+            event
+            for event in attempt_events
+            if event["event_type"] == "authorized"
+            and event["callback_attempt"] == 2
+        )
+        self.assertEqual(
+            "explicit_check_task_recovery",
+            retry_authorization["trigger"],
+        )
+        self.assertEqual(
+            "report-unknown-retry",
+            retry_authorization["request_trace_id"],
+        )
+
+    def test_each_new_request_can_advance_one_unknown_or_failed_attempt(self) -> None:
+        """unknown→rejected→success 每次只由一个新的显式请求推进一轮。"""
+
+        with workspace_tempdir() as runtime_directory:
+            service = LLMTaskService(str(Path(runtime_directory) / "tasks.sqlite3"))
+            adapter = LegacyTaskCommandAdapter(
+                service,
+                ReportTaskCommandCodec(),
+                task_id_factory=lambda: TaskId("report-recovery-attempt-chain"),
+            )
+            created = adapter.create_if_allowed(_command(_submission()))
+            assert created.execution is not None
+            _finish_terminal(adapter, created.execution)
+            outcomes = iter(
+                (
+                    ReportCallbackDeliveryOutcome.DELIVERY_OUTCOME_UNKNOWN,
+                    ReportCallbackDeliveryOutcome.REJECTED,
+                    ReportCallbackDeliveryOutcome.SUCCESS,
+                )
+            )
+            transport_calls = 0
+
+            def transport(_payload: dict[str, object]) -> ReportCallbackDeliveryResult:
+                nonlocal transport_calls
+                transport_calls += 1
+                outcome = next(outcomes)
+                return ReportCallbackDeliveryResult(outcome, outcome.value)
+
+            recovery = RecoverReportCallbackSynchronously(
+                source=SQLiteReportCallbackRecoverySource(service),
+                callbacks=SQLiteReportCallbackAdapter(
+                    service,
+                    callback_url="http://callback.local/result",
+                    callback_timeout=5,
+                    lease_seconds=30,
+                    transport=transport,
+                ),
+            )
+            with patch(
+                "app.modules.report.adapters.callback_guard."
+                "save_callback_history_payload"
+            ):
+                results = tuple(
+                    recovery.execute(
+                        ReportId.from_public_value(132),
+                        request_trace_id=f"report-attempt-{attempt}",
+                    )
+                    for attempt in range(1, 4)
+                )
+            projection = service.get_task("report", "132")
+            events = service.list_callback_delivery_attempt_events(
+                business_type="report",
+                business_key="132",
+            )
+
+        self.assertEqual((False, False, True), results)
+        self.assertEqual(3, transport_calls)
+        assert projection is not None
+        self.assertEqual(3, projection["callback_attempts"])
+        self.assertEqual("success", projection["callback_status"])
+        self.assertEqual(
+            {1, 2, 3},
+            {
+                event["callback_attempt"]
+                for event in events
+                if event["event_type"] == "authorized"
+            },
+        )
+
+    def test_fifty_concurrent_rejected_recoveries_do_not_roll_attempt(self) -> None:
+        """同一活跃请求中的跟随者不得在 owner 明确失败后继续形成新 attempt。"""
+
+        with workspace_tempdir() as runtime_directory:
+            service = LLMTaskService(str(Path(runtime_directory) / "tasks.sqlite3"))
+            adapter = LegacyTaskCommandAdapter(
+                service,
+                ReportTaskCommandCodec(),
+                task_id_factory=lambda: TaskId("report-recovery-rejected-flight"),
+            )
+            created = adapter.create_if_allowed(_command(_submission()))
+            assert created.execution is not None
+            _finish_terminal(adapter, created.execution)
+            transport_entered = threading.Event()
+            release_transport = threading.Event()
+            transport_calls = 0
+
+            def transport(_payload: dict[str, object]) -> ReportCallbackDeliveryResult:
+                nonlocal transport_calls
+                transport_calls += 1
+                transport_entered.set()
+                self.assertTrue(release_transport.wait(timeout=30))
+                return ReportCallbackDeliveryResult(
+                    ReportCallbackDeliveryOutcome.REJECTED,
+                    "http_status=503",
+                )
+
+            recovery = RecoverReportCallbackSynchronously(
+                source=SQLiteReportCallbackRecoverySource(service),
+                callbacks=SQLiteReportCallbackAdapter(
+                    service,
+                    callback_url="http://callback.local/result",
+                    callback_timeout=5,
+                    lease_seconds=30,
+                    transport=transport,
+                ),
+            )
+            start = threading.Barrier(50)
+            follower_lock = threading.Lock()
+            followers_done = 0
+            all_followers_done = threading.Event()
+
+            def recover_once(index: int) -> bool:
+                nonlocal followers_done
+                start.wait(timeout=30)
+                result = recovery.execute(
+                    ReportId.from_public_value(132),
+                    request_trace_id=f"report-concurrent-{index}",
+                )
+                with follower_lock:
+                    followers_done += 1
+                    if followers_done == 49:
+                        all_followers_done.set()
+                return result
+
+            with patch(
+                "app.modules.report.adapters.callback_guard."
+                "save_callback_history_payload"
+            ), ThreadPoolExecutor(max_workers=50) as executor:
+                futures = [executor.submit(recover_once, index) for index in range(50)]
+                self.assertTrue(transport_entered.wait(timeout=30))
+                self.assertTrue(all_followers_done.wait(timeout=30))
+                release_transport.set()
+                results = tuple(future.result(timeout=30) for future in futures)
+            projection = service.get_task("report", "132")
+
+        self.assertEqual(0, sum(results))
+        self.assertEqual(1, transport_calls)
+        assert projection is not None
+        self.assertEqual(1, projection["callback_attempts"])
+        self.assertEqual("failed", projection["callback_status"])
+
     def test_fifty_concurrent_check_task_recoveries_send_exactly_once(self) -> None:
         """50 个同步查询可以并发进入，但同一 execution 只能有一个 HTTP owner。"""
 

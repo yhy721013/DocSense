@@ -422,6 +422,7 @@ class FakeWeaponryCallbackPort:
         self._active: dict[int, WeaponryCallbackGuardLease] = {}
         self._lease_reasons: dict[str, WeaponryCallbackAcquireReason] = {}
         self._fencing: dict[int, int] = {}
+        self._attempts: dict[int, int] = {}
         self._completed: set[int] = set()
         self._failed: set[int] = set()
         self._unknown: set[int] = set()
@@ -456,10 +457,23 @@ class FakeWeaponryCallbackPort:
                 return WeaponryCallbackAcquireResult(
                     WeaponryCallbackAcquireOutcome.STALE
                 )
-            if architecture_id in self._unknown:
+            current_attempts = self._attempts.get(architecture_id, 0)
+            if (
+                command.expected_callback_attempts is not None
+                and command.expected_callback_attempts != current_attempts
+            ):
                 return WeaponryCallbackAcquireResult(
-                    WeaponryCallbackAcquireOutcome.OUTCOME_UNKNOWN
+                    WeaponryCallbackAcquireOutcome.STALE
                 )
+            if architecture_id in self._unknown:
+                if (
+                    command.reason
+                    is not WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY
+                ):
+                    return WeaponryCallbackAcquireResult(
+                        WeaponryCallbackAcquireOutcome.OUTCOME_UNKNOWN
+                    )
+                self._unknown.remove(architecture_id)
             if architecture_id in self._completed:
                 return WeaponryCallbackAcquireResult(
                     WeaponryCallbackAcquireOutcome.ALREADY_COMPLETED
@@ -479,6 +493,7 @@ class FakeWeaponryCallbackPort:
                 )
             fencing = self._fencing.get(architecture_id, 0) + 1
             self._fencing[architecture_id] = fencing
+            self._attempts[architecture_id] = current_attempts + 1
             lease = WeaponryCallbackGuardLease(
                 task_id=command.task_id,
                 architecture_id=architecture_id,

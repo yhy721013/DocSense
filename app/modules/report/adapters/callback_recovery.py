@@ -20,7 +20,9 @@ from app.services.llm_service.task_service import LLMTaskService
 
 logger = logging.getLogger(__name__)
 _REPORT_BUSINESS_TYPE = "report"
-_RECOVERABLE_CALLBACK_STATUSES = frozenset({"pending", "failed"})
+_RECOVERABLE_CALLBACK_STATUSES = frozenset(
+    {"pending", "failed", "outcome_unknown"}
+)
 
 
 class SQLiteReportCallbackRecoverySource(ReportCallbackRecoverySourcePort):
@@ -70,6 +72,7 @@ class SQLiteReportCallbackRecoverySource(ReportCallbackRecoverySourcePort):
             task_id=TaskId(execution_id),  # type: ignore[arg-type]
             report_id=report_id,
             payload=callback_payload,
+            callback_attempts=task.get("callback_attempts"),  # type: ignore[arg-type]
         )
         logger.debug(
             "已加载报告同步回调恢复候选: task_id=%s report_id=%s callback_status=%s",

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 import inspect
 import json
@@ -232,6 +232,274 @@ def _finish_success(
 
 
 class WeaponryCallbackGuardIntegrationTests(unittest.TestCase):
+    def test_new_check_task_can_explicitly_retry_outcome_unknown(self) -> None:
+        """Weaponry 新请求可重试 unknown，正常路径仍不得自动抢占。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            service = LLMTaskService(database)
+            commands = LegacyTaskCommandAdapter(service, WeaponryTaskCommandCodec())
+            _finish_success(commands, _submission(10501, marker="unknown-retry"))
+            outcomes = iter(
+                (
+                    WeaponryCallbackDeliveryOutcome.DELIVERY_OUTCOME_UNKNOWN,
+                    WeaponryCallbackDeliveryOutcome.SUCCESS,
+                )
+            )
+            transport_calls = 0
+
+            def transport(_payload: dict[str, object]):
+                nonlocal transport_calls
+                transport_calls += 1
+                outcome = next(outcomes)
+                return WeaponryCallbackDeliveryResult(outcome, outcome.value)
+
+            callbacks = SQLiteWeaponryCallbackAdapter(
+                service,
+                callback_url="http://callback.invalid/result",
+                callback_timeout=5.0,
+                lease_seconds=15.0,
+                transport=transport,
+            )
+            recovery = RecoverWeaponryCallbackSynchronously(
+                source=SQLiteWeaponryCallbackRecoverySource(service),
+                callbacks=callbacks,
+            )
+            with patch(
+                "app.modules.weaponry.adapters.callback_guard."
+                "save_callback_history_payload"
+            ):
+                first = recovery.execute(
+                    10501,
+                    request_trace_id="weaponry-unknown-first",
+                )
+                frozen = service.get_task("weaponry", "10501")
+                second = recovery.execute(
+                    10501,
+                    request_trace_id="weaponry-unknown-retry",
+                )
+                completed = service.get_task("weaponry", "10501")
+                attempt_events = service.list_callback_delivery_attempt_events(
+                    business_type="weaponry",
+                    business_key="10501",
+                )
+
+        self.assertFalse(first)
+        assert frozen is not None
+        self.assertEqual("outcome_unknown", frozen["callback_status"])
+        self.assertTrue(second)
+        self.assertEqual(2, transport_calls)
+        assert completed is not None
+        self.assertEqual("success", completed["callback_status"])
+        retry_authorization = next(
+            event
+            for event in attempt_events
+            if event["event_type"] == "authorized"
+            and event["callback_attempt"] == 2
+        )
+        self.assertEqual(
+            "explicit_check_task_recovery",
+            retry_authorization["trigger"],
+        )
+        self.assertEqual(
+            "weaponry-unknown-retry",
+            retry_authorization["request_trace_id"],
+        )
+
+    def test_each_new_request_advances_one_weaponry_attempt(self) -> None:
+        """unknown→rejected→success 只允许三个独立请求各推进一次 attempt。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            service = LLMTaskService(database)
+            commands = LegacyTaskCommandAdapter(service, WeaponryTaskCommandCodec())
+            _finish_success(commands, _submission(10511, marker="attempt-chain"))
+            outcomes = iter(
+                (
+                    WeaponryCallbackDeliveryOutcome.DELIVERY_OUTCOME_UNKNOWN,
+                    WeaponryCallbackDeliveryOutcome.REJECTED,
+                    WeaponryCallbackDeliveryOutcome.SUCCESS,
+                )
+            )
+            transport_calls = 0
+
+            def transport(_payload: dict[str, object]):
+                nonlocal transport_calls
+                transport_calls += 1
+                outcome = next(outcomes)
+                return WeaponryCallbackDeliveryResult(outcome, outcome.value)
+
+            recovery = RecoverWeaponryCallbackSynchronously(
+                source=SQLiteWeaponryCallbackRecoverySource(service),
+                callbacks=SQLiteWeaponryCallbackAdapter(
+                    service,
+                    callback_url="http://callback.invalid/result",
+                    callback_timeout=5.0,
+                    lease_seconds=15.0,
+                    transport=transport,
+                ),
+            )
+            with patch(
+                "app.modules.weaponry.adapters.callback_guard."
+                "save_callback_history_payload"
+            ):
+                results = tuple(
+                    recovery.execute(
+                        10511,
+                        request_trace_id=f"weaponry-attempt-{attempt}",
+                    )
+                    for attempt in range(1, 4)
+                )
+            projection = service.get_task("weaponry", "10511")
+
+        self.assertEqual((False, False, True), results)
+        self.assertEqual(3, transport_calls)
+        assert projection is not None
+        self.assertEqual(3, projection["callback_attempts"])
+        self.assertEqual("success", projection["callback_status"])
+
+    def test_fifty_concurrent_rejections_do_not_roll_weaponry_attempt(self) -> None:
+        """同一活跃批次的跟随者不能在 owner 失败后自动形成下一轮补发。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            service = LLMTaskService(database)
+            commands = LegacyTaskCommandAdapter(service, WeaponryTaskCommandCodec())
+            _finish_success(commands, _submission(10512, marker="rejected-flight"))
+            transport_entered = Event()
+            release_transport = Event()
+            transport_calls = 0
+
+            def transport(_payload: dict[str, object]):
+                nonlocal transport_calls
+                transport_calls += 1
+                transport_entered.set()
+                self.assertTrue(release_transport.wait(timeout=30))
+                return WeaponryCallbackDeliveryResult(
+                    WeaponryCallbackDeliveryOutcome.REJECTED,
+                    "http_status=503",
+                )
+
+            recovery = RecoverWeaponryCallbackSynchronously(
+                source=SQLiteWeaponryCallbackRecoverySource(service),
+                callbacks=SQLiteWeaponryCallbackAdapter(
+                    service,
+                    callback_url="http://callback.invalid/result",
+                    callback_timeout=5.0,
+                    lease_seconds=15.0,
+                    transport=transport,
+                ),
+            )
+            start = Barrier(50)
+            follower_lock = Lock()
+            followers_done = 0
+            all_followers_done = Event()
+
+            def recover_once(index: int) -> bool:
+                nonlocal followers_done
+                start.wait(timeout=30)
+                result = recovery.execute(
+                    10512,
+                    request_trace_id=f"weaponry-concurrent-{index}",
+                )
+                with follower_lock:
+                    followers_done += 1
+                    if followers_done == 49:
+                        all_followers_done.set()
+                return result
+
+            with patch(
+                "app.modules.weaponry.adapters.callback_guard."
+                "save_callback_history_payload"
+            ), ThreadPoolExecutor(max_workers=50) as executor:
+                futures = [executor.submit(recover_once, index) for index in range(50)]
+                self.assertTrue(transport_entered.wait(timeout=30))
+                self.assertTrue(all_followers_done.wait(timeout=30))
+                release_transport.set()
+                results = tuple(future.result(timeout=30) for future in futures)
+            projection = service.get_task("weaponry", "10512")
+
+        self.assertEqual(0, sum(results))
+        self.assertEqual(1, transport_calls)
+        assert projection is not None
+        self.assertEqual(1, projection["callback_attempts"])
+        self.assertEqual("failed", projection["callback_status"])
+
+    def test_fifty_distinct_architectures_keep_callback_identity_isolated(self) -> None:
+        """50 个异键任务的 payload、Guard、attempt 和审计不得相互串扰。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            service = LLMTaskService(database)
+            commands = LegacyTaskCommandAdapter(service, WeaponryTaskCommandCodec())
+            architecture_ids = tuple(range(10650, 10700))
+            for architecture_id in architecture_ids:
+                _finish_success(
+                    commands,
+                    _submission(architecture_id, marker=f"isolated-{architecture_id}"),
+                )
+            delivered_ids: list[int] = []
+            delivered_lock = Lock()
+
+            def transport(payload: dict[str, object]):
+                data = payload["data"]
+                if not isinstance(data, dict):
+                    raise AssertionError("武器谱回调 data 不是对象")
+                with delivered_lock:
+                    delivered_ids.append(int(data["architectureId"]))
+                return WeaponryCallbackDeliveryResult(
+                    WeaponryCallbackDeliveryOutcome.SUCCESS,
+                    "http_status=204",
+                )
+
+            recovery = RecoverWeaponryCallbackSynchronously(
+                source=SQLiteWeaponryCallbackRecoverySource(service),
+                callbacks=SQLiteWeaponryCallbackAdapter(
+                    service,
+                    callback_url="http://callback.invalid/result",
+                    callback_timeout=5.0,
+                    lease_seconds=15.0,
+                    transport=transport,
+                ),
+            )
+            with patch(
+                "app.modules.weaponry.adapters.callback_guard."
+                "save_callback_history_payload"
+            ), ThreadPoolExecutor(max_workers=50) as executor:
+                results = tuple(
+                    executor.map(
+                        lambda architecture_id: recovery.execute(
+                            architecture_id,
+                            request_trace_id=f"weaponry-isolated-{architecture_id}",
+                        ),
+                        architecture_ids,
+                    )
+                )
+
+            for architecture_id in architecture_ids:
+                projection = service.get_task("weaponry", str(architecture_id))
+                self.assertIsNotNone(projection)
+                assert projection is not None
+                self.assertEqual("success", projection["callback_status"])
+                self.assertEqual(1, projection["callback_attempts"])
+                events = service.list_callback_delivery_attempt_events(
+                    business_type="weaponry",
+                    business_key=str(architecture_id),
+                )
+                authorization = next(
+                    event
+                    for event in events
+                    if event["event_type"] == "authorized"
+                )
+                self.assertEqual(
+                    f"weaponry-isolated-{architecture_id}",
+                    authorization["request_trace_id"],
+                )
+
+        self.assertEqual((True,) * 50, results)
+        self.assertEqual(set(architecture_ids), set(delivered_ids))
+        self.assertEqual(50, len(delivered_ids))
+
     def test_http_3xx_is_rejected_and_explicit_recovery_accepts_only_2xx(self) -> None:
         """重定向不得伪装成功；甲方严格 2xx 才能完成投递。"""
 
@@ -269,6 +537,7 @@ class WeaponryCallbackGuardIntegrationTests(unittest.TestCase):
                         task_id,
                         10502,
                         WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY,
+                        1,
                     )
                 )
                 assert second.lease is not None
@@ -1032,6 +1301,10 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                 self.assertIs(
                     weaponry.callbacks,
                     weaponry.callback_recovery.callbacks,
+                )
+                self.assertIs(
+                    services.report_callback_recovery.callbacks,
+                    services.report_dispatcher.callbacks,
                 )
                 self.assertIs(
                     weaponry.resource_recovery,

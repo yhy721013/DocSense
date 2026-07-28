@@ -156,6 +156,23 @@
       "onInvalid": "reject_entire_request",
       "status": 400
     },
+    "validationBeforeSideEffects": "all-params-parse-and-normalize-before-any-callback",
+    "sameRequestDeduplication": {
+      "file": "normalized-fileName-first-occurrence",
+      "report": "normalized-reportId-first-occurrence",
+      "weaponry": "normalized-architectureId-first-occurrence"
+    },
+    "explicitUnknownRecovery": {
+      "businessTypes": [
+        "file",
+        "report",
+        "weaponry"
+      ],
+      "deliverySemantics": "at-least-once",
+      "automaticWorkerRetry": false,
+      "receiverIdempotencyRequired": true
+    },
+    "responseCardinalityBasis": "original-params-count-before-deduplication",
     "batchMissingPolicy": "continue_existing_items_and_return_empty_success",
     "implementationStatus": "implemented",
     "implementationWave": "1B"

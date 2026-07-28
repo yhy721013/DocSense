@@ -18,7 +18,7 @@
 - report、analysis、weaponry 等业务模块通过任务应用入口或端口协作，不允许 tasks 导入这些模块的 Adapter。
 - 内部 `task_id`、attempt、租约、队列名和事件序号均不得进入现有公开响应。
 
-## 当前实施状态（阶段 1D-6）
+## 当前实施状态（阶段 1F 关闭后补强）
 
 阶段 1A～1B-1 已建立并通过 Fake Port 验证以下框架无关契约：
 
@@ -83,8 +83,10 @@ SQLite Task Command Adapter 已装配当前开发分支的 `/llm/generate-report
 多实例一致性已经实现、部署或通过生产容量验收的证据。Weaponry 已在 1D-6 将同一
 Dispatcher/组合根绑定生产容器和公开薄路由，并接入真实 Callback Guard 与资源恢复；这仍然
 只是开发分支上的 SQLite 单实例兼容链，尚未部署生产。
-`/llm/check-task` 继续按甲方规定保留请求内同步恢复：report 类型现已绑定 report 模块的
-`RecoverReportCallbackSynchronously`，并与正常 Worker 竞争同一个 execution 级 Callback
-Guard；weaponry 类型也已绑定本模块的同步恢复用例并与 Worker 复用同一个 Guard，file 类型
-暂走旧同步兼容实现。阶段 3～6 只增加 MySQL/Outbox/RabbitMQ 后台
+`/llm/check-task` 继续按甲方规定保留请求内同步恢复：file、report、weaponry 分别绑定各自
+垂直模块的 `Recover*CallbackSynchronously`，并与正常 Worker 竞争同一个 execution 级
+Callback Guard。2026-07-29 新增内部 `callback_delivery_attempt_events` 追加审计；显式
+unknown 授权与 Guard CAS、attempt 增量和投影更新位于同一 SQLite 事务，完成、过期冻结和
+不一致冻结也留下事件。只有新的 check-task 可使用显式 unknown trigger，正常 Worker 和维护
+线程不得自动重试；人工解除审计保持独立。阶段 3～6 只增加 MySQL/Outbox/RabbitMQ 后台
 兜底，不替换同步入口，也不得建立绕过 Guard 的并行发送链。

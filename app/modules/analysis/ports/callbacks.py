@@ -50,6 +50,7 @@ class AnalysisCallbackRequest:
     allow_failed_retry: bool = False
     allow_outcome_unknown_retry: bool = False
     expected_callback_attempts: int | None = None
+    request_trace_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -76,6 +77,12 @@ class AnalysisCallbackRequest:
             raise ValueError(
                 "未知结果显式补发必须同时启用 allow_failed_retry"
             )
+        if not isinstance(self.request_trace_id, str):
+            raise TypeError("request_trace_id 必须是 str")
+        normalized_trace_id = self.request_trace_id.strip()
+        if len(normalized_trace_id) > 128:
+            raise ValueError("request_trace_id 最多 128 个字符")
+        object.__setattr__(self, "request_trace_id", normalized_trace_id)
 
 
 @dataclass(frozen=True)

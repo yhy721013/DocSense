@@ -710,6 +710,7 @@ class StrictAuditResourceAndCallbackFakeTests(unittest.TestCase):
                 first_task,
                 architecture_id,
                 WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY,
+                1,
             )
         )
         self.assertIs(WeaponryCallbackAcquireOutcome.ACQUIRED, recovered.outcome)
@@ -725,10 +726,42 @@ class StrictAuditResourceAndCallbackFakeTests(unittest.TestCase):
         self.assertIs(
             WeaponryCallbackAcquireOutcome.OUTCOME_UNKNOWN,
             callback.acquire(
+                AcquireWeaponryCallback(first_task, architecture_id)
+            ).outcome,
+        )
+        retried_unknown = callback.acquire(
+            AcquireWeaponryCallback(
+                first_task,
+                architecture_id,
+                WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY,
+                2,
+            )
+        )
+        self.assertIs(
+            WeaponryCallbackAcquireOutcome.ACQUIRED,
+            retried_unknown.outcome,
+        )
+        callback.delivery_results[first_task] = WeaponryCallbackDeliveryResult(
+            WeaponryCallbackDeliveryOutcome.DELIVERY_OUTCOME_UNKNOWN
+        )
+        second_unknown_delivery = callback.deliver(
+            DeliverWeaponryCallback(retried_unknown.lease, payload)  # type: ignore[arg-type]
+        )
+        self.assertTrue(
+            callback.complete(  # type: ignore[arg-type]
+                retried_unknown.lease,
+                second_unknown_delivery,
+                payload,
+            )
+        )
+        self.assertIs(
+            WeaponryCallbackAcquireOutcome.STALE,
+            callback.acquire(
                 AcquireWeaponryCallback(
                     first_task,
                     architecture_id,
                     WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY,
+                    2,
                 )
             ).outcome,
         )

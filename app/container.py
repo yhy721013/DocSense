@@ -1101,6 +1101,16 @@ def create_application_services() -> ApplicationServices:
             RUNTIME_DIR / "locks" / "report-dispatcher.lock"
         ),
     )
+    # 正常 Worker、同步 check-task 与过期 Guard 维护必须共用唯一 Callback Adapter。
+    # 这项 fail-fast 校验阻止后续组合根重构意外创建第二套发送权；维护线程本身仍只会
+    # 冻结过期 ``sending``，绝不会调用同步恢复用例或自动补发 unknown。
+    if not (
+        report_runner.callbacks
+        is report_callback_recovery.callbacks
+        is report_dispatcher.callbacks
+        is report_callbacks
+    ):
+        raise RuntimeError("Report Worker/check-task/维护线程必须共享同一 Callback Guard")
     report_submit = SubmitReportTask(
         task_commands=report_task_commands,
         progress_publisher=report_progress_publisher,

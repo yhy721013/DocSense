@@ -89,6 +89,8 @@ class AcquireWeaponryCallback:
     reason: WeaponryCallbackAcquireReason = (
         WeaponryCallbackAcquireReason.INITIAL_DELIVERY
     )
+    expected_callback_attempts: int | None = None
+    request_trace_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, TaskId):
@@ -96,6 +98,24 @@ class AcquireWeaponryCallback:
         _architecture_id(self.architecture_id)
         if not isinstance(self.reason, WeaponryCallbackAcquireReason):
             raise TypeError("reason 必须是 WeaponryCallbackAcquireReason")
+        if self.expected_callback_attempts is not None and (
+            isinstance(self.expected_callback_attempts, bool)
+            or not isinstance(self.expected_callback_attempts, int)
+            or self.expected_callback_attempts < 0
+        ):
+            raise ValueError("expected_callback_attempts 必须是非负整数或 None")
+        is_explicit = (
+            self.reason
+            is WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY
+        )
+        if is_explicit != (self.expected_callback_attempts is not None):
+            raise ValueError("显式 check-task 恢复必须携带 callback attempt 快照")
+        if not isinstance(self.request_trace_id, str):
+            raise TypeError("request_trace_id 必须是 str")
+        normalized_trace_id = self.request_trace_id.strip()
+        if len(normalized_trace_id) > 128:
+            raise ValueError("request_trace_id 最多 128 个字符")
+        object.__setattr__(self, "request_trace_id", normalized_trace_id)
 
 
 @dataclass(frozen=True)
@@ -143,6 +163,7 @@ class WeaponryCallbackRecoveryCandidate:
     task_id: TaskId
     architecture_id: int
     payload: WeaponryCallbackPayload
+    callback_attempts: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, TaskId):
@@ -152,6 +173,12 @@ class WeaponryCallbackRecoveryCandidate:
             raise TypeError("payload 必须是 WeaponryCallbackPayload")
         if self.payload.architecture_id != self.architecture_id:
             raise ValueError("恢复候选 payload 与 architecture_id 不一致")
+        if (
+            isinstance(self.callback_attempts, bool)
+            or not isinstance(self.callback_attempts, int)
+            or self.callback_attempts < 0
+        ):
+            raise ValueError("callback_attempts 必须是非负整数")
 
 
 @dataclass(frozen=True)

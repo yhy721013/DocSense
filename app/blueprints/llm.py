@@ -489,6 +489,7 @@ def llm_weaponry():
 def llm_check_task():
     services = _services()
     task_service = services.task_service
+    trace_id = uuid4().hex
     payload = request.get_json(silent=True) or {}
     business_type = payload.get("businessType")
     if business_type not in {"file", "report", "weaponry"}:
@@ -506,10 +507,17 @@ def llm_check_task():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    missing_count = 0
-    callback_replayed_count = 0
-    duplicate_file_count = 0
-    processed_file_keys: set[str] = set()
+    # check-task 会在当前 HTTP 请求线程内执行必要的 Callback 恢复，因此它不是纯查询。
+    # 必须先完整校验所有业务键，再进入任何任务读取或网络副作用；否则前面的合法项可能
+    # 已经发出回调，后面的非法项却让整次请求返回 400，形成难以解释的部分执行。
+    #
+    # 同一业务键允许存在多种公开表示，例如 report 的 132/"000132" 和 weaponry 的
+    # 10502/"00010502"。去重必须发生在规范化之后，并稳定保留首次出现顺序，确保一个
+    # HTTP 请求对同一逻辑任务至多授权一轮恢复。原始 params 数量仍用于既有单项 404/
+    # 批量 200 判定，不能因内部去重擅自改变公开状态码。
+    parsed_items: list[tuple[int, str, str | int]] = []
+    first_index_by_key: dict[str, int] = {}
+    duplicate_item_count = 0
     for index, params in enumerate(params_list):
         if business_type == "file":
             business_key = params.get("fileName")
@@ -520,19 +528,7 @@ def llm_check_task():
                 )
                 return jsonify({"error": "fileName不能为空"}), 400
             normalized_key = business_key.strip()
-            # 同一 HTTP 请求内的重复 fileName 只处理首次出现项。check-task 是带回调
-            # 副作用的命令；若逐项执行重复键，前一次明确失败后第二项可能立即形成新的
-            # attempt，违背调用方“一次请求只触发一轮补发”的直觉。稳定去重不改变
-            # 参数、响应体或状态码，且保留首次出现顺序。
-            if normalized_key in processed_file_keys:
-                duplicate_file_count += 1
-                logger.info(
-                    "任务查询请求跳过重复文件项: fileName=%s index=%s",
-                    normalized_key,
-                    index,
-                )
-                continue
-            processed_file_keys.add(normalized_key)
+            normalized_value: str | int = normalized_key
         elif business_type == "weaponry":
             architecture_id = params.get("architectureId")
             if architecture_id is None:
@@ -554,6 +550,7 @@ def llm_check_task():
                 )
                 return jsonify({"error": str(exc)}), 400
             normalized_key = normalized_architecture_id.business_key
+            normalized_value = normalized_architecture_id.value
         else:
             report_id = params.get("reportId")
             if report_id is None:
@@ -573,6 +570,26 @@ def llm_check_task():
                 )
                 return jsonify({"error": str(exc)}), 400
             normalized_key = normalized_report_id.business_key
+            normalized_value = normalized_report_id.value
+
+        first_index = first_index_by_key.get(normalized_key)
+        if first_index is not None:
+            duplicate_item_count += 1
+            logger.info(
+                "任务查询请求跳过规范化重复项: business_type=%s index=%d "
+                "first_index=%d trace_id=%s",
+                business_type,
+                index,
+                first_index,
+                trace_id,
+            )
+            continue
+        first_index_by_key[normalized_key] = index
+        parsed_items.append((index, normalized_key, normalized_value))
+
+    missing_count = 0
+    callback_replayed_count = 0
+    for original_index, normalized_key, normalized_value in parsed_items:
 
         task = task_service.get_task(business_type, normalized_key)
         if not task:
@@ -587,7 +604,7 @@ def llm_check_task():
                 "批量任务查询项未找到任务: businessType=%s businessKey=%s index=%s",
                 business_type,
                 normalized_key,
-                index,
+                original_index,
             )
             # 批量缺失项不终止其余项的回调恢复；成功体不再公开占位任务快照。
             missing_count += 1
@@ -598,14 +615,16 @@ def llm_check_task():
             # 遗留直发方法，而是与正常 Worker 共用 execution 级 latest-wins、Guard 和
             # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
             replayed = services.report_callback_recovery.execute(
-                ReportId.from_public_value(normalized_report_id.value)
+                ReportId.from_public_value(normalized_value),  # type: ignore[arg-type]
+                request_trace_id=trace_id,
             )
         elif business_type == "weaponry":
             weaponry_services = services.weaponry_services
             if weaponry_services is None:
                 raise RuntimeError("应用容器未装配武器谱运行链")
             replayed = weaponry_services.callback_recovery.execute(
-                normalized_architecture_id.value
+                normalized_value,  # type: ignore[arg-type]
+                request_trace_id=trace_id,
             )
         else:
             analysis_callback_recovery = services.analysis_callback_recovery
@@ -614,7 +633,10 @@ def llm_check_task():
                 # 缺少新恢复链，必须显式失败，不能回退到旧 replay 以免形成第二个 owner。
                 logger.error("文件 check-task 缺少新回调恢复链，拒绝使用遗留恢复器")
                 raise RuntimeError("应用容器未装配文件分析回调恢复链")
-            replayed = analysis_callback_recovery.execute(normalized_key)
+            replayed = analysis_callback_recovery.execute(
+                normalized_key,
+                request_trace_id=trace_id,
+            )
         # 保持原有“恢复后重读”的一致性门禁，但不再把内部状态投影到 HTTP 响应。
         refreshed_task = task_service.get_task(business_type, normalized_key)
         if refreshed_task is None:
@@ -622,7 +644,7 @@ def llm_check_task():
                 "任务回调恢复后重新读取失败: businessType=%s businessKey=%s index=%s",
                 business_type,
                 normalized_key,
-                index,
+                original_index,
             )
             raise RuntimeError("任务回调恢复后不存在")
         if replayed:
@@ -630,13 +652,15 @@ def llm_check_task():
 
     logger.info(
         "任务检查与必要回调恢复已完成: businessType=%s requested_count=%d "
-        "missing_count=%d duplicate_file_count=%d callback_replayed_count=%d "
-        "status_code=200",
+        "unique_count=%d missing_count=%d duplicate_item_count=%d "
+        "callback_replayed_count=%d status_code=200 trace_id=%s",
         business_type,
         len(params_list),
+        len(parsed_items),
         missing_count,
-        duplicate_file_count,
+        duplicate_item_count,
         callback_replayed_count,
+        trace_id,
     )
     # 公开接口只承诺检查已完成；任务状态、进度、Callback 细节继续留在内部存储。
     return _empty_http_response(200)

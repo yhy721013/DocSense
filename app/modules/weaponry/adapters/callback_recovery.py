@@ -27,7 +27,9 @@ from app.services.llm_service.task_service import LLMTaskService
 logger = logging.getLogger(__name__)
 
 _WEAPONRY_BUSINESS_TYPE = "weaponry"
-_RECOVERABLE_CALLBACK_STATUSES = frozenset({"pending", "failed"})
+_RECOVERABLE_CALLBACK_STATUSES = frozenset(
+    {"pending", "failed", "outcome_unknown"}
+)
 _TERMINAL_STATUSES = frozenset({WEAPONRY_STATUS_SUCCEEDED, WEAPONRY_STATUS_FAILED})
 
 
@@ -210,6 +212,7 @@ class SQLiteWeaponryCallbackRecoverySource(WeaponryCallbackRecoverySourcePort):
                 payload,
                 expected_architecture_id=normalized_id,
             ),
+            callback_attempts=task.get("callback_attempts"),  # type: ignore[arg-type]
         )
         logger.debug(
             "已加载武器谱同步回调恢复候选: task_id=%s architecture_id=%s "

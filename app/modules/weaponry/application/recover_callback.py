@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from uuid import uuid4
 
 from app.modules.weaponry.domain import normalize_architecture_id_value
 from app.modules.weaponry.ports import (
@@ -38,6 +40,10 @@ class RecoverWeaponryCallbackSynchronously:
             raise TypeError("callbacks 必须实现 WeaponryCallbackPort")
         self._source = source
         self._callbacks = callbacks
+        # 只合并当前进程正在处理的同一 architectureId，防止一批并发 check-task 在
+        # owner 明确失败后继续读取新 attempt。跨实例互斥仍由持久化 Guard/CAS 负责。
+        self._active_recovery_lock = threading.RLock()
+        self._active_architecture_ids: set[int] = set()
 
     @property
     def callbacks(self) -> WeaponryCallbackPort:
@@ -45,10 +51,51 @@ class RecoverWeaponryCallbackSynchronously:
 
         return self._callbacks
 
-    def execute(self, architecture_id: int) -> bool:
+    def execute(self, architecture_id: int, *, request_trace_id: str = "") -> bool:
         """同步尝试一次；只有本次 HTTP 收到严格 2xx 才返回 ``True``。"""
 
         normalized_id = normalize_architecture_id_value(architecture_id)
+        if not isinstance(request_trace_id, str):
+            raise TypeError("request_trace_id 必须是 str")
+        normalized_trace_id = request_trace_id.strip()
+        if len(normalized_trace_id) > 128:
+            raise ValueError("request_trace_id 最多 128 个字符")
+        effective_trace_id = normalized_trace_id or uuid4().hex
+        if not self._try_enter_local_recovery(normalized_id):
+            logger.info(
+                "武器谱同步回调恢复已由本进程 owner 处理，跳过重复发送: "
+                "architecture_id=%s",
+                normalized_id,
+            )
+            return False
+        try:
+            return self._execute_owned(
+                normalized_id,
+                request_trace_id=effective_trace_id,
+            )
+        finally:
+            self._leave_local_recovery(normalized_id)
+
+    def _try_enter_local_recovery(self, architecture_id: int) -> bool:
+        with self._active_recovery_lock:
+            if architecture_id in self._active_architecture_ids:
+                return False
+            self._active_architecture_ids.add(architecture_id)
+            return True
+
+    def _leave_local_recovery(self, architecture_id: int) -> None:
+        with self._active_recovery_lock:
+            self._active_architecture_ids.discard(architecture_id)
+
+    def _execute_owned(
+        self,
+        architecture_id: int,
+        *,
+        request_trace_id: str,
+    ) -> bool:
+        """由本进程 owner 使用首次候选快照尝试至多一次 Callback。"""
+
+        normalized_id = architecture_id
         candidate = self._source.load_recoverable(normalized_id)
         if candidate is None:
             logger.debug(
@@ -63,6 +110,8 @@ class RecoverWeaponryCallbackSynchronously:
                 reason=(
                     WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY
                 ),
+                expected_callback_attempts=candidate.callback_attempts,
+                request_trace_id=request_trace_id,
             )
         )
         if not isinstance(acquire, WeaponryCallbackAcquireResult):

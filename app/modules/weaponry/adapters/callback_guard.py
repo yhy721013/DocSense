@@ -153,6 +153,13 @@ class SQLiteWeaponryCallbackAdapter:
                 command.reason
                 is WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY
             ),
+            allow_outcome_unknown_retry=(
+                command.reason
+                is WeaponryCallbackAcquireReason.EXPLICIT_CHECK_TASK_RECOVERY
+            ),
+            expected_callback_attempts=command.expected_callback_attempts,
+            delivery_trigger=command.reason.value,
+            request_trace_id=command.request_trace_id,
         )
         try:
             outcome = WeaponryCallbackAcquireOutcome(raw.get("outcome"))

@@ -160,6 +160,12 @@ class SQLiteAnalysisCallbackAdapter(AnalysisCallbackPort):
                 request.allow_outcome_unknown_retry
             ),
             expected_callback_attempts=request.expected_callback_attempts,
+            delivery_trigger=(
+                "explicit_check_task_recovery"
+                if request.allow_failed_retry
+                else "initial_delivery"
+            ),
+            request_trace_id=request.request_trace_id,
         )
         outcome = self._acquire_outcome(raw.get("outcome"))
         if outcome is not AnalysisCallbackAcquireOutcome.ACQUIRED:

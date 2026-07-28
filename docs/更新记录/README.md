@@ -121,6 +121,7 @@
 | `260727-阶段1F-5B唯一生产链路由接线与离线验收记录.md` | 1F-5B 的 `/llm/analysis` Parser → Submit → Presenter 路由接线、file check-task 新 Callback Recovery owner、永久 AST/契约回归与生产预检边界；代码/离线验收完成，真实目标库发布尚待确认。 |
 | `260727-阶段1F-7B关闭验收执行记录.md` | 1F-7B 的 408 项定向回归、发现 1,752/排除 13/执行 1,739 项安全全仓回归、旧执行器引用盘点和文档收口；代码/离线关闭验收完成，真实目标库发布仍待确认。 |
 | `260727-阶段1F关闭后全面审查修复与清库发布收口执行记录.md` | 1F 关闭后对 file `outcome_unknown` 显式 check-task 至少一次补发、请求内去重、毒快照回调、投影原子收敛、资源统计、Dispatcher 致命退出和 `clean.py` fail-closed 的修复；同步权威接口说明但不增删公开字段，并按停服清库重建制度把只读预检保留为存量/恢复诊断工具。 |
+| `260729-report与weaponry显式unknown重试执行记录.md` | 按 U0～U7 实施 report/weaponry check-task 显式 at-least-once unknown 补发、三类型完整预校验与规范化去重、Guard attempt CAS/追加审计、组合根单发送权和接口黄金资产同步；公开字段与状态码不变，仍限 SQLite 单实例离线证据。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 

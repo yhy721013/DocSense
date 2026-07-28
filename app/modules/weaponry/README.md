@@ -37,6 +37,13 @@ Weaponry 薄适配、严格基础设施配置、共享 limiter、进程锁、离
   和遗留引用清单已经完成。有效 production attestation 尚未在真实受控环境生成，readiness 必须
   保持 false，代码也尚未部署生产环境。
 
+2026-07-29 起，weaponry 类型 `/llm/check-task` 在既有 `pending/failed` 恢复之外，允许新的
+请求显式授权一次 `outcome_unknown` 的 at-least-once 补发。路由在任何回调副作用前完整校验
+全部 `params`，并按规范化 `architectureId` 稳定去重；同一请求的每个唯一键最多竞争一次，
+同一 attempt 的并发请求仍由 SQLite CAS/lease/fencing 保证单 owner。正常 Worker 与维护线程
+不会自动重发 unknown，维护线程只冻结过期 Guard；接收端必须按规范化 `architectureId` 和
+业务结果幂等。该改造没有增加任何公开字段，也没有改变 200/400/404/409/202 契约。
+
 1D-3B 的“生产 Adapter”表示可以在组合根注入的真实基础设施实现；1D-6 已完成源码装配，但不
 表示已经部署或完成真实模型/回调端联调。当前 1D-6 自动测试仍使用受控 Fake Transport、Mock HTTP
 和临时 SQLite，不修改现有 AnythingLLM workspace/文档。1D-5 的 50 个 SQLite accepted 任务只形成持久行、一条

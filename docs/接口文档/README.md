@@ -7,6 +7,12 @@
 必须按 `fileName` 和业务结果幂等处理。同一 check-task 请求中规范化后重复的 fileName 只处理首次出现项。
 该确认不增删请求参数、响应字段、回调字段，不改变既有 HTTP 状态码或严格空成功体。
 
+2026-07-29 将同一语义扩展至 report 和 weaponry：三类业务的 `outcome_unknown` 都只能由新的
+`/llm/check-task` 请求显式授权 at-least-once 补发，正常 Worker 与维护线程不得自动重试；
+接收方分别按 `fileName`、规范化 `reportId` 或规范化 `architectureId` 与业务结果幂等处理。
+服务端在任何回调副作用前完整校验全部 `params`，并按规范化业务键稳定去重；单项 404 与批量
+200 仍以原始 `params` 项数判定。本次确认同样不增删任何公开字段、状态码或 Header。
+
 2026-07-27 又批准并实现 `/llm/chat` 的首次空文件范围变更：受理事务首次创建 `chatId`
 且调用方显式传入 `fileNames=[]` 时，使用受理时刻当前实例知识库中的全部可用已解析文件；
 既有会话空数组在当时表示不新增文件。该阶段不增删参数、JSON/SSE 字段、事件、Header 或

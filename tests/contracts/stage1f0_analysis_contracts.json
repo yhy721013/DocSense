@@ -5,9 +5,9 @@
   "publicContractChanged": true,
   "interfaceAuthority": {
     "path": "docs/接口文档/文件处理和报告生成.md",
-    "sha256": "8752485821489C5B63CBB81BC2F61FF6C34BE9E47BDE411FB915EA689C78D1F3",
-    "lastApprovedAt": "2026-07-27",
-    "approvedChange": "GJB兜底定向选择通用要求；file outcome_unknown可由新的check-task按at-least-once语义显式补发，同请求重复fileName只处理一次"
+    "sha256": "A565F7ED512CDC81CD5ECCECA7AD58C082AB0D672937F6514A895106C1451F84",
+    "lastApprovedAt": "2026-07-29",
+    "approvedChange": "file/report/weaponry outcome_unknown均可由新的check-task按at-least-once语义显式补发；整批先校验、按规范化业务键去重，响应分支仍按原始params项数判定"
   },
   "analysisSubmission": {
     "method": "POST",
@@ -221,7 +221,12 @@
         "error": "任务不存在"
       }
     },
-    "callbackRecovery": "file pending/failed终态回调在同步检查中按既有规则恢复；outcome_unknown仅由新的check-task按at-least-once语义显式补发，恢复结果不写入成功响应"
+    "callbackRecovery": "file/report/weaponry pending/failed终态回调在同步检查中按既有规则恢复；outcome_unknown仅由新的check-task按at-least-once语义显式补发，恢复结果不写入成功响应",
+    "validationBeforeSideEffects": "all-params-parse-and-normalize-before-any-callback",
+    "sameRequestDeduplication": "normalized-business-key-first-occurrence",
+    "responseCardinalityBasis": "original-params-count-before-deduplication",
+    "receiverIdempotencyRequired": true,
+    "newPublicFields": false
   },
   "fileProgress": {
     "transport": "WebSocket",

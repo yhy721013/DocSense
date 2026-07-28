@@ -560,6 +560,7 @@ Dispatcher、可靠队列或多实例运行时。
     `test_stage1a1_check_task_contract.py` 和 `test_clean_runtime.py`；2026-07-27 的安全全仓结果为
     发现 1,758 项、排除 13 项、执行/成功 1,745 项、失败 0 项、错误 0 项、跳过 0 项。
 46. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
+47. 运行 report/weaponry 显式 unknown 重试关闭回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_callback_attempt_audit tests.test_analysis_callback_guard tests.test_analysis_ports tests.test_report_ports tests.test_report_callback_guard tests.test_report_callback_recovery tests.test_weaponry_stage1d6 tests.test_weaponry_strict_fakes tests.test_stage1a1_check_task_contract tests.test_progress_and_check_task tests.test_dependency_container tests.test_architecture_boundaries tests.test_stage0_contract_assets tests.test_stage1d_weaponry_contract_assets tests.test_analysis_contract_assets`；2026-07-29 结果为 262 项通过。安全全仓动态发现 2,055 项，精确排除既有 13 项后执行 2,042 项，成功 2,040、失败 0、错误 0、跳过 2。该证据只覆盖临时 SQLite/Fake 的单实例离线边界。
 
 ## 执行限制
 

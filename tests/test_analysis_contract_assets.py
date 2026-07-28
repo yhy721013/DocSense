@@ -159,7 +159,8 @@ class AnalysisContractAssetTests(unittest.TestCase):
         self.assertEqual(1, self.contract["schemaVersion"])
         self.assertEqual("1F-0", self.contract["stage"])
         self.assertTrue(self.contract["publicContractChanged"])
-        self.assertEqual("2026-07-27", authority["lastApprovedAt"])
+        self.assertEqual("2026-07-29", authority["lastApprovedAt"])
+        self.assertIn("file/report/weaponry outcome_unknown", authority["approvedChange"])
         self.assertEqual(authority["sha256"], observed_sha256)
         self.assertEqual(
             self.contract,
@@ -348,6 +349,20 @@ class AnalysisContractAssetTests(unittest.TestCase):
         )
         self.assertEqual(check_task["success"]["status"], response.status_code)
         self.assertEqual(check_task["success"]["body"].encode("utf-8"), response.data)
+        self.assertEqual(
+            "all-params-parse-and-normalize-before-any-callback",
+            check_task["validationBeforeSideEffects"],
+        )
+        self.assertEqual(
+            "normalized-business-key-first-occurrence",
+            check_task["sameRequestDeduplication"],
+        )
+        self.assertEqual(
+            "original-params-count-before-deduplication",
+            check_task["responseCardinalityBasis"],
+        )
+        self.assertTrue(check_task["receiverIdempotencyRequired"])
+        self.assertFalse(check_task["newPublicFields"])
 
         response = self.client.post(
             check_task["path"],
