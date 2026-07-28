@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 
 from flask import Flask
 
@@ -19,6 +20,9 @@ from app.container import (
 )
 from app.services.core.logging import setup_logging
 from app.services.core.settings import MAX_CONTENT_LENGTH
+
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(*, services: ApplicationServices | None = None) -> Flask:
@@ -45,7 +49,25 @@ def create_app(*, services: ApplicationServices | None = None) -> Flask:
         # 显式注入的离线测试默认不启动任何后台线程；只有应用工厂自行创建的生产容器
         # 才拥有 Dispatcher 生命周期。启动失败必须让应用创建失败，不能在没有恢复扫描
         # 的情况下继续对外返回 202。
-        resolved_services.start_background_services()
+        try:
+            resolved_services.start_background_services()
+        except BaseException as startup_error:
+            # 生产容器由应用工厂独占。即使各 Dispatcher 已在 start() 内完成局部
+            # 回滚，这里仍统一 close，确保失败组件刚取得的进程锁、维护线程和其他
+            # 容器资源都走完最终释放路径。关闭异常只记录，不能遮蔽真正的启动错误。
+            logger.error(
+                "DocSense 后台服务启动失败，开始关闭应用拥有的依赖容器: "
+                "error_type=%s",
+                type(startup_error).__name__,
+            )
+            try:
+                resolved_services.close()
+            except BaseException:
+                logger.critical(
+                    "DocSense 启动失败后的容器关闭异常，必须检查进程锁与后台资源",
+                    exc_info=True,
+                )
+            raise
         atexit.register(resolved_services.close)
 
     return app

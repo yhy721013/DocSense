@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import tempfile
 import threading
@@ -808,6 +809,82 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertEqual(1, self.services.report_dispatcher.start_count)
         register.assert_called_once_with(self.services.close)
         self.services.close()
+
+    def test_production_start_failure_closes_owned_container_without_atexit(
+        self,
+    ) -> None:
+        """生产启动失败必须最终关闭容器，且不得注册一个失效的退出钩子。"""
+
+        owned_services = MagicMock(spec=ApplicationServices)
+        owned_services.start_background_services.side_effect = RuntimeError(
+            "forced production startup failure"
+        )
+        owned_services.close.side_effect = ValueError("forced close failure")
+
+        with (
+            patch("app.create_application_services", return_value=owned_services),
+            patch("app.atexit.register") as register,
+            self.assertLogs("app", level="ERROR"),
+            self.assertRaisesRegex(RuntimeError, "forced production startup failure"),
+        ):
+            create_app()
+
+        owned_services.close.assert_called_once_with()
+        register.assert_not_called()
+
+    def test_production_container_constructs_one_shared_office_preparer(self) -> None:
+        """Report 与 Analysis 必须引用同一个进程级转换容量许可。"""
+
+        source_path = Path(__file__).resolve().parents[1] / "app" / "container.py"
+        module = ast.parse(source_path.read_text(encoding="utf-8"))
+        production_factory = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "create_application_services"
+        )
+        constructor_calls = [
+            node
+            for node in ast.walk(production_factory)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "LibreOfficeLegacyOfficePreparer"
+        ]
+        # 生产组合根内部只能构造一次，随后把同一局部变量注入 Report、Analysis
+        # 和 ApplicationServices；离线默认依赖工厂不属于这个函数作用域。
+        self.assertEqual(1, len(constructor_calls))
+
+        injected_targets: dict[str, str] = {}
+        for node in ast.walk(production_factory):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id not in {
+                "LegacyReportFileAdapter",
+                "LegacyAnalysisFilePreparationAdapter",
+                "ApplicationServices",
+            }:
+                continue
+            keyword = next(
+                (
+                    item
+                    for item in node.keywords
+                    if item.arg == "legacy_office_preparer"
+                ),
+                None,
+            )
+            if keyword is not None and isinstance(keyword.value, ast.Name):
+                injected_targets[node.func.id] = keyword.value.id
+
+        self.assertEqual(
+            {
+                "LegacyReportFileAdapter": "legacy_office_preparer",
+                "LegacyAnalysisFilePreparationAdapter": (
+                    "legacy_office_preparer"
+                ),
+                "ApplicationServices": "legacy_office_preparer",
+            },
+            injected_targets,
+        )
 
     def test_run_entrypoint_disables_debug_reloader_for_single_worker(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "run.py").read_text(

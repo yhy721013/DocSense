@@ -76,6 +76,23 @@ class LegacyOfficeConfigTests(unittest.TestCase):
         self.assertEqual(4096, config.max_input_bytes)
         self.assertEqual(8192, config.max_output_bytes)
 
+    def test_deployment_example_explicitly_enables_legacy_office(self) -> None:
+        """部署样例默认开启，但不能改变环境变量缺失时的代码安全默认值。"""
+
+        env_example = (
+            Path(__file__).resolve().parents[1] / ".env.example"
+        ).read_text(encoding="utf-8")
+        assignments = {
+            line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
+            for line in env_example.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "=" in line
+        }
+
+        self.assertEqual(
+            "true",
+            assignments.get("DOCSENSE_LEGACY_OFFICE_ENABLED"),
+        )
+
     def test_loader_rejects_ambiguous_or_unsafe_values(self) -> None:
         invalid_cases = (
             ("DOCSENSE_LEGACY_OFFICE_ENABLED", "perhaps"),
