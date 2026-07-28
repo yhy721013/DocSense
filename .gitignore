@@ -41,3 +41,6 @@ models/
 data/
 *.tar
 *.tar.gz
+
+# 运行依赖
+argos-translate/

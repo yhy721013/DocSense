@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 import threading
+from types import SimpleNamespace
 import unittest
 
 from app.integrations.anythingllm import (
@@ -46,6 +48,7 @@ class _FakeAnythingLLMRuntime:
         self.embedding_calls = 0
         self.fail_create_after_commit = False
         self.fail_upload_after_commit = False
+        self.fail_embedding_after_commit = False
 
 
 class _FakeDocuments:
@@ -55,8 +58,10 @@ class _FakeDocuments:
     def upload_document(self, file_path, *, user_id=None, metadata=None):
         self._runtime.upload_calls += 1
         path = Path(file_path)
+        provider_file_name = re.sub(r"[-\s]+", "-", path.name)
         location = (
-            f"custom-documents/upload-{self._runtime.upload_calls}-{path.name}"
+            f"custom-documents/{provider_file_name}-"
+            f"00000000-0000-0000-0000-{self._runtime.upload_calls:012d}.json"
         )
         document = AnythingLLMDocument(
             id=f"upload-{self._runtime.upload_calls}",
@@ -106,7 +111,17 @@ class _FakeWorkspaces:
         for location in adds or ():
             document = self._runtime.uploaded[location]
             if all(item.location != location for item in documents):
-                documents.append(document)
+                # 真实 AnythingLLM 的 workspace 文档记录会把 title 改写成带上传 UUID
+                # 的 location 文件名，而不是保留上传请求中的原始文件名。Fake 必须呈现
+                # 这个生产差异，避免协调器再次错误依赖展示标题判断文档身份。
+                documents.append(
+                    replace(
+                        document,
+                        title=location.rsplit("/", 1)[-1],
+                    )
+                )
+        if self._runtime.fail_embedding_after_commit:
+            raise AnythingLLMTimeoutError("injected embedding timeout")
         return next(
             workspace
             for workspace in self._runtime.workspaces
@@ -236,6 +251,10 @@ class TermsCatalogCoordinatorTests(unittest.TestCase):
             )
 
             # 模拟进程重启：重新构造协调器和状态对象，但复用同一远端事实。
+            self.assertNotEqual(
+                manifest.cards[0].upload_file_name,
+                runtime.documents_by_slug[runtime.workspaces[0].slug][0].title,
+            )
             _, _, restarted = self._coordinator(root, runtime)
             restarted.prepare()
             self.assertEqual(
@@ -253,6 +272,22 @@ class TermsCatalogCoordinatorTests(unittest.TestCase):
                 ),
                 runtime.workspaces[0].name,
             )
+
+    def test_inspect_uses_persisted_location_instead_of_provider_title(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_card(root, 1, "alpha")
+            runtime = _FakeAnythingLLMRuntime()
+            _, _, coordinator = self._coordinator(root, runtime)
+            coordinator.prepare()
+
+            _, _, restarted = self._coordinator(root, runtime)
+            plan = restarted.inspect()
+
+            self.assertEqual((), plan.missing_card_ids)
+            self.assertEqual((), plan.unexpected_document_titles)
+            self.assertFalse(plan.blocked_outcome_unknown)
+            self.assertFalse(plan.write_required)
 
     def test_partial_generation_only_uploads_the_missing_card(self) -> None:
         with TemporaryDirectory() as directory:
@@ -328,6 +363,42 @@ class TermsCatalogCoordinatorTests(unittest.TestCase):
             with self.assertRaises(TermsCatalogSynchronizationError):
                 restarted.prepare()
             self.assertEqual(1, runtime.upload_calls)
+
+    def test_binding_timeout_after_commit_recovers_by_exact_location(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_card(root, 1, "alpha")
+            runtime = _FakeAnythingLLMRuntime()
+            runtime.fail_embedding_after_commit = True
+            _, _, coordinator = self._coordinator(root, runtime)
+
+            with self.assertRaises(TermsCatalogSynchronizationError):
+                coordinator.prepare()
+            self.assertEqual(1, runtime.upload_calls)
+            self.assertEqual(1, runtime.embedding_calls)
+
+            runtime.fail_embedding_after_commit = False
+            _, _, restarted = self._coordinator(root, runtime)
+            restarted.prepare()
+            self.assertEqual(1, runtime.upload_calls)
+            self.assertEqual(1, runtime.embedding_calls)
+
+    def test_non_empty_workspace_without_recovery_facts_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_card(root, 1, "alpha")
+            runtime = _FakeAnythingLLMRuntime()
+            _, _, coordinator = self._coordinator(root, runtime)
+            coordinator.prepare()
+            writes = (runtime.upload_calls, runtime.embedding_calls)
+
+            # 模拟本地恢复库丢失。远端 title 经过 Provider 改写后不能证明它一定属于
+            # 当前目录，因此必须阻断启动，不能按标题猜测并重复上传。
+            (root / "state.sqlite3").unlink()
+            _, _, restarted = self._coordinator(root, runtime)
+            with self.assertRaises(TermsCatalogSynchronizationError):
+                restarted.prepare()
+            self.assertEqual(writes, (runtime.upload_calls, runtime.embedding_calls))
 
     def test_legacy_manual_fingerprint_routes_to_original_read_only_workspace(
         self,

@@ -19,6 +19,8 @@ import threading
 import tempfile
 from typing import Final
 
+from app.integrations.anythingllm.models import normalize_document_location_key
+
 from .anythingllm_clients import WeaponryAnythingLLMClientFactoryProtocol
 
 
@@ -545,10 +547,9 @@ class AnythingLLMTermsCatalogCoordinator:
                 if workspace is not None
                 else ()
             )
-        actual_titles = {document.title.casefold() for document in documents}
-        expected_by_title = {
-            card.upload_file_name.casefold(): card for card in self._manifest.cards
-        }
+        remote_by_location = self._index_remote_documents(documents)
+        managed_locations: set[str] = set()
+        missing_card_ids: list[str] = []
         prior_catalog = self._state_store.catalog_state(self._manifest.fingerprint)
         blocked = bool(
             prior_catalog is not None
@@ -556,28 +557,33 @@ class AnythingLLMTermsCatalogCoordinator:
             and workspace is None
         )
         for card in self._manifest.cards:
-            prior_card = self._state_store.card_state(
-                self._manifest.fingerprint,
-                card.card_id,
-            )
+            prior_card = self._validated_card_state(card)
+            location_key = self._state_location_key(prior_card)
+            if location_key and len(remote_by_location.get(location_key, ())) == 1:
+                managed_locations.add(location_key)
+                continue
+
+            missing_card_ids.append(card.card_id)
             blocked = blocked or bool(
                 prior_card is not None
-                and prior_card["state"] == "outcome_unknown"
-                and card.upload_file_name.casefold() not in actual_titles
+                and prior_card["state"] in {"uploading", "outcome_unknown"}
             )
+
+        unexpected_documents = [
+            document
+            for location_key, matched in remote_by_location.items()
+            if location_key not in managed_locations
+            for document in matched
+        ]
         return TermsCatalogSyncPlan(
             fingerprint=self._manifest.fingerprint,
             workspace_name=self._workspace_name,
             workspace_slug=workspace.slug if workspace is not None else "",
             workspace_exists=workspace is not None,
             expected_card_count=len(self._manifest.cards),
-            missing_card_ids=tuple(
-                card.card_id
-                for title, card in expected_by_title.items()
-                if title not in actual_titles
-            ),
+            missing_card_ids=tuple(missing_card_ids),
             unexpected_document_titles=tuple(
-                sorted(actual_titles - set(expected_by_title))
+                sorted(document.title.casefold() for document in unexpected_documents)
             ),
             blocked_outcome_unknown=blocked,
         )
@@ -695,23 +701,48 @@ class AnythingLLMTermsCatalogCoordinator:
             workspace_slug,
             user_id=self._user_id,
         )
-        remote_by_title: dict[str, list] = {}
-        for document in documents:
-            remote_by_title.setdefault(document.title.casefold(), []).append(document)
-        expected_titles = {card.upload_file_name.casefold() for card in self._manifest.cards}
-        unexpected = sorted(set(remote_by_title) - expected_titles)
-        if unexpected:
+        remote_by_location = self._index_remote_documents(documents)
+        states_by_card_id: dict[str, sqlite3.Row | None] = {}
+        managed_locations: set[str] = set()
+        for card in self._manifest.cards:
+            state = self._validated_card_state(card)
+            states_by_card_id[card.card_id] = state
+            location_key = self._state_location_key(state)
+            if location_key:
+                managed_locations.add(location_key)
+
+        unexpected_locations = sorted(set(remote_by_location) - managed_locations)
+        if unexpected_locations:
+            unexpected_titles = sorted(
+                document.title
+                for location_key in unexpected_locations
+                for document in remote_by_location[location_key]
+            )
+            logger.error(
+                "版本化术语 workspace 含有无法由本地恢复事实证明归属的文档: "
+                "workspace_slug=%s actual_count=%d managed_location_count=%d "
+                "unexpected_count=%d unexpected_titles=%s",
+                workspace_slug,
+                len(documents),
+                len(managed_locations),
+                len(unexpected_locations),
+                unexpected_titles[:10],
+            )
             raise TermsCatalogSynchronizationError(
                 "版本化术语 workspace 含有非本目录托管的文档"
             )
 
         for card in self._manifest.cards:
-            matched = remote_by_title.get(card.upload_file_name.casefold(), [])
+            previous = states_by_card_id[card.card_id]
+            location_key = self._state_location_key(previous)
+            matched = remote_by_location.get(location_key, []) if location_key else []
             if len(matched) > 1:
                 raise TermsCatalogSynchronizationError(
                     f"术语 workspace 存在重复文档: {card.card_id}"
                 )
             if matched:
+                # AnythingLLM 会把工作区记录的 title 改写成带上传 UUID 的 location
+                # 文件名，因此只能用状态库持久化的完整 location 证明这是同一次上传。
                 self._state_store.put_card(
                     fingerprint=self._manifest.fingerprint,
                     card=card,
@@ -719,6 +750,33 @@ class AnythingLLMTermsCatalogCoordinator:
                     state="bound",
                 )
                 continue
+
+            previous_state = str(previous["state"]) if previous is not None else ""
+            if previous_state == "uploaded" and location_key:
+                # 上传响应已经明确返回了 location，但进程可能在绑定前退出。此时复用
+                # 已知上传事实继续绑定，不能重新上传并制造新的全局文档。
+                self._bind_uploaded_card(
+                    clients,
+                    workspace_slug,
+                    card,
+                    str(previous["document_location"]),
+                )
+                continue
+            if previous_state in {"uploading", "outcome_unknown"}:
+                logger.error(
+                    "术语卡存在无法安全重放的远端写入状态: card_id=%s state=%s "
+                    "has_document_location=%s",
+                    card.card_id,
+                    previous_state,
+                    bool(location_key),
+                )
+                raise TermsCatalogSynchronizationError(
+                    f"术语卡上次上传或绑定结果未知: {card.card_id}"
+                )
+            if previous_state not in {"", "bound"}:
+                raise TermsCatalogSynchronizationError(
+                    f"术语卡恢复状态不受支持: {card.card_id}"
+                )
             self._upload_and_bind_card(clients, workspace_slug, card)
 
     def _upload_and_bind_card(self, clients, workspace_slug: str, card) -> None:
@@ -726,7 +784,10 @@ class AnythingLLMTermsCatalogCoordinator:
             self._manifest.fingerprint,
             card.card_id,
         )
-        if previous is not None and previous["state"] == "outcome_unknown":
+        if previous is not None and previous["state"] in {
+            "uploading",
+            "outcome_unknown",
+        }:
             raise TermsCatalogSynchronizationError(
                 f"术语卡上次上传或绑定结果未知: {card.card_id}"
             )
@@ -772,22 +833,38 @@ class AnythingLLMTermsCatalogCoordinator:
             document_location=document.location,
             state="uploaded",
         )
+        self._bind_uploaded_card(
+            clients,
+            workspace_slug,
+            card,
+            document.location,
+        )
+
+    def _bind_uploaded_card(
+        self,
+        clients,
+        workspace_slug: str,
+        card: TermsCatalogCard,
+        document_location: str,
+    ) -> None:
+        """绑定一次已取得确定 location 的上传，并精确查回同一远端文档。"""
+
         try:
             clients.workspaces.update_embeddings(
                 workspace_slug,
-                adds=[document.location],
+                adds=[document_location],
                 user_id=self._user_id,
             )
             verified = clients.workspaces.find_document(
                 workspace_slug,
-                document.location,
+                document_location,
                 user_id=self._user_id,
             )
         except Exception as exc:
             self._state_store.put_card(
                 fingerprint=self._manifest.fingerprint,
                 card=card,
-                document_location=document.location,
+                document_location=document_location,
                 state="outcome_unknown",
                 error_code=getattr(exc, "code", type(exc).__name__),
             )
@@ -798,7 +875,7 @@ class AnythingLLMTermsCatalogCoordinator:
             self._state_store.put_card(
                 fingerprint=self._manifest.fingerprint,
                 card=card,
-                document_location=document.location,
+                document_location=document_location,
                 state="outcome_unknown",
                 error_code="binding_not_visible",
             )
@@ -808,7 +885,7 @@ class AnythingLLMTermsCatalogCoordinator:
         self._state_store.put_card(
             fingerprint=self._manifest.fingerprint,
             card=card,
-            document_location=document.location,
+            document_location=document_location,
             state="bound",
         )
 
@@ -817,12 +894,99 @@ class AnythingLLMTermsCatalogCoordinator:
             workspace_slug,
             user_id=self._user_id,
         )
-        actual = [document.title.casefold() for document in documents]
-        expected = [card.upload_file_name.casefold() for card in self._manifest.cards]
-        if len(actual) != len(set(actual)) or sorted(actual) != sorted(expected):
+        remote_by_location = self._index_remote_documents(documents)
+        expected_by_location: dict[str, TermsCatalogCard] = {}
+        missing_card_ids: list[str] = []
+        invalid_state_card_ids: list[str] = []
+        for card in self._manifest.cards:
+            state = self._validated_card_state(card)
+            location_key = self._state_location_key(state)
+            if state is None or state["state"] != "bound" or not location_key:
+                invalid_state_card_ids.append(card.card_id)
+                continue
+            if location_key in expected_by_location:
+                raise TermsCatalogSynchronizationError(
+                    "术语目录状态库中多个卡片指向同一远端文档"
+                )
+            expected_by_location[location_key] = card
+            if len(remote_by_location.get(location_key, ())) != 1:
+                missing_card_ids.append(card.card_id)
+
+        unexpected_locations = sorted(
+            set(remote_by_location) - set(expected_by_location)
+        )
+        if invalid_state_card_ids or missing_card_ids or unexpected_locations:
+            unexpected_titles = sorted(
+                document.title
+                for location_key in unexpected_locations
+                for document in remote_by_location[location_key]
+            )
+            logger.error(
+                "术语 workspace 完整性校验失败: workspace_slug=%s "
+                "expected_count=%d actual_count=%d invalid_state_count=%d "
+                "missing_count=%d unexpected_count=%d invalid_state_card_ids=%s "
+                "missing_card_ids=%s unexpected_titles=%s",
+                workspace_slug,
+                len(self._manifest.cards),
+                len(documents),
+                len(invalid_state_card_ids),
+                len(missing_card_ids),
+                len(unexpected_locations),
+                invalid_state_card_ids[:10],
+                missing_card_ids[:10],
+                unexpected_titles[:10],
+            )
             raise TermsCatalogSynchronizationError(
                 "术语 workspace 完整性校验失败"
             )
+
+    def _validated_card_state(self, card: TermsCatalogCard) -> sqlite3.Row | None:
+        """读取并校验一张卡的恢复事实，拒绝同指纹下的状态身份漂移。"""
+
+        state = self._state_store.card_state(
+            self._manifest.fingerprint,
+            card.card_id,
+        )
+        if state is None:
+            return None
+        if str(state["upload_file_name"]).casefold() != card.upload_file_name.casefold():
+            logger.error(
+                "术语卡恢复事实与本地冻结清单不一致: card_id=%s",
+                card.card_id,
+            )
+            raise TermsCatalogSynchronizationError(
+                f"术语卡恢复事实身份不一致: {card.card_id}"
+            )
+        return state
+
+    @staticmethod
+    def _state_location_key(state: sqlite3.Row | None) -> str:
+        if state is None:
+            return ""
+        return normalize_document_location_key(str(state["document_location"]))
+
+    @staticmethod
+    def _index_remote_documents(documents) -> dict[str, list]:
+        """按完整 location 建立远端索引；展示 title 不参与可信身份判断。"""
+
+        indexed: dict[str, list] = {}
+        for document in documents:
+            location_key = normalize_document_location_key(document.location)
+            if not location_key:
+                raise TermsCatalogSynchronizationError(
+                    "术语 workspace 文档缺少可信 location"
+                )
+            indexed.setdefault(location_key, []).append(document)
+        duplicate_count = sum(1 for matched in indexed.values() if len(matched) > 1)
+        if duplicate_count:
+            logger.error(
+                "术语 workspace 存在重复 location: duplicate_location_count=%d",
+                duplicate_count,
+            )
+            raise TermsCatalogSynchronizationError(
+                "术语 workspace 存在重复文档位置"
+            )
+        return indexed
 
 
 __all__ = [
