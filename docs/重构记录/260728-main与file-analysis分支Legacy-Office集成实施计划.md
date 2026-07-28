@@ -6,7 +6,7 @@
 | --- | --- |
 | 编写日期 | 2026-07-28 |
 | 文档层级 | L3 分支集成与跨模块文件级实施计划 |
-| 文档状态 | 执行中：M0—M7 已完成，M8 待执行 |
+| 文档状态 | 执行中：M0—M8 已完成，M9 待执行 |
 | 当前开发分支基线 | `refactor/file-analysis@9776f711...`（M0 收口提交前） |
 | 目标主线 | `main@fb758cda...` |
 | 共同基点 | `2c886a94...` |
@@ -36,9 +36,10 @@
 | M5 Stage 1F Analysis 集成 | 已完成 | 318 项 Analysis 全量回归及 116 项共享/契约回归通过，公开接口契约无变化 |
 | M6 容器、默认开关和生命周期 | 已完成 | 68 项门禁通过（其中 1 项为仅限 macOS 实机的预期 Skip），启动失败统一关闭容器 |
 | M7 共享业务回归与存储治理 | 已完成 | 191 项共享回归通过，新增无删除入口的 XLSX Folder 只读库存工具 |
-| M8—M10 | 待执行 | 严格逐阶段通过门禁后推进 |
+| M8 接口文档与项目记录 | 已完成 | 35 项契约与配置测试通过，仅同步已确认语义和接口权威摘要 |
+| M9—M10 | 待执行 | 严格逐阶段通过门禁后推进 |
 
-M0—M7 的详细证据见：
+M0—M8 的详细证据见：
 
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M0执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M1执行记录.md`；
@@ -47,7 +48,8 @@ M0—M7 的详细证据见：
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M4执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M5执行记录.md`；
 - `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M6执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M7执行记录.md`。
+- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M7执行记录.md`；
+- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M8执行记录.md`。
 
 ---
 

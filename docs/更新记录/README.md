@@ -2,6 +2,20 @@
 
 本目录保存已经实施、正在实施或需要长期追溯的设计决策与改造记录。它用于解释“为什么这样改、改动范围、验证方式和剩余边界”，但不替代接口文档的对外契约地位。
 
+## Legacy Office 分支集成记录
+
+| 文件 | 作用 |
+| --- | --- |
+| `260728-main与file-analysis分支Legacy-Office集成M0执行记录.md` | 冻结 Git 基线、文件处置矩阵、公开契约摘要和离线回归基线。 |
+| `260728-main与file-analysis分支Legacy-Office集成M1执行记录.md` | 保留双父历史完成非快进合并，并人工处置 Analysis 等冲突。 |
+| `260728-main与file-analysis分支Legacy-Office集成M2执行记录.md` | 验收 LibreOffice 转换内核、所有权清理和离线交付资产。 |
+| `260728-main与file-analysis分支Legacy-Office集成M3执行记录.md` | 验收 AnythingLLM 单 Sheet 协议、多 Sheet 拒绝和 Folder 安全清理。 |
+| `260728-main与file-analysis分支Legacy-Office集成M4执行记录.md` | 验收 Report Legacy 来源、单 Sheet、Artifact 和失败收敛。 |
+| `260728-main与file-analysis分支Legacy-Office集成M5执行记录.md` | 将 Legacy Office 能力接入 Stage 1F Analysis 唯一生产链并冻结 V2 策略。 |
+| `260728-main与file-analysis分支Legacy-Office集成M6执行记录.md` | 验收部署默认值、共享 Preparer、Preflight 和启动失败资源回收。 |
+| `260728-main与file-analysis分支Legacy-Office集成M7执行记录.md` | 完成共享业务回归，并增加无删除入口的 XLSX Folder 只读库存治理。 |
+| `260728-main与file-analysis分支Legacy-Office集成M8执行记录.md` | 同步接口语义、README、索引和契约资产，不增删任何公开字段。 |
+
 ## 文件对话相关文件
 
 | 文件 | 作用 |

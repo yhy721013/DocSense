@@ -21,6 +21,7 @@
 | `260727-文件对话首次空文件自动全量范围实施计划.md` | L3 已完成专项计划：阶段 0～7 已完成契约黄金基线、全量目录快照、纯领域候选 DTO、受理事务原子选择、执行/绑定/历史等价、日志/调试一致性、离线全面回归及最终关闭验收；公开 `/llm/chat` 已启用首次空 `fileNames` 的全量不可变快照，参数与 SSE 契约不变。证据限定为 SQLite 单实例离线环境。 |
 | `260727-文件对话请求范围与活动范围分离实施计划.md` | L3 已确认、待实施的后续语义修正：分离前端 Requested Scope、持久 Active Scope、本轮 Effective Scope 与 Workspace 累计绑定；首次空数组冻结一次全量范围，任意非空数组整体替换活动范围，后续空数组保持最后显式范围，history 只展示前端本轮显式文件。公开字段结构不变，开发 Chat 数据在切换时停服清理。 |
 | `260725-main与refactor并发重构分支集成实施计划.md` | L3 分支集成计划：以最新 `main` 为第一父基线，将 `refactor/concurrency` 阶段 0～1E 成果集成进主线；逐文件规定 8 个冲突文件、24 个冲突块、Analysis 最新功能保留、SQLite Schema 并集、里程碑、测试、回滚和完成定义。该计划取代 `260722-refactor与analysis优化分支合并实施计划.md` 的旧执行方向。 |
+| `260728-main与file-analysis分支Legacy-Office集成实施计划.md` | L3 分支集成计划：把 `main` 的 Legacy Office、单 Sheet XLSX、Report 与离线交付能力集成到 Stage 1F 文件分析唯一生产链；冻结处理策略、失败关闭、共享转换容量、只读存储治理、逐阶段门禁和真实环境停止条件。 |
 | `260724-阶段1E分类节点变更同步Saga文件级实施设计.md` | L3 文件级设计：保持 `/llm/reassign` 同步契约，通过持久化 Operation/Step/Event/恢复观测、Knowledge Port、SQLite Unit of Work、条件 CAS、写后探测、反向补偿和恢复审计完成 1E 功能闭环；1E-0～1E-7 已完成，真实供应商演练与生产容量校准仍是后续启用门禁。 |
 | `260726-阶段1F文件分析高内聚收口文件级实施设计.md` | L3 文件级设计：保持 `/llm/analysis`、file check-task、Progress 和回调结构，将 Analysis 集中实现收口为垂直业务切片；按 TaskId 执行、批量原子受理、SQLite 持久调度、任务级 I/O、Callback Guard、资源恢复、50 并发隔离、切换与回退门禁均已细化。1F-0～1F-7B 代码/离线验收及关闭后全面审查修复均已完成；当前停服清库重建发布不要求对空库重复执行只读预检，保留/恢复存量数据库或清理存疑时仍须通过该门禁。 |
 | `260726-阶段1F-3S文件分析Application等价拆分实施计划.md` | L3 已完成计划：在 1F-3R 后、1F-4 前，将 2,162 行 `run_analysis.py` 机械拆分为 473 行 Facade 和五个内部协作模块；公开导出、构造签名、调用顺序、Prompt/预算、异常/日志、审计/知识/终态和副作用语义均由轨迹、故障矩阵和永久 AST 门禁验证。 |

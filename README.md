@@ -25,8 +25,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/`、`app/adapters/web/`、`app/presenters/` | HTTP/WS/SSE 入参解析、框架映射、协议流式与响应展示、本地调试入口 | `llm.py` `report_requests.py` `report_submission.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；报告、武器谱和统一任务边界已迁入，其他业务按阶段继续迁移 | `report/` `weaponry/` `tasks/` |
-| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 尚未完成统一分层的文件解析、任务兼容存储、翻译编排，以及文件对话应用服务与本地持久化/锁实现；旧武器谱 Service 仅保留兼容与回归证据 | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
+| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；文件分析、报告、武器谱和统一任务边界均已迁入 | `analysis/` `report/` `weaponry/` `tasks/` |
+| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 保留任务兼容存储、共享翻译编排、文件对话应用与旧实现回归证据；公开文件分析路由不再调用旧 Analysis Runner | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
@@ -76,6 +76,7 @@ app/
   container.py                      # 应用装配根、ApplicationServices 与 analysis/report 任务限制器
   modules/
     tasks/                          # 统一任务 Domain/Application/Ports/兼容 Adapter
+    analysis/                       # 文件分析 Domain/Application/Ports/生产 Adapter
     report/                         # 报告 Domain/Application/Ports/生产形态 Adapter
   ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
   integrations/
@@ -93,7 +94,7 @@ app/
       prompts.py                    # 统一 Prompt 构建
       architecture_tree.py          # 完整领域树校验、不可变索引与进程内 LRU 缓存
     llm_service/
-      analysis_service.py           # 文件解析主流程（含 mhtml/OCR/翻译编排）
+      analysis_service.py           # 文件解析旧实现与纯规则导入兼容；公开路由不再调用旧 Runner
       architecture_recall_service.py # 本地 lexical/tree/rule 召回、RRF 融合与有界候选投影
       report_service.py             # 报告遗留兼容实现；当前公开路由不再调用
       weaponry_service.py           # 武器谱字段提取遗留兼容实现；当前公开路由不再调用
@@ -204,8 +205,9 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
    - 可选支持 Microsoft Office 97–2003 二进制文件：`.doc → .docx`、`.ppt → .pptx`、
      `.xls → .xlsx`。服务端在下载后、上传 AnythingLLM 前使用本机 LibreOffice headless
      转换；甲方请求、进度、任务查询、回调、知识库来源名和 `fileName`/`originalFileName`/
-     `format`/`dataFormat` 均继续使用业务原值，内部 OOXML 文件名不会对外返回。功能默认关闭；
-     关闭时 legacy 文件明确进入既有失败合同，不会原样上传。
+     `format`/`dataFormat` 均继续使用业务原值，内部 OOXML 文件名不会对外返回。标准部署样例
+     默认开启；代码在环境变量完全缺失时仍安全关闭。关闭时 legacy 文件明确进入既有失败合同，
+     不会原样上传。
    - XLS/XLSX 当前只支持**恰好一个可解析工作表**。AnythingLLM 返回多个 Sheet 文档时，
      服务端会明确拒绝该文件并清理本次上传的完整内部文件夹，不会静默只使用第一张表。
      同一 `fileName` 的新版本成功入库后，只从当前知识库解绑旧 Sheet，不全局删除旧
@@ -344,8 +346,9 @@ python -m pip install -r requirements.txt
 
 扫描 PDF 的内置 OCR 还依赖系统安装的 Tesseract 及所配置语言的数据包；`requirements.txt` 只安装 Python 依赖，不安装这些系统组件。默认 analysis 扫描件引擎为 MinerU，需要相应的本地运行环境，或通过 `DOCSENSE_MINERU_API_URL` 复用外部 MinerU API；MinerU 或内置 OCR 失败时，代码会按既有降级链路继续处理原 PDF。
 
-Office 97–2003 支持依赖本机稳定版 LibreOffice 26.2.x，且默认不启用。DocSense 不会在
-启动或任务执行时自动下载/安装 LibreOffice。仓库中的
+Office 97–2003 支持依赖本机稳定版 LibreOffice 26.2.x。标准 `.env.example` 默认显式开启，
+代码在环境变量缺失时仍保持安全关闭；DocSense 不会在启动或任务执行时自动下载/安装
+LibreOffice。仓库中的
 [Legacy Office 离线交付说明](scripts/legacy_office/README.md) 提供固定 26.2.5 的
 官方下载、SHA-256 校验、离线打包、安装和 preflight 流程；实际安装包、smoke 样本和
 最终包只写入 Git 已忽略的 `dist/legacy-office/`。
@@ -380,8 +383,9 @@ Office 97–2003 支持依赖本机稳定版 LibreOffice 26.2.x，且默认不�
 - `DOCSENSE_REASSIGN_RUNTIME_MODE`：分类节点变更运行模式，当前唯一允许值为 `single_instance`。
   SQLite lease 使用进程本地时钟，配置为其他值会在装配阶段 fail-fast；迁移到数据库权威时间并完成
   跨实例 fencing 验证前，不得把该模块作为多实例运行链启用。
-- `DOCSENSE_LEGACY_OFFICE_ENABLED`：Legacy Office 转换总开关，默认 `false`。关闭时
-  不探测 LibreOffice，但 `.doc/.ppt/.xls` 任务会明确失败，禁止原样上传。
+- `DOCSENSE_LEGACY_OFFICE_ENABLED`：Legacy Office 转换总开关。标准 `.env.example` 的部署
+  默认值为 `true`；环境变量完全缺失时的代码安全默认值为 `false`。关闭时不探测
+  LibreOffice，但 `.doc/.ppt/.xls` 任务会明确失败，禁止原样上传。
 - `DOCSENSE_LIBREOFFICE_EXECUTABLE`：可选的 `soffice` 绝对路径；为空时依次检查
   Windows/macOS 标准安装路径和 `PATH`。
 - `DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES=26.2`：允许的稳定版本系列。
@@ -409,6 +413,12 @@ PPT notes/OCR、XLS 公式计算结果/隐藏内容、动画/媒体，或三种 
 `originalText` 全部非空。XLS/XLSX 只接受恰好一个可解析工作表，多工作表
 fail-closed。本轮交付平台为 Windows x64 与 macOS Apple Silicon；Windows 尚未实机认证。
 Docker、macOS Intel、Windows ARM64 和 `.doc` 报告模板不在范围。
+
+XLSX Collector Folder 存储库存可使用
+`python scripts/inspect_xlsx_folder_inventory.py --knowledge-db-path <knowledge.sqlite3>` 只读查看。
+脚本仅调用 AnythingLLM GET 接口并以 SQLite 只读模式比对永久知识引用，输出哈希与计数；没有
+apply/delete 参数。已提交永久知识的历史 Folder 只报告、不自动删除，无本地引用的 Folder 也只
+进入人工所有权复核。
 
 实现与交付依据为 LibreOffice 官方的
 [启动参数](https://help.libreoffice.org/latest/en-US/text/shared/guide/start_parameters.html)、
