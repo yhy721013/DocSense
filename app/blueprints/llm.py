@@ -10,9 +10,11 @@ from flask_sock import Sock
 
 from app.adapters.web import (
     ArchitectureIdValidationError,
+    ChatScopeSelectorValidationError,
     ReportIdValidationError,
     normalize_architecture_id,
     normalize_report_id,
+    parse_chat_scope_selector,
 )
 from app.adapters.web.flask import (
     AnalysisPresentedResponse,
@@ -56,11 +58,15 @@ from app.presenters.weaponry_submission import (
     WeaponrySubmissionResponsePresenter,
 )
 from app.services.chat import (
+    ChatArchitectureIdConflictError,
+    ChatArchitectureScopeInvalidError,
+    ChatArchitectureScopeNotFoundError,
     ChatDeleteBusyError,
     ChatDeleteCleanupError,
     ChatDeleteNotFoundError,
     ChatDocumentNotFoundError,
     ChatRunBusyError,
+    ChatScopeModeConflictError,
     ChatSessionUnavailableError,
     ChatTitleEmptyHistoryError,
     ChatTitleGenerationError,
@@ -828,14 +834,15 @@ def llm_chat():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    file_names = params.get("fileNames")
-    if not isinstance(file_names, list):
+    try:
+        scope_selector = parse_chat_scope_selector(params)
+    except ChatScopeSelectorValidationError as exc:
         logger.warning(
-            "文件对话请求被拒绝: fileNames类型无效 chatId=%s file_names_type=%s",
+            "文件对话请求被拒绝: 范围选择器无效 chatId=%s error_type=%s",
             chat_id,
-            type(file_names).__name__,
+            exc.__class__.__name__,
         )
-        return jsonify({"error": "fileNames必须为数组"}), 400
+        return jsonify({"error": str(exc)}), 400
 
     message = params.get("message")
     if not isinstance(message, str) or not message.strip():
@@ -852,49 +859,20 @@ def llm_chat():
         return jsonify({"error": "message超过文件对话长度上限"}), 400
     logger.info(
         "文件对话请求参数校验通过: "
-        "chatId=%s raw_requested_file_count=%d message_length=%d",
+        "chatId=%s scope_mode=%s normalized_requested_file_count=%d "
+        "requested_architecture_id=%s message_length=%d",
         chat_id,
-        len(file_names),
+        scope_selector.scope_mode,
+        len(scope_selector.file_names),
+        scope_selector.architecture_id,
         len(message),
     )
-
-    normalized_file_names: list[str] = []
-    seen_file_names: set[str] = set()
-
-    # 对话入参中的 fileNames 是业务侧哈希文件名。Blueprint 这里只负责元素类型、
-    # 空白值和首次出现顺序去重；文件存在性、目录一致性以及首次空数组的自动选择，
-    # 均由 Application/Coordinator 在受理边界统一判定，避免路由层复制业务规则。
-    for index, fn in enumerate(file_names):
-        if not isinstance(fn, str) or not fn.strip():
-            logger.warning(
-                "文件对话请求被拒绝: fileNames中包含无效文件名 chatId=%s index=%s",
-                chat_id,
-                index,
-            )
-            return jsonify({"error": "fileNames中包含无效文件名"}), 400
-        normalized_file_name = fn.strip()
-        if normalized_file_name in seen_file_names:
-            logger.debug(
-                "文件对话请求去重重复文件名: chatId=%s index=%s",
-                chat_id,
-                index,
-            )
-            continue
-        seen_file_names.add(normalized_file_name)
-        normalized_file_names.append(normalized_file_name)
-
-    logger.info(
-        "文件对话引用文件校验完成: "
-        "chatId=%s normalized_requested_file_count=%d",
-        chat_id,
-        len(normalized_file_names),
-    )
-    if len(normalized_file_names) > CHAT_MAX_FILES_PER_REQUEST:
+    if len(scope_selector.file_names) > CHAT_MAX_FILES_PER_REQUEST:
         logger.warning(
             "文件对话请求被拒绝：文件数量超过上限: "
             "chatId=%s requested_file_count=%d limit=%d",
             chat_id,
-            len(normalized_file_names),
+            len(scope_selector.file_names),
             CHAT_MAX_FILES_PER_REQUEST,
         )
         return jsonify({"error": "fileNames超过文件对话数量上限"}), 400
@@ -925,7 +903,7 @@ def llm_chat():
         prepared_run = chat_run_executor.prepare_chat_run(
             chat_id=chat_id,
             message=message,
-            file_names=tuple(normalized_file_names),
+            scope_selector=scope_selector,
         )
     except ChatDocumentNotFoundError as exc:
         _release_stream_slot()
@@ -934,6 +912,44 @@ def llm_chat():
             chat_id,
         )
         return jsonify({"error": str(exc)}), 404
+    except ChatArchitectureScopeNotFoundError:
+        _release_stream_slot()
+        logger.warning(
+            "architecture 文件对话请求被拒绝：类别不存在或为空: "
+            "chatId=%s architectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({
+            "error": "architectureId对应类别不存在或没有可用于对话的文件"
+        }), 404
+    except ChatArchitectureScopeInvalidError:
+        _release_stream_slot()
+        logger.warning(
+            "architecture 文件对话请求被拒绝：类别目录无法形成有效范围: "
+            "chatId=%s architectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({
+            "error": "architectureId对应类别文件无法形成有效对话范围"
+        }), 400
+    except ChatScopeModeConflictError:
+        _release_stream_slot()
+        logger.warning(
+            "文件对话请求被拒绝：会话范围模式冲突: chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话的范围模式不匹配"}), 409
+    except ChatArchitectureIdConflictError:
+        _release_stream_slot()
+        logger.warning(
+            "architecture 文件对话请求被拒绝：会话类别 ID 冲突: "
+            "chatId=%s requestedArchitectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({"error": "当前对话已绑定其他architectureId"}), 409
     except (ChatRunBusyError, ChatSessionUnavailableError):
         _release_stream_slot()
         logger.warning(
@@ -958,10 +974,13 @@ def llm_chat():
 
     logger.info(
         "文件对话运行已分配，准备创建流式响应: "
-        "chatId=%s runId=%s requested_file_count=%d",
+        "chatId=%s runId=%s scope_mode=%s requested_file_count=%d "
+        "requested_architecture_id=%s",
         chat_id,
         prepared_run.run_id,
-        len(normalized_file_names),
+        scope_selector.scope_mode,
+        len(scope_selector.file_names),
+        scope_selector.architecture_id,
     )
 
     try:

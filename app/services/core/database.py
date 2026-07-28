@@ -603,6 +603,45 @@ class DatabaseService:
                 records.append(record)
             return records
 
+    def list_document_records_by_architecture_id(
+        self,
+        architecture_id: int,
+    ) -> list[dict]:
+        """按精确类别 ID 返回可用于快照解析的直接文档记录。
+
+        本查询刻意不读取 architecture 树，也不在 Python 中过滤全量目录。复合唯一索引
+        ``(architecture_id, file_name)`` 可直接服务等值条件；代理主键 ``id`` 只用于同名
+        异常数据下的确定排序，不承担公开或业务身份。
+        """
+        if isinstance(architecture_id, bool) or not isinstance(
+            architecture_id,
+            int,
+        ):
+            raise TypeError("architecture_id 必须是整数")
+        if architecture_id < 1 or architecture_id > 9223372036854775807:
+            raise ValueError("architecture_id 必须是正整数")
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT id, file_name, original_name, ingested_file_name,
+                       architecture_id, anything_doc_id, doc_path, metadata_json
+                FROM documents
+                WHERE architecture_id = ?
+                ORDER BY file_name ASC, id ASC
+                """,
+                (architecture_id,),
+            )
+            records: list[dict] = []
+            for row in cursor.fetchall():
+                record = dict(row)
+                record["metadata"] = self._deserialize_document_metadata(
+                    record.pop("metadata_json")
+                )
+                records.append(record)
+            return records
+
     @staticmethod
     def _deserialize_document_metadata(value: str) -> dict:
         """严格解析本地业务元数据，禁止以空对象掩盖数据库损坏。"""

@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 from app.ports import ChatDocumentRef
+from app.services.chat.domain.document_candidates import (
+    CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+    CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+    CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
+    CHAT_ARCHITECTURE_ERROR_INVALID,
+    CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
+    ChatArchitectureCandidates,
+    ChatDocumentCandidate,
+)
 from app.services.core.database import DatabaseService
 
 
@@ -52,6 +61,18 @@ class ChatDocumentResolver(Protocol):
 
     def resolve_all_available(self) -> tuple[ResolvedChatDocument, ...]:
         """返回同一知识库读取时点内全部可用于文件对话的文档。"""
+        ...
+
+
+@runtime_checkable
+class ChatArchitectureDocumentResolver(Protocol):
+    """按 architecture 解析候选的独立能力，避免扩大旧 file Resolver 契约。"""
+
+    def resolve_by_architecture_id(
+        self,
+        architecture_id: int,
+    ) -> ChatArchitectureCandidates:
+        """返回一次精确类别目录读取形成的有界候选结果。"""
         ...
 
 
@@ -177,6 +198,153 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
         )
         return tuple(resolved)
 
+    def resolve_by_architecture_id(
+        self,
+        architecture_id: int,
+    ) -> ChatArchitectureCandidates:
+        """解析精确类别的直接文件，不把目录结果提前映射为 HTTP。
+
+        目录为空或目录记录损坏都返回不可变 outcome，交给 Chat 受理事务结合
+        ``session_created`` 裁决。数据库连接/执行类异常继续向上抛出，不能伪装成业务
+        空类别；严格 metadata 解码产生的 ``ValueError`` 则属于目录损坏。
+        """
+        if isinstance(architecture_id, bool) or not isinstance(
+            architecture_id,
+            int,
+        ):
+            raise TypeError("architecture_id must be int")
+        if architecture_id < 1 or architecture_id > 9223372036854775807:
+            raise ValueError("architecture_id is out of range")
+
+        logger.info(
+            "开始解析 architecture 文件对话候选: architecture_id=%s",
+            architecture_id,
+        )
+        try:
+            records = (
+                self._knowledge_base.list_document_records_by_architecture_id(
+                    architecture_id
+                )
+            )
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "architecture 文件对话候选解析失败: architecture_id=%s "
+                "architecture_candidate_outcome=%s error_code=%s "
+                "error_type=%s",
+                architecture_id,
+                CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+                CHAT_ARCHITECTURE_ERROR_INVALID,
+                type(exc).__name__,
+            )
+            return ChatArchitectureCandidates(
+                architecture_id=architecture_id,
+                resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+                error_code=CHAT_ARCHITECTURE_ERROR_INVALID,
+            )
+
+        if not records:
+            logger.info(
+                "architecture 文件对话候选解析完成: architecture_id=%s "
+                "catalog_record_count=0 resolved_file_count=0 "
+                "architecture_candidate_outcome=%s error_code=%s",
+                architecture_id,
+                CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+                CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
+            )
+            return ChatArchitectureCandidates(
+                architecture_id=architecture_id,
+                resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+                error_code=CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
+            )
+
+        try:
+            documents = self._resolve_architecture_records(records)
+        except (ChatDocumentCatalogConflictError, TypeError, ValueError) as exc:
+            logger.warning(
+                "architecture 文件对话候选解析失败: architecture_id=%s "
+                "catalog_record_count=%d resolved_file_count=0 "
+                "architecture_candidate_outcome=%s error_code=%s "
+                "error_type=%s",
+                architecture_id,
+                len(records),
+                CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+                CHAT_ARCHITECTURE_ERROR_INVALID,
+                type(exc).__name__,
+            )
+            return ChatArchitectureCandidates(
+                architecture_id=architecture_id,
+                resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+                error_code=CHAT_ARCHITECTURE_ERROR_INVALID,
+            )
+
+        logger.info(
+            "architecture 文件对话候选解析完成: architecture_id=%s "
+            "catalog_record_count=%d resolved_file_count=%d "
+            "architecture_candidate_outcome=%s error_code=",
+            architecture_id,
+            len(records),
+            len(documents),
+            CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
+        )
+        return ChatArchitectureCandidates(
+            architecture_id=architecture_id,
+            resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
+            documents=documents,
+        )
+
+    def _resolve_architecture_records(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> tuple[ChatDocumentCandidate, ...]:
+        """整体解析并校验类别记录，任何坏成员都令候选整体 invalid。"""
+        documents: list[ChatDocumentCandidate] = []
+        seen_file_names: set[str] = set()
+        seen_document_refs: set[str] = set()
+        seen_external_locations: set[str] = set()
+
+        for index, record in enumerate(records):
+            if not isinstance(record, Mapping):
+                raise TypeError(f"architecture record {index} must be mapping")
+            file_name = str(record.get("file_name") or "").strip()
+            if not file_name:
+                raise ValueError("architecture record file_name is empty")
+            # fileNames 模式历史上允许用业务名兜底原名，不能被本需求改变；architecture
+            # 首次快照则必须整体校验目录完整性，空原名不能静默变成另一个身份字段。
+            original_name = str(record.get("original_name") or "").strip()
+            if not original_name:
+                raise ValueError("architecture record original_name is empty")
+            resolved = self._resolve_record(file_name=file_name, record=record)
+            document_ref = self._normalize_document_ref(
+                resolved.document.document_ref
+            )
+            external_location = self._normalize_external_location(
+                resolved.document.external_location
+            )
+            if file_name in seen_file_names:
+                raise ChatDocumentCatalogConflictError(
+                    "architecture scope contains duplicate file_name"
+                )
+            if document_ref in seen_document_refs:
+                raise ChatDocumentCatalogConflictError(
+                    "architecture scope contains duplicate document_ref"
+                )
+            if external_location in seen_external_locations:
+                raise ChatDocumentCatalogConflictError(
+                    "architecture scope contains duplicate external_location"
+                )
+            seen_file_names.add(file_name)
+            seen_document_refs.add(document_ref)
+            seen_external_locations.add(external_location)
+            documents.append(
+                ChatDocumentCandidate(
+                    file_name=resolved.file_name,
+                    original_name=resolved.original_name,
+                    document_ref=document_ref,
+                    external_location=external_location,
+                )
+            )
+        return tuple(documents)
+
     @staticmethod
     def _resolve_record(
         *,
@@ -229,6 +397,7 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
 
 
 __all__ = [
+    "ChatArchitectureDocumentResolver",
     "ChatDocumentCatalogConflictError",
     "ChatDocumentNotFoundError",
     "ChatDocumentResolver",

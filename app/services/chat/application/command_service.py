@@ -8,6 +8,7 @@ from app.services.chat.domain.document_candidates import (
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.domain.document_scope import ChatScopeSelector
 from app.services.chat.domain.models import ChatRun
 from app.services.chat.locking.lease import (
     ChatRunCoordinator,
@@ -45,6 +46,7 @@ class ChatCommandService:
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
         document_candidates: ChatDocumentSelectionCandidates | None = None,
+        scope_selector: ChatScopeSelector | None = None,
         max_files_per_request: int | None = None,
     ) -> ChatRun:
         if document_candidates is not None and not isinstance(
@@ -62,6 +64,11 @@ class ChatCommandService:
                 "document_candidates cannot be combined with legacy "
                 "document tuples"
             )
+        if scope_selector is not None and not isinstance(
+            scope_selector,
+            ChatScopeSelector,
+        ):
+            raise TypeError("scope_selector must be ChatScopeSelector or None")
         explicit_count = (
             len(document_candidates.explicit_documents)
             if document_candidates is not None
@@ -72,11 +79,33 @@ class ChatCommandService:
             if document_candidates is not None
             else 0
         )
+        architecture_candidates = (
+            None
+            if document_candidates is None
+            else document_candidates.architecture_candidates
+        )
         logger.info(
             "准备启动文件对话运行: chat_id=%s message_chars=%d "
+            "scope_mode=%s requested_architecture_id=%s "
+            "architecture_candidate_outcome=%s "
             "explicit_candidate_count=%d default_candidate_count=%d",
             chat_id,
             len(str(user_message or "")),
+            (
+                scope_selector.scope_mode
+                if scope_selector is not None
+                else "legacy_files"
+            ),
+            (
+                scope_selector.architecture_id
+                if scope_selector is not None
+                else None
+            ),
+            (
+                architecture_candidates.resolution_outcome
+                if architecture_candidates is not None
+                else ""
+            ),
             explicit_count,
             default_count,
         )
@@ -86,6 +115,7 @@ class ChatCommandService:
             user_files=user_files,
             input_documents=input_documents,
             document_candidates=document_candidates,
+            scope_selector=scope_selector,
             max_files_per_request=max_files_per_request,
         )
         logger.info(

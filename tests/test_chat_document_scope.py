@@ -8,16 +8,29 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 from app.services.chat.domain.document_candidates import ChatDocumentCandidate
+from app.services.chat.domain.document_candidates import ChatArchitectureCandidates
 from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_MODE_ARCHITECTURE,
+    CHAT_SCOPE_MODE_FILES,
     CHAT_SCOPE_SELECTION_ACTIVE_REUSE,
+    CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+    CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE,
     CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL,
     CHAT_SCOPE_SELECTION_EXPLICIT,
     CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL,
     CHAT_SCOPE_SOURCE_EXPLICIT,
+    ChatArchitectureIdConflictError,
+    ChatArchitectureScopeInvalidError,
+    ChatArchitectureScopeNotFoundError,
+    ChatScopeModeConflictError,
+    ChatScopeSelector,
     ChatScopeDecision,
     ChatScopeHead,
     ChatScopeRevision,
+    ChatSessionScopeBinding,
+    decide_chat_architecture_scope,
     decide_chat_document_scope,
+    decide_chat_session_scope_binding,
 )
 
 
@@ -204,7 +217,7 @@ class ChatDocumentScopeDomainTests(unittest.TestCase):
         )
 
         invalid_version = decision.to_payload()
-        invalid_version["schema_version"] = 2
+        invalid_version["schema_version"] = 3
         with self.assertRaisesRegex(ValueError, "schema_version"):
             ChatScopeDecision.from_payload(invalid_version)
 
@@ -232,6 +245,114 @@ class ChatDocumentScopeDomainTests(unittest.TestCase):
             setattr(revision, "members", ())
         with self.assertRaises(FrozenInstanceError):
             setattr(head, "scope_revision_id", "scope-2")
+
+    def test_selector_and_session_binding_are_immutable(self) -> None:
+        selector = ChatScopeSelector.for_architecture(7)
+        binding, created = decide_chat_session_scope_binding(
+            chat_id="chat-1",
+            selector=selector,
+            existing_binding=None,
+            created_at="2026-07-28T00:00:00+00:00",
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(CHAT_SCOPE_MODE_ARCHITECTURE, binding.scope_mode)
+        self.assertEqual(7, binding.architecture_id)
+        reused, created = decide_chat_session_scope_binding(
+            chat_id="chat-1",
+            selector=ChatScopeSelector.for_architecture(7),
+            existing_binding=binding,
+            created_at="ignored",
+        )
+        self.assertIs(binding, reused)
+        self.assertFalse(created)
+        with self.assertRaises(ChatArchitectureIdConflictError):
+            decide_chat_session_scope_binding(
+                chat_id="chat-1",
+                selector=ChatScopeSelector.for_architecture(8),
+                existing_binding=binding,
+                created_at="ignored",
+            )
+        with self.assertRaises(ChatScopeModeConflictError):
+            decide_chat_session_scope_binding(
+                chat_id="chat-1",
+                selector=ChatScopeSelector.for_files([]),
+                existing_binding=binding,
+                created_at="ignored",
+            )
+
+        files_binding = ChatSessionScopeBinding(
+            chat_id="chat-2",
+            scope_mode=CHAT_SCOPE_MODE_FILES,
+            architecture_id=None,
+            created_at="2026-07-28T00:00:00+00:00",
+        )
+        self.assertIsNone(files_binding.architecture_id)
+
+    def test_architecture_scope_initial_and_reuse_ignore_late_catalog_outcome(self) -> None:
+        resolved = ChatArchitectureCandidates(
+            architecture_id=7,
+            resolution_outcome="resolved",
+            documents=_documents(["a.pdf", "b.pdf"]),
+        )
+        initial = decide_chat_architecture_scope(
+            session_created=True,
+            requested_architecture_id=7,
+            bound_architecture_id=7,
+            architecture_candidates=resolved,
+            current_scope_documents=None,
+        )
+        self.assertEqual(
+            CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+            initial.selection_mode,
+        )
+        self.assertEqual(7, initial.source_architecture_id)
+        self.assertEqual(2, len(initial.effective_documents))
+
+        now_empty = ChatArchitectureCandidates(
+            architecture_id=7,
+            resolution_outcome="not_found",
+            error_code="architecture_catalog_not_found",
+        )
+        reused = decide_chat_architecture_scope(
+            session_created=False,
+            requested_architecture_id=7,
+            bound_architecture_id=7,
+            architecture_candidates=now_empty,
+            current_scope_documents=initial.effective_documents,
+        )
+        self.assertEqual(
+            CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE,
+            reused.selection_mode,
+        )
+        self.assertEqual(initial.effective_documents, reused.effective_documents)
+        self.assertFalse(reused.creates_scope_revision)
+
+    def test_new_architecture_scope_defers_typed_candidate_failures(self) -> None:
+        with self.assertRaises(ChatArchitectureScopeNotFoundError):
+            decide_chat_architecture_scope(
+                session_created=True,
+                requested_architecture_id=7,
+                bound_architecture_id=7,
+                architecture_candidates=ChatArchitectureCandidates(
+                    architecture_id=7,
+                    resolution_outcome="not_found",
+                    error_code="architecture_catalog_not_found",
+                ),
+                current_scope_documents=None,
+            )
+        with self.assertRaises(ChatArchitectureScopeInvalidError):
+            decide_chat_architecture_scope(
+                session_created=True,
+                requested_architecture_id=7,
+                bound_architecture_id=7,
+                architecture_candidates=ChatArchitectureCandidates(
+                    architecture_id=7,
+                    resolution_outcome="invalid",
+                    error_code="architecture_catalog_invalid",
+                ),
+                current_scope_documents=None,
+            )
 
 
 if __name__ == "__main__":

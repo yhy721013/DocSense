@@ -35,6 +35,66 @@ class DatabaseServiceTests(unittest.TestCase):
             self.assertEqual(records[0]["file_name"], "demo.pdf")
             self.assertEqual(records[0]["metadata"], {"country": "中国"})
 
+    def test_list_document_records_by_architecture_id_is_exact_and_stable(self):
+        """类别查询只返回精确 ID 的直接文件，并按业务名稳定排序。"""
+        with workspace_tempdir() as tmp:
+            service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
+            service.save_document_record(
+                "beta.pdf", 100, "document-beta", ingested_file_name="beta.pdf"
+            )
+            service.save_document_record(
+                "alpha.pdf", 100, "document-alpha", ingested_file_name="alpha.pdf"
+            )
+            service.save_document_record(
+                "child.pdf", 101, "document-child", ingested_file_name="child.pdf"
+            )
+
+            records = service.list_document_records_by_architecture_id(100)
+
+            self.assertEqual(
+                ["alpha.pdf", "beta.pdf"],
+                [record["file_name"] for record in records],
+            )
+            self.assertEqual(
+                {100},
+                {record["architecture_id"] for record in records},
+            )
+            self.assertEqual(
+                [],
+                service.list_document_records_by_architecture_id(999),
+            )
+
+    def test_architecture_document_query_strictly_decodes_metadata(self):
+        """精确查询不能用空 metadata 掩盖类别中的损坏记录。"""
+        with workspace_tempdir() as tmp:
+            db_path = f"{tmp}/knowledge.sqlite3"
+            service = DatabaseService(db_path=db_path)
+            service.save_document_record(
+                "broken.pdf",
+                100,
+                "document-broken",
+                ingested_file_name="broken.pdf",
+            )
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "UPDATE documents SET metadata_json = '[]' "
+                    "WHERE architecture_id = ?",
+                    (100,),
+                )
+
+            with self.assertRaisesRegex(ValueError, "必须是 JSON 对象"):
+                service.list_document_records_by_architecture_id(100)
+
+    def test_architecture_document_query_rejects_non_normalized_ids(self):
+        with workspace_tempdir() as tmp:
+            service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
+            for value in (True, "1", 1.0, 0, -1, 9223372036854775808):
+                with self.subTest(value=value):
+                    with self.assertRaises((TypeError, ValueError)):
+                        service.list_document_records_by_architecture_id(
+                            value  # type: ignore[arg-type]
+                        )
+
     def test_document_upsert_updates_only_same_architecture_row(self):
         """同一 architecture 内重放只更新目标行，不使用 REPLACE 删除后重建。"""
         with workspace_tempdir() as tmp:

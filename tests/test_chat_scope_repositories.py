@@ -6,21 +6,26 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from threading import Barrier
 
 from app.services.chat import (
+    CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+    CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL,
     CHAT_SCOPE_SELECTION_EXPLICIT,
     CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL,
     CHAT_SCOPE_SOURCE_EXPLICIT,
     ChatDocumentCandidate,
     ChatRunLockService,
     ChatScopeRevision,
+    ChatSessionScopeBinding,
     ChatStore,
     chat_scope_revision_id_for_run,
 )
+from app.services.chat.persistence import repositories as chat_repositories
 
 
 _NOW = "2026-07-28T00:00:00+00:00"
@@ -76,7 +81,7 @@ class ChatScopeRepositoryTests(unittest.TestCase):
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
-    def test_schema_v4_tables_columns_and_migration_are_present(self) -> None:
+    def test_schema_v5_tables_columns_and_migration_are_present(self) -> None:
         with closing(self._connect()) as connection:
             tables = {
                 row["name"]
@@ -110,16 +115,377 @@ class ChatScopeRepositoryTests(unittest.TestCase):
                 "chat_scope_heads",
             }.issubset(tables)
         )
-        self.assertEqual({1, 2, 3, 4}, versions)
+        self.assertEqual({1, 2, 3, 4, 5}, versions)
         self.assertTrue(
             {
                 "requested_files_json",
                 "effective_scope_revision_id",
                 "selection_mode",
+                "requested_architecture_id",
             }.issubset(input_columns)
         )
+        self.assertIn("chat_session_scope_bindings", tables)
         self.assertIn("chat_id", revision_foreign_keys)
         self.assertNotIn("source_run_id", revision_foreign_keys)
+
+    def test_v4_fixture_migrates_to_v5_without_scope_or_message_drift(self) -> None:
+        """真实形状 v4 数据迁移后行数、字段、Head 和消息必须逐项等价。"""
+        db_path = str(Path(self.temp_dir.name) / "v4-fixture.sqlite3")
+        with patch.object(
+            chat_repositories,
+            "_CHAT_SCHEMA_MIGRATIONS",
+            chat_repositories._CHAT_SCHEMA_MIGRATIONS[:4],
+        ):
+            chat_repositories.ensure_chat_schema(db_path)
+
+        with closing(sqlite3.connect(db_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(
+                """
+                INSERT INTO chat_sessions (
+                    chat_id, status, created_at, updated_at
+                ) VALUES ('chat-v4', 'active', ?, ?)
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_runs (
+                    run_id, chat_id, status, created_at, updated_at
+                ) VALUES ('run-v4', 'chat-v4', 'accepted', ?, ?)
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_scope_revisions (
+                    scope_revision_id, chat_id, source_mode,
+                    source_run_id, created_at
+                ) VALUES ('scope-v4', 'chat-v4', 'explicit', 'run-v4', ?)
+                """,
+                (_NOW,),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_scope_members (
+                    scope_revision_id, ordinal, file_name, original_name,
+                    document_ref, external_location
+                ) VALUES (
+                    'scope-v4', 0, 'a.pdf', 'A.pdf',
+                    'document:a', 'custom-documents/a.json'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_scope_heads (
+                    chat_id, scope_revision_id, updated_at
+                ) VALUES ('chat-v4', 'scope-v4', ?)
+                """,
+                (_NOW,),
+            )
+            requested_json = json.dumps(
+                [{"file_name": "a.pdf", "original_name": "A.pdf"}],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_run_inputs (
+                    run_id, message, files_json, created_at,
+                    requested_files_json, effective_scope_revision_id,
+                    selection_mode
+                ) VALUES (
+                    'run-v4', '问题', '[]', ?, ?, 'scope-v4', 'explicit'
+                )
+                """,
+                (_NOW, requested_json),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_messages (
+                    message_id, chat_id, run_id, role, content,
+                    status, sequence_no, created_at
+                ) VALUES (
+                    'message-v4', 'chat-v4', 'run-v4', 'user', '问题',
+                    'pending', 1, ?
+                )
+                """,
+                (_NOW,),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_message_files (
+                    message_id, file_name, original_name
+                ) VALUES ('message-v4', 'a.pdf', 'A.pdf')
+                """
+            )
+            connection.commit()
+
+        chat_repositories.ensure_chat_schema(db_path)
+        store = ChatStore(db_path)
+
+        binding = store.session_scope_bindings.get("chat-v4")
+        revision = store.scopes.get_current_revision("chat-v4")
+        run_input = store.run_inputs.get("run-v4")
+        messages = store.messages.list_by_chat("chat-v4")
+        self.assertEqual("files", binding.scope_mode)
+        self.assertIsNone(binding.architecture_id)
+        self.assertEqual("explicit", revision.source_mode)
+        self.assertIsNone(revision.source_architecture_id)
+        self.assertEqual(("a.pdf",), tuple(item.file_name for item in revision.members))
+        self.assertIsNone(run_input.requested_architecture_id)
+        self.assertEqual(("a.pdf",), tuple(item.file_name for item in run_input.files))
+        self.assertEqual(("a.pdf",), tuple(item.file_name for item in messages[0].files))
+        self.assertIsNone(messages[0].architecture_id)
+
+        # 重复 ensure 不得重复迁移或改变事实。
+        chat_repositories.ensure_chat_schema(db_path)
+        with closing(sqlite3.connect(db_path)) as connection:
+            self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
+            self.assertEqual(
+                [1, 2, 3, 4, 5],
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM chat_schema_migrations ORDER BY version"
+                    )
+                ],
+            )
+            self.assertEqual(
+                (1, 1, 1),
+                (
+                    connection.execute("SELECT COUNT(*) FROM chat_scope_revisions").fetchone()[0],
+                    connection.execute("SELECT COUNT(*) FROM chat_scope_members").fetchone()[0],
+                    connection.execute("SELECT COUNT(*) FROM chat_scope_heads").fetchone()[0],
+                ),
+            )
+
+    def test_v5_migration_failure_rolls_back_all_schema_changes(self) -> None:
+        """故障发生在 v5 DDL 完成后也不能留下半张表或版本记录。"""
+        db_path = str(Path(self.temp_dir.name) / "v5-failure.sqlite3")
+        with patch.object(
+            chat_repositories,
+            "_CHAT_SCHEMA_MIGRATIONS",
+            chat_repositories._CHAT_SCHEMA_MIGRATIONS[:4],
+        ):
+            chat_repositories.ensure_chat_schema(db_path)
+
+        def fail_after_v5(connection: sqlite3.Connection) -> None:
+            chat_repositories._add_architecture_chat_scope(connection)
+            raise RuntimeError("forced v5 migration failure")
+
+        failing_migrations = (
+            *chat_repositories._CHAT_SCHEMA_MIGRATIONS[:4],
+            (5, fail_after_v5),
+        )
+        with patch.object(
+            chat_repositories,
+            "_CHAT_SCHEMA_MIGRATIONS",
+            failing_migrations,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forced v5"):
+                chat_repositories.ensure_chat_schema(db_path)
+
+        with closing(sqlite3.connect(db_path)) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            run_input_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(chat_run_inputs)"
+                )
+            }
+            self.assertNotIn("chat_session_scope_bindings", tables)
+            self.assertNotIn("requested_architecture_id", run_input_columns)
+            self.assertEqual(
+                [1, 2, 3, 4],
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM chat_schema_migrations ORDER BY version"
+                    )
+                ],
+            )
+
+        # 回滚后的 v4 库仍可由正常迁移一次升级成功。
+        chat_repositories.ensure_chat_schema(db_path)
+        self.assertIsNotNone(ChatStore(db_path).session_scope_bindings)
+
+    def test_architecture_binding_scope_run_input_and_message_are_consistent(self) -> None:
+        # 本用例刻意逐层写入 Schema v5 事实，因此不能调用已经会自动创建 files
+        # Binding 的生产 Coordinator；先直接构造合法 Session/Run 作为外键父记录。
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_sessions (
+                    chat_id, workspace_ref, thread_ref, status,
+                    created_at, updated_at, metadata_json
+                ) VALUES ('chat-architecture', '', '', 'active', ?, ?, '{}')
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_runs (
+                    run_id, chat_id, status, abort_requested,
+                    owner_instance_id, heartbeat_at, error_message,
+                    created_at, started_at, completed_at, updated_at
+                ) VALUES (
+                    'run-architecture', 'chat-architecture', 'accepted', 0,
+                    '', NULL, '', ?, NULL, NULL, ?
+                )
+                """,
+                (_NOW, _NOW),
+            )
+            connection.commit()
+        run = self.store.runs.get("run-architecture")
+        self.assertIsNotNone(run)
+        assert run is not None
+        binding = ChatSessionScopeBinding(
+            chat_id="chat-architecture",
+            scope_mode="architecture",
+            architecture_id=7,
+            created_at=_NOW,
+        )
+        self.store.session_scope_bindings.create(binding)
+        revision = ChatScopeRevision(
+            scope_revision_id=chat_scope_revision_id_for_run(run.run_id),
+            chat_id="chat-architecture",
+            source_mode=CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL,
+            source_run_id=run.run_id,
+            source_architecture_id=7,
+            members=(_member("a.pdf"),),
+            created_at=_NOW,
+        )
+        self.store.scopes.append_and_set_head(
+            revision=revision,
+            expected_current_revision_id=None,
+        )
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_run_inputs (
+                    run_id, message, files_json, created_at,
+                    requested_files_json, effective_scope_revision_id,
+                    selection_mode, requested_architecture_id
+                ) VALUES (?, '问题', '[]', ?, '[]', ?, ?, 7)
+                """,
+                (
+                    run.run_id,
+                    _NOW,
+                    revision.scope_revision_id,
+                    CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+                ),
+            )
+            connection.commit()
+        user_message = self.store.messages.append(
+            message_id="message-architecture-user",
+            chat_id="chat-architecture",
+            run_id=run.run_id,
+            role="user",
+            content="问题",
+            status="pending",
+            architecture_id=7,
+        )
+        assistant_message = self.store.messages.append(
+            message_id="message-architecture-assistant",
+            chat_id="chat-architecture",
+            run_id=run.run_id,
+            role="assistant",
+            content="回答",
+            status="committed",
+        )
+
+        loaded_input = self.store.run_inputs.get(run.run_id)
+        self.assertEqual(7, loaded_input.requested_architecture_id)
+        self.assertEqual(7, user_message.architecture_id)
+        self.assertEqual((), user_message.files)
+        self.assertIsNone(assistant_message.architecture_id)
+        self.assertEqual((), assistant_message.files)
+
+        with closing(self._connect()) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE chat_session_scope_bindings SET architecture_id = 8 "
+                    "WHERE chat_id = 'chat-architecture'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    INSERT INTO chat_message_files (
+                        message_id, file_name, original_name
+                    ) VALUES ('message-architecture-user', 'a.pdf', 'A.pdf')
+                    """
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE chat_run_inputs SET requested_architecture_id = 8 "
+                    "WHERE run_id = 'run-architecture'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    INSERT INTO chat_scope_revisions (
+                        scope_revision_id, chat_id, source_mode,
+                        source_run_id, source_architecture_id, created_at
+                    ) VALUES (
+                        'wrong-architecture-scope', 'chat-architecture',
+                        'architecture_initial', 'run-architecture', 8, ?
+                    )
+                    """,
+                    (_NOW,),
+                )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.messages.append(
+                message_id="message-architecture-missing-id",
+                chat_id="chat-architecture",
+                run_id=run.run_id,
+                role="user",
+                content="缺少 ID",
+                status="pending",
+            )
+        with self.assertRaises(ValueError):
+            self.store.messages.append(
+                message_id="message-assistant-with-id",
+                chat_id="chat-architecture",
+                run_id=run.run_id,
+                role="assistant",
+                content="错误",
+                status="committed",
+                architecture_id=7,
+            )
+
+    def test_fifty_architecture_bindings_are_isolated(self) -> None:
+        count = 50
+        barrier = Barrier(count)
+
+        def create_binding(index: int) -> tuple[str, int]:
+            chat_id = f"binding-chat-{index}"
+            self.store.sessions.create_or_get(chat_id=chat_id)
+            barrier.wait(timeout=10)
+            binding = self.store.session_scope_bindings.create(
+                ChatSessionScopeBinding(
+                    chat_id=chat_id,
+                    scope_mode="architecture",
+                    architecture_id=index + 1,
+                    created_at=_NOW,
+                )
+            )
+            return binding.chat_id, int(binding.architecture_id)
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(create_binding, range(count)))
+
+        self.assertEqual(count, len(set(results)))
+        for chat_id, architecture_id in results:
+            binding = self.store.session_scope_bindings.get(chat_id)
+            self.assertEqual(architecture_id, binding.architecture_id)
 
     def test_append_revision_reads_ordered_members_and_head(self) -> None:
         self._create_run(chat_id="chat-a", run_id="run-a")

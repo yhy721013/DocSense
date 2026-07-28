@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from app.services.chat.domain.document_candidates import (
         ChatDocumentSelectionCandidates,
     )
+    from app.services.chat.domain.document_scope import ChatScopeSelector
 
 
 def _required_text(value: str, *, name: str) -> str:
@@ -135,6 +136,7 @@ class ChatRunCoordinator(Protocol):
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
         document_candidates: "ChatDocumentSelectionCandidates | None" = None,
+        scope_selector: "ChatScopeSelector | None" = None,
         max_files_per_request: int | None = None,
     ) -> ChatRun:
         """原子选择文档、受理运行，并保持同一会话的活动运行互斥。"""

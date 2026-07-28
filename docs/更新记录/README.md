@@ -46,6 +46,14 @@
 | `260728-文件对话请求与活动范围分离阶段5执行记录.md` | 阶段 5 历史、日志与调试一致性：history 只投影 requested，1,000 个 effective 文件不扩大空请求历史；调试 `fileNames` 校正为 Active Scope，bindings 独立脱敏计数且不新增 JSON 字段；204 项 Chat 回归通过。 |
 | `260728-文件对话请求与活动范围分离阶段6执行记录.md` | 阶段 6 开发 Chat 库精确清理与安全全仓回归：空库重建 Schema v1～v4，发现 1,879/排除 13/执行 1,866 项全部通过；证据限定为 Windows、SQLite 单实例与离线 Fake。 |
 | `260728-文件对话请求与活动范围分离阶段7关闭验收执行记录.md` | 阶段 7 最终关闭：同步权威接口文档且公开字段零增删，完成 204 项 Chat、70 项契约/网关/容器/架构、1,866 项安全全仓及静态审计；开发分支 SQLite 单实例离线计划关闭。 |
+| `260728-知识谱系类别文件对话阶段0合同黄金资产与基线执行记录.md` | architecture 类别文件对话阶段 0：冻结互斥选择器、直接文件快照、不可变会话绑定、错误优先级、历史字段和 SSE 不变量；10 项合同、211 项 Chat 及发现 1,993/排除 13/执行 1,980 项安全全仓基线通过，生产代码尚未修改。 |
+| `260728-知识谱系类别文件对话阶段1选择器与纯领域执行记录.md` | 阶段 1 实现未接路由的严格二选一 Web Parser、Candidate Schema v2、不可变 Session Binding、architecture initial/reuse 纯状态机和 Domain AST 隔离；57 项定向及 223 项 Chat 回归通过。 |
+| `260728-知识谱系类别文件对话阶段2目录查询与Resolver执行记录.md` | 阶段 2 增加 exact architecture 参数化 SQL、直接文件稳定目录读取、有界 resolved/not_found/invalid Resolver 和独立 capability Protocol；50 项 Database/Resolver/架构及 228 项 Chat 回归通过，生产路由未切换。 |
+| `260728-知识谱系类别文件对话阶段3持久化Schema-v5执行记录.md` | 阶段 3 落地 Schema v5、不可变 Session Binding、architecture Scope Revision、运行输入和消息一致性门禁；14 项 Scope、86 项持久化/容器及 232 项 Chat 回归通过，Coordinator 尚未接线。 |
+| `260728-知识谱系类别文件对话阶段4原子受理编排执行记录.md` | 阶段 4 将 Binding→冲突优先级→Head/Revision→run/input/message 串入同一受理事务；87 项定向及 237 项 Chat 回归通过，公开路由尚未切换。 |
+| `260728-知识谱系类别文件对话阶段5路由执行与历史切换执行记录.md` | 阶段 5 完成 `/llm/chat` selector、architecture Resolver/快照执行、获批错误映射和 history 字段互斥；242 项 Chat 及 82 项相邻门禁通过。 |
+| `260728-知识谱系类别文件对话阶段6并发恢复与安全全仓执行记录.md` | 阶段 6 验收 run_id 重启恢复、远端额外文档不扩张、混合 ID/模式及 50 会话并发隔离，完成资源租约日志摘要化；248 项 Chat 及发现 2,033/排除 13/执行 2,020 项安全全仓回归通过。 |
+| `260728-知识谱系类别文件对话阶段7关闭验收执行记录.md` | 阶段 7 同步权威合同和计划状态，完成 248 项 Chat、85 项合同/网关/架构、142 项相邻模块及发现 2,033/排除 13/执行 2,020 项安全全仓复验；当前功能分支 SQLite 单实例离线计划关闭。 |
 | `260715-阶段1A-1接口契约基线执行记录.md` | check-task/Progress 当前与目标契约分层、离线测试结果，以及已确认的严格 params/action 错误连接策略。 |
 | `260715-阶段1A-2模块骨架与架构边界执行记录.md` | tasks/Flask Adapter 包骨架、AST 导入门禁、规则自证、完整回归结果与 1A-3 后续边界。 |
 | `260716-阶段1A-3内部任务契约执行记录.md` | 不可变 Task/Progress DTO、三类 Port、两个应用服务、Fake 契约测试、波次 1A 门禁与完整回归。 |

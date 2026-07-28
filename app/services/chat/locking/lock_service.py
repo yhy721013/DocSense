@@ -36,8 +36,13 @@ from app.services.chat.domain.document_candidates import (
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_MODE_ARCHITECTURE,
+    CHAT_SCOPE_MODE_FILES,
     ChatScopeRevision,
+    ChatScopeSelector,
+    decide_chat_architecture_scope,
     decide_chat_document_scope,
+    decide_chat_session_scope_binding,
 )
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.locking.lease import (
@@ -50,6 +55,7 @@ from app.services.chat.persistence.event_repository import ChatRunEventRepositor
 from app.services.chat.persistence.repositories import (
     ChatRunRepository,
     ChatScopeRepository,
+    ChatSessionScopeBindingRepository,
     _connection_scope,
     _optional_text,
     _required_text,
@@ -161,6 +167,7 @@ class ChatRunLockService:
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
         document_candidates: ChatDocumentSelectionCandidates | None = None,
+        scope_selector: ChatScopeSelector | None = None,
         max_files_per_request: int | None = None,
     ) -> ChatRun:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
@@ -180,6 +187,12 @@ class ChatRunLockService:
                 "document_candidates cannot be combined with legacy "
                 "document tuples"
             )
+        normalized_scope_selector = self._normalize_scope_selector(
+            scope_selector=scope_selector,
+            document_candidates=document_candidates,
+            user_files=user_files,
+            input_documents=input_documents,
+        )
         if max_files_per_request is not None and (
             isinstance(max_files_per_request, bool)
             or not isinstance(max_files_per_request, int)
@@ -221,6 +234,41 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     status=session_row["status"],
                 )
+            existing_binding = (
+                ChatSessionScopeBindingRepository.get_in_transaction(
+                    connection,
+                    chat_id=normalized_chat_id,
+                )
+            )
+            if session_created and existing_binding is not None:
+                raise ValueError(
+                    "new chat session unexpectedly has scope binding"
+                )
+            if not session_created and existing_binding is None:
+                logger.error(
+                    "既有文件对话缺少不可变范围绑定，受理失败关闭: "
+                    "chat_id=%s run_id=%s",
+                    normalized_chat_id,
+                    normalized_run_id,
+                )
+                raise ValueError(
+                    "existing chat session is missing immutable scope binding"
+                )
+            scope_binding, creates_binding = (
+                decide_chat_session_scope_binding(
+                    chat_id=normalized_chat_id,
+                    selector=normalized_scope_selector,
+                    existing_binding=existing_binding,
+                    created_at=now,
+                )
+            )
+            if creates_binding:
+                ChatSessionScopeBindingRepository.create_in_transaction(
+                    connection,
+                    binding=scope_binding,
+                )
+            # 不可变模式和 architecture ID 必须在活跃运行检查前裁决；否则同一
+            # chatId 的错误模式请求会被不稳定地伪装成普通“流正在进行”。
             self._expire_stale_runs(
                 connection,
                 chat_id=normalized_chat_id,
@@ -305,16 +353,43 @@ class ChatRunLockService:
                     current_scope_documents = (
                         current_scope_revision.members
                     )
-                scope_decision = decide_chat_document_scope(
-                    session_created=session_created,
-                    requested_documents=(
-                        document_candidates.explicit_documents
-                    ),
-                    automatic_initial_documents=(
-                        document_candidates.new_session_default_documents
-                    ),
-                    current_scope_documents=current_scope_documents,
-                )
+                if scope_binding.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
+                    architecture_candidates = (
+                        document_candidates.architecture_candidates
+                    )
+                    if architecture_candidates is None:
+                        raise ValueError(
+                            "architecture selector requires architecture candidates"
+                        )
+                    scope_decision = decide_chat_architecture_scope(
+                        session_created=session_created,
+                        requested_architecture_id=(
+                            normalized_scope_selector.architecture_id
+                        ),
+                        bound_architecture_id=scope_binding.architecture_id,
+                        architecture_candidates=architecture_candidates,
+                        current_scope_documents=current_scope_documents,
+                    )
+                    if not session_created:
+                        if (
+                            current_scope_revision is None
+                            or current_scope_revision.source_architecture_id
+                            != scope_binding.architecture_id
+                        ):
+                            raise ValueError(
+                                "architecture scope revision does not match binding"
+                            )
+                else:
+                    scope_decision = decide_chat_document_scope(
+                        session_created=session_created,
+                        requested_documents=(
+                            document_candidates.explicit_documents
+                        ),
+                        automatic_initial_documents=(
+                            document_candidates.new_session_default_documents
+                        ),
+                        current_scope_documents=current_scope_documents,
+                    )
                 selection_mode = scope_decision.selection_mode
                 history_user_files = tuple(
                     (
@@ -352,11 +427,24 @@ class ChatRunLockService:
 
             logger.info(
                 "文件对话受理事务已选择有效文档: chat_id=%s run_id=%s "
+                "scope_mode=%s requested_architecture_id=%s "
+                "bound_architecture_id=%s architecture_candidate_outcome=%s "
                 "selection_mode=%s "
                 "session_created=%s explicit_candidate_count=%d "
                 "default_candidate_count=%d effective_file_count=%d",
                 normalized_chat_id,
                 normalized_run_id,
+                scope_binding.scope_mode,
+                normalized_scope_selector.architecture_id,
+                scope_binding.architecture_id,
+                (
+                    document_candidates.architecture_candidates.resolution_outcome
+                    if (
+                        document_candidates is not None
+                        and document_candidates.architecture_candidates is not None
+                    )
+                    else ""
+                ),
                 selection_mode,
                 session_created,
                 explicit_candidate_count,
@@ -400,6 +488,9 @@ class ChatRunLockService:
                         source_run_id=normalized_run_id,
                         members=scope_decision.effective_documents,
                         created_at=now,
+                        source_architecture_id=(
+                            scope_decision.source_architecture_id
+                        ),
                     )
                     ChatScopeRepository.append_and_set_head_in_transaction(
                         connection,
@@ -436,6 +527,11 @@ class ChatRunLockService:
                         effective_scope_revision_id
                     ),
                     selection_mode=selection_mode,
+                    requested_architecture_id=(
+                        scope_decision.requested_architecture_id
+                        if scope_decision is not None
+                        else None
+                    ),
                     created_at=now,
                 )
                 self._append_user_pending(
@@ -444,6 +540,7 @@ class ChatRunLockService:
                     run_id=normalized_run_id,
                     message=user_message,
                     files=history_user_files,
+                    architecture_id=scope_binding.architecture_id,
                     created_at=now,
                 )
             logger.info(
@@ -461,6 +558,79 @@ class ChatRunLockService:
                 bool(self.owner_instance_id),
             )
             return self._row(row)
+
+    @staticmethod
+    def _normalize_scope_selector(
+        *,
+        scope_selector: ChatScopeSelector | None,
+        document_candidates: ChatDocumentSelectionCandidates | None,
+        user_files: tuple[tuple[str, str], ...],
+        input_documents: tuple[tuple[str, str, str, str], ...],
+    ) -> ChatScopeSelector:
+        """规范内部选择器，并为既有 file 调用构造等价 Binding 输入。
+
+        architecture 路径禁止推断 ID，必须由已经通过 Web 规范化的显式选择器提供；
+        兼容的 file 路径则可从现有不可变候选恢复文件名，从而不迫使旧内部调用方
+        一次性修改方法签名。
+        """
+        if scope_selector is not None and not isinstance(
+            scope_selector,
+            ChatScopeSelector,
+        ):
+            raise TypeError("scope_selector must be ChatScopeSelector or None")
+        architecture_candidates = (
+            None
+            if document_candidates is None
+            else document_candidates.architecture_candidates
+        )
+        if scope_selector is None:
+            if architecture_candidates is not None:
+                raise ValueError(
+                    "architecture candidates require an explicit scope selector"
+                )
+            if document_candidates is not None:
+                inferred_file_names = tuple(
+                    document.file_name
+                    for document in document_candidates.explicit_documents
+                )
+            elif input_documents:
+                inferred_file_names = tuple(
+                    file_name for file_name, _, _, _ in input_documents
+                )
+            else:
+                inferred_file_names = tuple(
+                    file_name for file_name, _ in user_files
+                )
+            return ChatScopeSelector.for_files(inferred_file_names)
+
+        if scope_selector.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
+            if architecture_candidates is None:
+                raise ValueError(
+                    "architecture selector requires architecture candidates"
+                )
+            if (
+                architecture_candidates.architecture_id
+                != scope_selector.architecture_id
+            ):
+                raise ValueError(
+                    "architecture selector and candidates ID do not match"
+                )
+            return scope_selector
+
+        if architecture_candidates is not None:
+            raise ValueError(
+                "file selector cannot contain architecture candidates"
+            )
+        if document_candidates is not None:
+            explicit_file_names = tuple(
+                document.file_name
+                for document in document_candidates.explicit_documents
+            )
+            if explicit_file_names != scope_selector.file_names:
+                raise ValueError(
+                    "file selector does not match explicit document candidates"
+                )
+        return scope_selector
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:
         """原子阻止新运行，并在存在活动运行时拒绝删除。"""
@@ -1098,6 +1268,7 @@ class ChatRunLockService:
         requested_files: tuple[tuple[str, str], ...] = (),
         effective_scope_revision_id: str = "",
         selection_mode: str = "legacy_input",
+        requested_architecture_id: int | None = None,
     ) -> None:
         normalized_message = _required_text(message, name="user_message")
         normalized_documents = tuple(
@@ -1149,8 +1320,8 @@ class ChatRunLockService:
             INSERT INTO chat_run_inputs (
                 run_id, message, files_json, created_at,
                 requested_files_json, effective_scope_revision_id,
-                selection_mode
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                selection_mode, requested_architecture_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -1168,6 +1339,7 @@ class ChatRunLockService:
                 ),
                 normalized_scope_revision_id,
                 normalized_selection_mode,
+                requested_architecture_id,
             ),
         )
 
@@ -1179,6 +1351,7 @@ class ChatRunLockService:
         run_id: str,
         message: str,
         files: tuple[tuple[str, str], ...],
+        architecture_id: int | None,
         created_at: str,
     ) -> None:
         normalized_message = _required_text(message, name="user_message")
@@ -1200,8 +1373,8 @@ class ChatRunLockService:
             """
             INSERT INTO chat_messages (
                 message_id, chat_id, run_id, role, content,
-                status, sequence_no, created_at
-            ) VALUES (?, ?, ?, 'user', ?, ?, ?, ?)
+                status, sequence_no, created_at, architecture_id
+            ) VALUES (?, ?, ?, 'user', ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -1211,6 +1384,7 @@ class ChatRunLockService:
                 MESSAGE_PENDING,
                 int(sequence_row["next_sequence"]),
                 created_at,
+                architecture_id,
             ),
         )
         for file_name, original_name in normalized_files:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -195,6 +196,148 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
             "^文件 broken.pdf 缺少可用于对话的文档引用$",
         ):
             resolver.resolve_all_available()
+
+    def test_architecture_resolver_returns_only_exact_direct_files(self) -> None:
+        self._save_document(
+            "beta.pdf",
+            architecture_id=7,
+            document_id="doc-beta",
+        )
+        self._save_document(
+            "alpha.pdf",
+            architecture_id=7,
+            document_id="doc-alpha",
+        )
+        # 8 可代表树上的子类别或任意相邻类别；精确 SQL 不得把它展开进 7。
+        self._save_document(
+            "child.pdf",
+            architecture_id=8,
+            document_id="doc-child",
+        )
+
+        candidates = self.resolver.resolve_by_architecture_id(7)
+
+        self.assertEqual("resolved", candidates.resolution_outcome)
+        self.assertEqual(
+            ("alpha.pdf", "beta.pdf"),
+            tuple(document.file_name for document in candidates.documents),
+        )
+        self.assertFalse(
+            any(
+                document.file_name == "child.pdf"
+                for document in candidates.documents
+            )
+        )
+
+    def test_architecture_resolver_empty_catalog_is_bounded_not_found(self) -> None:
+        candidates = self.resolver.resolve_by_architecture_id(7)
+
+        self.assertEqual("not_found", candidates.resolution_outcome)
+        self.assertEqual(
+            "architecture_catalog_not_found",
+            candidates.error_code,
+        )
+        self.assertEqual((), candidates.documents)
+
+    def test_architecture_resolver_rejects_partial_or_duplicate_identity(self) -> None:
+        cases = (
+            [
+                {
+                    "file_name": "empty-original.pdf",
+                    "original_name": "",
+                    "anything_doc_id": "doc-empty-original",
+                    "doc_path": "custom-documents/empty-original.json",
+                }
+            ],
+            [
+                {
+                    "file_name": "good.pdf",
+                    "original_name": "good.pdf",
+                    "anything_doc_id": "doc-good",
+                    "doc_path": "custom-documents/good.json",
+                },
+                {
+                    "file_name": "broken.pdf",
+                    "original_name": "broken.pdf",
+                    "anything_doc_id": "",
+                    "doc_path": "",
+                },
+            ],
+            [
+                {
+                    "file_name": "a.pdf",
+                    "original_name": "a.pdf",
+                    "anything_doc_id": "same",
+                    "doc_path": "custom-documents/a.json",
+                },
+                {
+                    "file_name": "b.pdf",
+                    "original_name": "b.pdf",
+                    "anything_doc_id": "same",
+                    "doc_path": "custom-documents/b.json",
+                },
+            ],
+            [
+                {
+                    "file_name": "a.pdf",
+                    "original_name": "a.pdf",
+                    "anything_doc_id": "doc-a",
+                    "doc_path": "custom-documents/same.json",
+                },
+                {
+                    "file_name": "b.pdf",
+                    "original_name": "b.pdf",
+                    "anything_doc_id": "doc-b",
+                    "doc_path": r"custom-documents\same.json",
+                },
+            ],
+        )
+        for records in cases:
+            with self.subTest(record_count=len(records)):
+                knowledge_base = Mock(spec=DatabaseService)
+                knowledge_base.list_document_records_by_architecture_id.return_value = (
+                    records
+                )
+                resolver = DatabaseChatDocumentResolver(knowledge_base)
+
+                candidates = resolver.resolve_by_architecture_id(7)
+
+                self.assertEqual("invalid", candidates.resolution_outcome)
+                self.assertEqual(
+                    "architecture_catalog_invalid",
+                    candidates.error_code,
+                )
+                self.assertEqual((), candidates.documents)
+
+    def test_architecture_resolver_reads_catalog_once_without_full_scan(self) -> None:
+        knowledge_base = Mock(spec=DatabaseService)
+        knowledge_base.list_document_records_by_architecture_id.return_value = [
+            {
+                "file_name": "alpha.pdf",
+                "original_name": "Alpha.pdf",
+                "anything_doc_id": "doc-alpha",
+                "doc_path": "custom-documents/alpha.json",
+            }
+        ]
+        resolver = DatabaseChatDocumentResolver(knowledge_base)
+
+        resolver.resolve_by_architecture_id(7)
+
+        knowledge_base.list_document_records_by_architecture_id.assert_called_once_with(
+            7
+        )
+        knowledge_base.list_document_records.assert_not_called()
+        knowledge_base.get_document_record.assert_not_called()
+
+    def test_architecture_resolver_does_not_hide_database_execution_failure(self) -> None:
+        knowledge_base = Mock(spec=DatabaseService)
+        knowledge_base.list_document_records_by_architecture_id.side_effect = (
+            sqlite3.OperationalError("forced read failure")
+        )
+        resolver = DatabaseChatDocumentResolver(knowledge_base)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            resolver.resolve_by_architecture_id(7)
 
 
 if __name__ == "__main__":
