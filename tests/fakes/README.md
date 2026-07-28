@@ -7,6 +7,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `__init__.py` | 导出各类测试替身。 |
+| `analysis.py` | Analysis 九类 Port 的统一严格 Fake 与线程安全期望脚本；未配置、乱序、错误类型或未消费期望均立即失败。 |
 | `chat.py` | 文件对话替身：共享内存后端、任务级对话工厂和对话端口，模拟工作区/线程、文档绑定、流消息、临时回复、历史和幂等删除。 |
 | `knowledge_index.py` | 知识索引端口替身。 |
 | `rag.py` | RAG 端口替身。 |
@@ -43,3 +44,10 @@
   相同回答文本不能替代 document/evidence 身份校验。
 - Resource Fake 必须用锁、expected version、cleanup lease 和 fencing token 模拟并发；shared
   资源永不进入清理状态，unknown 清理在对账或隔离前不得直接重试。
+- Analysis 严格 Fake 不得提供默认成功值或将未声明调用静默忽略。1F-3 已由
+  `StrictAnalysisTaskCommandFake`、`StrictAnalysisGuardedProgressFake`、
+  `StrictAnalysisTaskWorkspaceFake` 与 `StrictAnalysisRagFactoryFake` 补齐 TaskId 运行所需的领取、
+  进度、目录和 Factory 作用域；并发测试仍应按 execution 使用独立脚本队列，所有返回值都必须再次
+  核对 execution/session/operation/Receipt。1F-6 的资源、回调和恢复测试以显式的内存 Port 或临时
+  SQLite/替身 Transport 驱动，必须断言 Guard、CAS、unknown 与隔离事实；不得由未接线 Application
+  虚构成功。Dispatcher 交互仍属于后续阶段。

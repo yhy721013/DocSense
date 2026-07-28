@@ -513,8 +513,10 @@ class LegacyOfficeConversionTests(unittest.TestCase):
 
     def test_preflight_accepts_stable_allowed_version_and_caches(self) -> None:
         factory = FakeProcessFactory()
+        executable = "/opt/docsense/soffice"
         preparer = LibreOfficeLegacyOfficePreparer(
-            self.config(),
+            self.config(executable=executable),
+            platform_name="darwin",
             environment={
                 "HOME": "/Users/docsense",
                 "PATH": "/usr/bin:/bin",
@@ -524,6 +526,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                 "CALLBACK_URL": "http://private.invalid/callback",
             },
             process_factory=factory,
+            path_is_file=lambda value: value == executable,
+            path_is_executable=lambda value: value == executable,
         )
         self.assertEqual(preparer.preflight(), "26.2.5.2")
         self.assertEqual(preparer.preflight(), "26.2.5.2")
@@ -667,10 +671,15 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                         expected_filter,
                     )
                     self.assertFalse(kwargs["shell"])
-                    self.assertTrue(kwargs["start_new_session"])
+                    if sys.platform.startswith("win"):
+                        self.assertIn("creationflags", kwargs)
+                        self.assertNotIn("start_new_session", kwargs)
+                    else:
+                        self.assertTrue(kwargs["start_new_session"])
                     self.assertIn("-env:UserInstallation=file://", command[1])
-                    profile_uri = command[1].split("=", 1)[1]
-                    profile = Path(profile_uri.removeprefix("file://"))
+                    # 生产命令仍校验 file URI；测试直接从任务所有权边界读取同一 Profile，
+                    # 避免用 Windows Path 错误解析 macOS URI 或反向解析。
+                    profile = result.prepared_path.parent.parent / "profile"
                     registry = (
                         profile / "user" / "registrymodifications.xcu"
                     ).read_text(encoding="utf-8")
@@ -702,8 +711,9 @@ class LegacyOfficeConversionTests(unittest.TestCase):
         self,
     ) -> None:
         factory = FakeProcessFactory()
+        executable = "/opt/docsense/soffice"
         preparer = LibreOfficeLegacyOfficePreparer(
-            self.config(),
+            self.config(executable=executable),
             platform_name="darwin",
             environment={
                 "HOME": "/Users/host-account",
@@ -714,6 +724,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                 "ANYTHINGLLM_API_KEY": "must-not-reach-child",
             },
             process_factory=factory,
+            path_is_file=lambda value: value == executable,
+            path_is_executable=lambda value: value == executable,
         )
         with preparer.prepare(self.source(".doc"), job_id="private-env") as result:
             command, kwargs = factory.conversion_commands[-1]
@@ -730,14 +742,17 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                 )
             self.assertTrue((job_path / "home").is_dir())
             self.assertTrue((job_path / "tmp").is_dir())
-            self.assertEqual(
-                (job_path / "home").stat().st_mode & 0o777,
-                0o700,
-            )
-            self.assertEqual(
-                (job_path / "tmp").stat().st_mode & 0o777,
-                0o700,
-            )
+            # Windows 文件系统不提供可比的 POSIX mode bits；目录隔离仍在所有平台验证，
+            # 精确 0700 仅在具备该语义的宿主机断言。
+            if os.name != "nt":
+                self.assertEqual(
+                    (job_path / "home").stat().st_mode & 0o777,
+                    0o700,
+                )
+                self.assertEqual(
+                    (job_path / "tmp").stat().st_mode & 0o777,
+                    0o700,
+                )
             self.assertNotIn("ANYTHINGLLM_API_KEY", child_environment)
             self.assertEqual(Path(command[-1]).parent, job_path)
         self.assertFalse(job_path.exists())
@@ -1306,26 +1321,27 @@ class LegacyOfficeConversionTests(unittest.TestCase):
         preparer, _ = self.preparer()
         jobs_root = preparer.config.jobs_root
         owned = jobs_root / "job-owned"
+        legacy_windows_owned = jobs_root / "job-legacy-windows"
         unowned = jobs_root / "job-unowned"
         unrelated = jobs_root / "other"
-        for directory in (owned, unowned, unrelated):
+        for directory in (owned, legacy_windows_owned, unowned, unrelated):
             directory.mkdir(parents=True)
-        (owned / _OWNED_JOB_MARKER_NAME).write_text(
-            _OWNED_JOB_MARKER_VALUE,
-            encoding="ascii",
+        marker_bytes = _OWNED_JOB_MARKER_VALUE.encode("ascii")
+        (owned / _OWNED_JOB_MARKER_NAME).write_bytes(marker_bytes)
+        # 兼容修复前 Windows 文本模式写出的 CRLF 标记，确保历史残留仍可由启动扫描回收。
+        (legacy_windows_owned / _OWNED_JOB_MARKER_NAME).write_bytes(
+            marker_bytes.replace(b"\n", b"\r\n")
         )
         (unowned / "data").write_text("keep", encoding="utf-8")
-        (unrelated / _OWNED_JOB_MARKER_NAME).write_text(
-            _OWNED_JOB_MARKER_VALUE,
-            encoding="ascii",
-        )
+        (unrelated / _OWNED_JOB_MARKER_NAME).write_bytes(marker_bytes)
         symlink = jobs_root / "job-link"
         try:
             symlink.symlink_to(owned, target_is_directory=True)
         except OSError:
             symlink = None
-        self.assertEqual(preparer.sweep_stale_jobs(), 1)
+        self.assertEqual(preparer.sweep_stale_jobs(), 2)
         self.assertFalse(owned.exists())
+        self.assertFalse(legacy_windows_owned.exists())
         self.assertTrue(unowned.exists())
         self.assertTrue(unrelated.exists())
         if symlink is not None:
@@ -1334,17 +1350,25 @@ class LegacyOfficeConversionTests(unittest.TestCase):
     def test_posix_timeout_terminates_process_group(self) -> None:
         factory = FakeProcessFactory()
         factory.timeout_conversion = True
-        preparer, _ = self.preparer(factory)
+        executable = "/opt/docsense/soffice"
+        preparer = LibreOfficeLegacyOfficePreparer(
+            self.config(executable=executable),
+            platform_name="darwin",
+            process_factory=factory,
+            path_is_file=lambda value: value == executable,
+            path_is_executable=lambda value: value == executable,
+        )
         sent_signals: list[tuple[int, int]] = []
 
         def record_signal(pgid: int, sent_signal: int) -> None:
             sent_signals.append((pgid, sent_signal))
-            if sent_signal == signal.SIGKILL:
+            if sent_signal == getattr(signal, "SIGKILL", 9):
                 factory.last_process.kill()
 
         with patch(
             "app.modules.document_processing.libreoffice.os.killpg",
             side_effect=record_signal,
+            create=True,
         ):
             self.assert_error_code(
                 "conversion_timeout",
@@ -1352,7 +1376,10 @@ class LegacyOfficeConversionTests(unittest.TestCase):
             )
         timed_out_pid = factory.last_process.pid
         self.assertIn((timed_out_pid, signal.SIGTERM), sent_signals)
-        self.assertIn((timed_out_pid, signal.SIGKILL), sent_signals)
+        self.assertIn(
+            (timed_out_pid, getattr(signal, "SIGKILL", 9)),
+            sent_signals,
+        )
         self.assertEqual(factory.last_process.returncode, -9)
 
     def test_windows_uses_new_process_group_and_taskkill_tree(self) -> None:

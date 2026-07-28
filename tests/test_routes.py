@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from app import create_app
 from app.container import APPLICATION_SERVICES_EXTENSION
-from app.services.llm_service.analysis_service import (
+from app.modules.analysis.domain.models import (
     MAX_ANALYSIS_PARAMS_PER_REQUEST,
     MAX_ANALYSIS_REQUEST_BYTES,
 )
@@ -177,8 +177,8 @@ class LLMRouteValidationTests(unittest.TestCase):
         response = self.client.get("/llm/progress")
         self.assertNotEqual(response.status_code, 404)
 
-    @patch("app.blueprints.llm.threading.Thread")
-    def test_analysis_starts_background_task_for_valid_request(self, mock_thread):
+    @patch("threading.Thread")
+    def test_analysis_persists_new_execution_without_route_thread(self, mock_thread):
         response = self.client.post(
             "/llm/analysis",
             json={
@@ -192,19 +192,23 @@ class LLMRouteValidationTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 202)
-        # 受理成功体必须严格为空，内部 execution_id 只能留在任务库和后台线程中。
+        # 受理成功体必须严格为空，内部 execution_id 只能留在任务库和 Dispatcher 中。
         self.assertEqual(response.data, b"")
-        mock_thread.assert_called_once()
+        mock_thread.assert_not_called()
         persisted_task = self.task_service.get_task("file", "sample.txt")
         self.assertIsNotNone(persisted_task)
-        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
-        self.assertEqual(
-            worker_kwargs["execution_id"],
-            persisted_task["execution_id"],
+        assert persisted_task is not None
+        execution = self.task_service.get_task_execution(
+            persisted_task["execution_id"]
         )
+        self.assertIsNotNone(execution)
+        assert execution is not None
+        self.assertEqual("accepted", execution["execution_state"])
+        self.assertIsNotNone(execution["batch_id"])
+        self.assertEqual(1, execution["batch_sequence"])
 
-    @patch("app.blueprints.llm.threading.Thread")
-    def test_analysis_accepts_multiple_files_and_starts_one_batch_thread(self, mock_thread):
+    @patch("threading.Thread")
+    def test_analysis_accepts_multiple_files_without_route_thread(self, mock_thread):
         response = self.client.post(
             "/llm/analysis",
             json={
@@ -229,14 +233,23 @@ class LLMRouteValidationTests(unittest.TestCase):
             for file_name in ("a.txt", "b.txt")
         }
         self.assertTrue(all(task is not None for task in persisted_tasks.values()))
-        mock_thread.assert_called_once()
-        worker_kwargs = mock_thread.call_args.kwargs["kwargs"]
+        mock_thread.assert_not_called()
+        executions = {
+            file_name: self.task_service.get_task_execution(task["execution_id"])
+            for file_name, task in persisted_tasks.items()
+        }
+        self.assertTrue(all(execution is not None for execution in executions.values()))
         self.assertEqual(
-            worker_kwargs["execution_ids"],
-            {
-                file_name: task["execution_id"]
-                for file_name, task in persisted_tasks.items()
-            },
+            1,
+            executions["a.txt"]["batch_sequence"],  # type: ignore[index]
+        )
+        self.assertEqual(
+            2,
+            executions["b.txt"]["batch_sequence"],  # type: ignore[index]
+        )
+        self.assertEqual(
+            executions["a.txt"]["batch_id"],  # type: ignore[index]
+            executions["b.txt"]["batch_id"],  # type: ignore[index]
         )
 
     def test_analysis_rejects_duplicate_file_names_in_same_batch(self):
@@ -276,7 +289,7 @@ class LLMRouteValidationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_terminal_task_while_callback_is_pending(
         self,
         mock_thread,
@@ -328,7 +341,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_failed_task_while_replay_lease_is_active(
         self,
         mock_thread,
@@ -394,7 +407,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_keeps_missing_null_and_empty_architecture_compatibility(
         self,
         mock_thread,
@@ -411,9 +424,9 @@ class LLMRouteValidationTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 202)
 
-        self.assertEqual(mock_thread.call_count, 2)
+        self.assertEqual(mock_thread.call_count, 0)
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_explicitly_malformed_architecture_ranges(
         self,
         mock_thread,
@@ -456,7 +469,7 @@ class LLMRouteValidationTests(unittest.TestCase):
 
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_invalid_unicode_and_non_finite_json(
         self,
         mock_thread,
@@ -506,7 +519,7 @@ class LLMRouteValidationTests(unittest.TestCase):
 
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_validates_every_batch_item_before_creating_tasks(
         self,
         mock_thread,
@@ -545,7 +558,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_overdeep_tree_before_task_creation(
         self,
         mock_thread,
@@ -582,7 +595,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_non_object_params_without_silent_filtering(
         self,
         mock_thread,
@@ -608,7 +621,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_too_many_files_before_task_creation(
         self,
         mock_thread,
@@ -638,7 +651,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_rejects_oversized_content_length_before_parsing(
         self,
         mock_thread,
@@ -655,13 +668,13 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_analysis_bounds_chunked_body_without_content_length(
         self,
         mock_thread,
     ):
         with patch(
-            "app.blueprints.llm.MAX_ANALYSIS_REQUEST_BYTES",
+            "app.adapters.web.flask.analysis_requests.MAX_ANALYSIS_REQUEST_BYTES",
             8,
         ):
             response = self.client.post(
@@ -677,7 +690,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_generate_report_persists_and_wakes_without_route_thread(self, mock_thread):
         response = self.client.post(
             "/llm/generate-report",
@@ -797,7 +810,7 @@ class LLMRouteValidationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_weaponry_normalizes_selected_file_urls_and_preserves_original_request(
         self,
         mock_thread,
@@ -853,7 +866,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(frozen_scope["documents"][0]["file_name"], "abc123.pdf")
         self.assertEqual(frozen_scope["documents"][0]["source_architecture_id"], 99999)
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_weaponry_empty_file_path_list_keeps_full_category_scope(
         self,
         mock_thread,

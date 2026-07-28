@@ -44,3 +44,6 @@ data/
 
 # Legacy Office 离线安装包、下载缓存和最终压缩包（不进入 Git/LFS）
 dist/legacy-office/
+
+# 运行依赖
+argos-translate/

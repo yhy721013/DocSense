@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 from typing import Any
 
@@ -71,6 +72,57 @@ class LatestTaskProgressPublisherAdapter:
                 publication.expected_task_id,
                 publication.internal_state,
             )
+
+    def publish_guarded(
+        self,
+        publication: ProgressPublication,
+        *,
+        is_current: Callable[[], bool],
+    ) -> bool:
+        """把业务 Application 的 owner 复核与持久化 latest 复核合并到同一 Hub 临界区。
+
+        Analysis Worker 已在自己的用例层提供 ``is_current``，而容器还必须复用本 Adapter
+        的 ``TaskCommandPort.is_latest`` 保护，防止未来调用者遗漏持久化 latest 条件。
+        两个判断都只读且不持有写事务；委托给底层 Guarded Progress Port 后，二者与同一
+        业务键的投影更新处于同一原子临界区，不能退化为“先查后普通 publish”。
+        """
+
+        if not isinstance(publication, ProgressPublication):
+            raise TypeError("publication 必须是 ProgressPublication")
+        if not callable(is_current):
+            raise TypeError("is_current 必须可调用")
+        business_ref = TaskBusinessRef(
+            publication.key.business_type,
+            publication.key.business_key,
+        )
+
+        def guarded_current() -> bool:
+            caller_current = is_current()
+            if not isinstance(caller_current, bool):
+                raise TypeError("Application Progress is_current 必须返回 bool")
+            if not caller_current:
+                return False
+            return self._task_commands.is_latest(
+                publication.expected_task_id,
+                business_ref,
+            )
+
+        published = self._delegate.publish_guarded(
+            publication,
+            is_current=guarded_current,
+        )
+        if not isinstance(published, bool):
+            raise TypeError("GuardedProgressPublisherPort 必须返回 bool")
+        if not published:
+            logger.warning(
+                "Guarded Progress owner 已变化，跳过旧执行投影: business_type=%s "
+                "business_key=%s task_id=%s internal_state=%s",
+                publication.key.business_type,
+                publication.key.business_key,
+                publication.expected_task_id,
+                publication.internal_state,
+            )
+        return published
 
 
 __all__ = ["LatestTaskProgressPublisherAdapter"]

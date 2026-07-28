@@ -21,6 +21,18 @@ class _StopAfterLegacyOfficePreflight(RuntimeError):
     pass
 
 
+def _weaponry_config_without_terms() -> MagicMock:
+    """构造不会提前访问术语目录的最小容器夹具。
+
+    Legacy Office 测试只验证其启动门禁顺序。功能分支新增术语目录门禁后，裸 ``MagicMock``
+    的布尔值默认为真，会误触发不属于本测试范围的真实目录读取，因此必须显式关闭该能力。
+    """
+
+    config = MagicMock()
+    config.terms_rule_context_enabled = False
+    return config
+
+
 class LegacyOfficeConfigTests(unittest.TestCase):
     def test_defaults_are_disabled_and_use_fixed_runtime_jobs_root(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -39,7 +51,9 @@ class LegacyOfficeConfigTests(unittest.TestCase):
         )
 
     def test_loader_preserves_approved_internal_overrides(self) -> None:
-        executable = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        # 配置加载器校验当前部署平台的绝对路径；用宿主机绝对路径保证测试可在
+        # Windows 与 macOS 运行，真实存在性由后续 Preflight 负责。
+        executable = str(Path.cwd() / "fake-libreoffice-executable")
         with patch.dict(
             os.environ,
             {
@@ -61,6 +75,23 @@ class LegacyOfficeConfigTests(unittest.TestCase):
         self.assertEqual(2, config.max_concurrency)
         self.assertEqual(4096, config.max_input_bytes)
         self.assertEqual(8192, config.max_output_bytes)
+
+    def test_deployment_example_explicitly_enables_legacy_office(self) -> None:
+        """部署样例默认开启，但不能改变环境变量缺失时的代码安全默认值。"""
+
+        env_example = (
+            Path(__file__).resolve().parents[1] / ".env.example"
+        ).read_text(encoding="utf-8")
+        assignments = {
+            line.split("=", 1)[0].strip(): line.split("=", 1)[1].strip()
+            for line in env_example.splitlines()
+            if line.strip() and not line.lstrip().startswith("#") and "=" in line
+        }
+
+        self.assertEqual(
+            "true",
+            assignments.get("DOCSENSE_LEGACY_OFFICE_ENABLED"),
+        )
 
     def test_loader_rejects_ambiguous_or_unsafe_values(self) -> None:
         invalid_cases = (
@@ -99,7 +130,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
             ),
             patch(
                 "app.container.load_weaponry_infrastructure_config",
-                return_value=MagicMock(),
+                return_value=_weaponry_config_without_terms(),
             ),
             patch(
                 "app.container.load_reassignment_infrastructure_config",
@@ -140,7 +171,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
             ),
             patch(
                 "app.container.load_weaponry_infrastructure_config",
-                return_value=MagicMock(),
+                return_value=_weaponry_config_without_terms(),
             ),
             patch(
                 "app.container.load_reassignment_infrastructure_config",
@@ -192,7 +223,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
                     ),
                     patch(
                         "app.container.load_weaponry_infrastructure_config",
-                        return_value=MagicMock(),
+                        return_value=_weaponry_config_without_terms(),
                     ),
                     patch(
                         "app.container.load_reassignment_infrastructure_config",

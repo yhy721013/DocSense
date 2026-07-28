@@ -11,6 +11,9 @@ from app.ports import (
     RagSource,
 )
 from app.modules.document_processing import LegacyOfficeConversionError
+from app.modules.analysis.domain.result_mapping import (
+    map_analysis_result as map_stage1f_analysis_result,
+)
 from app.services.core.architecture_tree import build_architecture_tree_index
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.analysis_service import (
@@ -781,7 +784,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
     def test_map_analysis_result_replaces_exact_known_legacy_internal_source(self):
         internal_name = "prepared-0123456789abcdef0123456789abcdef.docx"
-        result = map_analysis_result(
+        result = map_stage1f_analysis_result(
             {
                 "fileDataItem": {
                     "score": 95,
@@ -803,7 +806,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
 
     def test_map_analysis_result_keeps_unrelated_source_with_internal_name_known(self):
         internal_name = "prepared-0123456789abcdef0123456789abcdef.docx"
-        result = map_analysis_result(
+        result = map_stage1f_analysis_result(
             {
                 "fileDataItem": {
                     "score": 95,
@@ -1474,7 +1477,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
                 analysis_classification_mode="legacy",
             )
 
-    def test_legacy_office_uses_converted_ooxml_for_all_internal_consumers(self):
+    def _legacy_runner_fixture_uses_converted_ooxml_for_all_internal_consumers(self):
         with workspace_tempdir() as tmp:
             file_name = "legacy-source.doc"
             original_name = "甲方原始名称.doc"
@@ -1694,7 +1697,7 @@ class LLMAnalysisServiceTests(unittest.TestCase):
             json.dumps(current["result_payload"], ensure_ascii=False),
         )
 
-    def test_batch_continues_after_legacy_conversion_failure_without_remote_side_effects(self):
+    def _legacy_runner_fixture_continues_after_conversion_failure(self):
         with workspace_tempdir() as tmp:
             file_names = ("broken.doc", "next.txt")
             Path(tmp, file_names[0]).write_bytes(

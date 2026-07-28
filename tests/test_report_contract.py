@@ -60,7 +60,7 @@ class ReportRouteImplementedContractTests(unittest.TestCase):
             ],
         }
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_success_is_strict_empty_202_and_only_wakes_dispatcher(
         self,
         mock_thread,
@@ -85,7 +85,7 @@ class ReportRouteImplementedContractTests(unittest.TestCase):
         assert latest is not None
         self.assertEqual(0.0, latest["data"]["progress"])
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_active_duplicate_returns_409_without_new_execution_or_wakeup(
         self,
         mock_thread,
@@ -163,7 +163,7 @@ class ReportRouteImplementedContractTests(unittest.TestCase):
         )
         self.assertEqual([], self.services.report_dispatcher.task_ids)
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_approved_params_policy_rejects_entire_mixed_request(
         self,
         mock_thread,
@@ -189,7 +189,7 @@ class ReportRouteImplementedContractTests(unittest.TestCase):
         )
         mock_thread.assert_not_called()
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_approved_file_path_policy_rejects_invalid_element_before_acceptance(
         self,
         mock_thread,
@@ -259,7 +259,7 @@ class ReportRouteImplementedContractTests(unittest.TestCase):
                 self.assertEqual({"error": message}, response.get_json())
                 self.assertIn(message, expected_errors.values())
 
-    @patch("app.blueprints.llm.threading.Thread")
+    @patch("threading.Thread")
     def test_approved_top_level_policy_rejects_every_non_object_json(
         self,
         mock_thread,

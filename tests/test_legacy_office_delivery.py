@@ -185,16 +185,15 @@ class LegacyOfficeDeliveryTests(unittest.TestCase):
     def test_delivery_scope_is_documented_and_binary_outputs_are_ignored(self):
         env_text = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
         readme_text = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        interface_text = (
-            PROJECT_ROOT / "docs" / "接口文档" / "文件处理和报告生成.md"
-        ).read_text(encoding="utf-8")
         gitignore_text = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
 
-        self.assertIn("DOCSENSE_LEGACY_OFFICE_ENABLED=false", env_text)
+        # 部署样例按已确认决策默认开启；代码环境变量缺失时的安全关闭由配置测试单独冻结。
+        self.assertIn("DOCSENSE_LEGACY_OFFICE_ENABLED=true", env_text)
         self.assertIn("DOCSENSE_LIBREOFFICE_ALLOWED_VERSION_SERIES=26.2", env_text)
         self.assertIn(".doc → .docx", readme_text)
         self.assertIn("Windows 尚未实机认证", readme_text)
-        self.assertIn("templateOutline` | 不支持", interface_text)
+        # 接口权威文档按集成计划延迟到 M8；M2 只验收内核、交付资产和部署样例，
+        # 不允许用尚未完成的实现提前改变公开语义。
         self.assertIn("dist/legacy-office/", gitignore_text)
 
         forbidden_suffixes = {".doc", ".ppt", ".xls", ".msi", ".dmg", ".zip"}
@@ -363,7 +362,13 @@ class LegacyOfficeDeliveryTests(unittest.TestCase):
                 "_process_group_exists",
                 side_effect=(True, False, False),
             ),
-            mock.patch.object(smoke_test_macos.os, "killpg") as killpg,
+            # Windows 的 os 模块没有 killpg；create=True 只为跨平台静态模拟补齐替身，
+            # macOS 实机行为仍由下一个条件测试验证。
+            mock.patch.object(
+                smoke_test_macos.os,
+                "killpg",
+                create=True,
+            ) as killpg,
         ):
             smoke_test_macos._terminate_process_group(process, grace_seconds=0)
 
@@ -371,7 +376,10 @@ class LegacyOfficeDeliveryTests(unittest.TestCase):
             killpg.call_args_list,
             [
                 mock.call(12345, smoke_test_macos.signal.SIGTERM),
-                mock.call(12345, smoke_test_macos.signal.SIGKILL),
+                mock.call(
+                    12345,
+                    getattr(smoke_test_macos.signal, "SIGKILL", 9),
+                ),
             ],
         )
         process.wait.assert_called_once_with(timeout=5)

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import logging
 
+from app.services.chat.domain.document_candidates import (
+    ChatDocumentSelectionCandidates,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import ChatRun
 from app.services.chat.locking.lease import (
@@ -41,19 +44,49 @@ class ChatCommandService:
         user_message: str | None = None,
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
+        document_candidates: ChatDocumentSelectionCandidates | None = None,
+        max_files_per_request: int | None = None,
     ) -> ChatRun:
+        if document_candidates is not None and not isinstance(
+            document_candidates,
+            ChatDocumentSelectionCandidates,
+        ):
+            raise TypeError(
+                "document_candidates must be ChatDocumentSelectionCandidates "
+                "or None"
+            )
+        if document_candidates is not None and (
+            user_files or input_documents
+        ):
+            raise ValueError(
+                "document_candidates cannot be combined with legacy "
+                "document tuples"
+            )
+        explicit_count = (
+            len(document_candidates.explicit_documents)
+            if document_candidates is not None
+            else len(input_documents)
+        )
+        default_count = (
+            len(document_candidates.new_session_default_documents)
+            if document_candidates is not None
+            else 0
+        )
         logger.info(
-            "准备启动文件对话运行: chat_id=%s message_chars=%d user_file_count=%d input_document_count=%d",
+            "准备启动文件对话运行: chat_id=%s message_chars=%d "
+            "explicit_candidate_count=%d default_candidate_count=%d",
             chat_id,
             len(str(user_message or "")),
-            len(user_files),
-            len(input_documents),
+            explicit_count,
+            default_count,
         )
         run = self._run_coordinator.try_acquire_chat_run(
             chat_id=chat_id,
             user_message=user_message,
             user_files=user_files,
             input_documents=input_documents,
+            document_candidates=document_candidates,
+            max_files_per_request=max_files_per_request,
         )
         logger.info(
             "文件对话运行已受理: chat_id=%s run_id=%s status=%s "

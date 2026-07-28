@@ -84,7 +84,9 @@ def _terminate_process_group(
 
     if _process_group_exists(process_group_id):
         try:
-            os.killpg(process_group_id, signal.SIGKILL)
+            # 脚本生产运行平台一定提供 SIGKILL；数值回退只用于 Windows CI 导入并
+            # 静态验证进程组收敛算法，不会扩大脚本支持平台声明。
+            os.killpg(process_group_id, getattr(signal, "SIGKILL", 9))
         except ProcessLookupError:
             pass
 

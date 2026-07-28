@@ -9,10 +9,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.domain.models import ChatRun
+
+if TYPE_CHECKING:
+    from app.services.chat.domain.document_candidates import (
+        ChatDocumentSelectionCandidates,
+    )
 
 
 def _required_text(value: str, *, name: str) -> str:
@@ -129,8 +134,10 @@ class ChatRunCoordinator(Protocol):
         user_message: str | None = None,
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
+        document_candidates: "ChatDocumentSelectionCandidates | None" = None,
+        max_files_per_request: int | None = None,
     ) -> ChatRun:
-        """原子受理一条对话运行，并保持同一会话的活动运行互斥。"""
+        """原子选择文档、受理运行，并保持同一会话的活动运行互斥。"""
         ...
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:

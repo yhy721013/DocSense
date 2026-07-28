@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import tempfile
 import threading
@@ -32,6 +33,7 @@ from app.services.core.config import (
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
     AnalysisClassificationConfig,
+    AnalysisInfrastructureConfig,
     AnythingLLMConfig,
     LLMIntegrationConfig,
     ReportInfrastructureConfig,
@@ -42,6 +44,15 @@ from app.container import (
     APPLICATION_SERVICES_EXTENSION,
     ApplicationServices,
     UploadTaskLimiter,
+)
+from app.modules.analysis.adapters import (
+    SQLiteAnalysisBatchCommandAdapter,
+    SQLiteAnalysisCallbackAdapter,
+    SQLiteAnalysisCallbackRecoverySource,
+)
+from app.modules.analysis.application import (
+    RecoverAnalysisCallbackSynchronously,
+    SubmitAnalysisBatch,
 )
 from app.modules.report.adapters import (
     AnythingLLMReportClientFactory,
@@ -115,6 +126,57 @@ class _NoopWeaponryMaintenance:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
         return {"limit": limit}
+
+
+class _FailingAnalysisDispatcher:
+    """显式离线 Dispatcher Fake：只验证容器回滚，不创建任何后台线程。"""
+
+    def __init__(self) -> None:
+        self.start_count = 0
+        self.stop_count = 0
+        self.close_count = 0
+
+    def wake_up(self) -> None:
+        return None
+
+    def start(self) -> None:
+        self.start_count += 1
+        raise RuntimeError("forced analysis startup failure")
+
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
+        self.stop_count += 1
+        return True
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+class _RecordingAnalysisDispatcher:
+    """文件分析路由测试使用的无后台 Dispatcher。
+
+    该替身只记录 Application 在 SQLite 事务提交后发出的有界唤醒，不创建线程、
+    不扫描任务、更不会访问外部模型或回调地址。它用于证明 HTTP 路由只做受理，
+    Worker 生命周期仍由容器统一管理。
+    """
+
+    def __init__(self) -> None:
+        self.wake_count = 0
+        self.start_count = 0
+        self.stop_count = 0
+        self.close_count = 0
+
+    def wake_up(self) -> None:
+        self.wake_count += 1
+
+    def start(self) -> None:
+        self.start_count += 1
+
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
+        self.stop_count += 1
+        return True
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 def _weaponry_infrastructure_config() -> WeaponryInfrastructureConfig:
@@ -691,6 +753,46 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertEqual("closed", weaponry.snapshot().lifecycle_state)
         self.assertEqual(1, services.report_dispatcher.close_count)
 
+    def test_analysis_start_failure_rolls_back_only_components_started_this_call(self) -> None:
+        """Analysis 启动失败时，Report 必须逆序停机且不能留下半启动 Worker。"""
+
+        dispatcher = _FailingAnalysisDispatcher()
+        task_commands = SQLiteAnalysisBatchCommandAdapter(
+            self.services.task_service
+        )
+        callbacks = SQLiteAnalysisCallbackAdapter(
+            self.services.task_service,
+            callback_timeout=1.0,
+            lease_seconds=10.0,
+        )
+        services = replace(
+            self.services,
+            analysis_submit=SubmitAnalysisBatch(
+                batch_commands=task_commands,
+                dispatcher=dispatcher,
+            ),
+            analysis_callback_recovery=RecoverAnalysisCallbackSynchronously(
+                source=SQLiteAnalysisCallbackRecoverySource(
+                    self.services.task_service
+                ),
+                callbacks=callbacks,
+                callback_url="",
+            ),
+            analysis_dispatcher=dispatcher,
+            analysis_runtime_config=AnalysisInfrastructureConfig(
+                callback_http_timeout_seconds=1.0,
+                callback_lease_seconds=10.0,
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "forced analysis startup failure"):
+            services.start_background_services()
+
+        self.assertEqual(1, dispatcher.start_count)
+        self.assertEqual(0, dispatcher.stop_count)
+        self.assertEqual(1, services.report_dispatcher.start_count)
+        self.assertEqual(1, services.report_dispatcher.stop_count)
+
     def test_production_owned_container_starts_once_and_registers_close(self) -> None:
         """仅无参应用工厂拥有后台线程，显式注入测试保持手动生命周期。"""
 
@@ -707,6 +809,82 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertEqual(1, self.services.report_dispatcher.start_count)
         register.assert_called_once_with(self.services.close)
         self.services.close()
+
+    def test_production_start_failure_closes_owned_container_without_atexit(
+        self,
+    ) -> None:
+        """生产启动失败必须最终关闭容器，且不得注册一个失效的退出钩子。"""
+
+        owned_services = MagicMock(spec=ApplicationServices)
+        owned_services.start_background_services.side_effect = RuntimeError(
+            "forced production startup failure"
+        )
+        owned_services.close.side_effect = ValueError("forced close failure")
+
+        with (
+            patch("app.create_application_services", return_value=owned_services),
+            patch("app.atexit.register") as register,
+            self.assertLogs("app", level="ERROR"),
+            self.assertRaisesRegex(RuntimeError, "forced production startup failure"),
+        ):
+            create_app()
+
+        owned_services.close.assert_called_once_with()
+        register.assert_not_called()
+
+    def test_production_container_constructs_one_shared_office_preparer(self) -> None:
+        """Report 与 Analysis 必须引用同一个进程级转换容量许可。"""
+
+        source_path = Path(__file__).resolve().parents[1] / "app" / "container.py"
+        module = ast.parse(source_path.read_text(encoding="utf-8"))
+        production_factory = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "create_application_services"
+        )
+        constructor_calls = [
+            node
+            for node in ast.walk(production_factory)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "LibreOfficeLegacyOfficePreparer"
+        ]
+        # 生产组合根内部只能构造一次，随后把同一局部变量注入 Report、Analysis
+        # 和 ApplicationServices；离线默认依赖工厂不属于这个函数作用域。
+        self.assertEqual(1, len(constructor_calls))
+
+        injected_targets: dict[str, str] = {}
+        for node in ast.walk(production_factory):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id not in {
+                "LegacyReportFileAdapter",
+                "LegacyAnalysisFilePreparationAdapter",
+                "ApplicationServices",
+            }:
+                continue
+            keyword = next(
+                (
+                    item
+                    for item in node.keywords
+                    if item.arg == "legacy_office_preparer"
+                ),
+                None,
+            )
+            if keyword is not None and isinstance(keyword.value, ast.Name):
+                injected_targets[node.func.id] = keyword.value.id
+
+        self.assertEqual(
+            {
+                "LegacyReportFileAdapter": "legacy_office_preparer",
+                "LegacyAnalysisFilePreparationAdapter": (
+                    "legacy_office_preparer"
+                ),
+                "ApplicationServices": "legacy_office_preparer",
+            },
+            injected_targets,
+        )
 
     def test_run_entrypoint_disables_debug_reloader_for_single_worker(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "run.py").read_text(
@@ -748,12 +926,20 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertNotIn("record_chat_run_events", blueprint_source)
         self.assertNotIn("stream_chat_run(chat_run_request)", blueprint_source)
 
-    @patch("app.blueprints.llm.threading.Thread")
-    def test_analysis_route_injects_factories_without_entering_leases(
+    def test_analysis_route_persists_policy_and_only_wakes_dispatcher(
         self,
-        thread_type: MagicMock,
     ) -> None:
-        """路由只把两个无状态 Factory 交给线程，不在请求线程创建 Gateway 或 Transport。"""
+        """路由只冻结策略并原子受理，Gateway/Worker 均不能进入请求线程。"""
+        dispatcher = _RecordingAnalysisDispatcher()
+        infrastructure_config = AnalysisInfrastructureConfig.single_instance()
+        task_commands = SQLiteAnalysisBatchCommandAdapter(
+            self.services.task_service
+        )
+        callbacks = SQLiteAnalysisCallbackAdapter(
+            self.services.task_service,
+            callback_timeout=infrastructure_config.callback_http_timeout_seconds,
+            lease_seconds=infrastructure_config.callback_lease_seconds,
+        )
         configured_services = replace(
             self.services,
             analysis_classification_config=AnalysisClassificationConfig(
@@ -762,6 +948,19 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
                 ),
             ),
+            analysis_submit=SubmitAnalysisBatch(
+                batch_commands=task_commands,
+                dispatcher=dispatcher,
+            ),
+            analysis_callback_recovery=RecoverAnalysisCallbackSynchronously(
+                source=SQLiteAnalysisCallbackRecoverySource(
+                    self.services.task_service
+                ),
+                callbacks=callbacks,
+                callback_url="",
+            ),
+            analysis_dispatcher=dispatcher,
+            analysis_runtime_config=infrastructure_config,
         )
         app = create_app(services=configured_services)
 
@@ -779,36 +978,31 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         )
 
         self.assertEqual(202, response.status_code)
-        task_kwargs = thread_type.call_args.kwargs["kwargs"]
-        self.assertIs(
-            self.document_rag_factory,
-            task_kwargs["document_rag_factory"],
+        self.assertEqual(b"", response.get_data())
+        self.assertEqual(1, dispatcher.wake_count)
+        self.assertEqual(0, dispatcher.start_count)
+        latest_task = self.services.task_service.get_task("file", "sample.txt")
+        self.assertIsNotNone(latest_task)
+        assert latest_task is not None
+        execution = self.services.task_service.get_task_execution(
+            latest_task["execution_id"]
         )
-        self.assertIs(
-            self.knowledge_index_factory,
-            task_kwargs["knowledge_index_factory"],
-        )
-        self.assertIs(
-            self.services.legacy_office_preparer,
-            task_kwargs["legacy_office_preparer"],
-        )
+        self.assertIsNotNone(execution)
+        assert execution is not None
+        policy_snapshot = execution["input_payload"]["policy_snapshot"]
         self.assertEqual(
             ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
-            task_kwargs["analysis_classification_mode"],
+            policy_snapshot["classification_mode"],
         )
         self.assertEqual(
             ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
-            task_kwargs["analysis_filename_constraint_mode"],
+            policy_snapshot["filename_constraint_mode"],
         )
         self.assertEqual(
             ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
-            task_kwargs["analysis_identity_reselect_mode"],
+            policy_snapshot["identity_reselect_mode"],
         )
-        target = thread_type.call_args.kwargs["target"]
-        self.assertIs(
-            self.services.upload_task_limiter,
-            target.__self__,
-        )
+        # 路由受理不得提前取得 RAG/知识库租约；真实访问只发生在 Dispatcher Worker 内。
         self.assertEqual(0, len(self.document_rag_factory.ports))
         self.assertEqual(0, len(self.knowledge_index_factory.ports))
 

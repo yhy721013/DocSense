@@ -254,11 +254,7 @@ class WeaponryInfrastructureConfig:
                 )
             return
 
-        for name in (
-            "terms_workspace_name",
-            "terms_dir",
-            "terms_catalog_fingerprint",
-        ):
+        for name in ("terms_workspace_name", "terms_dir"):
             object.__setattr__(
                 self,
                 name,
@@ -268,6 +264,14 @@ class WeaponryInfrastructureConfig:
                 raise WeaponryInfrastructureConfigurationError(
                     f"术语辅助启用时 {name} 不能为空"
                 )
+        object.__setattr__(
+            self,
+            "terms_catalog_fingerprint",
+            _optional_text(
+                self.terms_catalog_fingerprint,
+                name="terms_catalog_fingerprint",
+            ),
+        )
         object.__setattr__(
             self,
             "terms_candidate_top_n",
@@ -367,6 +371,10 @@ def build_weaponry_runtime_policies(
         max_table_rows=config.max_table_rows,
     )
     if config.terms_rule_context_enabled:
+        if not config.terms_catalog_fingerprint:
+            raise WeaponryInfrastructureConfigurationError(
+                "术语辅助策略只能在本地目录自动指纹冻结后构造"
+            )
         auxiliary = AuxiliaryGuidancePolicySnapshot(
             policy_id=AUXILIARY_GUIDANCE_TERMS_RULES_COLUMN_COMPACT_V2,
             catalog_fingerprint=config.terms_catalog_fingerprint or "",
@@ -464,10 +472,8 @@ def load_weaponry_infrastructure_config(
                 "weaponry-terms-rules",
             ),
             "terms_dir": source.get("WEAPONRY_TERMS_DIR", "terms"),
-            "terms_catalog_fingerprint": _required_env(
-                source,
-                "WEAPONRY_TERMS_CATALOG_FINGERPRINT",
-            ),
+            # 指纹不再从环境变量读取；生产组合根根据本地术语卡内容自动计算并冻结。
+            "terms_catalog_fingerprint": None,
             "terms_candidate_top_n": _strict_int(
                 source,
                 "DOCSENSE_WEAPONRY_TERMS_CANDIDATE_TOP_N",

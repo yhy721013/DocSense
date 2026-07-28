@@ -12,7 +12,10 @@ from app.integrations.anythingllm.errors import (
     AnythingLLMTransportClosedError,
     AnythingLLMTransportError,
 )
-from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.documents import (
+    AnythingLLMDocumentClient,
+    XlsxFolderInventoryItem,
+)
 from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.chat_gateway import AnythingLLMChatGateway
 from app.integrations.anythingllm.factory import (
@@ -57,4 +60,5 @@ __all__ = [
     "AnythingLLMWorkspace",
     "AnythingLLMWorkspaceClient",
     "SSEEvent",
+    "XlsxFolderInventoryItem",
 ]

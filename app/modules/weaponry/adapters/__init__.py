@@ -47,9 +47,23 @@ from .resource_registration import (
 from .resource_store import SQLiteWeaponryResourceStoreAdapter
 from .terms_rule_guidance import (
     AnythingLLMReadOnlyTermsRuleProvider,
+    CatalogRoutingTermsRuleProviderProtocol,
     TermsRuleChunk,
     TermsRuleGuidanceAdapter,
     TermsRuleProviderProtocol,
+)
+from .terms_catalog import (
+    AnythingLLMTermsCatalogCoordinator,
+    SQLiteTermsCatalogStateStore,
+    TERMS_CATALOG_FINGERPRINT_SCHEMA,
+    TermsCatalogDescriptor,
+    TermsCatalogManifest,
+    TermsCatalogSynchronizationError,
+    TermsCatalogSyncPlan,
+    TermsCatalogValidationError,
+    TermsCatalogWorkspaceResolver,
+    build_terms_catalog_manifest,
+    workspace_name_for_fingerprint,
 )
 from .translation import (
     LLMTranslationServiceWeaponryAdapter,
@@ -76,6 +90,7 @@ __all__ = [
     "WeaponryCreationIntentRecoveryResult",
     "AnythingLLMProvidedEvidenceExtractionAdapter",
     "AnythingLLMReadOnlyTermsRuleProvider",
+    "AnythingLLMTermsCatalogCoordinator",
     "AnythingLLMTargetEvidenceRetrievalAdapter",
     "normalize_anythingllm_source_url_ref",
     "resolve_anythingllm_source_document_key",
@@ -87,6 +102,8 @@ __all__ = [
     "LocalWeaponryDispatcherSnapshot",
     "LocalWeaponryTaskDispatcher",
     "NoAuxiliaryGuidanceAdapter",
+    "CatalogRoutingTermsRuleProviderProtocol",
+    "SQLiteTermsCatalogStateStore",
     "SQLiteWeaponryInteractionAuditAdapter",
     "SQLiteWeaponryCallbackAdapter",
     "SQLiteWeaponryCallbackRecoverySource",
@@ -96,6 +113,13 @@ __all__ = [
     "TermsRuleChunk",
     "TermsRuleGuidanceAdapter",
     "TermsRuleProviderProtocol",
+    "TERMS_CATALOG_FINGERPRINT_SCHEMA",
+    "TermsCatalogDescriptor",
+    "TermsCatalogManifest",
+    "TermsCatalogSynchronizationError",
+    "TermsCatalogSyncPlan",
+    "TermsCatalogValidationError",
+    "TermsCatalogWorkspaceResolver",
     "WeaponryAnythingLLMClientFactoryProtocol",
     "WeaponryAnythingLLMClients",
     "WeaponryCreatedResourceRegistrarProtocol",
@@ -112,6 +136,8 @@ __all__ = [
     "WeaponryTextTranslatorProtocol",
     "build_weaponry_production_selection_policy",
     "build_weaponry_runtime_policies",
+    "build_terms_catalog_manifest",
     "load_weaponry_infrastructure_config",
     "validate_weaponry_runtime_capabilities",
+    "workspace_name_for_fingerprint",
 ]

@@ -32,6 +32,15 @@ TASKS_ROOT = MODULES_ROOT / "tasks"
 REPORT_ROOT = MODULES_ROOT / "report"
 WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
 REASSIGN_ROOT = MODULES_ROOT / "reassign"
+ANALYSIS_ROOT = MODULES_ROOT / "analysis"
+ANALYSIS_APPLICATION_FACADE_PATH = ANALYSIS_ROOT / "application" / "run_analysis.py"
+ANALYSIS_APPLICATION_COLLABORATOR_PATHS = {
+    "models": ANALYSIS_ROOT / "application" / "workflow_models.py",
+    "model_workflow": ANALYSIS_ROOT / "application" / "model_workflow.py",
+    "audit_lifecycle": ANALYSIS_ROOT / "application" / "audit_lifecycle.py",
+    "knowledge_handoff": ANALYSIS_ROOT / "application" / "knowledge_handoff.py",
+    "failure_convergence": ANALYSIS_ROOT / "application" / "failure_convergence.py",
+}
 PRESENTERS_ROOT = ROOT / "app" / "presenters"
 LLM_ROUTE_PATH = ROOT / "app" / "blueprints" / "llm.py"
 REASSIGN_COMPOSITION_PATH = REASSIGN_ROOT / "composition.py"
@@ -51,6 +60,10 @@ REASSIGN_RECOVERY_COLLABORATOR_PATHS = {
 # 的最小 Port 依赖和 callback-wrapper 禁令仍由下方独立门禁锁定，因此只更新精确规模基线。
 REASSIGN_RECOVERY_FACADE_MAX_LINES = 746
 REASSIGN_RECOVERY_FACADE_MAX_COMPLEXITY = 24
+# 1F-3S 等价拆分后的硬上限：外观只保留公开入口和跨协作器的顶层顺序，具体 Prompt、
+# 领域分类、结果映射及条件写算法不得重新回迁。该数值保留合理的未来编排余量，不以
+# 当前行数作为紧绷阈值，避免无关注释或诊断日志造成误报。
+ANALYSIS_APPLICATION_FACADE_MAX_LINES = 700
 CONTAINER_PATH = ROOT / "app" / "container.py"
 
 
@@ -151,6 +164,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             REASSIGN_ROOT / "application",
             REASSIGN_ROOT / "ports",
             REASSIGN_ROOT / "adapters",
+            ANALYSIS_ROOT,
+            ANALYSIS_ROOT / "domain",
+            ANALYSIS_ROOT / "application",
+            ANALYSIS_ROOT / "ports",
+            ANALYSIS_ROOT / "adapters",
             ROOT / "app" / "adapters",
             ROOT / "app" / "adapters" / "web",
             ROOT / "app" / "adapters" / "web" / "flask",
@@ -432,14 +450,118 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
                     "恢复 Facade 分支复杂度反弹；请先评估是否应归属到独立协作器",
                 )
 
+    def test_analysis_application_facade_keeps_internal_collaborator_boundary(self) -> None:
+        """锁定 1F-3S 的薄外观与五个内部协作器，防止算法回迁或形成反向依赖。"""
+
+        source = ANALYSIS_APPLICATION_FACADE_PATH.read_text(encoding="utf-8")
+        self.assertLessEqual(
+            len(source.splitlines()),
+            ANALYSIS_APPLICATION_FACADE_MAX_LINES,
+            "文件分析 Application 外观超过 1F-3S 上限；请把具体算法下沉到内部协作器",
+        )
+        tree = ast.parse(source, filename=str(ANALYSIS_APPLICATION_FACADE_PATH))
+        facade = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "RunAnalysisTask"
+        )
+        methods = {
+            node.name: ast.get_source_segment(source, node) or ""
+            for node in facade.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.assertEqual(
+            {"__init__", "execute", "_execute_in_rag_factory", "_execute_with_rag", "_knowledge_idempotency_key"},
+            set(methods),
+            "RunAnalysisTask 只能保留公开入口、Factory 作用域和顶层编排",
+        )
+        initializer = methods["__init__"]
+        for collaborator in (
+            "_AnalysisModelWorkflow()",
+            "_AnalysisAuditLifecycle(audit)",
+            "_AnalysisKnowledgeHandoff(knowledge, translation)",
+            "_AnalysisFailureConvergence(",
+        ):
+            with self.subTest(collaborator=collaborator):
+                self.assertIn(collaborator, initializer)
+
+        workflow_text = methods["_execute_with_rag"]
+        for collaborator in (
+            "self._model_workflow.",
+            "self._audit_lifecycle.",
+            "self._knowledge_handoff.",
+            "self._failure_convergence.",
+        ):
+            with self.subTest(workflow_collaborator=collaborator):
+                self.assertIn(collaborator, workflow_text)
+
+        # Prompt、分类规则和结果映射都属于模型工作流。Facade 只能调用协作器，不能为了
+        # “方便”重新导入这些算法；否则会绕过 1F-3S 的职责隔离。
+        for forbidden_import in (
+            "app.modules.analysis.domain.prompts",
+            "app.modules.analysis.domain.classification_rules",
+            "app.modules.analysis.domain.result_mapping",
+        ):
+            with self.subTest(forbidden_import=forbidden_import):
+                self.assertNotIn(forbidden_import, source)
+
+        for role, path in ANALYSIS_APPLICATION_COLLABORATOR_PATHS.items():
+            with self.subTest(collaborator=role):
+                collaborator_source = path.read_text(encoding="utf-8")
+                collaborator_tree = ast.parse(collaborator_source, filename=str(path))
+                reverse_imports = [
+                    node.module or ""
+                    for node in ast.walk(collaborator_tree)
+                    if isinstance(node, ast.ImportFrom)
+                ]
+                self.assertFalse(
+                    any(module.endswith("run_analysis") for module in reverse_imports),
+                    "内部协作器不得反向导入 Facade，以免形成循环依赖",
+                )
+
+    def test_analysis_application_collaborators_keep_real_port_algorithms(self) -> None:
+        """协作器必须直接拥有职责算法，不能退化成 Facade 的空 callback 转发。"""
+
+        expected_port_calls = {
+            "model_workflow": ("rag.execute(", "map_analysis_result("),
+            "audit_lifecycle": (
+                "self._audit.reserve_recall(",
+                "self._audit.persist_interaction(",
+                "rag.close_session(",
+            ),
+            "knowledge_handoff": (
+                "self._knowledge.persist(",
+                "self._translation.translate(",
+            ),
+            "failure_convergence": (
+                "self._task_commands.update_progress_if_current(",
+                "self._task_commands.finish_if_current(",
+                "self._progress_publisher.publish_guarded(",
+            ),
+        }
+        for role, expected_calls in expected_port_calls.items():
+            path = ANALYSIS_APPLICATION_COLLABORATOR_PATHS[role]
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(collaborator=role):
+                self.assertNotIn("from .run_analysis import", source)
+                for expected_call in expected_calls:
+                    with self.subTest(port_call=expected_call):
+                        self.assertIn(expected_call, source)
+
     def test_route_tests_do_not_construct_uninjected_production_applications(self) -> None:
         """只有显式生命周期用例可以调用无参 create_app，其他测试必须注入离线容器。"""
 
+        # 仅生产容器所有权测试可以刻意构造无参应用工厂：一项验证正常启动和退出钩子，
+        # 另一项验证启动失败后的补偿关闭。白名单使用精确文件名和方法名，防止范围扩散。
         allowed = {
             (
                 "test_dependency_container.py",
                 "test_production_owned_container_starts_once_and_registers_close",
-            )
+            ),
+            (
+                "test_dependency_container.py",
+                "test_production_start_failure_closes_owned_container_without_atexit",
+            ),
         }
         violations: list[str] = []
         for source_path in sorted((ROOT / "tests").glob("test_*.py")):

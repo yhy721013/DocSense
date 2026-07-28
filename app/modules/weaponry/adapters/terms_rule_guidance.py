@@ -23,6 +23,7 @@ from app.modules.weaponry.ports import (
 )
 
 from .anythingllm_clients import WeaponryAnythingLLMClientFactoryProtocol
+from .terms_catalog import TermsCatalogWorkspaceResolver
 
 
 logger = logging.getLogger(__name__)
@@ -68,32 +69,83 @@ class TermsRuleProviderProtocol(Protocol):
         ...
 
 
+@runtime_checkable
+class CatalogRoutingTermsRuleProviderProtocol(Protocol):
+    """可按 execution 冻结指纹读取不同代术语 workspace 的并发安全 Provider。"""
+
+    def search_catalog(
+        self,
+        catalog_fingerprint: str,
+        query: str,
+        *,
+        top_n: int,
+    ) -> tuple[TermsRuleChunk, ...]:
+        ...
+
+
 class AnythingLLMReadOnlyTermsRuleProvider:
-    """只读取配置好的共享术语 workspace；本类没有任何写 API。"""
+    """只读术语 Provider；可固定单 workspace，也可按目录指纹路由多代 workspace。"""
 
     def __init__(
         self,
         client_factory: WeaponryAnythingLLMClientFactoryProtocol,
         *,
-        workspace_slug: str,
+        workspace_slug: str | None = None,
+        workspace_resolver: TermsCatalogWorkspaceResolver | None = None,
         user_id: int | None = 1,
     ) -> None:
         if not isinstance(client_factory, WeaponryAnythingLLMClientFactoryProtocol):
             raise TypeError("client_factory 必须实现武器谱 AnythingLLM Client 工厂")
-        if not isinstance(workspace_slug, str) or not workspace_slug.strip():
-            raise ValueError("workspace_slug 必须是非空 str")
+        normalized_slug = (
+            workspace_slug.strip()
+            if isinstance(workspace_slug, str) and workspace_slug.strip()
+            else None
+        )
+        if (normalized_slug is None) == (workspace_resolver is None):
+            raise ValueError(
+                "workspace_slug 与 workspace_resolver 必须且只能提供一个"
+            )
+        if workspace_resolver is not None and not isinstance(
+            workspace_resolver,
+            TermsCatalogWorkspaceResolver,
+        ):
+            raise TypeError("workspace_resolver 类型非法")
         if user_id is not None and (
             isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1
         ):
             raise ValueError("user_id 必须是正整数或 None")
         self._client_factory = client_factory
-        self._workspace_slug = workspace_slug.strip()
+        self._workspace_slug = normalized_slug
+        self._workspace_resolver = workspace_resolver
         self._user_id = user_id
 
     def search(self, query: str, *, top_n: int) -> tuple[TermsRuleChunk, ...]:
+        if self._workspace_slug is None:
+            raise RuntimeError("多代术语 Provider 必须使用 search_catalog")
+        return self._search_workspace(self._workspace_slug, query, top_n=top_n)
+
+    def search_catalog(
+        self,
+        catalog_fingerprint: str,
+        query: str,
+        *,
+        top_n: int,
+    ) -> tuple[TermsRuleChunk, ...]:
+        if self._workspace_resolver is None:
+            raise RuntimeError("固定 workspace Provider 不支持按目录指纹路由")
+        workspace_slug = self._workspace_resolver.resolve(catalog_fingerprint)
+        return self._search_workspace(workspace_slug, query, top_n=top_n)
+
+    def _search_workspace(
+        self,
+        workspace_slug: str,
+        query: str,
+        *,
+        top_n: int,
+    ) -> tuple[TermsRuleChunk, ...]:
         with self._client_factory.create() as clients:
             sources = clients.workspaces.vector_search(
-                self._workspace_slug,
+                workspace_slug,
                 query,
                 top_n=top_n,
                 score_threshold=0.0,
@@ -157,14 +209,23 @@ class TermsRuleGuidanceAdapter:
         self,
         provider: TermsRuleProviderProtocol,
         *,
-        catalog_fingerprint: str,
+        catalog_fingerprint: str | None = None,
     ) -> None:
         if not isinstance(provider, TermsRuleProviderProtocol):
             raise TypeError("provider 必须实现 TermsRuleProviderProtocol")
-        if not isinstance(catalog_fingerprint, str) or not catalog_fingerprint.strip():
-            raise ValueError("catalog_fingerprint 必须是非空 str")
+        normalized_fingerprint = (
+            catalog_fingerprint.strip()
+            if isinstance(catalog_fingerprint, str)
+            and catalog_fingerprint.strip()
+            else None
+        )
+        if (
+            not isinstance(provider, CatalogRoutingTermsRuleProviderProtocol)
+            and normalized_fingerprint is None
+        ):
+            raise ValueError("固定 workspace Provider 必须配置 catalog_fingerprint")
         self._provider = provider
-        self._catalog_fingerprint = catalog_fingerprint.strip()
+        self._catalog_fingerprint = normalized_fingerprint
 
     def load(self, request: AuxiliaryGuidanceRequest) -> AuxiliaryGuidanceResult:
         if not isinstance(request, AuxiliaryGuidanceRequest):
@@ -177,7 +238,10 @@ class TermsRuleGuidanceAdapter:
                 "auxiliary_policy_adapter_mismatch",
                 "术语规则 Adapter 不支持当前辅助策略",
             )
-        if request.policy.catalog_fingerprint != self._catalog_fingerprint:
+        if (
+            self._catalog_fingerprint is not None
+            and request.policy.catalog_fingerprint != self._catalog_fingerprint
+        ):
             raise WeaponryPortStateError(
                 "auxiliary_catalog_fingerprint_mismatch",
                 "术语目录指纹与 execution 快照不一致",
@@ -189,9 +253,9 @@ class TermsRuleGuidanceAdapter:
             ):
                 guidance, card_ids = self._load_column_compact(request)
             else:
-                chunks = self._provider.search(
+                chunks = self._search(
+                    request,
                     self._legacy_query(request),
-                    top_n=request.policy.top_n,
                 )
                 guidance = self._legacy_to_guidance(
                     chunks,
@@ -238,6 +302,21 @@ class TermsRuleGuidanceAdapter:
             guidance=guidance,
             outcome=outcome,
         )
+
+    def _search(
+        self,
+        request: AuxiliaryGuidanceRequest,
+        query: str,
+    ) -> tuple[TermsRuleChunk, ...]:
+        """统一固定目录与多代目录检索，避免在字段方法中散落路由分支。"""
+
+        if isinstance(self._provider, CatalogRoutingTermsRuleProviderProtocol):
+            return self._provider.search_catalog(
+                request.policy.catalog_fingerprint,
+                query,
+                top_n=request.policy.top_n,
+            )
+        return self._provider.search(query, top_n=request.policy.top_n)
 
     @staticmethod
     def _legacy_query(request: AuxiliaryGuidanceRequest) -> str:
@@ -287,10 +366,7 @@ class TermsRuleGuidanceAdapter:
     ) -> tuple[tuple[AuxiliaryGuidance, ...], tuple[str, ...]]:
         matches: list[_MatchedTermsRule] = []
         for target in self._targets(request):
-            chunks = self._provider.search(
-                self._target_query(target),
-                top_n=request.policy.top_n,
-            )
+            chunks = self._search(request, self._target_query(target))
             matched = self._match_target(target, chunks)
             if matched is None:
                 continue
@@ -599,6 +675,7 @@ def _card_id_from_text(source_ref: str, text: str) -> str:
 
 __all__ = [
     "AnythingLLMReadOnlyTermsRuleProvider",
+    "CatalogRoutingTermsRuleProviderProtocol",
     "TermsRuleChunk",
     "TermsRuleGuidanceAdapter",
     "TermsRuleProviderProtocol",

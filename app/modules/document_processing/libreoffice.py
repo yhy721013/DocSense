@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import ntpath
 import os
+import posixpath
 import re
 import shutil
 import signal
@@ -32,6 +33,16 @@ logger = logging.getLogger(__name__)
 _OLE2_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")
 _OWNED_JOB_MARKER_NAME = ".docsense-legacy-office-job"
 _OWNED_JOB_MARKER_VALUE = "DOCSENSE_LEGACY_OFFICE_JOB_V1\n"
+# 标记文件必须以二进制方式写入，避免 Windows 文本模式把 LF 扩展成 CRLF，进而让
+# 本进程刚创建的任务目录无法通过所有权校验。兼容集合仅额外接受旧 Windows 版本
+# 确实可能写出的 CRLF 字节，不能放宽为任意文本或忽略空白，否则会削弱删除边界。
+_OWNED_JOB_MARKER_BYTES = _OWNED_JOB_MARKER_VALUE.encode("ascii")
+_OWNED_JOB_MARKER_COMPATIBLE_BYTES = frozenset(
+    {
+        _OWNED_JOB_MARKER_BYTES,
+        _OWNED_JOB_MARKER_BYTES.replace(b"\n", b"\r\n"),
+    }
+)
 _LOG_DIAGNOSTIC_LIMIT = 2048
 _PROCESS_TREE_GRACE_SECONDS = 2.0
 _PROCESS_OUTPUT_CAPTURE_BYTES = 64 * 1024
@@ -224,7 +235,10 @@ def is_legacy_office_path(path: str | Path) -> bool:
 def _is_absolute_path(value: str, platform_name: str) -> bool:
     if platform_name.startswith("win"):
         return ntpath.isabs(value)
-    return Path(value).is_absolute()
+    # 路径语义必须由目标部署平台决定，不能由当前执行测试的宿主机决定。例如在 Windows
+    # 上静态验证 macOS 资产时，``Path('/Applications/...')`` 不是 Windows 绝对路径，
+    # 但它仍是合法的 macOS 配置。
+    return posixpath.isabs(value)
 
 
 def _standard_executable_candidates(
@@ -257,14 +271,16 @@ def _standard_executable_candidates(
         )
         user_home = str(environment.get("HOME", "")).strip()
         if user_home:
+            # 候选路径属于目标 macOS，必须使用 POSIX 拼接；否则在 Windows 上执行
+            # 离线资产审计时会被宿主 ``Path`` 改写为反斜杠，导致同一配置无法复核。
             candidates.append(
-                str(
-                    Path(user_home)
-                    / "Applications"
-                    / "LibreOffice.app"
-                    / "Contents"
-                    / "MacOS"
-                    / "soffice"
+                posixpath.join(
+                    user_home,
+                    "Applications",
+                    "LibreOffice.app",
+                    "Contents",
+                    "MacOS",
+                    "soffice",
                 )
             )
 
@@ -757,7 +773,7 @@ class LibreOfficeLegacyOfficePreparer:
             job_path = Path(tempfile.mkdtemp(prefix="job-", dir=str(root)))
             job_path.chmod(0o700)
             marker = job_path / _OWNED_JOB_MARKER_NAME
-            marker.write_text(_OWNED_JOB_MARKER_VALUE, encoding="ascii")
+            marker.write_bytes(_OWNED_JOB_MARKER_BYTES)
             try:
                 marker.chmod(0o600)
             except OSError:
@@ -1326,7 +1342,9 @@ class LibreOfficeLegacyOfficePreparer:
             # has already exited and ``communicate`` returned.  This closes the
             # parent-exited/descendant-survived gap.
             try:
-                os.killpg(process_group, signal.SIGKILL)
+                # 数值 9 是 POSIX SIGKILL。Windows 不会进入此分支，但使用回退值可让
+                # Windows CI 对 macOS 进程组算法进行无进程副作用的静态模拟。
+                os.killpg(process_group, getattr(signal, "SIGKILL", 9))
             except (OSError, ProcessLookupError):
                 pass
         else:
@@ -1345,10 +1363,9 @@ class LibreOfficeLegacyOfficePreparer:
             return (
                 not marker.is_symlink()
                 and marker.is_file()
-                and marker.stat().st_size == len(_OWNED_JOB_MARKER_VALUE)
-                and marker.read_text(encoding="ascii") == _OWNED_JOB_MARKER_VALUE
+                and marker.read_bytes() in _OWNED_JOB_MARKER_COMPATIBLE_BYTES
             )
-        except (OSError, UnicodeError):
+        except OSError:
             return False
 
     def _cleanup_owned_job(self, job_path: Path) -> bool:

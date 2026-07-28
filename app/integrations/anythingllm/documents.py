@@ -130,6 +130,23 @@ class XlsxFolderCleanupToken:
         )
 
 
+@dataclass(frozen=True)
+class XlsxFolderInventoryItem:
+    """只读库存中的一个 XLSX Collector Folder 及其完整成员快照。
+
+    该 DTO 只表达远端当前事实，不代表调用方拥有删除权。只有上传响应边界签发并在
+    删除前重新核对成员集合的 ``XlsxFolderCleanupToken`` 才能授权破坏性操作。
+    """
+
+    folder_name: str
+    member_locations: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        token_scope = XlsxFolderCleanupToken.issue(self.member_locations).parse()
+        if token_scope.folder_name != self.folder_name:
+            raise ValueError("XLSX 库存 Folder 与成员位置不一致")
+
+
 class AnythingLLMDocumentClient:
     """封装 AnythingLLM 全局文档 API 的无状态原子操作。
 
@@ -446,6 +463,70 @@ class AnythingLLMDocumentClient:
             len(scope.member_locations),
             user_id is not None,
         )
+
+    def list_xlsx_folder_inventory(
+        self,
+        *,
+        user_id: int | None = None,
+    ) -> tuple[XlsxFolderInventoryItem, ...]:
+        """只读列出所有符合受控结构的 XLSX Collector Folder。
+
+        本方法只调用 ``GET documents`` 与 ``GET documents/folder/<name>``，不会上传、
+        绑定、删除或签发清理授权。根目录中与 XLSX 结构无关的普通文档会被忽略；一旦
+        名称符合 XLSX Folder 结构，其类型、成员和重复身份必须全部通过严格校验。
+        """
+
+        body = self._transport.get_json("documents", user_id=user_id)
+        payload = require_mapping(body, context="documents 根列表响应")
+        local_files = require_mapping(
+            payload.get("localFiles"),
+            context="documents 根列表 localFiles 字段",
+        )
+        items = require_sequence(
+            local_files.get("items"),
+            context="documents 根列表 items 字段",
+        )
+
+        folder_names: list[str] = []
+        normalized_keys: set[str] = set()
+        for index, item in enumerate(items):
+            record = require_mapping(item, context=f"documents 根列表成员 {index}")
+            folder_name = first_text(record, "name")
+            parsed = parse_xlsx_sheet_location(
+                f"{folder_name}/sheet-placeholder.json"
+            )
+            if parsed is None:
+                continue
+            if first_text(record, "type").casefold() != "folder":
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM XLSX 根目录成员类型不是 folder"
+                )
+            normalized_key = parsed[1].casefold()
+            if normalized_key in normalized_keys:
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM documents 根列表包含重复 XLSX Folder"
+                )
+            normalized_keys.add(normalized_key)
+            folder_names.append(parsed[1])
+
+        inventory = tuple(
+            XlsxFolderInventoryItem(
+                folder_name=folder_name,
+                member_locations=self._list_xlsx_folder_members(
+                    folder_name,
+                    user_id=user_id,
+                ),
+            )
+            for folder_name in sorted(folder_names, key=str.casefold)
+        )
+        logger.info(
+            "AnythingLLM XLSX Folder 只读库存完成: folder_count=%d "
+            "member_count=%d has_user_context=%s remote_mutation=false",
+            len(inventory),
+            sum(len(item.member_locations) for item in inventory),
+            user_id is not None,
+        )
+        return inventory
 
     def _list_xlsx_folder_members(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from copy import deepcopy
 import csv
 import json
@@ -168,7 +169,9 @@ class LocalScriptTests(unittest.TestCase):
         self.fail(f"run.py 未在预期时间内启动成功: {last_error!r}")
 
     def _create_runner_task_db(self, task_db: Path) -> None:
-        with sqlite3.connect(task_db) as conn:
+        # ``Connection.__exit__`` 只提交/回滚而不关闭句柄；Windows 会因此无法删除
+        # TemporaryDirectory 中的 SQLite 文件，测试必须显式关闭连接。
+        with closing(sqlite3.connect(task_db)) as conn, conn:
             conn.execute(
                 """
                 CREATE TABLE llm_tasks (
@@ -589,7 +592,7 @@ class LocalScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             task_db = Path(tmpdir) / "llm_tasks.sqlite3"
             self._create_runner_task_db(task_db)
-            with sqlite3.connect(task_db) as conn:
+            with closing(sqlite3.connect(task_db)) as conn, conn:
                 conn.execute(
                     """
                     INSERT INTO llm_tasks (
@@ -641,7 +644,7 @@ class LocalScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             task_db = Path(tmpdir) / "llm_tasks.sqlite3"
             self._create_runner_task_db(task_db)
-            with sqlite3.connect(task_db) as conn:
+            with closing(sqlite3.connect(task_db)) as conn, conn:
                 conn.execute(
                     """
                     INSERT INTO llm_tasks (
@@ -672,7 +675,7 @@ class LocalScriptTests(unittest.TestCase):
                 nonlocal request_count
                 request_count += 1
                 if request_count == 2:
-                    with sqlite3.connect(task_db) as conn:
+                    with closing(sqlite3.connect(task_db)) as conn, conn:
                         conn.execute(
                             """
                             UPDATE llm_tasks

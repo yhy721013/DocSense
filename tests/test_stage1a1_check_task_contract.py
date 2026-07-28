@@ -4,8 +4,8 @@
 结构，批量缺失项继续处理其余任务，必要的回调恢复仍在本次请求内完成。任务状态、
 进度、回调尝试结果均不得再通过成功体公开。
 
-所有用例均注入临时 SQLite 和离线应用容器，回调发送使用 Mock，不会访问真实网络或
-启动 ``run.py``。
+所有用例均注入临时 SQLite 和离线应用容器，回调发送使用显式 Transport 替身，不会访问
+真实网络或启动 ``run.py``。
 """
 
 from __future__ import annotations
@@ -14,9 +14,30 @@ import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
 
 from app import create_app
+from app.modules.analysis.adapters import (
+    SQLiteAnalysisBatchCommandAdapter,
+    SQLiteAnalysisCallbackAdapter,
+    SQLiteAnalysisCallbackRecoverySource,
+)
+from app.modules.analysis.application import (
+    AnalysisTaskCompletion,
+    RecoverAnalysisCallbackSynchronously,
+)
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisPolicySnapshot,
+    AnalysisSubmissionSnapshot,
+    FrozenJsonObject,
+)
+from app.modules.analysis.ports import (
+    AnalysisBatchCommand,
+    AnalysisCallbackDelivery,
+    AnalysisCallbackDeliveryOutcome,
+    AnalysisCallbackDeliveryRequest,
+)
+from app.modules.tasks.domain import TaskBusinessRef
+from app.modules.tasks.ports import ExpectedTaskCompletion
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
 
@@ -40,38 +61,110 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
-    def _client_with_callback_url(self, callback_url: str):
-        """复用同一临时任务库，仅替换测试应用中的回调配置。"""
+    def _client_with_analysis_callback(
+        self,
+        callback_url: str,
+        *,
+        outcome: AnalysisCallbackDeliveryOutcome,
+    ) -> tuple[object, list[AnalysisCallbackDeliveryRequest]]:
+        """在同一 SQLite 中替换新 Analysis 恢复链，并记录是否发生网络边界调用。
 
+        ``/llm/check-task`` 在 1F-5B 后不再读取 ``llm_config.callback_url``。测试因此
+        直接替换已装配的 Recovery 用例，验证路由确实只使用新 Callback Guard 链。
+        """
+
+        requests: list[AnalysisCallbackDeliveryRequest] = []
+
+        def transport(
+            request: AnalysisCallbackDeliveryRequest,
+        ) -> AnalysisCallbackDelivery:
+            requests.append(request)
+            return AnalysisCallbackDelivery(
+                execution=request.lease.execution,
+                lease_token=request.lease.lease_token,
+                lease_version=request.lease.lease_version,
+                outcome=outcome,
+                detail_code=(
+                    ""
+                    if outcome is AnalysisCallbackDeliveryOutcome.DELIVERED
+                    else (
+                        "response_read_interrupted"
+                        if outcome
+                        is AnalysisCallbackDeliveryOutcome.OUTCOME_UNKNOWN
+                        else "http_status=503"
+                    )
+                ),
+            )
+
+        callbacks = SQLiteAnalysisCallbackAdapter(
+            self.task_service,
+            callback_timeout=1.0,
+            lease_seconds=10.0,
+            transport=transport,
+            history_writer=lambda _payload, *, callback_context: None,
+        )
         configured_services = replace(
             self.services,
-            llm_config=replace(
-                self.services.llm_config,
+            analysis_callback_recovery=RecoverAnalysisCallbackSynchronously(
+                source=SQLiteAnalysisCallbackRecoverySource(self.task_service),
+                callbacks=callbacks,
                 callback_url=callback_url,
             ),
         )
-        return create_app(services=configured_services).test_client()
+        return create_app(services=configured_services).test_client(), requests
 
-    def _complete_file_task(self, file_name: str) -> None:
-        """建立可触发回调恢复的文件终态任务。"""
+    def _complete_file_task(self, file_name: str):  # type: ignore[no-untyped-def]
+        """建立带 batch 身份的 Analysis 终态任务，避免新恢复器误接管历史投影。"""
 
-        self.task_service.create_file_task(
-            file_name,
-            {
-                "businessType": "file",
-                "params": [{"fileName": file_name}],
-            },
+        raw_params = {
+            "fileName": file_name,
+            "filePath": f"https://example.invalid/{file_name}",
+        }
+        command = AnalysisBatchCommand(
+            request_projection=FrozenJsonObject.from_mapping(
+                {"businessType": "file", "params": [raw_params]},
+                name="check_task_route_request",
+            ),
+            submissions=(
+                AnalysisSubmissionSnapshot.from_request_params(
+                    raw_params,
+                    policy_snapshot=AnalysisPolicySnapshot.default(),
+                ),
+            ),
+            trace_id=f"check-task-route-{file_name}",
         )
-        self.task_service.mark_business_completed(
-            "file",
-            file_name,
+        commands = SQLiteAnalysisBatchCommandAdapter(self.task_service)
+        admission = commands.create_batch_if_allowed(command)
+        execution = admission.executions[0]
+        claimed = commands.claim(execution.task_id)
+        self.assertIsNotNone(claimed.execution)
+        callback_payload = FrozenJsonObject.from_mapping(
             {
                 "businessType": "file",
                 "data": {"fileName": file_name, "status": "2"},
                 "msg": "解析成功",
             },
-            status="2",
+            name="check_task_route_callback_payload",
         )
+        self.assertTrue(
+            commands.finish_if_current(
+                ExpectedTaskCompletion(
+                    expected_task_id=execution.task_id,
+                    business_ref=TaskBusinessRef("file", file_name),
+                    execution_state="succeeded",
+                    public_status="2",
+                    message="解析成功",
+                    result=AnalysisTaskCompletion(
+                        callback_payload=callback_payload,
+                        succeeded=True,
+                        mapped_result=FrozenJsonObject.from_mapping(
+                            {"architectureId": 103}
+                        ),
+                    ),
+                )
+            )
+        )
+        return execution
 
     def test_rejects_invalid_or_missing_business_type(self) -> None:
         """缺失或非法 businessType 必须保持 HTTP 400 与既有错误体。"""
@@ -351,18 +444,16 @@ class CheckTaskRouteContractTests(unittest.TestCase):
         """终态 pending 回调在 check-task 中成功补发后必须持久化 success。"""
 
         self._complete_file_task("pending.pdf")
-        client = self._client_with_callback_url(_CALLBACK_URL)
-
-        with patch(
-            "app.services.llm_service.task_service.post_callback_payload",
-            return_value=True,
-        ) as callback_sender:
-            response = client.post(
-                "/llm/check-task",
-                json={
-                    "businessType": "file",
-                    "params": [{"fileName": "pending.pdf"}],
-                },
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+        )
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "pending.pdf"}],
+            },
         )
 
         self.assertEqual(200, response.status_code)
@@ -371,29 +462,28 @@ class CheckTaskRouteContractTests(unittest.TestCase):
             "success",
             self.task_service.get_task("file", "pending.pdf")["callback_status"],
         )
-        callback_sender.assert_called_once()
+        self.assertEqual(1, len(callback_requests))
 
     def test_failed_callback_is_replayed_and_persisted_as_success(self) -> None:
         """终态 failed 回调也允许由 check-task 显式恢复一次。"""
 
-        self._complete_file_task("failed-then-success.pdf")
+        execution = self._complete_file_task("failed-then-success.pdf")
         self.task_service.mark_callback_failed(
             "file",
             "failed-then-success.pdf",
             "timeout",
+            execution_id=execution.task_id.value,
         )
-        client = self._client_with_callback_url(_CALLBACK_URL)
-
-        with patch(
-            "app.services.llm_service.task_service.post_callback_payload",
-            return_value=True,
-        ) as callback_sender:
-            response = client.post(
-                "/llm/check-task",
-                json={
-                    "businessType": "file",
-                    "params": [{"fileName": "failed-then-success.pdf"}],
-                },
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+        )
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "failed-then-success.pdf"}],
+            },
         )
 
         self.assertEqual(200, response.status_code)
@@ -404,25 +494,28 @@ class CheckTaskRouteContractTests(unittest.TestCase):
                 "callback_status"
             ],
         )
-        callback_sender.assert_called_once()
+        self.assertEqual(1, len(callback_requests))
 
     def test_failed_replay_remains_failed(self) -> None:
         """补发返回失败时不得伪装成功，内部 callbackStatus 必须仍为 failed。"""
 
-        self._complete_file_task("still-failed.pdf")
-        self.task_service.mark_callback_failed("file", "still-failed.pdf", "timeout")
-        client = self._client_with_callback_url(_CALLBACK_URL)
-
-        with patch(
-            "app.services.llm_service.task_service.post_callback_payload",
-            return_value=False,
-        ) as callback_sender:
-            response = client.post(
-                "/llm/check-task",
-                json={
-                    "businessType": "file",
-                    "params": [{"fileName": "still-failed.pdf"}],
-                },
+        execution = self._complete_file_task("still-failed.pdf")
+        self.task_service.mark_callback_failed(
+            "file",
+            "still-failed.pdf",
+            "timeout",
+            execution_id=execution.task_id.value,
+        )
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.REJECTED,
+        )
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "still-failed.pdf"}],
+            },
         )
 
         self.assertEqual(200, response.status_code)
@@ -431,22 +524,93 @@ class CheckTaskRouteContractTests(unittest.TestCase):
             "failed",
             self.task_service.get_task("file", "still-failed.pdf")["callback_status"],
         )
-        callback_sender.assert_called_once()
+        self.assertEqual(1, len(callback_requests))
+
+    def test_duplicate_file_names_in_one_request_only_trigger_one_attempt(self) -> None:
+        """同一请求的重复 fileName 必须合并，不能连续形成两次业务回调。"""
+
+        execution = self._complete_file_task("duplicate-retry.pdf")
+        self.task_service.mark_callback_failed(
+            "file",
+            "duplicate-retry.pdf",
+            "timeout",
+            execution_id=execution.task_id.value,
+        )
+        duplicate_task_before = self.task_service.get_task(
+            "file",
+            "duplicate-retry.pdf",
+        )
+        self.assertIsNotNone(duplicate_task_before)
+        assert duplicate_task_before is not None
+        attempts_before = duplicate_task_before["callback_attempts"]
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.REJECTED,
+        )
+
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [
+                    {"fileName": " duplicate-retry.pdf "},
+                    {"fileName": "duplicate-retry.pdf"},
+                ],
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(b"", response.data)
+        self.assertEqual(1, len(callback_requests))
+        task = self.task_service.get_task("file", "duplicate-retry.pdf")
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual("failed", task["callback_status"])
+        self.assertEqual(attempts_before + 1, task["callback_attempts"])
+
+    def test_new_check_task_can_explicitly_retry_outcome_unknown(self) -> None:
+        """file 未知结果由下一次请求显式补发，普通后台路径不自动发送。"""
+
+        self._complete_file_task("unknown-retry.pdf")
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.OUTCOME_UNKNOWN,
+        )
+        payload = {
+            "businessType": "file",
+            "params": [{"fileName": "unknown-retry.pdf"}],
+        }
+
+        first_response = client.post("/llm/check-task", json=payload)
+        self.assertEqual(200, first_response.status_code)
+        self.assertEqual(b"", first_response.data)
+        self.assertEqual(1, len(callback_requests))
+        self.assertEqual(
+            "outcome_unknown",
+            self.task_service.get_task("file", "unknown-retry.pdf")[
+                "callback_status"
+            ],
+        )
+
+        second_response = client.post("/llm/check-task", json=payload)
+        self.assertEqual(200, second_response.status_code)
+        self.assertEqual(b"", second_response.data)
+        self.assertEqual(2, len(callback_requests))
 
     def test_missing_callback_url_moves_pending_to_skipped_without_replay(self) -> None:
         """无接收方时 pending 应幂等收敛为 skipped，且不制造网络尝试。"""
 
         self._complete_file_task("no-callback.pdf")
-
-        with patch(
-            "app.services.llm_service.task_service.post_callback_payload"
-        ) as callback_sender:
-            response = self.client.post(
-                "/llm/check-task",
-                json={
-                    "businessType": "file",
-                    "params": [{"fileName": "no-callback.pdf"}],
-                },
+        client, callback_requests = self._client_with_analysis_callback(
+            "",
+            outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+        )
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "no-callback.pdf"}],
+            },
         )
 
         self.assertEqual(200, response.status_code)
@@ -455,13 +619,17 @@ class CheckTaskRouteContractTests(unittest.TestCase):
             "skipped",
             self.task_service.get_task("file", "no-callback.pdf")["callback_status"],
         )
-        callback_sender.assert_not_called()
+        self.assertEqual([], callback_requests)
 
     def test_skipped_callback_is_not_replayed_after_url_is_configured(self) -> None:
         """skipped 是明确终态，后续补配 URL 不能追补历史任务。"""
 
         self._complete_file_task("already-skipped.pdf")
-        initial_response = self.client.post(
+        initial_client, initial_requests = self._client_with_analysis_callback(
+            "",
+            outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+        )
+        initial_response = initial_client.post(
             "/llm/check-task",
             json={
                 "businessType": "file",
@@ -470,22 +638,64 @@ class CheckTaskRouteContractTests(unittest.TestCase):
         )
         self.assertEqual(200, initial_response.status_code)
         self.assertEqual(b"", initial_response.data)
+        self.assertEqual([], initial_requests)
 
-        client = self._client_with_callback_url(_CALLBACK_URL)
-        with patch(
-            "app.services.llm_service.task_service.post_callback_payload"
-        ) as callback_sender:
-            response = client.post(
-                "/llm/check-task",
-                json={
-                    "businessType": "file",
-                    "params": [{"fileName": "already-skipped.pdf"}],
-                },
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+        )
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "already-skipped.pdf"}],
+            },
         )
 
         self.assertEqual(200, response.status_code)
         self.assertEqual(b"", response.data)
-        callback_sender.assert_not_called()
+        self.assertEqual([], callback_requests)
+
+    def test_legacy_terminal_callback_never_falls_back_to_old_recovery(self) -> None:
+        """历史终态必须由发布前预检清零，切换后不能绕回旧恢复器。"""
+
+        legacy = self.task_service.create_file_task(
+            "legacy-pending.pdf",
+            {"businessType": "file", "params": [{"fileName": "legacy-pending.pdf"}]},
+        )
+        self.task_service.mark_business_completed(
+            "file",
+            "legacy-pending.pdf",
+            {
+                "businessType": "file",
+                "data": {"fileName": "legacy-pending.pdf", "status": "2"},
+                "msg": "历史解析成功",
+            },
+            status="2",
+            execution_id=legacy["execution_id"],
+        )
+        client, callback_requests = self._client_with_analysis_callback(
+            _CALLBACK_URL,
+            outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
+        )
+
+        response = client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "legacy-pending.pdf"}],
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(b"", response.data)
+        self.assertEqual([], callback_requests)
+        self.assertEqual(
+            "pending",
+            self.task_service.get_task("file", "legacy-pending.pdf")[
+                "callback_status"
+            ],
+        )
 
 
 class CheckTaskContractAssetTests(unittest.TestCase):

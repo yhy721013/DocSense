@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
@@ -23,6 +25,31 @@ from app.integrations.anythingllm.policies import (
     analysis_rag_workspace_settings,
     knowledge_index_workspace_settings,
 )
+from app.modules.analysis.adapters import (
+    AnalysisTranslationExecutionCoordinator,
+    LegacyAnalysisAuditAdapter,
+    LegacyAnalysisFilePreparationAdapter,
+    LegacyAnalysisKnowledgeAdapter,
+    LegacyAnalysisRagAdapterFactory,
+    LocalAnalysisTaskWorkspaceAdapter,
+    SQLiteAnalysisBatchCommandAdapter,
+    SQLiteAnalysisCallbackAdapter,
+    SQLiteAnalysisCallbackRecoverySource,
+    SQLiteAnalysisResourceStoreAdapter,
+    SerializedAnalysisTranslationAdapter,
+)
+from app.modules.analysis.adapters.local_dispatcher import (
+    LocalAnalysisDispatcherSnapshot,
+    LocalAnalysisTaskDispatcher,
+)
+from app.modules.analysis.application import (
+    RecoverAnalysisCallbackSynchronously,
+    SubmitAnalysisBatch,
+)
+from app.modules.analysis.composition import (
+    compose_analysis_application_services,
+)
+from app.modules.analysis.ports import AnalysisDispatcherPort
 from app.modules.document_processing import (
     LegacyOfficeConfig,
     LegacyOfficeConversionError,
@@ -75,6 +102,7 @@ from app.modules.tasks.adapters import (
 )
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.modules.weaponry.adapters import (
+    AnythingLLMTermsCatalogCoordinator,
     AnythingLLMProvidedEvidenceExtractionAdapter,
     AnythingLLMWeaponryCreationIntentRecoveryAdapter,
     AnythingLLMReadOnlyTermsRuleProvider,
@@ -89,11 +117,14 @@ from app.modules.weaponry.adapters import (
     SQLiteWeaponryCreationIntentStoreAdapter,
     SQLiteWeaponryInteractionAuditAdapter,
     SQLiteWeaponryResourceStoreAdapter,
+    SQLiteTermsCatalogStateStore,
     StoreBackedWeaponryResourceRegistrar,
     TermsRuleGuidanceAdapter,
+    TermsCatalogWorkspaceResolver,
     WeaponryRuntimeCapabilities,
     WeaponryProductionGateSnapshot,
     WeaponryTaskCommandCodec,
+    build_terms_catalog_manifest,
     load_weaponry_infrastructure_config,
 )
 from app.modules.weaponry.adapters.local_dispatcher import (
@@ -126,11 +157,13 @@ from app.services.chat import (
 )
 from app.services.core.config import (
     AnalysisClassificationConfig,
+    AnalysisInfrastructureConfig,
     AnythingLLMConfig,
     ChatInfrastructureConfig,
     LLMIntegrationConfig,
     ReportInfrastructureConfig,
     load_analysis_classification_config,
+    load_analysis_infrastructure_config,
     load_anythingllm_config,
     load_chat_infrastructure_config,
     load_legacy_office_config,
@@ -149,6 +182,23 @@ from app.services.llm_service.translation_service import get_translation_service
 
 
 logger = logging.getLogger(__name__)
+
+
+def _terminate_process_after_analysis_dispatcher_fatal(message: str) -> None:
+    """终止仍在提供 HTTP 的失效进程，交由 Docker 从持久任务事实恢复。
+
+    `/llm/analysis` 的 202 表示任务已经持久受理，不能在提交后改回 503。若唯一
+    Dispatcher 意外退出，继续让 Flask 存活会形成“仍可受理、永不执行”的假健康状态；
+    因此生产组合根发送 SIGTERM，由 ``restart: unless-stopped`` 启动新进程重新扫描。
+    """
+
+    logger.critical(
+        "文件分析 Dispatcher 已不可恢复退出，准备终止应用进程: "
+        "fatal_error=%s pid=%s",
+        message,
+        os.getpid(),
+    )
+    os.kill(os.getpid(), signal.SIGTERM)
 
 APPLICATION_SERVICES_EXTENSION = "docsense_services"
 
@@ -174,6 +224,7 @@ class ApplicationReadinessSnapshot:
     report: LocalReportDispatcherSnapshot | None
     weaponry: LocalWeaponryDispatcherSnapshot | None
     weaponry_production_gate: WeaponryProductionGateSnapshot | None
+    analysis: LocalAnalysisDispatcherSnapshot | None
 
 @dataclass(frozen=True)
 class ApplicationServices:
@@ -210,12 +261,22 @@ class ApplicationServices:
     legacy_office_preparer: LegacyOfficePreparer = field(
         default_factory=_disabled_legacy_office_preparer
     )
+    legacy_office_config: LegacyOfficeConfig = field(
+        default_factory=LegacyOfficeConfig.disabled
+    )
     analysis_classification_config: AnalysisClassificationConfig = field(
         default_factory=AnalysisClassificationConfig.topk_two_stage
     )
     chat_infrastructure_config: ChatInfrastructureConfig = field(
         default_factory=ChatInfrastructureConfig.single_instance
     )
+    # 1F-5B 后公开 `/llm/analysis` 与 file ``check-task`` 只能使用这条新运行链。None
+    # 只允许不覆盖文件路由的历史单元测试或显式离线 Fake；生产工厂必须同时装配四项，
+    # 路由缺失绑定时会明确失败，绝不能回退到遗留线程或遗留回调恢复器。
+    analysis_submit: SubmitAnalysisBatch | None = None
+    analysis_callback_recovery: RecoverAnalysisCallbackSynchronously | None = None
+    analysis_dispatcher: AnalysisDispatcherPort | None = None
+    analysis_runtime_config: AnalysisInfrastructureConfig | None = None
     # 生产工厂在 1D-6 必须装配完整新链。``None`` 仅保留给不覆盖 weaponry 路由的旧式
     # 单元测试夹具；公开路由遇到 None 会明确失败，绝不会回退到遗留线程。
     weaponry_services: WeaponryApplicationServices | None = None
@@ -250,6 +311,7 @@ class ApplicationServices:
             "anythingllm_config": self.anythingllm_config,
             "report_infrastructure_config": self.report_infrastructure_config,
             "legacy_office_preparer": self.legacy_office_preparer,
+            "legacy_office_config": self.legacy_office_config,
             "analysis_classification_config": self.analysis_classification_config,
             "chat_infrastructure_config": self.chat_infrastructure_config,
         }
@@ -335,6 +397,46 @@ class ApplicationServices:
             raise TypeError(
                 "analysis_classification_config must be AnalysisClassificationConfig"
             )
+        if not isinstance(self.legacy_office_config, LegacyOfficeConfig):
+            raise TypeError("legacy_office_config 必须是 LegacyOfficeConfig")
+        analysis_bindings = (
+            self.analysis_submit,
+            self.analysis_callback_recovery,
+            self.analysis_dispatcher,
+            self.analysis_runtime_config,
+        )
+        if any(item is not None for item in analysis_bindings) and any(
+            item is None for item in analysis_bindings
+        ):
+            raise ValueError(
+                "Analysis 运行链必须同时提供 submit、callback_recovery、dispatcher 和配置"
+            )
+        if self.analysis_submit is not None:
+            if not isinstance(self.analysis_submit, SubmitAnalysisBatch):
+                raise TypeError("analysis_submit 必须是 SubmitAnalysisBatch 或 None")
+            if not isinstance(
+                self.analysis_callback_recovery,
+                RecoverAnalysisCallbackSynchronously,
+            ):
+                raise TypeError(
+                    "analysis_callback_recovery 必须是 "
+                    "RecoverAnalysisCallbackSynchronously 或 None"
+                )
+            if not isinstance(self.analysis_dispatcher, AnalysisDispatcherPort):
+                raise TypeError(
+                    "analysis_dispatcher 必须实现 AnalysisDispatcherPort 或 None"
+                )
+            if not isinstance(
+                self.analysis_runtime_config,
+                AnalysisInfrastructureConfig,
+            ):
+                raise TypeError(
+                    "analysis_runtime_config 必须是 AnalysisInfrastructureConfig 或 None"
+                )
+            if self.analysis_submit.dispatcher is not self.analysis_dispatcher:
+                raise ValueError(
+                    "analysis_submit 与 ApplicationServices 必须共享同一 Dispatcher 实例"
+                )
         if self.weaponry_services is not None:
             if not isinstance(
                 self.weaponry_services,
@@ -359,6 +461,7 @@ class ApplicationServices:
             )
         self._validate_chat_infrastructure_capabilities()
         self._validate_report_infrastructure_capabilities()
+        self._validate_analysis_infrastructure_capabilities()
         self._validate_weaponry_infrastructure_capabilities()
 
     def _validate_chat_infrastructure_capabilities(self) -> None:
@@ -425,6 +528,59 @@ class ApplicationServices:
             self.report_infrastructure_config.cleanup_lease_seconds,
         )
 
+    def _validate_analysis_infrastructure_capabilities(self) -> None:
+        """验证已装配的 Analysis 链只声明当前 SQLite 单实例能力。
+
+        旧测试夹具可以明确不装配 Analysis；但生产组合一旦提供该链，就必须证明进程锁、
+        共享 limiter 与 Callback 超时/租约关系完整，不能在公开路由尚未切换时静默留下
+        一个没有边界保护的后台 Worker。
+        """
+
+        if self.analysis_dispatcher is None:
+            logger.info("测试或兼容容器未装配文件分析运行链: production_factory=false")
+            return
+        if self.analysis_runtime_config is None:  # __post_init__ 已保证全有或全无。
+            raise RuntimeError("Analysis运行链缺少基础设施配置")
+        if self.analysis_runtime_config.runtime_mode != "single_instance":
+            raise RuntimeError("unsupported analysis infrastructure runtime mode")
+
+        required_lease = required_http_lease_seconds(
+            self.analysis_runtime_config.callback_http_timeout_seconds
+        )
+        if self.analysis_runtime_config.callback_lease_seconds <= required_lease:
+            raise RuntimeError(
+                "Analysis callback lease 未严格覆盖HTTP连接、读取和安全余量"
+            )
+
+        if isinstance(self.analysis_dispatcher, LocalAnalysisTaskDispatcher):
+            if not self.analysis_dispatcher.has_process_guard:
+                raise RuntimeError(
+                    "生产 LocalAnalysisTaskDispatcher 必须装配跨进程单实例锁"
+                )
+            if (
+                self.analysis_dispatcher.execution_limiter
+                is not self.upload_task_limiter
+            ):
+                raise ValueError(
+                    "Analysis 必须与 Report/Weaponry 共享同一重型任务 limiter"
+                )
+        else:
+            # 显式 Fake 可用于离线组合/路由测试；它没有资格宣称生产后台能力，readiness
+            # 会因缺少标准 snapshot 保持 false，而不是偷偷创建真实线程。
+            logger.info(
+                "文件分析运行链使用显式非生产 Dispatcher: dispatcher_type=%s",
+                type(self.analysis_dispatcher).__name__,
+            )
+
+        logger.info(
+            "文件分析基础设施能力校验通过: runtime_mode=%s dispatcher_type=%s "
+            "callback_http_timeout_seconds=%.3f callback_lease_seconds=%.3f",
+            self.analysis_runtime_config.runtime_mode,
+            type(self.analysis_dispatcher).__name__,
+            self.analysis_runtime_config.callback_http_timeout_seconds,
+            self.analysis_runtime_config.callback_lease_seconds,
+        )
+
     def _validate_weaponry_infrastructure_capabilities(self) -> None:
         """只在显式装配时验证 Weaponry；缺省不能用隐式 no-op 伪装就绪。"""
 
@@ -474,6 +630,16 @@ class ApplicationServices:
             if callable(report_snapshot_reader)
             else None
         )
+        analysis_snapshot_reader = (
+            getattr(self.analysis_dispatcher, "snapshot", None)
+            if self.analysis_dispatcher is not None
+            else None
+        )
+        analysis = (
+            analysis_snapshot_reader()
+            if callable(analysis_snapshot_reader)
+            else None
+        )
         weaponry = (
             self.weaponry_services.snapshot()
             if self.weaponry_services is not None
@@ -491,6 +657,26 @@ class ApplicationServices:
             reasons.append(
                 f"report_dispatcher_not_ready:{report.fatal_error or report.lifecycle_state}"
             )
+        if self.analysis_dispatcher is not None:
+            if analysis is None:
+                reasons.append("analysis_dispatcher_snapshot_unavailable")
+            elif not analysis.ready:
+                reasons.append(
+                    "analysis_dispatcher_not_ready:"
+                    f"{analysis.fatal_error or analysis.lifecycle_state}"
+                )
+            if (
+                self.analysis_runtime_config is None
+                or self.analysis_runtime_config.runtime_mode != "single_instance"
+            ):
+                reasons.append("analysis_runtime_mode_invalid")
+            elif (
+                self.analysis_runtime_config.callback_lease_seconds
+                <= required_http_lease_seconds(
+                    self.analysis_runtime_config.callback_http_timeout_seconds
+                )
+            ):
+                reasons.append("analysis_callback_lease_insufficient")
         if weaponry is None:
             reasons.append("weaponry_services_not_bound")
         elif not weaponry.ready:
@@ -502,9 +688,25 @@ class ApplicationServices:
             reasons.append("weaponry_production_gate_unavailable")
         elif not gate.ready:
             reasons.append(f"weaponry_production_gate:{gate.reason}")
+        analysis_config_ready = (
+            self.analysis_dispatcher is None
+            or (
+                self.analysis_runtime_config is not None
+                and self.analysis_runtime_config.runtime_mode == "single_instance"
+                and self.analysis_runtime_config.callback_lease_seconds
+                > required_http_lease_seconds(
+                    self.analysis_runtime_config.callback_http_timeout_seconds
+                )
+            )
+        )
         lifecycle_ready = (
             report is not None
             and report.ready
+            and (
+                self.analysis_dispatcher is None
+                or (analysis is not None and analysis.ready)
+            )
+            and analysis_config_ready
             and weaponry is not None
             and weaponry.ready
         )
@@ -517,57 +719,145 @@ class ApplicationServices:
             report=report,
             weaponry=weaponry,
             weaponry_production_gate=gate,
+            analysis=analysis,
         )
 
     def start_background_services(self) -> None:
         """显式启动容器拥有的本地后台能力。
 
-        当前报告 Dispatcher 包含一条重型任务执行线程，以及彼此隔离的资源恢复、队列
-        诊断维护线程。这里所说的“单 Worker”只约束报告业务执行并发，不代表维护工作
-        继续与模型调用串在同一线程中。
+        固定顺序为 Report、Weaponry、Analysis。任一组件启动失败时，只回滚本次调用中
+        实际从未运行变为启动的组件，并按逆序停止；绝不为了回滚把数据库里的 running
+        execution 改回 accepted。构造容器本身不启动线程，离线 Fake 也只能在调用方显式
+        调用本方法后才会收到 start。
         """
 
         logger.info("开始启动 DocSense 后台服务")
-        self.report_dispatcher.start()
+        components: list[tuple[str, object, float]] = [
+            (
+                "Report",
+                self.report_dispatcher,
+                self.report_infrastructure_config.stop_timeout_seconds,
+            ),
+        ]
         if self.weaponry_services is not None:
-            try:
-                self.weaponry_services.start()
-            except Exception:
-                # 第二个组件启动失败时不能留下“应用创建失败但报告 Worker 仍运行”的
-                # 半启动进程。仅停止线程，不回退任何 running execution。
-                rolled_back = self.report_dispatcher.stop(
-                    timeout_seconds=(
-                        self.report_infrastructure_config.stop_timeout_seconds
-                    )
+            components.append(
+                (
+                    "Weaponry",
+                    self.weaponry_services,
+                    self.weaponry_services.config.stop_timeout_seconds,
                 )
-                if not rolled_back:
-                    logger.critical(
-                        "Weaponry 启动失败且 Report 回滚停机超时，必须终止当前进程"
+            )
+        if self.analysis_dispatcher is not None:
+            if self.analysis_runtime_config is None:  # 防御性保护，__post_init__ 已校验。
+                raise RuntimeError("Analysis Dispatcher 缺少停止超时配置")
+            components.append(
+                (
+                    "Analysis",
+                    self.analysis_dispatcher,
+                    self.analysis_runtime_config.stop_timeout_seconds,
+                )
+            )
+
+        started_this_call: list[tuple[str, object, float]] = []
+        try:
+            for component_name, component, stop_timeout_seconds in components:
+                was_running = self._background_component_is_running(component)
+                # 所有本地 Dispatcher 与显式 Fake 都遵循同一窄生命周期协议；在这里
+                # 动态读取是为了兼容 Report/Weaponry 现有 Port，不把业务模块互相导入。
+                start = getattr(component, "start", None)
+                if not callable(start):
+                    raise TypeError(
+                        f"{component_name} 后台组件缺少可调用 start"
                     )
-                raise
+                start()
+                if not was_running:
+                    started_this_call.append(
+                        (component_name, component, stop_timeout_seconds)
+                    )
+        except Exception:
+            for component_name, component, stop_timeout_seconds in reversed(
+                started_this_call
+            ):
+                try:
+                    stop = getattr(component, "stop", None)
+                    if not callable(stop):
+                        raise TypeError(
+                            f"{component_name} 后台组件缺少可调用 stop"
+                        )
+                    stopped = stop(timeout_seconds=stop_timeout_seconds)
+                    if stopped is not True:
+                        logger.critical(
+                            "%s 启动失败后的逆序回滚停机超时或未完成，必须终止当前进程",
+                            component_name,
+                        )
+                except Exception:
+                    logger.critical(
+                        "%s 启动失败后的逆序回滚异常，必须终止当前进程",
+                        component_name,
+                        exc_info=True,
+                    )
+            raise
         logger.info("DocSense 后台服务启动完成")
 
     def stop_background_services(self, *, timeout_seconds: float | None = None) -> bool:
         """停止领取新任务并有限等待当前函数；不重置 running execution。"""
 
+        analysis_stopped = True
         weaponry_stopped = True
-        if self.weaponry_services is not None:
-            weaponry_stopped = self.weaponry_services.stop(
-                timeout_seconds=timeout_seconds
-            )
-        report_stopped = self.report_dispatcher.stop(
-            timeout_seconds=timeout_seconds
-        )
-        return weaponry_stopped and report_stopped
+        try:
+            if self.analysis_dispatcher is not None:
+                analysis_stopped = self.analysis_dispatcher.stop(
+                    timeout_seconds=timeout_seconds
+                )
+        finally:
+            try:
+                if self.weaponry_services is not None:
+                    weaponry_stopped = self.weaponry_services.stop(
+                        timeout_seconds=timeout_seconds
+                    )
+            finally:
+                report_stopped = self.report_dispatcher.stop(
+                    timeout_seconds=timeout_seconds
+                )
+        return analysis_stopped and weaponry_stopped and report_stopped
 
     def close(self) -> None:
         """幂等关闭容器拥有的后台生命周期。"""
 
         try:
-            if self.weaponry_services is not None:
-                self.weaponry_services.close()
+            if self.analysis_dispatcher is not None:
+                self.analysis_dispatcher.close()
         finally:
-            self.report_dispatcher.close()
+            try:
+                if self.weaponry_services is not None:
+                    self.weaponry_services.close()
+            finally:
+                self.report_dispatcher.close()
+
+    @staticmethod
+    def _background_component_is_running(component: object) -> bool:
+        """尽力识别本轮调用前已运行组件，避免失败回滚误停既有 Worker。
+
+        没有标准 snapshot 的显式 Fake 视为未运行：测试替身不应因为缺少生产诊断字段而
+        获得“已启动”豁免。生产 Dispatcher 均提供 ``lifecycle_state``，不会走该分支。
+        """
+
+        snapshot_reader = getattr(component, "snapshot", None)
+        if not callable(snapshot_reader):
+            return False
+        try:
+            snapshot = snapshot_reader()
+        except Exception:
+            logger.warning(
+                "读取后台组件启动前快照失败，失败时将按本轮已启动处理: component_type=%s",
+                type(component).__name__,
+                exc_info=True,
+            )
+            return False
+        lifecycle_state = str(
+            getattr(snapshot, "lifecycle_state", "") or ""
+        ).strip().lower()
+        return lifecycle_state in {"starting", "running"}
 
 
 def create_application_services() -> ApplicationServices:
@@ -577,13 +867,16 @@ def create_application_services() -> ApplicationServices:
     # SQLite 单实例模式配置成集群时，会在应用启动的最早阶段 fail fast。
     chat_infrastructure_config = load_chat_infrastructure_config()
     analysis_classification_config = load_analysis_classification_config()
+    analysis_infrastructure_config = load_analysis_infrastructure_config()
     logger.info(
         "已读取运行模式配置: chat_runtime_mode=%s "
+        "analysis_runtime_mode=%s "
         "analysis_classification_mode=%s "
         "analysis_filename_constraint_mode=%s "
         "analysis_data_standard_mode=%s "
         "analysis_identity_reselect_mode=%s",
         chat_infrastructure_config.runtime_mode,
+        analysis_infrastructure_config.runtime_mode,
         analysis_classification_config.mode,
         analysis_classification_config.filename_constraint_mode,
         analysis_classification_config.data_standard_mode,
@@ -591,6 +884,17 @@ def create_application_services() -> ApplicationServices:
     )
     report_infrastructure_config = load_report_infrastructure_config()
     weaponry_infrastructure_config = load_weaponry_infrastructure_config()
+    # 术语开启时由本地真实内容自动生成唯一指纹，不再读取人工版本标签。这里只读取并
+    # 冻结本地清单；AnythingLLM 写入仍延迟到 Weaponry 取得单实例锁后的启动门禁。
+    weaponry_terms_manifest = None
+    if weaponry_infrastructure_config.terms_rule_context_enabled:
+        weaponry_terms_manifest = build_terms_catalog_manifest(
+            weaponry_infrastructure_config.terms_dir or ""
+        )
+        weaponry_infrastructure_config = replace(
+            weaponry_infrastructure_config,
+            terms_catalog_fingerprint=weaponry_terms_manifest.fingerprint,
+        )
     reassign_infrastructure_config = load_reassignment_infrastructure_config()
     legacy_office_config = load_legacy_office_config()
     legacy_office_preparer = LibreOfficeLegacyOfficePreparer(
@@ -624,10 +928,11 @@ def create_application_services() -> ApplicationServices:
     )
     logger.info(
         "已读取单实例基础设施配置: chat_runtime_mode=%s report_runtime_mode=%s "
-        "weaponry_runtime_mode=%s reassign_runtime_mode=%s "
+        "analysis_runtime_mode=%s weaponry_runtime_mode=%s reassign_runtime_mode=%s "
         "reassign_total_timeout_seconds=%.3f",
         chat_infrastructure_config.runtime_mode,
         report_infrastructure_config.runtime_mode,
+        analysis_infrastructure_config.runtime_mode,
         weaponry_infrastructure_config.runtime_mode,
         reassign_infrastructure_config.runtime_mode,
         reassign_infrastructure_config.total_timeout_seconds,
@@ -669,6 +974,21 @@ def create_application_services() -> ApplicationServices:
         task_reader=LegacyTaskReadAdapter(task_service),
     )
     upload_task_limiter = UploadTaskLimiter(max_concurrency=1)
+
+    # Analysis 的 RAG 与永久知识 Adapter 只持有惰性 Factory。每次真实任务进入 Worker
+    # 后才会创建独立 Transport；Report/Weaponry 各自有业务专用 Factory，不能复用这里
+    # 的任务级 Session。两个对象也会作为容器公共依赖传给旧兼容路径，确保只有一份明确
+    # 的 Analysis Gateway/Knowledge 装配身份。
+    document_rag_factory = AnythingLLMGatewayFactory(
+        anythingllm_config,
+        workspace_settings=analysis_rag_workspace_settings(),
+    )
+    knowledge_index_factory = AnythingLLMKnowledgeIndexFactory(
+        anythingllm_config,
+        task_service.knowledge_index_operations,
+        kb_service,
+        workspace_settings=knowledge_index_workspace_settings(),
+    )
 
     # 分类节点变更仍是同步接口，但其跨系统写入已经由 Application 的持久化 Saga 管理。
     # Container 只构造无状态 Factory 和单一应用外观：没有共享 HTTP Session，没有后台线程，也
@@ -787,6 +1107,56 @@ def create_application_services() -> ApplicationServices:
         dispatcher=report_dispatcher,
     )
 
+    # 1F-5B 的唯一文件分析运行链。公开路由只写入这条批量受理链，Dispatcher 的扫描条件
+    # 严格限定为带 batch 身份的 execution，因此不会误领历史 file 兼容任务；真实 HTTP
+    # Session 仍延迟到 Worker 内创建。当前发布制度会先停服并由 clean.py 清库重建；
+    # 若未来保留存量库，则改用只读预检处理遗留任务。禁止在此处增加双跑或兼容回退。
+    analysis_task_commands = SQLiteAnalysisBatchCommandAdapter(task_service)
+    analysis_progress_publisher = LatestTaskProgressPublisherAdapter(
+        task_commands=analysis_task_commands,
+        delegate=progress_adapter,
+    )
+    analysis_callbacks = SQLiteAnalysisCallbackAdapter(
+        task_service,
+        callback_timeout=(
+            analysis_infrastructure_config.callback_http_timeout_seconds
+        ),
+        lease_seconds=analysis_infrastructure_config.callback_lease_seconds,
+    )
+    analysis_services = compose_analysis_application_services(
+        task_commands=analysis_task_commands,
+        progress_publisher=analysis_progress_publisher,
+        workspaces=LocalAnalysisTaskWorkspaceAdapter(
+            str(RUNTIME_DIR / "tasks")
+        ),
+        files=LegacyAnalysisFilePreparationAdapter(
+            download_timeout_seconds=llm_config.download_timeout,
+            legacy_office_preparer=legacy_office_preparer,
+        ),
+        rag_factory=LegacyAnalysisRagAdapterFactory(document_rag_factory),
+        knowledge=LegacyAnalysisKnowledgeAdapter(knowledge_index_factory),
+        audit=LegacyAnalysisAuditAdapter(task_service),
+        translation=SerializedAnalysisTranslationAdapter(
+            get_translation_service(),
+            AnalysisTranslationExecutionCoordinator(),
+        ),
+        callbacks=analysis_callbacks,
+        callback_recovery_source=SQLiteAnalysisCallbackRecoverySource(
+            task_service
+        ),
+        resources=SQLiteAnalysisResourceStoreAdapter(task_service),
+        execution_limiter=upload_task_limiter,
+        process_guard=GenericFileProcessSingletonGuard(
+            RUNTIME_DIR / "locks" / "analysis-dispatcher.lock",
+            component_name="文件分析本地 Dispatcher",
+        ),
+        config=analysis_infrastructure_config,
+        callback_url=llm_config.callback_url or "",
+        fatal_error_handler=(
+            _terminate_process_after_analysis_dispatcher_fatal
+        ),
+    )
+
     # Weaponry 与 Report 共享任务数据库、进度 Hub 和重型任务 limiter，但拥有独立业务
     # TaskCommand、Callback Guard、资源事实、进程锁和 Worker。所有 AnythingLLM 工厂只
     # 保存不可变配置；真正的 HTTP Session 仍在单次任务/清理调用内创建并关闭。
@@ -842,17 +1212,30 @@ def create_application_services() -> ApplicationServices:
             weaponry_infrastructure_config.extraction_model_fingerprint
         ),
     )
+    weaponry_terms_startup_gate = None
     if weaponry_infrastructure_config.terms_rule_context_enabled:
-        # 启用分支只读预先配置的共享术语 workspace；它不拥有上传、绑定或删除权限。
+        if weaponry_terms_manifest is None:  # 防御性保护，上方启用分支必须已冻结清单。
+            raise RuntimeError("术语辅助已启用但本地术语清单未构造")
+        terms_workspace_resolver = TermsCatalogWorkspaceResolver(
+            weaponry_client_factory,
+            workspace_base_name=(
+                weaponry_infrastructure_config.terms_workspace_name or ""
+            ),
+        )
+        terms_catalog_coordinator = AnythingLLMTermsCatalogCoordinator(
+            weaponry_client_factory,
+            manifest=weaponry_terms_manifest,
+            workspace_base_name=(
+                weaponry_infrastructure_config.terms_workspace_name or ""
+            ),
+            state_store=SQLiteTermsCatalogStateStore(llm_config.task_db_path),
+            resolver=terms_workspace_resolver,
+        )
+        weaponry_terms_startup_gate = terms_catalog_coordinator.prepare
         weaponry_guidance = TermsRuleGuidanceAdapter(
             AnythingLLMReadOnlyTermsRuleProvider(
                 weaponry_client_factory,
-                workspace_slug=(
-                    weaponry_infrastructure_config.terms_workspace_name or ""
-                ),
-            ),
-            catalog_fingerprint=(
-                weaponry_infrastructure_config.terms_catalog_fingerprint or ""
+                workspace_resolver=terms_workspace_resolver,
             ),
         )
     else:
@@ -929,18 +1312,11 @@ def create_application_services() -> ApplicationServices:
                 ),
             )
         ),
+        startup_gate=weaponry_terms_startup_gate,
     )
     services = ApplicationServices(
-        document_rag_factory=AnythingLLMGatewayFactory(
-            anythingllm_config,
-            workspace_settings=analysis_rag_workspace_settings(),
-        ),
-        knowledge_index_factory=AnythingLLMKnowledgeIndexFactory(
-            anythingllm_config,
-            task_service.knowledge_index_operations,
-            kb_service,
-            workspace_settings=knowledge_index_workspace_settings(),
-        ),
+        document_rag_factory=document_rag_factory,
+        knowledge_index_factory=knowledge_index_factory,
         chat_conversation_factory=chat_conversation_factory,
         task_service=task_service,
         kb_service=kb_service,
@@ -978,8 +1354,13 @@ def create_application_services() -> ApplicationServices:
         anythingllm_config=anythingllm_config,
         report_infrastructure_config=report_infrastructure_config,
         legacy_office_preparer=legacy_office_preparer,
+        legacy_office_config=legacy_office_config,
         analysis_classification_config=analysis_classification_config,
         chat_infrastructure_config=chat_infrastructure_config,
+        analysis_submit=analysis_services.submit,
+        analysis_callback_recovery=analysis_services.callback_recovery,
+        analysis_dispatcher=analysis_services.dispatcher,
+        analysis_runtime_config=analysis_infrastructure_config,
         weaponry_services=weaponry_services,
         reassign_services=reassign_services,
     )
@@ -1001,11 +1382,12 @@ def create_application_services() -> ApplicationServices:
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "
         "upload_max_concurrency=%d chat_runtime_mode=%s report_runtime_mode=%s "
-        "weaponry_runtime_bound=%s reassign_runtime_bound=%s",
+        "analysis_runtime_bound=%s weaponry_runtime_bound=%s reassign_runtime_bound=%s",
         services.knowledge_index_factory is not None,
         services.upload_task_limiter.max_concurrency,
         services.chat_infrastructure_config.runtime_mode,
         services.report_infrastructure_config.runtime_mode,
+        services.analysis_dispatcher is not None,
         services.weaponry_services is not None,
         services.reassign_services is not None,
     )
