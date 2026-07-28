@@ -8,7 +8,7 @@ M1“独立集成工作树与 Git 合并”已完成，可以进入 M2。集成�
 
 | 项目 | 值 |
 | --- | --- |
-| 集成分支 | `codex/refactor-file-analysis-main-integration` |
+| 集成分支 | 创建时为 `codex/refactor-file-analysis-main-integration`；2026-07-28 在 M10 准备期间正式改名为 `merge/file-analysis` |
 | 独立工作树 | `.runtime/worktrees/file-analysis-integration` |
 | 第一父提交 | `main@fb758cda24ca0550c9ea8cfc76b5a523eb75a16e` |
 | 第二父提交 | `refactor/file-analysis@6f5c64ffc70215b2bdf276239698052938668567` |
