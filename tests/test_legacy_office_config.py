@@ -21,6 +21,18 @@ class _StopAfterLegacyOfficePreflight(RuntimeError):
     pass
 
 
+def _weaponry_config_without_terms() -> MagicMock:
+    """构造不会提前访问术语目录的最小容器夹具。
+
+    Legacy Office 测试只验证其启动门禁顺序。功能分支新增术语目录门禁后，裸 ``MagicMock``
+    的布尔值默认为真，会误触发不属于本测试范围的真实目录读取，因此必须显式关闭该能力。
+    """
+
+    config = MagicMock()
+    config.terms_rule_context_enabled = False
+    return config
+
+
 class LegacyOfficeConfigTests(unittest.TestCase):
     def test_defaults_are_disabled_and_use_fixed_runtime_jobs_root(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -39,7 +51,9 @@ class LegacyOfficeConfigTests(unittest.TestCase):
         )
 
     def test_loader_preserves_approved_internal_overrides(self) -> None:
-        executable = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+        # 配置加载器校验当前部署平台的绝对路径；用宿主机绝对路径保证测试可在
+        # Windows 与 macOS 运行，真实存在性由后续 Preflight 负责。
+        executable = str(Path.cwd() / "fake-libreoffice-executable")
         with patch.dict(
             os.environ,
             {
@@ -99,7 +113,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
             ),
             patch(
                 "app.container.load_weaponry_infrastructure_config",
-                return_value=MagicMock(),
+                return_value=_weaponry_config_without_terms(),
             ),
             patch(
                 "app.container.load_reassignment_infrastructure_config",
@@ -140,7 +154,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
             ),
             patch(
                 "app.container.load_weaponry_infrastructure_config",
-                return_value=MagicMock(),
+                return_value=_weaponry_config_without_terms(),
             ),
             patch(
                 "app.container.load_reassignment_infrastructure_config",
@@ -192,7 +206,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
                     ),
                     patch(
                         "app.container.load_weaponry_infrastructure_config",
-                        return_value=MagicMock(),
+                        return_value=_weaponry_config_without_terms(),
                     ),
                     patch(
                         "app.container.load_reassignment_infrastructure_config",
