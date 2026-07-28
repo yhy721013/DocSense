@@ -28,7 +28,7 @@
 | `260724-阶段1E分类节点变更同步Saga文件级实施设计.md` | L3 文件级设计：保持 `/llm/reassign` 同步契约，通过持久化 Operation/Step/Event/恢复观测、Knowledge Port、SQLite Unit of Work、条件 CAS、写后探测、反向补偿和恢复审计完成 1E 功能闭环；1E-0～1E-7 已完成，真实供应商演练与生产容量校准仍是后续启用门禁。 |
 | `260726-阶段1F文件分析高内聚收口文件级实施设计.md` | L3 文件级设计：保持 `/llm/analysis`、file check-task、Progress 和回调结构，将 Analysis 集中实现收口为垂直业务切片；按 TaskId 执行、批量原子受理、SQLite 持久调度、任务级 I/O、Callback Guard、资源恢复、50 并发隔离、切换与回退门禁均已细化。1F-0～1F-7B 代码/离线验收及关闭后全面审查修复均已完成；当前停服清库重建发布不要求对空库重复执行只读预检，保留/恢复存量数据库或清理存疑时仍须通过该门禁。 |
 | `260726-阶段1F-3S文件分析Application等价拆分实施计划.md` | L3 已完成计划：在 1F-3R 后、1F-4 前，将 2,162 行 `run_analysis.py` 机械拆分为 473 行 Facade 和五个内部协作模块；公开导出、构造签名、调用顺序、Prompt/预算、异常/日志、审计/知识/终态和副作用语义均由轨迹、故障矩阵和永久 AST 门禁验证。 |
-| `260718-阶段1H共享文档处理模块文件级实施设计.md` | L3 文件级设计：与 1D 平级的共享文档处理阶段；把 MHTML/MinerU/OCR/Office、Artifact/Profile/Lineage 和任务级资源从 Translator/utils 抽离，阶段 3 再切换 MinIO。当前仅完成计划，尚未实施。 |
+| `260718-阶段1H共享文档处理模块文件级实施设计.md` | L3 修订文件级设计：按最新主线把 Legacy Office 认定为可复用的供应商 Adapter 基础，规划 1H-0～1H-7 建立通用 Artifact/Profile/Lineage、共享 DocumentProcessing Application、独立 Translation 模块、逐调用方切换和永久门禁；1H 正式迁移尚未开始，阶段 3 再切换 MinIO。 |
 | `../更新记录/260716-阶段0与1A审查修正记录.md` | 阶段 0/1A 全面审查后的实现修正、验证结果、生产边界及 TASK-09 latest-wins 决策和后置门禁。 |
 | `../更新记录/260716-阶段1B-1可靠恢复命令边界执行记录.md` | 阶段 1B-1 的批量原子 Command Port、应用服务、Presenter、Fake、测试结果和生产未切换边界。 |
 | `../更新记录/260716-阶段1B-2Progress控制面迁移执行记录.md` | 阶段 1B-2 的无 action 契约切换、类型化 Progress 端口、线程安全 Hub/Adapter、连接缓冲，以及全面审查后的投递水位、reportId 规范化和 Barrier 50 线程验收。 |
