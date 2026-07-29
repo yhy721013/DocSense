@@ -28,11 +28,13 @@ class LegacyOfficeConversionError(RuntimeError):
         *,
         diagnostic: str = "",
         safe_message: str = LEGACY_OFFICE_SAFE_ERROR_MESSAGE,
+        outcome_unknown: bool = False,
     ) -> None:
         super().__init__(safe_message)
         self.code = str(code)
         self.safe_message = str(safe_message)
         self.diagnostic = str(diagnostic)
+        self.outcome_unknown = bool(outcome_unknown)
 
     def __str__(self) -> str:
         return self.safe_message

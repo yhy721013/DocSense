@@ -67,6 +67,7 @@ from .terms_catalog import (
 )
 from .translation import (
     LLMTranslationServiceWeaponryAdapter,
+    TranslationEngineWeaponryAdapter,
     WeaponryTextTranslatorProtocol,
 )
 from .infrastructure_config import (
@@ -99,6 +100,7 @@ __all__ = [
     "WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE",
     "DatabaseServiceWeaponryDocumentScopeAdapter",
     "LLMTranslationServiceWeaponryAdapter",
+    "TranslationEngineWeaponryAdapter",
     "LocalWeaponryDispatcherSnapshot",
     "LocalWeaponryTaskDispatcher",
     "NoAuxiliaryGuidanceAdapter",

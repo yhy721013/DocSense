@@ -25,13 +25,15 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/`、`app/adapters/web/`、`app/presenters/` | HTTP/WS/SSE 入参解析、框架映射、协议流式与响应展示、本地调试入口 | `llm.py` `report_requests.py` `report_submission.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；文件分析、报告、武器谱和统一任务边界均已迁入 | `analysis/` `report/` `weaponry/` `tasks/` |
-| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 保留任务兼容存储、共享翻译编排、文件对话应用与旧实现回归证据；公开文件分析路由不再调用旧 Analysis Runner | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
+| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；文件分析、报告、武器谱、共享文档处理、翻译和统一任务边界均已迁入 | `analysis/` `report/` `weaponry/` `document_processing/` `translation/` `tasks/` |
+| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 保留任务兼容存储、旧翻译编排、文件对话应用与旧实现回归证据；公开文件分析路由不再调用旧 Analysis Runner，当前生产翻译由独立模块装配 | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
-| 迁移期工具层 | `app/services/utils/` | 回调、文件/OCR 预处理，以及尚未迁移完成的 legacy AnythingLLM Facade/RAG 流程 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
-| 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `mhtml_handler.py` `txt_handler.py` |
+| 迁移期工具层 | `app/services/utils/` | 回调、下载、legacy AnythingLLM/RAG 流程及文档处理兼容 Facade；MHTML/OCR 唯一实现已迁入共享模块 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
+| 共享文档处理层 | `app/modules/document_processing/` | Artifact/Profile/Lineage、MHTML/LibreOffice/MinerU/OCR Processor、本地 Store/Record 与统一准备流水线 | `domain/` `application/` `ports/` `adapters/` |
+| 翻译能力层 | `app/modules/translation/` | 只读取 prepared Markdown/Text Artifact；语言引擎、分段和安全 Renderer 与格式转换解耦 | `domain/` `application/` `ports/` `adapters/` |
+| 迁移期翻译 Facade | `app/services/translator/` | 保留旧 Python 导入签名和待清理 Handler；生产全文翻译已不再从这里执行文件转换 | `core.py` `document_handler.py` `mhtml_handler.py` |
 
 ### 2.2 主要调用方向
 
@@ -39,12 +41,24 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
-5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
-6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
+5. `report/analysis adapters -> document_processing`：下载后的原始文件只进入一条 Artifact 流水线；
+   RAG、正文读取和全文翻译共享 prepared Artifact。
+6. `analysis/weaponry adapters -> translation`：全文只调用 `TranslatePreparedDocument`，摘要与
+   Weaponry 纯文本只调用实例级 TranslationEngine。
 7. `check-task -> report/weaponry/analysis application`：三类业务分别通过
    `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously`、
    `RecoverAnalysisCallbackSynchronously` 与正常 Worker 共用 execution 级 Callback Guard；file 不再
    回退到兼容 Task Service。三类业务均保留甲方规定的请求内同步恢复副作用。
+
+阶段 1H-0～1H-7 及关闭后 1H-R 全面审查修复已完成代码与安全离线验收。1H-R 恢复扫描
+PDF 的 RAG-only 原件降级、保留结构化 Markdown/图片、增加显式 Processing Record 对账、
+Artifact Catalog、读租约/锁回收和有界本地容量。上游系统保存的原始上传文档不由
+DocumentProcessing 删除；任务共享 Store 中的 source/prepared Artifact 在当前阶段继续保留，
+只即时清理能证明所有权的 Processor scratch、失败候选和 `.part`。旧 Handler/Service/Facade 因
+兼容代码和测试引用尚未物理删除，但永久架构门禁禁止当前生产链重新从旧转换路径取得执行权。
+未来 Artifact GC 必须基于数据库引用、保留期、删除资格、lease/fencing 和审计状态实施。
+Analysis/Report accepted 时冻结全部处理/翻译运行参数仍属于阶段 2 的内部 Task Schema 升级，
+MinIO、可靠队列、多实例一致性与生产容量证明仍属于后续阶段。
 
 ### 2.3 analysis/report/weaponry 请求到回调的链路
 
@@ -78,6 +92,8 @@ app/
     tasks/                          # 统一任务 Domain/Application/Ports/兼容 Adapter
     analysis/                       # 文件分析 Domain/Application/Ports/生产 Adapter
     report/                         # 报告 Domain/Application/Ports/生产形态 Adapter
+    document_processing/            # Artifact/Profile/Lineage 与通用文档 Processor
+    translation/                    # prepared Artifact 翻译与实例级语言引擎
   ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
   integrations/
     anythingllm/                    # Transport、策略、原子 Client、Gateway 与任务级 Factory

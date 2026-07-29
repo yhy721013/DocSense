@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Protocol, runtime_checkable
 
+from app.modules.translation.domain import TranslationMode
+from app.modules.translation.ports import TranslationEnginePort
 from app.modules.weaponry.ports import (
     WeaponryTranslationOutcome,
     WeaponryTranslationRequest,
@@ -88,7 +90,57 @@ class LLMTranslationServiceWeaponryAdapter:
         )
 
 
+class TranslationEngineWeaponryAdapter:
+    """Weaponry 直接消费独立 TranslationEngine，不再经过文档翻译服务。"""
+
+    def __init__(self, engine: TranslationEnginePort) -> None:
+        if not isinstance(engine, TranslationEnginePort):
+            raise TypeError("engine 必须实现 TranslationEnginePort")
+        self._engine = engine
+
+    def translate(
+        self,
+        request: WeaponryTranslationRequest,
+    ) -> WeaponryTranslationResult:
+        if not isinstance(request, WeaponryTranslationRequest):
+            raise TypeError("request 必须是 WeaponryTranslationRequest")
+        try:
+            translated = self._engine.translate(
+                request.text,
+                target_language=request.target_language,
+                mode=TranslationMode.MACHINE,
+            )
+        except Exception as exc:
+            logger.warning(
+                "武器谱 TranslationEngine 调用失败: task_id=%s "
+                "call_id=%s error_type=%s",
+                request.call.task_id.value,
+                request.call.call_id,
+                type(exc).__name__,
+            )
+            return WeaponryTranslationResult(
+                call=request.call,
+                text="",
+                outcome=WeaponryTranslationOutcome.FAILED,
+                error_code="translation_exception",
+            )
+        normalized = translated.strip() if isinstance(translated, str) else ""
+        if not normalized:
+            return WeaponryTranslationResult(
+                call=request.call,
+                text="",
+                outcome=WeaponryTranslationOutcome.FAILED,
+                error_code="translation_empty",
+            )
+        return WeaponryTranslationResult(
+            call=request.call,
+            text=normalized,
+            outcome=WeaponryTranslationOutcome.SUCCEEDED,
+        )
+
+
 __all__ = [
     "LLMTranslationServiceWeaponryAdapter",
+    "TranslationEngineWeaponryAdapter",
     "WeaponryTextTranslatorProtocol",
 ]

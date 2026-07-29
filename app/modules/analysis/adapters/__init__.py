@@ -25,6 +25,7 @@ from .task_commands import (
     SQLiteAnalysisBatchCommandAdapter,
 )
 from .translation import (
+    ArtifactAnalysisTranslationAdapter,
     AnalysisTranslationExecutionCoordinator,
     LegacyAnalysisTranslationService,
     SerializedAnalysisTranslationAdapter,
@@ -32,6 +33,7 @@ from .translation import (
 
 __all__ = (
     "AnalysisTaskInputCodec",
+    "ArtifactAnalysisTranslationAdapter",
     "AnalysisTaskInputCodecError",
     "AnalysisResourceStoreConcurrencyError",
     "AnalysisTaskCommandAdapterError",

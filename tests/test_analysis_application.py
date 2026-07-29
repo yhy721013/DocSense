@@ -778,8 +778,8 @@ class RunAnalysisTaskTests(unittest.TestCase):
         self.assertEqual("task.finish", script.calls[-5][0])
         script.assert_exhausted()
 
-    def test_full_translation_uses_converted_path_only_for_legacy_office(self) -> None:
-        """Legacy 用 processing OOXML；普通格式继续使用 raw source，避免扩大行为变化。"""
+    def test_full_translation_compatibility_fake_uses_prepared_path(self) -> None:
+        """1H-6 后无 Artifact 的旧 Fake 也必须使用 processing，而非 raw source。"""
 
         task_input, _task_execution = _fixture()
         execution = AnalysisExecutionRef(
@@ -824,7 +824,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
                     upload_path="C:/analysis/rag-input.pdf",
                     original_text="正文",
                 ),
-                "C:/analysis/raw.pdf",
+                "C:/analysis/normalized.pdf",
             ),
         ):
             with self.subTest(expected_path=expected_path):

@@ -2,6 +2,20 @@
 
 本目录保存已经实施、正在实施或需要长期追溯的设计决策与改造记录。它用于解释“为什么这样改、改动范围、验证方式和剩余边界”，但不替代接口文档的对外契约地位。
 
+## 阶段 1H 共享文档处理
+
+| 文件 | 作用 |
+| --- | --- |
+| `260729-阶段1H-0基线与并发路径修复执行记录.md` | 冻结 DocumentProcessing/Artifact/Translation 当前调用与资源所有权、公开契约只读 Hash、自建语料和临时依赖；记录经确认增加的 1H-0R Windows 并发路径规范化修复及 138 项离线回归。 |
+| `260729-阶段1H-1共享处理内核与本地Artifact执行记录.md` | 建立不可变 Artifact/Profile/Lineage、稳定幂等键、Port/Application、严格 Fake、本地原子 Artifact Store 和模块自有 SQLite Processing Record；同步阶段 2～4 迁移边界并完成 160 项离线回归。 |
+| `260729-阶段1H-2Legacy-Office通用Artifact纳管执行记录.md` | 将唯一 LibreOffice/OOXML 安全内核迁入 Adapter 包，以冻结 Profile 和通用 Processor 生成 normalized OOXML Artifact/Lineage；保留无重复实现的旧 Facade，并通过 143 项离线回归。 |
+| `260729-阶段1H-3MHTML独立处理执行记录.md` | 迁出 MHTML MIME/正文纯规则和浏览器 Processor，清零两条 Translator 反向依赖；冻结确定失败降级、未知结果协调及固定 `--no-sandbox` 策略，并通过 170 项离线回归。 |
+| `260729-阶段1H-4MinerU-OCR与通用格式执行记录.md` | 将 MinerU、内置 OCR 和通用直通校验迁入 DocumentProcessing；落地 FIFO 重型许可、外部提交意图/供应商身份及 outcome unknown 对账边界，并通过 188 项离线回归。 |
+| `260729-阶段1H-5独立Translation模块执行记录.md` | 建立只接受 prepared Artifact 的 Translation Domain/Application/Ports/Adapters，迁入 HYMT/Argos/Ollama 唯一运行时和安全 Renderer，将引擎锁缩到实例调用，并通过 199 项离线回归。 |
+| `260729-阶段1H-6业务调用方单路径切换执行记录.md` | 按 Utils、Report、Analysis、Translation/Weaponry 顺序切换统一 Artifact 流水线；同一请求无新旧双执行，固定保留 MHTML `--no-sandbox`，并通过 956 项扩大离线回归。 |
+| `260729-阶段1H-7关闭验收与Artifact保留执行记录.md` | 完成永久依赖门禁、50 任务/100 Artifact 隔离、遗留三类引用矩阵和 Artifact 保留/未来 GC 语义；安全全仓发现 2,128 项、排除 13 项、执行 2,115 项且 failure/error 为 0，接口文档零修改。 |
+| `260729-阶段1H关闭后全面审查修复执行记录.md` | 修复 PDF 降级漂移、富 Markdown/图片生命周期、MHTML/MinerU 结果所有权、Processing Record 显式对账、MinerU Profile 脱敏、读租约/锁回收/有界容量和 Artifact Catalog；不改公开接口，并明确 accepted 全配置快照、真实服务和多实例仍属后续门禁。 |
+
 ## Legacy Office 分支集成记录
 
 | 文件 | 作用 |

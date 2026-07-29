@@ -134,17 +134,23 @@ class _AnalysisKnowledgeHandoff:
             snapshot.raw_params.to_dict().get("enableFullTranslation", True)
         )
         if enable_full_translation:
-            request = AnalysisTranslationRequest(
-                execution=execution,
-                kind=AnalysisTranslationKind.DOCUMENT,
-                # 仅 Legacy Office 改读转换后的 OOXML；PDF/MHTML 等既有格式继续读取
-                # 原始下载文件，避免集成新能力时扩大已上线的全文翻译行为变化。
-                source_path=(
-                    prepared.processing_path
-                    if prepared.internal_prepared_basename
-                    else prepared.source_path
-                ),
-            )
+            if prepared.prepared_artifact is not None:
+                request = AnalysisTranslationRequest(
+                    execution=execution,
+                    kind=AnalysisTranslationKind.DOCUMENT,
+                    # 生产文件 Adapter 必须提供该引用；RAG、正文读取和全文翻译共享
+                    # 同一份 prepared Artifact，Translation Application 不接收路径。
+                    prepared_artifact=prepared.prepared_artifact,
+                )
+            else:
+                # 两级 OCR 均明确失败时，生产 Adapter 会让 RAG 使用原 PDF，同时不提供
+                # prepared 文本 Artifact。这里沿用既有兼容请求形态，生产 Translation
+                # Adapter 会稳定返回可降级失败，公开翻译字段保持为空。
+                request = AnalysisTranslationRequest(
+                    execution=execution,
+                    kind=AnalysisTranslationKind.DOCUMENT,
+                    source_path=prepared.processing_path,
+                )
         else:
             summary = file_item.get("summary", "")
             if not isinstance(summary, str) or not summary:

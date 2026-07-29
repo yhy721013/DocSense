@@ -17,6 +17,8 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
+from app.modules.document_processing.adapters import LocalArtifactStoreAdapter
+from app.modules.document_processing.domain import ArtifactRef
 from app.modules.report.domain.errors import ReportArtifactError
 from app.modules.report.ports import (
     ReportArtifactCategory,
@@ -328,6 +330,41 @@ class LocalReportArtifactAdapter:
             scope.task_id,
             destination,
             category,
+            sequence_no=sequence_no,
+        )
+
+    def publish_document_artifact(
+        self,
+        scope: ReportArtifactScope,
+        *,
+        category: ReportArtifactCategory,
+        artifact: ArtifactRef,
+        document_store: LocalArtifactStoreAdapter,
+        file_name: str,
+        sequence_no: int | None,
+    ) -> ReportArtifactRef:
+        """把共享 DocumentProcessing Artifact 映射到既有报告合同。
+
+        ``ReportArtifactRef`` 是报告模块已经冻结的业务引用，不能把共享 Artifact 字段
+        塞入公开 DTO。本方法在适配层复核所有权与完整性后执行一次原子发布；共享 Store
+        中的处理记录和 lineage 仍是转换事实的权威来源，报告 Store 只持有业务生命周期
+        所需的映射副本。
+        """
+
+        self._require_scope(scope)
+        if not isinstance(artifact, ArtifactRef):
+            raise TypeError("artifact 必须是 ArtifactRef")
+        if artifact.task_id != scope.task_id:
+            raise ReportArtifactError("共享 Artifact 不属于当前报告任务")
+        if not isinstance(document_store, LocalArtifactStoreAdapter):
+            raise TypeError("document_store 必须是 LocalArtifactStoreAdapter")
+        if not document_store.verify(artifact):
+            raise ReportArtifactError("共享 Artifact 完整性检查失败")
+        return self.publish_file(
+            scope,
+            category=category,
+            source_path=document_store.resolve_path(artifact),
+            file_name=file_name,
             sequence_no=sequence_no,
         )
 

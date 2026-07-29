@@ -29,7 +29,7 @@ from app.modules.document_processing import (
     discover_libreoffice_executable,
     is_legacy_office_path,
 )
-from app.modules.document_processing.libreoffice import (
+from app.modules.document_processing.adapters.libreoffice.engine import (
     _OOXML_MAX_UNCOMPRESSED_BYTES,
     _OOXML_VALIDATION_TIMEOUT_SECONDS,
     _OWNED_JOB_MARKER_NAME,
@@ -38,7 +38,7 @@ from app.modules.document_processing.libreoffice import (
     _PROCESS_OUTPUT_READ_BYTES,
     _sanitize_for_log,
 )
-from app.modules.document_processing.ooxml_validator import (
+from app.modules.document_processing.adapters.libreoffice.ooxml_validator import (
     EXIT_DUPLICATE_MEMBER,
     EXIT_INVALID_ZIP_METADATA,
     EXIT_UNSAFE_MEMBER,
@@ -930,7 +930,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                     zip64=use_zip64,
                 )
                 with patch(
-                    "app.modules.document_processing.ooxml_validator."
+                    "app.modules.document_processing.adapters.libreoffice."
+                    "ooxml_validator."
                     "zipfile.ZipFile"
                 ) as zip_file:
                     exit_code = validate_ooxml_archive(
@@ -954,7 +955,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
             populate_central_directory=True,
         )
         with patch(
-            "app.modules.document_processing.ooxml_validator.zipfile.ZipFile"
+            "app.modules.document_processing.adapters.libreoffice."
+            "ooxml_validator.zipfile.ZipFile"
         ) as zip_file:
             self.assertEqual(
                 validate_ooxml_archive(
@@ -1068,7 +1070,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                             file_size=archive_path.stat().st_size,
                         )
                 with patch(
-                    "app.modules.document_processing.ooxml_validator."
+                    "app.modules.document_processing.adapters.libreoffice."
+                    "ooxml_validator."
                     "zipfile.ZipFile"
                 ) as zip_file:
                     self.assertEqual(
@@ -1207,12 +1210,12 @@ class LegacyOfficeConversionTests(unittest.TestCase):
         preparer, _ = self.preparer()
         with (
             patch(
-                "app.modules.document_processing.libreoffice."
+                "app.modules.document_processing.adapters.libreoffice.engine."
                 "_ooxml_validator_script_path",
                 return_value=hang_script,
             ),
             patch(
-                "app.modules.document_processing.libreoffice."
+                "app.modules.document_processing.adapters.libreoffice.engine."
                 "_OOXML_VALIDATION_TIMEOUT_SECONDS",
                 0.2,
             ),
@@ -1255,7 +1258,7 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                     ),
                 )
                 with self.assertLogs(
-                    "app.modules.document_processing.libreoffice",
+                    "app.modules.document_processing.adapters.libreoffice.engine",
                     level="ERROR",
                 ) as logs:
                     self.assert_error_code(
@@ -1295,7 +1298,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
         result = preparer.prepare(self.source(".doc"), job_id="cleanup-failure")
         job_path = result.prepared_path.parent.parent
         with patch(
-            "app.modules.document_processing.libreoffice.shutil.rmtree",
+            "app.modules.document_processing.adapters.libreoffice."
+            "engine.shutil.rmtree",
             side_effect=OSError("private cleanup path"),
         ):
             result.close()
@@ -1366,7 +1370,8 @@ class LegacyOfficeConversionTests(unittest.TestCase):
                 factory.last_process.kill()
 
         with patch(
-            "app.modules.document_processing.libreoffice.os.killpg",
+            "app.modules.document_processing.adapters.libreoffice."
+            "engine.os.killpg",
             side_effect=record_signal,
             create=True,
         ):
@@ -1446,6 +1451,33 @@ class LegacyOfficeConversionTests(unittest.TestCase):
         self.assertIn("/F", command)
         self.assertFalse(taskkill_kwargs["shell"])
         self.assertEqual(conversion_kwargs, [])
+
+    def test_timeout_is_unknown_when_process_tree_termination_is_unconfirmed(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory()
+        factory.timeout_conversion = True
+        preparer = LibreOfficeLegacyOfficePreparer(
+            self.config(),
+            platform_name="win32",
+            process_factory=factory,
+            taskkill_runner=lambda command, **kwargs: subprocess.CompletedProcess(
+                command,
+                1,
+            ),
+            path_is_file=lambda value: value == str(self.executable),
+            path_is_executable=lambda value: True,
+        )
+
+        error = self.assert_error_code(
+            "conversion_timeout_outcome_unknown",
+            lambda: preparer.prepare(
+                self.source(".doc"),
+                job_id="unconfirmed-timeout",
+            ),
+        )
+
+        self.assertTrue(error.outcome_unknown)
 
     def test_thread_semaphore_limits_conversions(self) -> None:
         factory = FakeProcessFactory()

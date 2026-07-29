@@ -561,6 +561,12 @@ Dispatcher、可靠队列或多实例运行时。
     发现 1,758 项、排除 13 项、执行/成功 1,745 项、失败 0 项、错误 0 项、跳过 0 项。
 46. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
 47. 运行 report/weaponry 显式 unknown 重试关闭回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_callback_attempt_audit tests.test_analysis_callback_guard tests.test_analysis_ports tests.test_report_ports tests.test_report_callback_guard tests.test_report_callback_recovery tests.test_weaponry_stage1d6 tests.test_weaponry_strict_fakes tests.test_stage1a1_check_task_contract tests.test_progress_and_check_task tests.test_dependency_container tests.test_architecture_boundaries tests.test_stage0_contract_assets tests.test_stage1d_weaponry_contract_assets tests.test_analysis_contract_assets`；2026-07-29 结果为 262 项通过。安全全仓动态发现 2,055 项，精确排除既有 13 项后执行 2,042 项，成功 2,040、失败 0、错误 0、跳过 2。该证据只覆盖临时 SQLite/Fake 的单实例离线边界。
+48. 运行阶段 1H-7 关闭门禁：`venv\Scripts\python.exe -B -m unittest tests.test_document_processing_architecture tests.test_stage1h_closeout tests.test_stage1h_consumer_cutover tests.test_translation_module -q`；再按本文件既有 13 项精确排除清单执行安全全仓。2026-07-29 动态发现 2,128 项，排除 13 项，执行 2,115 项，成功 2,112、失败 0、错误 0、跳过 3；跳过项为两个仅 macOS 真实进程组用例和当前 Windows 无符号链接权限用例。
+49. 运行阶段 1H-R 全面审查修复门禁：先执行各 R 波次的
+    `test_document_processing_{artifacts,records,formats,mhtml}.py`、`test_stage1h_consumer_cutover.py`、
+    `test_legacy_office_conversion.py`、`test_translation_module.py` 和架构门禁；再动态发现
+    `test*.py` 并只排除既有 13 项。2026-07-29 发现 2,145 项、排除 13 项、执行 2,132 项，
+    成功 2,129、失败 0、错误 0、跳过 3；未运行 `run.py` 或真实后台服务。
 
 ## 执行限制
 

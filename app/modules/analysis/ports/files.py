@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from app.modules.document_processing.domain import ArtifactRef
 from .common import AnalysisExecutionRef
 from app.modules.analysis.domain.task_inputs import (
     AnalysisDocumentProcessingPolicySnapshot,
@@ -84,6 +85,7 @@ class PreparedAnalysisDocument:
     original_text: str
     processing_path: str = ""
     internal_prepared_basename: str = ""
+    prepared_artifact: ArtifactRef | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -108,6 +110,11 @@ class PreparedAnalysisDocument:
         if basename and basename.replace("\\", "/").rsplit("/", 1)[-1] != basename:
             raise ValueError("internal_prepared_basename 必须是 basename")
         object.__setattr__(self, "internal_prepared_basename", basename)
+        if self.prepared_artifact is not None:
+            if not isinstance(self.prepared_artifact, ArtifactRef):
+                raise TypeError("prepared_artifact 必须是 ArtifactRef 或 None")
+            if self.prepared_artifact.task_id != self.execution.task_id:
+                raise ValueError("prepared_artifact 不属于当前 analysis task")
 
 
 @runtime_checkable

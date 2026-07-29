@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 from pathlib import Path
 
-from .mhtml2pdf import MHTMLToPDFConverter
+from app.modules.document_processing.adapters.mhtml import MHTMLToPDFConverter
 from .MarkdownHandler import MarkdownHandler
 from .core import HYMTTranslator
 

@@ -11,9 +11,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import html
 from pathlib import Path
 from typing import Callable, Protocol, TypeVar
 
+from app.modules.translation.application import (
+    TranslatePreparedDocument,
+    build_translation_profile,
+)
+from app.modules.translation.domain import (
+    TranslationFailurePolicy,
+    TranslationMode,
+    TranslationRequest,
+)
+from app.modules.translation.ports import (
+    TranslationEnginePort,
+    TranslationRendererPort,
+)
 from app.modules.analysis.ports.translation import (
     AnalysisTranslationKind,
     AnalysisTranslationOutcome,
@@ -214,7 +228,137 @@ class SerializedAnalysisTranslationAdapter(AnalysisTranslationPort):
         )
 
 
+class ArtifactAnalysisTranslationAdapter(AnalysisTranslationPort):
+    """Analysis 到独立 Translation 模块的生产适配器。
+
+    全文只接受 prepared Artifact；摘要只调用 TranslationEngine。两者共享同一个引擎
+    Adapter，因此线程安全范围仅覆盖单次引擎调用，不再串行化 Artifact 读取、分段、
+    Renderer 或 DocumentProcessing。
+    """
+
+    def __init__(
+        self,
+        *,
+        document_translation: TranslatePreparedDocument,
+        engine: TranslationEnginePort,
+        renderer: TranslationRendererPort,
+        mode_resolver: Callable[[], TranslationMode],
+    ) -> None:
+        if not isinstance(document_translation, TranslatePreparedDocument):
+            raise TypeError(
+                "document_translation 必须是 TranslatePreparedDocument"
+            )
+        if not isinstance(engine, TranslationEnginePort):
+            raise TypeError("engine 必须实现 TranslationEnginePort")
+        if not isinstance(renderer, TranslationRendererPort):
+            raise TypeError("renderer 必须实现 TranslationRendererPort")
+        if not callable(mode_resolver):
+            raise TypeError("mode_resolver 必须可调用")
+        self._document_translation = document_translation
+        self._engine = engine
+        self._renderer = renderer
+        self._mode_resolver = mode_resolver
+
+    def translate(
+        self,
+        request: AnalysisTranslationRequest,
+    ) -> AnalysisTranslationResult:
+        if not isinstance(request, AnalysisTranslationRequest):
+            raise TypeError("request 必须是 AnalysisTranslationRequest")
+        if request.kind is AnalysisTranslationKind.DOCUMENT:
+            return self._translate_prepared_document(request)
+        return self._translate_summary_with_engine(request)
+
+    def _translate_prepared_document(
+        self,
+        request: AnalysisTranslationRequest,
+    ) -> AnalysisTranslationResult:
+        artifact = request.prepared_artifact
+        if artifact is None:
+            return self._failed_result(
+                request,
+                "document_translation_artifact_missing",
+            )
+        try:
+            profile = build_translation_profile(
+                engine=self._engine,
+                renderer=self._renderer,
+                mode=self._resolve_mode(),
+                failure_policy=TranslationFailurePolicy.PLACEHOLDER,
+            )
+            result = self._document_translation.execute(
+                TranslationRequest(
+                    task_id=request.execution.task_id,
+                    prepared_artifact=artifact,
+                    target_language=request.target_language,
+                    item_limit=0,
+                    profile=profile,
+                    trace_id=(
+                        f"analysis:{request.execution.task_id.value}:document"
+                    ),
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "文件分析 prepared Artifact 全文翻译失败: task_id=%s "
+                "artifact_id=%s error_type=%s",
+                request.execution.task_id,
+                artifact.artifact_id[:12],
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return self._failed_result(request, "document_translation_failed")
+        return AnalysisTranslationResult(
+            execution=request.execution,
+            kind=request.kind,
+            outcome=AnalysisTranslationOutcome.SUCCEEDED,
+            document_translation_one=result.rendered.monolingual_html,
+            document_translation_two=result.rendered.bilingual_html,
+        )
+
+    def _translate_summary_with_engine(
+        self,
+        request: AnalysisTranslationRequest,
+    ) -> AnalysisTranslationResult:
+        try:
+            translated = self._engine.translate(
+                request.text,
+                target_language=request.target_language,
+                mode=self._resolve_mode(),
+            )
+            if not isinstance(translated, str) or not translated:
+                raise ValueError("TranslationEngine 返回空摘要")
+            # 保持旧接口字段中的 HTML 包装和“原文换行译文”展示语义。
+            translated_html = (
+                '<div class="translated-text">'
+                f"{html.escape(translated, quote=True)}</div>"
+            )
+        except Exception as exc:
+            logger.warning(
+                "文件分析摘要 TranslationEngine 失败: task_id=%s "
+                "text_chars=%d error_type=%s",
+                request.execution.task_id,
+                len(request.text),
+                type(exc).__name__,
+            )
+            return self._failed_result(request, "summary_translation_failed")
+        return AnalysisTranslationResult(
+            execution=request.execution,
+            kind=request.kind,
+            outcome=AnalysisTranslationOutcome.SUCCEEDED,
+            document_translation_one=translated_html,
+            document_translation_two=f"{request.text}\n{translated_html}",
+        )
+
+    def _resolve_mode(self) -> TranslationMode:
+        mode = self._mode_resolver()
+        if not isinstance(mode, TranslationMode):
+            raise TypeError("mode_resolver 必须返回 TranslationMode")
+        return mode
+
+
 __all__ = (
+    "ArtifactAnalysisTranslationAdapter",
     "AnalysisTranslationExecutionCoordinator",
     "LegacyAnalysisTranslationService",
     "SerializedAnalysisTranslationAdapter",

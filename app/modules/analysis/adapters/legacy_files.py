@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -22,6 +23,12 @@ from app.modules.document_processing import (
     LegacyOfficePreparer,
     is_legacy_office_path,
 )
+from app.modules.document_processing.adapters import (
+    LocalDocumentPreparationAdapter,
+    LocalDocumentPreparationRequest,
+    ScannedPDFEngine,
+)
+from app.modules.document_processing.domain import DocumentRepresentation
 from app.modules.analysis.ports.files import (
     AnalysisFilePreparationRequest,
     AnalysisTaskWorkspace,
@@ -33,12 +40,14 @@ from app.services.utils.file_downloader import (
     DEFAULT_MAX_DOWNLOAD_BYTES,
     download_to_temp_file,
 )
-from app.services.utils.mhtml_normalizer import (
+from app.modules.document_processing.adapters.path_compat import (
     extract_text_from_mhtml,
     is_mhtml_file,
     normalize_file_for_llm,
 )
-from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
+from app.modules.document_processing.adapters.builtin_ocr import (
+    prepare_analysis_file_for_upload,
+)
 from app.services.utils.word_extractor import extract_text_from_word
 
 
@@ -66,7 +75,11 @@ class LocalAnalysisTaskWorkspaceAdapter(AnalysisTaskWorkspacePort):
     def __init__(self, root_directory: str) -> None:
         if not isinstance(root_directory, str) or not root_directory.strip():
             raise ValueError("root_directory 必须是非空 str")
-        self._root_directory = Path(root_directory).resolve()
+        # Windows 在目录从“不存在”变为“已创建”的并发窗口中，Path.resolve 可能对
+        # 同一绝对路径交替返回 ``C:\...`` 与 ``\\?\C:\...``。两者指向同一位置，
+        # 但 Path.relative_to 会把它们当成不同根。构造时和每次创建任务目录时都先
+        # 统一等价的 Win32 前缀，避免合法任务被误判为路径逃逸。
+        self._root_directory = self._canonical_resolved(Path(root_directory))
 
     def create(self, execution) -> AnalysisTaskWorkspace:  # type: ignore[no-untyped-def]
         """创建当前 execution 的唯一目录，并阻止 TaskId 逃逸根目录。"""
@@ -81,7 +94,7 @@ class LocalAnalysisTaskWorkspaceAdapter(AnalysisTaskWorkspacePort):
         ):
             raise AnalysisFilePreparationError("task_id 不能用于任务目录")
 
-        task_root = (self._root_directory / task_id).resolve()
+        task_root = self._canonical_resolved(self._root_directory / task_id)
         try:
             task_root.relative_to(self._root_directory)
         except ValueError as exc:
@@ -93,6 +106,25 @@ class LocalAnalysisTaskWorkspaceAdapter(AnalysisTaskWorkspacePort):
             task_root,
         )
         return AnalysisTaskWorkspace(execution=execution, root_path=str(task_root))
+
+    @staticmethod
+    def _canonical_resolved(path: Path) -> Path:
+        r"""解析真实路径，并统一 Windows 扩展路径的等价表示。
+
+        这里只移除 Win32 API 的等价 ``\\?\`` 前缀，不做字符串层面的路径包含
+        判断。符号链接和 ``..`` 仍先由 Path.resolve 解析，随后继续使用
+        ``relative_to`` 校验真实包含关系，不能借规范化放宽目录逃逸门禁。
+        """
+
+        resolved = path.resolve()
+        if os.name != "nt":
+            return resolved
+        text = str(resolved)
+        if text.startswith("\\\\?\\UNC\\"):
+            return Path("\\\\" + text[8:])
+        if text.startswith("\\\\?\\"):
+            return Path(text[4:])
+        return resolved
 
 
 class LegacyAnalysisFilePreparationAdapter:
@@ -113,6 +145,10 @@ class LegacyAnalysisFilePreparationAdapter:
         upload_preparer: UploadPreparer = prepare_analysis_file_for_upload,
         text_reader: TextReader | None = None,
         legacy_office_preparer: LegacyOfficePreparer | None = None,
+        document_preparer: LocalDocumentPreparationAdapter | None = None,
+        document_scanned_pdf_engine: ScannedPDFEngine = (
+            ScannedPDFEngine.MINERU
+        ),
     ) -> None:
         if (
             isinstance(download_timeout_seconds, bool)
@@ -141,6 +177,14 @@ class LegacyAnalysisFilePreparationAdapter:
             for method_name in ("preflight", "prepare")
         ):
             raise TypeError("legacy_office_preparer 必须实现 preflight/prepare")
+        if document_preparer is not None and not callable(
+            getattr(document_preparer, "prepare", None)
+        ):
+            raise TypeError("document_preparer 必须实现 prepare")
+        if not isinstance(document_scanned_pdf_engine, ScannedPDFEngine):
+            raise TypeError(
+                "document_scanned_pdf_engine 必须是 ScannedPDFEngine"
+            )
         self._download_timeout_seconds = float(download_timeout_seconds)
         self._max_download_bytes = max_download_bytes
         self._ocr_config_loader = ocr_config_loader
@@ -149,6 +193,8 @@ class LegacyAnalysisFilePreparationAdapter:
         self._upload_preparer = upload_preparer
         self._text_reader = text_reader or self._read_original_text
         self._legacy_office_preparer = legacy_office_preparer
+        self._document_preparer = document_preparer
+        self._document_scanned_pdf_engine = document_scanned_pdf_engine
 
     def prepare(
         self,
@@ -186,6 +232,12 @@ class LegacyAnalysisFilePreparationAdapter:
                 file_name=source_name,
                 download_dir=download_dir,
             )
+            if self._document_preparer is not None:
+                return self._prepare_shared_artifact(
+                    request,
+                    downloaded_path=downloaded_path,
+                    normalized_dir=normalized_dir,
+                )
             processing_path, internal_prepared_basename = (
                 self._prepare_processing_path(
                     downloaded_path,
@@ -224,6 +276,116 @@ class LegacyAnalysisFilePreparationAdapter:
             upload_path=str(upload_path),
             original_text=original_text,
             internal_prepared_basename=internal_prepared_basename,
+        )
+
+    def _prepare_shared_artifact(
+        self,
+        request: AnalysisFilePreparationRequest,
+        *,
+        downloaded_path: Path,
+        normalized_dir: Path,
+    ) -> PreparedAnalysisDocument:
+        """把同一 prepared Artifact 映射给 RAG、正文读取和全文翻译。"""
+
+        preparer = self._document_preparer
+        assert preparer is not None
+        policy = request.document_processing_policy
+        if policy is None:  # pragma: no cover - DTO 已保证
+            raise AnalysisFilePreparationError("文件处理策略缺失")
+        legacy_source = is_legacy_office_path(downloaded_path)
+        if legacy_source != policy.legacy_office_required:
+            logger.error(
+                "文件分析输入类型与冻结策略不一致: task_id=%s "
+                "legacy_source=%s legacy_required=%s policy_fingerprint=%s",
+                request.execution.task_id,
+                legacy_source,
+                policy.legacy_office_required,
+                policy.processing_policy_fingerprint,
+            )
+            raise AnalysisFilePreparationError("文件类型与冻结处理策略不一致")
+        try:
+            prepared = preparer.prepare(
+                LocalDocumentPreparationRequest(
+                    task_id=request.execution.task_id,
+                    source_path=downloaded_path,
+                    logical_step="analysis-input",
+                    trace_id=(
+                        f"analysis:{request.execution.task_id.value}:prepare"
+                    ),
+                    scanned_pdf_engine=self._document_scanned_pdf_engine,
+                )
+            )
+            rag_artifact = prepared.rag_artifact
+            suffix = {
+                DocumentRepresentation.MARKDOWN: ".md",
+                DocumentRepresentation.TEXT: ".txt",
+                DocumentRepresentation.PDF: ".pdf",
+            }.get(rag_artifact.representation)
+            if suffix is None:  # pragma: no cover - LocalPreparedArtifact 已强制集合
+                raise AnalysisFilePreparationError("RAG Artifact 表示不受支持")
+            target = normalized_dir / f"prepared{suffix}"
+            temporary = target.with_suffix(f"{target.suffix}.part")
+            try:
+                with preparer.artifact_store.open_reader(
+                    rag_artifact
+                ) as reader, temporary.open("xb") as writer:
+                    shutil.copyfileobj(reader, writer, length=1024 * 1024)
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                os.replace(temporary, target)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "清理 Analysis Artifact 映射临时文件失败: "
+                        "task_id=%s",
+                        request.execution.task_id,
+                        exc_info=True,
+                    )
+            upload_path = self._require_file_within(
+                target,
+                root=normalized_dir,
+                label="prepared Artifact 映射",
+            )
+            text_artifact = prepared.prepared_artifact
+            if text_artifact is None:
+                # 两级 OCR 均已明确失败时，原 PDF 只进入 RAG。正文与全文翻译保持
+                # 可降级失败，不能尝试把二进制内容解码成文本。
+                original_text = ""
+            else:
+                with preparer.artifact_store.open_reader(
+                    text_artifact
+                ) as reader:
+                    original_text = reader.read().decode("utf-8")
+        except AnalysisFilePreparationError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "文件分析共享文档准备失败: task_id=%s file_name=%s "
+                "error_type=%s",
+                request.execution.task_id,
+                request.execution.file_name,
+                type(exc).__name__,
+            )
+            raise AnalysisFilePreparationError("文件分析文件准备失败") from exc
+
+        logger.info(
+            "文件分析共享 prepared Artifact 已映射: task_id=%s "
+            "rag_artifact_id=%s text_available=%s text_chars=%d",
+            request.execution.task_id,
+            rag_artifact.artifact_id[:12],
+            prepared.prepared_artifact is not None,
+            len(original_text),
+        )
+        return PreparedAnalysisDocument(
+            execution=request.execution,
+            source_path=str(downloaded_path),
+            processing_path=str(upload_path),
+            upload_path=str(upload_path),
+            original_text=original_text,
+            internal_prepared_basename=upload_path.name,
+            prepared_artifact=prepared.prepared_artifact,
         )
 
     def _prepare_processing_path(

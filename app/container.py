@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import signal
@@ -26,7 +27,7 @@ from app.integrations.anythingllm.policies import (
     knowledge_index_workspace_settings,
 )
 from app.modules.analysis.adapters import (
-    AnalysisTranslationExecutionCoordinator,
+    ArtifactAnalysisTranslationAdapter,
     LegacyAnalysisAuditAdapter,
     LegacyAnalysisFilePreparationAdapter,
     LegacyAnalysisKnowledgeAdapter,
@@ -36,7 +37,6 @@ from app.modules.analysis.adapters import (
     SQLiteAnalysisCallbackAdapter,
     SQLiteAnalysisCallbackRecoverySource,
     SQLiteAnalysisResourceStoreAdapter,
-    SerializedAnalysisTranslationAdapter,
 )
 from app.modules.analysis.adapters.local_dispatcher import (
     LocalAnalysisDispatcherSnapshot,
@@ -55,6 +55,17 @@ from app.modules.document_processing import (
     LegacyOfficeConversionError,
     LegacyOfficePreparer,
     LibreOfficeLegacyOfficePreparer,
+)
+from app.modules.document_processing.adapters import (
+    FIFOCapacityAdapter,
+    LocalArtifactStoreAdapter,
+    LocalDocumentPreparationAdapter,
+    ScannedPDFEngine,
+    SQLiteMinerUOperationObserver,
+    SQLiteProcessingRecordAdapter,
+)
+from app.modules.document_processing.composition import (
+    configure_document_processing_environment,
 )
 from app.modules.report.adapters import (
     AnythingLLMReportClientFactory,
@@ -76,6 +87,13 @@ from app.modules.report.application import (
     RunReportTask,
     SubmitReportTask,
 )
+from app.modules.translation.adapters import (
+    HYMTTranslator,
+    LazyHYMTTranslationEngineAdapter,
+    SafeHTMLTranslationRendererAdapter,
+)
+from app.modules.translation.application import TranslatePreparedDocument
+from app.modules.translation.domain import TranslationMode
 from app.modules.report.ports import (
     ReportTaskDispatcherLifecyclePort,
     ReportTaskDispatcherPort,
@@ -110,7 +128,7 @@ from app.modules.weaponry.adapters import (
     AnythingLLMWeaponryClientFactory,
     AnythingLLMWeaponryResourceCleanupAdapter,
     DatabaseServiceWeaponryDocumentScopeAdapter,
-    LLMTranslationServiceWeaponryAdapter,
+    TranslationEngineWeaponryAdapter,
     NoAuxiliaryGuidanceAdapter,
     SQLiteWeaponryCallbackAdapter,
     SQLiteWeaponryCallbackRecoverySource,
@@ -168,6 +186,7 @@ from app.services.core.config import (
     load_chat_infrastructure_config,
     load_legacy_office_config,
     load_llm_integration_config,
+    load_ocr_config,
     load_report_infrastructure_config,
 )
 from app.services.core.database import DatabaseService
@@ -178,10 +197,24 @@ from app.services.core.settings import (
     RUNTIME_DIR,
 )
 from app.services.llm_service.task_service import LLMTaskService
-from app.services.llm_service.translation_service import get_translation_service
 
 
 logger = logging.getLogger(__name__)
+
+
+def _translation_mode_from_environment() -> TranslationMode:
+    """解析既有 DOCSENSE_TRANSLATION_MODE，不改变公开或 Python 调用参数。"""
+
+    mode = os.getenv("DOCSENSE_TRANSLATION_MODE", "machine").strip().lower()
+    if mode in {"machine", "fast", "argos", "argostranslate"}:
+        return TranslationMode.MACHINE
+    if mode in {"llm", "model", "ollama"}:
+        return TranslationMode.LLM
+    logger.warning(
+        "环境变量 DOCSENSE_TRANSLATION_MODE 配置无效，默认使用机器翻译: mode=%s",
+        mode,
+    )
+    return TranslationMode.MACHINE
 
 
 def _terminate_process_after_analysis_dispatcher_fatal(message: str) -> None:
@@ -939,6 +972,11 @@ def create_application_services() -> ApplicationServices:
     )
     anythingllm_config = load_anythingllm_config()
     llm_config = load_llm_integration_config()
+    ocr_config = load_ocr_config()
+    configure_document_processing_environment(
+        mineru_model_source=os.getenv("MINERU_MODEL_SOURCE", "local"),
+        tessdata_prefix=ocr_config.tessdata_prefix,
+    )
     task_service = LLMTaskService(llm_config.task_db_path)
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_store = ChatStore(str(CHAT_DB_PATH))
@@ -974,6 +1012,63 @@ def create_application_services() -> ApplicationServices:
         task_reader=LegacyTaskReadAdapter(task_service),
     )
     upload_task_limiter = UploadTaskLimiter(max_concurrency=1)
+    # DocumentProcessing 的重型许可只包围 MinerU/OCR 调用。当前是单实例 FIFO；
+    # accepted 任务事实仍由各业务 Dispatcher/SQLite 持有，不能把它描述成可靠队列。
+    document_processing_capacity = FIFOCapacityAdapter(
+        capacity=1,
+        resource_name="document-processing-heavy-io",
+    )
+    document_artifacts = LocalArtifactStoreAdapter(
+        RUNTIME_DIR / "document_processing" / "artifacts"
+    )
+    legacy_policy_fingerprint = hashlib.sha256(
+        (
+            "legacy-office-policy-v1\0"
+            f"{legacy_office_config.allowed_version_series}\0"
+            f"{legacy_office_config.timeout_seconds}\0"
+            f"{legacy_office_config.max_input_bytes}\0"
+            f"{legacy_office_config.max_output_bytes}"
+        ).encode("utf-8")
+    ).hexdigest()
+    document_preparer = LocalDocumentPreparationAdapter(
+        artifact_store=document_artifacts,
+        records=SQLiteProcessingRecordAdapter(llm_config.task_db_path),
+        resource=document_processing_capacity,
+        legacy_office_preparer=legacy_office_preparer,
+        materialization_root=(
+            RUNTIME_DIR / "document_processing" / "materializations"
+        ),
+        legacy_policy_fingerprint=legacy_policy_fingerprint,
+        ocr_languages=ocr_config.languages,
+        ocr_dpi=ocr_config.dpi,
+        ocr_enabled=ocr_config.enabled,
+        ocr_sample_pages=ocr_config.sample_pages,
+        ocr_text_threshold=ocr_config.text_threshold,
+        mineru_lang=ocr_config.mineru_lang,
+        mineru_api_url=ocr_config.mineru_api_url,
+        mineru_operation_observer=SQLiteMinerUOperationObserver(
+            llm_config.task_db_path
+        ),
+    )
+    translation_model_name = os.getenv(
+        "DOCSENSE_TRANSLATION_MODEL",
+        "Qwen3-4B-Instruct-2507-Q4_K_M",
+    ).strip()
+    translation_engine = LazyHYMTTranslationEngineAdapter(
+        lambda: HYMTTranslator(
+            model_name=translation_model_name,
+            check_ollama=False,
+        ),
+        engine_fingerprint=(
+            f"hymt-runtime-v1:{translation_model_name or 'default'}"
+        ),
+    )
+    translation_renderer = SafeHTMLTranslationRendererAdapter()
+    translate_prepared_document = TranslatePreparedDocument(
+        reader=document_artifacts,
+        engine=translation_engine,
+        renderer=translation_renderer,
+    )
 
     # Analysis 的 RAG 与永久知识 Adapter 只持有惰性 Factory。每次真实任务进入 Worker
     # 后才会创建独立 Transport；Report/Weaponry 各自有业务专用 Factory，不能复用这里
@@ -1037,6 +1132,7 @@ def create_application_services() -> ApplicationServices:
         download_timeout=llm_config.download_timeout,
         max_download_bytes=report_infrastructure_config.max_download_bytes,
         legacy_office_preparer=legacy_office_preparer,
+        document_preparer=document_preparer,
     )
     report_rag = AnythingLLMReportRagAdapter(
         AnythingLLMReportClientFactory(anythingllm_config),
@@ -1142,13 +1238,19 @@ def create_application_services() -> ApplicationServices:
         files=LegacyAnalysisFilePreparationAdapter(
             download_timeout_seconds=llm_config.download_timeout,
             legacy_office_preparer=legacy_office_preparer,
+            document_preparer=document_preparer,
+            document_scanned_pdf_engine=ScannedPDFEngine(
+                ocr_config.analysis_scanned_pdf_engine
+            ),
         ),
         rag_factory=LegacyAnalysisRagAdapterFactory(document_rag_factory),
         knowledge=LegacyAnalysisKnowledgeAdapter(knowledge_index_factory),
         audit=LegacyAnalysisAuditAdapter(task_service),
-        translation=SerializedAnalysisTranslationAdapter(
-            get_translation_service(),
-            AnalysisTranslationExecutionCoordinator(),
+        translation=ArtifactAnalysisTranslationAdapter(
+            document_translation=translate_prepared_document,
+            engine=translation_engine,
+            renderer=translation_renderer,
+            mode_resolver=_translation_mode_from_environment,
         ),
         callbacks=analysis_callbacks,
         callback_recovery_source=SQLiteAnalysisCallbackRecoverySource(
@@ -1268,9 +1370,7 @@ def create_application_services() -> ApplicationServices:
         retrieval=weaponry_retrieval,
         extraction=weaponry_extraction,
         guidance=weaponry_guidance,
-        translation=LLMTranslationServiceWeaponryAdapter(
-            get_translation_service()
-        ),
+        translation=TranslationEngineWeaponryAdapter(translation_engine),
         audit=weaponry_audit,
         callbacks=weaponry_callbacks,
         callback_recovery_source=SQLiteWeaponryCallbackRecoverySource(

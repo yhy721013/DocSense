@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
+from app.modules.document_processing.domain import ArtifactRef
 from .common import AnalysisExecutionRef
 
 
@@ -27,6 +28,7 @@ class AnalysisTranslationRequest:
     kind: AnalysisTranslationKind
     target_language: str = "Chinese"
     source_path: str = ""
+    prepared_artifact: ArtifactRef | None = None
     text: str = ""
 
     def __post_init__(self) -> None:
@@ -39,8 +41,20 @@ class AnalysisTranslationRequest:
         if not isinstance(self.source_path, str) or not isinstance(self.text, str):
             raise TypeError("source_path 与 text 必须是 str")
         if self.kind is AnalysisTranslationKind.DOCUMENT:
-            if not self.source_path.strip() or self.text:
-                raise ValueError("document 翻译只能携带 source_path")
+            if self.text:
+                raise ValueError("document 翻译不得携带 text")
+            if self.prepared_artifact is not None and not isinstance(
+                self.prepared_artifact,
+                ArtifactRef,
+            ):
+                raise TypeError("prepared_artifact 必须是 ArtifactRef 或 None")
+            if not self.source_path.strip() and self.prepared_artifact is None:
+                raise ValueError("document 翻译必须携带受控 Artifact 或兼容 source_path")
+            if (
+                self.prepared_artifact is not None
+                and self.prepared_artifact.task_id != self.execution.task_id
+            ):
+                raise ValueError("prepared_artifact 不属于当前 analysis task")
         elif not self.text:
             raise ValueError("summary 翻译必须携带非空 text")
         object.__setattr__(self, "target_language", self.target_language.strip())

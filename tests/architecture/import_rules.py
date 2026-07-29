@@ -101,9 +101,27 @@ _ANALYSIS_DOMAIN_FILE_STDLIB_ROOTS = {
     "ranges.py": frozenset({"copy"}),
     "result_mapping.py": frozenset({"pathlib"}),
 }
+# 1H 的共享文档处理包含两类经评审的纯标准库例外：
+# - MHTML 领域规则使用 ``email`` 解析不可变 MIME 字节，不接触文件或网络；
+# - Legacy Office 兼容 DTO 暂时保留 Path 和幂等 cleanup lease，直到三类引用清零后
+#   随旧 Python 兼容签名一起删除。例外按“模块 + 文件”精确授予，不能扩散到整个 Domain。
+_DOCUMENT_PROCESSING_DOMAIN_FILE_STDLIB_ROOTS = {
+    "legacy_office.py": frozenset({"logging", "pathlib", "threading"}),
+    "mhtml.py": frozenset({"email"}),
+}
+_TRANSLATION_DOMAIN_FILE_STDLIB_ROOTS = {
+    # 该文件是从旧 Translator 搬迁的纯分块规则；日志只记录计数/错误类型，不执行 I/O。
+    "chunks.py": frozenset({"logging"}),
+}
 _PORTS_STDLIB_ROOTS = frozenset(
     {"__future__", "dataclasses", "enum", "typing"}
 )
+# Port 中的例外同样精确到文件。``legacy_office.py`` 保留迁移期路径签名；
+# ``processing.py`` 的锁只保护候选 scratch cleanup callback，不是任务执行锁。
+_DOCUMENT_PROCESSING_PORT_FILE_STDLIB_ROOTS = {
+    "legacy_office.py": frozenset({"pathlib"}),
+    "processing.py": frozenset({"threading"}),
+}
 _APPLICATION_STDLIB_ROOTS = frozenset(
     {
         "__future__",
@@ -385,10 +403,34 @@ def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
                 frozenset(),
             )
         )
+    elif module_name == "document_processing":
+        allowed_stdlib_roots = (
+            _DOMAIN_STDLIB_ROOTS
+            | _DOCUMENT_PROCESSING_DOMAIN_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
+    elif module_name == "translation":
+        allowed_stdlib_roots = (
+            _DOMAIN_STDLIB_ROOTS
+            | _TRANSLATION_DOMAIN_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
+    allowed_internal = [f"app.modules.{module_name}.domain"]
+    if module_name in {"document_processing", "translation"}:
+        # TaskId 是跨业务共享的稳定控制面值对象；只放行 tasks domain。
+        allowed_internal.append("app.modules.tasks.domain")
+    if module_name == "translation":
+        # Translation 只消费 prepared Artifact 值对象；独立 1H 门禁会永久禁止
+        # 其接触 DocumentProcessing Application/Adapter 或格式转换实现。
+        allowed_internal.append("app.modules.document_processing.domain")
     return _first_positive_allowlist_violation(
         reference,
         allowed_stdlib_roots=allowed_stdlib_roots,
-        allowed_internal_prefixes=(f"app.modules.{module_name}.domain",),
+        allowed_internal_prefixes=tuple(allowed_internal),
         reason="领域层只能依赖批准的标准库和本业务模块领域类型",
     )
 
@@ -404,9 +446,21 @@ def _ports_matcher(reference: ImportReference) -> RuleMatch | None:
         # TaskId/TaskBusinessRef 是跨业务 Port 可以复用的稳定控制面值对象；这里只放行
         # tasks domain，不放行 tasks application/adapters 或其他业务模块。
         allowed_internal.append("app.modules.tasks.domain")
+    if module_name in {"analysis", "translation"}:
+        # 两个消费者只共享不透明 ArtifactRef/表示类型，不获得 Processor 或路径能力。
+        allowed_internal.append("app.modules.document_processing.domain")
+    allowed_stdlib_roots = _PORTS_STDLIB_ROOTS
+    if module_name == "document_processing":
+        allowed_stdlib_roots = (
+            _PORTS_STDLIB_ROOTS
+            | _DOCUMENT_PROCESSING_PORT_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
     return _first_positive_allowlist_violation(
         reference,
-        allowed_stdlib_roots=_PORTS_STDLIB_ROOTS,
+        allowed_stdlib_roots=allowed_stdlib_roots,
         allowed_internal_prefixes=tuple(allowed_internal),
         reason="端口只能依赖批准的标准库、本模块领域类型和其他抽象端口",
     )

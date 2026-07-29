@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "capturedDate": "2026-07-29",
+  "publicContractHashes": {
+    "docs/接口文档/README.md": "C1F9CE40AD15D9DA81CC0F2090663E9B906BC255562C95FFF570AEFB05295D01",
+    "docs/接口文档/文件处理和报告生成.md": "513770604F4A428AB7FA7487F7D9D770AF7F0DBB1F0430035FC80B8635B13B09",
+    "docs/接口文档/知识谱系解析.md": "D92B4D2AF50945D22F985A6B68301C7614DDA15161B11F01EB8B2CB7B310FB6F"
+  },
+  "temporaryConversionCouplings": [],
+  "forbiddenConversionTargets": [
+    "app.services.translator.MinerUConverter",
+    "app.services.translator.mhtml2pdf"
+  ],
+  "legacyFormatCompatibilityFiles": [
+    "app/services/translator/MarkdownHandler.py",
+    "app/services/translator/MinerUConverter.py",
+    "app/services/translator/mhtml2pdf.py",
+    "app/services/translator/mhtml_handler.py",
+    "app/services/utils/mhtml_normalizer.py",
+    "app/services/utils/ocr_preprocessor.py",
+    "app/services/utils/rag_pipeline.py"
+  ],
+  "currentDocumentProcessingConsumers": [
+    "app/container.py",
+    "app/modules/analysis/adapters/legacy_files.py",
+    "app/modules/analysis/ports/files.py",
+    "app/modules/analysis/ports/translation.py",
+    "app/modules/report/adapters/legacy_files.py",
+    "app/modules/report/adapters/local_artifacts.py",
+    "app/services/core/config.py",
+    "app/services/translator/mhtml2pdf.py",
+    "app/services/translator/mhtml_handler.py",
+    "app/services/utils/mhtml_normalizer.py",
+    "app/services/translator/MinerUConverter.py",
+    "app/services/translator/MarkdownHandler.py",
+    "app/services/utils/ocr_preprocessor.py",
+    "app/services/utils/rag_pipeline.py",
+    "app/modules/translation/domain/models.py",
+    "app/modules/translation/ports/translation.py"
+  ],
+  "currentTranslationConsumers": [
+    "app/container.py",
+    "app/modules/analysis/adapters/translation.py",
+    "app/modules/weaponry/adapters/translation.py",
+    "app/services/translator/chunk_processor.py",
+    "app/services/translator/core.py",
+    "app/services/translator/utils.py"
+  ],
+  "mhtmlCases": [
+    {
+      "file": "simple.mhtml",
+      "mode": "general",
+      "contains": [
+        "Stage 1H Baseline",
+        "Hello Document Processing",
+        "Second baseline paragraph."
+      ],
+      "excludes": [
+        "console.log",
+        "display:none"
+      ]
+    },
+    {
+      "file": "navigation_reference.mhtml",
+      "mode": "retrieval",
+      "contains": [
+        "尼米兹级航空母舰",
+        "正文包含可检索的装备事实"
+      ],
+      "excludes": [
+        "相关推荐",
+        "USNI News",
+        "reference.example",
+        "版权信息"
+      ],
+      "exactCounts": {
+        "正文包含可检索的装备事实": 1
+      }
+    }
+  ],
+  "ocrFallbackOrder": {
+    "analysisDefault": [
+      "mineru",
+      "builtin_ocr",
+      "original_pdf"
+    ],
+    "reportDefault": [
+      "builtin_ocr",
+      "original_pdf"
+    ]
+  },
+  "translationDispatch": {
+    ".pdf": "markdown",
+    ".docx": "markdown",
+    ".pptx": "markdown",
+    ".xlsx": "markdown",
+    ".mhtml": "mhtml",
+    ".mht": "mhtml",
+    ".txt": "txt",
+    ".md": "markdown"
+  }
+}
