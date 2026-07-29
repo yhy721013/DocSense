@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.ports import ChatDocumentRef, ChatSessionRefs
+from app.ports import ChatChunk, ChatDocumentRef, ChatSessionRefs
 from app.services.chat.domain import CHAT_ARCHITECTURE_CANDIDATE_RESOLVED
 from app.services.chat import (
     ChatArchitectureCandidates,
@@ -36,6 +36,7 @@ from app.services.chat import (
     record_chat_run_events,
 )
 from tests.fakes import FakeChatConversationFactory
+from tests.fakes.chat import FakeChatConversationPort
 
 
 class _StaticDocumentResolver:
@@ -909,6 +910,140 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             self.assertTrue(
                 all(item.run_id == prepared.run_id for item in leases)
             )
+
+    def test_missing_remote_attachment_receipt_fails_closed_without_binding(
+        self,
+    ) -> None:
+        """远端未回传所请求位置时，禁止用原始 document_ref 假装绑定成功。"""
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20006",
+            message="question",
+            file_names=("alpha.pdf",),
+        )
+
+        with patch.object(
+            FakeChatConversationPort,
+            "attach_documents",
+            return_value=(),
+        ):
+            events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(["error"], [
+            event.event_type for event in events
+        ])
+        self.assertEqual(
+            (),
+            self.store.document_bindings.list_current_by_chat(
+                "20006"
+            ),
+        )
+        run = self.store.runs.get(prepared.run_id)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
+
+    def test_duplicate_remote_attachment_receipt_fails_closed_without_binding(
+        self,
+    ) -> None:
+        """同一远端位置出现多个回执时无法确定规范身份，整批不得落本地 Binding。"""
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20007",
+            message="question",
+            file_names=("alpha.pdf",),
+        )
+        location = "custom-documents/alpha.pdf.json"
+
+        with patch.object(
+            FakeChatConversationPort,
+            "attach_documents",
+            return_value=(
+                ChatDocumentRef(
+                    document_ref="document:canonical-a",
+                    external_location=location,
+                ),
+                ChatDocumentRef(
+                    document_ref="document:canonical-b",
+                    external_location=location,
+                ),
+            ),
+        ):
+            events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(["error"], [
+            event.event_type for event in events
+        ])
+        self.assertEqual(
+            (),
+            self.store.document_bindings.list_current_by_chat(
+                "20007"
+            ),
+        )
+
+    def test_unique_remote_attachment_receipt_can_canonicalize_document_ref(
+        self,
+    ) -> None:
+        """位置唯一匹配后，以供应商回执的规范 document_ref 驱动模型并持久化。"""
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20008",
+            message="question",
+            file_names=("alpha.pdf",),
+        )
+
+        with (
+            patch.object(
+                FakeChatConversationPort,
+                "attach_documents",
+                return_value=(
+                    ChatDocumentRef(
+                        document_ref="document:canonical-alpha",
+                        external_location=r"custom-documents\alpha.pdf.json",
+                    ),
+                ),
+            ),
+            patch.object(
+                FakeChatConversationPort,
+                "stream_message",
+                return_value=iter((ChatChunk("answer", 1),)),
+            ) as stream_message,
+        ):
+            events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(
+            ["chatInfo", "textChunk", "done"],
+            [event.event_type for event in events],
+        )
+        bindings = self.store.document_bindings.list_current_by_chat("20008")
+        self.assertEqual(1, len(bindings))
+        self.assertEqual("document:canonical-alpha", bindings[0].document_ref)
+        self.assertEqual(
+            "custom-documents/alpha.pdf.json",
+            bindings[0].external_location,
+        )
+        self.assertEqual(
+            ("document:canonical-alpha",),
+            stream_message.call_args.kwargs["document_refs"],
+        )
 
     def test_default_execution_uses_accepted_snapshot_after_catalog_changes(
         self,

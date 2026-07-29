@@ -64,6 +64,37 @@ class DatabaseServiceTests(unittest.TestCase):
                 service.list_document_records_by_architecture_id(999),
             )
 
+    def test_architecture_document_query_applies_sql_limit_after_stable_order(
+        self,
+    ):
+        """类别读取上界必须在数据库层生效，并保留既有确定排序。"""
+        with workspace_tempdir() as tmp:
+            service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
+            for file_name in ("charlie.pdf", "alpha.pdf", "beta.pdf"):
+                service.save_document_record(
+                    file_name,
+                    100,
+                    f"document-{file_name}",
+                    ingested_file_name=file_name,
+                )
+
+            records = service.list_document_records_by_architecture_id(
+                100,
+                limit=2,
+            )
+
+            self.assertEqual(
+                ["alpha.pdf", "beta.pdf"],
+                [record["file_name"] for record in records],
+            )
+            for invalid_limit in (True, "2", 0, -1):
+                with self.subTest(limit=invalid_limit):
+                    with self.assertRaises((TypeError, ValueError)):
+                        service.list_document_records_by_architecture_id(
+                            100,
+                            limit=invalid_limit,  # type: ignore[arg-type]
+                        )
+
     def test_architecture_document_query_strictly_decodes_metadata(self):
         """精确查询不能用空 metadata 掩盖类别中的损坏记录。"""
         with workspace_tempdir() as tmp:

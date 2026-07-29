@@ -14,6 +14,7 @@ from app.services.chat.domain.document_scope import (
     CHAT_SCOPE_MODE_ARCHITECTURE,
     CHAT_SCOPE_MODE_FILES,
 )
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,7 @@ class ChatScopeSelectorWebTests(unittest.TestCase):
                     )
 
     def test_architecture_id_is_normalized_to_domain_integer(self) -> None:
-        for raw_value in (1, "1", "0001", 9223372036854775807):
+        for raw_value in (1, "1", "0001", MAX_CHAT_ARCHITECTURE_ID):
             with self.subTest(raw_value=raw_value):
                 selector = parse_chat_scope_selector(
                     {"architectureId": raw_value}
@@ -47,11 +48,15 @@ class ChatScopeSelectorWebTests(unittest.TestCase):
     def test_architecture_id_rejects_null_bool_and_non_decimal_values(self) -> None:
         cases = (
             (None, "architectureId不能为空"),
-            (True, "architectureId必须为1到9223372036854775807之间的正整数"),
-            (1.0, "architectureId必须为1到9223372036854775807之间的正整数"),
-            ("1e3", "architectureId必须为1到9223372036854775807之间的正整数"),
-            ("１", "architectureId必须为1到9223372036854775807之间的正整数"),
-            ("9" * 10000, "architectureId必须为1到9223372036854775807之间的正整数"),
+            (True, "architectureId必须为1到9007199254740991之间的正整数"),
+            (1.0, "architectureId必须为1到9007199254740991之间的正整数"),
+            ("1e3", "architectureId必须为1到9007199254740991之间的正整数"),
+            ("１", "architectureId必须为1到9007199254740991之间的正整数"),
+            (
+                MAX_CHAT_ARCHITECTURE_ID + 1,
+                "architectureId必须为1到9007199254740991之间的正整数",
+            ),
+            ("9" * 10000, "architectureId必须为1到9007199254740991之间的正整数"),
         )
         for raw_value, expected_error in cases:
             with self.subTest(raw_type=type(raw_value).__name__):

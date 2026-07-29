@@ -9,9 +9,13 @@ from app.adapters.web.weaponry_ids import (
     normalize_architecture_id,
 )
 from app.services.chat.domain.document_scope import ChatScopeSelector
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 
 CHAT_ARCHITECTURE_ID_EMPTY_ERROR = "architectureId不能为空"
+CHAT_ARCHITECTURE_ID_ERROR = (
+    f"architectureId必须为1到{MAX_CHAT_ARCHITECTURE_ID}之间的正整数"
+)
 CHAT_SCOPE_SELECTOR_CONFLICT_ERROR = "architectureId与fileNames不能同时传入"
 CHAT_FILE_NAMES_TYPE_ERROR = "fileNames必须为数组"
 CHAT_FILE_NAME_ITEM_ERROR = "fileNames中包含无效文件名"
@@ -49,7 +53,13 @@ def parse_chat_scope_selector(params: Mapping[str, object]) -> ChatScopeSelector
                 raw_architecture_id
             ).value
         except ArchitectureIdValidationError as exc:
-            raise ChatScopeSelectorValidationError(str(exc)) from exc
+            raise ChatScopeSelectorValidationError(
+                CHAT_ARCHITECTURE_ID_ERROR
+            ) from exc
+        if architecture_id > MAX_CHAT_ARCHITECTURE_ID:
+            raise ChatScopeSelectorValidationError(
+                CHAT_ARCHITECTURE_ID_ERROR
+            )
         return ChatScopeSelector.for_architecture(architecture_id)
 
     # 缺少两个字段仍走原 fileNames 类型错误，防止 architecture 能力反向改变旧调用方。
@@ -72,6 +82,7 @@ def parse_chat_scope_selector(params: Mapping[str, object]) -> ChatScopeSelector
 
 __all__ = [
     "CHAT_ARCHITECTURE_ID_EMPTY_ERROR",
+    "CHAT_ARCHITECTURE_ID_ERROR",
     "CHAT_FILE_NAME_ITEM_ERROR",
     "CHAT_FILE_NAMES_TYPE_ERROR",
     "CHAT_SCOPE_SELECTOR_CONFLICT_ERROR",

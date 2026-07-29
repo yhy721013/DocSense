@@ -58,6 +58,7 @@ from app.presenters.weaponry_submission import (
     WeaponrySubmissionResponsePresenter,
 )
 from app.services.chat import (
+    ChatAdmissionBusyError,
     ChatArchitectureIdConflictError,
     ChatArchitectureScopeInvalidError,
     ChatArchitectureScopeNotFoundError,
@@ -902,7 +903,60 @@ def llm_chat():
         return jsonify({"error": "fileNames超过文件对话数量上限"}), 400
 
     chat_run_executor = services.chat_run_executor
-    if not chat_run_executor.try_acquire_stream_slot():
+    try:
+        admission_lease = services.chat_commands.reserve_chat_admission(
+            chat_id=chat_id,
+            scope_selector=scope_selector,
+        )
+    except ChatScopeModeConflictError:
+        logger.warning(
+            "文件对话准入被拒绝：会话范围模式冲突: chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话的范围模式不匹配"}), 409
+    except ChatArchitectureIdConflictError:
+        logger.warning(
+            "architecture 文件对话准入被拒绝：会话类别 ID 冲突: "
+            "chatId=%s requestedArchitectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({"error": "当前对话已绑定其他architectureId"}), 409
+    except (
+        ChatAdmissionBusyError,
+        ChatRunBusyError,
+        ChatSessionUnavailableError,
+    ):
+        logger.warning(
+            "文件对话准入被拒绝：同一 chatId 已有请求或运行: chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
+    except ValueError as exc:
+        logger.warning(
+            "文件对话准入校验失败: chatId=%s error_type=%s",
+            chat_id,
+            exc.__class__.__name__,
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        stream_slot_available = chat_run_executor.try_acquire_stream_slot()
+    except Exception:
+        # 容量适配器异常时尚未创建任何 Session/run；必须先按 token 释放 Guard，
+        # 避免同一 chatId 在异常恢复后仍被临时准入事实阻塞。
+        services.chat_commands.release_chat_admission(
+            lease=admission_lease
+        )
+        logger.exception(
+            "文件对话流容量许可获取异常，已释放准入 Guard: chatId=%s",
+            chat_id,
+        )
+        raise
+    if not stream_slot_available:
+        services.chat_commands.release_chat_admission(
+            lease=admission_lease
+        )
         logger.warning(
             "文件对话请求被拒绝：进程内流并发容量已满: chatId=%s max_concurrent_streams=%d",
             chat_id,
@@ -928,6 +982,7 @@ def llm_chat():
             chat_id=chat_id,
             message=message,
             scope_selector=scope_selector,
+            admission_lease=admission_lease,
         )
     except ChatDocumentNotFoundError as exc:
         _release_stream_slot()

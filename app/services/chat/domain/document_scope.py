@@ -12,6 +12,7 @@ from app.services.chat.domain.document_candidates import (
     ChatArchitectureCandidates,
     ChatDocumentCandidate,
 )
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 
 CHAT_SCOPE_MODE_FILES = "files"
@@ -116,7 +117,7 @@ def _architecture_id(value: Any, *, name: str) -> int:
     """校验 Web 层已经规范化的正整数 ID，禁止 bool 混入。"""
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be int")
-    if value < 1 or value > 9223372036854775807:
+    if value < 1 or value > MAX_CHAT_ARCHITECTURE_ID:
         raise ValueError(f"{name} is out of range")
     return value
 

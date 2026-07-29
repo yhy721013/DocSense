@@ -17,7 +17,9 @@ from app.services.chat.domain.document_candidates import (
     ChatArchitectureCandidates,
     ChatDocumentCandidate,
 )
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 from app.services.core.database import DatabaseService
+from app.services.core.settings import CHAT_MAX_FILES_PER_REQUEST
 
 
 logger = logging.getLogger(__name__)
@@ -79,8 +81,22 @@ class ChatArchitectureDocumentResolver(Protocol):
 class DatabaseChatDocumentResolver(ChatDocumentResolver):
     """将本地知识记录转换为供应商无关文档 DTO 的适配器。"""
 
-    def __init__(self, knowledge_base: DatabaseService) -> None:
+    def __init__(
+        self,
+        knowledge_base: DatabaseService,
+        *,
+        architecture_candidate_limit: int = CHAT_MAX_FILES_PER_REQUEST,
+    ) -> None:
+        if (
+            isinstance(architecture_candidate_limit, bool)
+            or not isinstance(architecture_candidate_limit, int)
+            or architecture_candidate_limit < 1
+        ):
+            raise ValueError(
+                "architecture_candidate_limit must be a positive integer"
+            )
         self._knowledge_base = knowledge_base
+        self._architecture_candidate_limit = architecture_candidate_limit
 
     def resolve_many(
         self,
@@ -213,7 +229,7 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
             int,
         ):
             raise TypeError("architecture_id must be int")
-        if architecture_id < 1 or architecture_id > 9223372036854775807:
+        if architecture_id < 1 or architecture_id > MAX_CHAT_ARCHITECTURE_ID:
             raise ValueError("architecture_id is out of range")
 
         logger.info(
@@ -223,7 +239,10 @@ class DatabaseChatDocumentResolver(ChatDocumentResolver):
         try:
             records = (
                 self._knowledge_base.list_document_records_by_architecture_id(
-                    architecture_id
+                    architecture_id,
+                    # 多读一条即可区分“恰好达到上限”和“已超过上限”；最终拒绝仍由
+                    # 原子受理事务执行，保持 fileNames 与 architecture 的统一门禁。
+                    limit=self._architecture_candidate_limit + 1,
                 )
             )
         except (ValueError, TypeError) as exc:

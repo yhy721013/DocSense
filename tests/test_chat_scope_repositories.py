@@ -1,4 +1,4 @@
-"""文件对话 Scope Schema v4 与 SQLite Repository 离线测试。"""
+"""文件对话 Scope Schema 与 SQLite Repository 离线测试。"""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from app.services.chat import (
     ChatStore,
     chat_scope_revision_id_for_run,
 )
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 from app.services.chat.persistence import repositories as chat_repositories
 
 
@@ -81,7 +82,7 @@ class ChatScopeRepositoryTests(unittest.TestCase):
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
-    def test_schema_v5_tables_columns_and_migration_are_present(self) -> None:
+    def test_schema_v6_tables_columns_and_migration_are_present(self) -> None:
         with closing(self._connect()) as connection:
             tables = {
                 row["name"]
@@ -113,9 +114,10 @@ class ChatScopeRepositoryTests(unittest.TestCase):
                 "chat_scope_revisions",
                 "chat_scope_members",
                 "chat_scope_heads",
+                "chat_admission_guards",
             }.issubset(tables)
         )
-        self.assertEqual({1, 2, 3, 4, 5}, versions)
+        self.assertEqual({1, 2, 3, 4, 5, 6}, versions)
         self.assertTrue(
             {
                 "requested_files_json",
@@ -128,7 +130,7 @@ class ChatScopeRepositoryTests(unittest.TestCase):
         self.assertIn("chat_id", revision_foreign_keys)
         self.assertNotIn("source_run_id", revision_foreign_keys)
 
-    def test_v4_fixture_migrates_to_v5_without_scope_or_message_drift(self) -> None:
+    def test_v4_fixture_migrates_to_v6_without_scope_or_message_drift(self) -> None:
         """真实形状 v4 数据迁移后行数、字段、Head 和消息必须逐项等价。"""
         db_path = str(Path(self.temp_dir.name) / "v4-fixture.sqlite3")
         with patch.object(
@@ -244,7 +246,7 @@ class ChatScopeRepositoryTests(unittest.TestCase):
         with closing(sqlite3.connect(db_path)) as connection:
             self.assertEqual([], connection.execute("PRAGMA foreign_key_check").fetchall())
             self.assertEqual(
-                [1, 2, 3, 4, 5],
+                [1, 2, 3, 4, 5, 6],
                 [
                     row[0]
                     for row in connection.execute(
@@ -315,6 +317,197 @@ class ChatScopeRepositoryTests(unittest.TestCase):
         # 回滚后的 v4 库仍可由正常迁移一次升级成功。
         chat_repositories.ensure_chat_schema(db_path)
         self.assertIsNotNone(ChatStore(db_path).session_scope_bindings)
+
+    def test_v6_migration_failure_rolls_back_guard_and_trigger_changes(self) -> None:
+        """v6 任一步骤失败都不能留下 Guard 表、替换后的触发器或版本记录。"""
+        db_path = str(Path(self.temp_dir.name) / "v6-failure.sqlite3")
+        with patch.object(
+            chat_repositories,
+            "_CHAT_SCHEMA_MIGRATIONS",
+            chat_repositories._CHAT_SCHEMA_MIGRATIONS[:5],
+        ):
+            chat_repositories.ensure_chat_schema(db_path)
+
+        def fail_after_v6(connection: sqlite3.Connection) -> None:
+            chat_repositories._add_chat_admission_guards_and_scope_binding_constraints(
+                connection
+            )
+            raise RuntimeError("forced v6 migration failure")
+
+        failing_migrations = (
+            *chat_repositories._CHAT_SCHEMA_MIGRATIONS[:5],
+            (6, fail_after_v6),
+        )
+        with patch.object(
+            chat_repositories,
+            "_CHAT_SCHEMA_MIGRATIONS",
+            failing_migrations,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forced v6"):
+                chat_repositories.ensure_chat_schema(db_path)
+
+        with closing(sqlite3.connect(db_path)) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            triggers = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                )
+            }
+            self.assertNotIn("chat_admission_guards", tables)
+            self.assertIn(
+                "trg_chat_scope_revision_architecture_binding_insert",
+                triggers,
+            )
+            self.assertNotIn(
+                "trg_chat_scope_revision_binding_insert",
+                triggers,
+            )
+            self.assertEqual(
+                [1, 2, 3, 4, 5],
+                [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM chat_schema_migrations "
+                        "ORDER BY version"
+                    )
+                ],
+            )
+
+        chat_repositories.ensure_chat_schema(db_path)
+        with closing(sqlite3.connect(db_path)) as connection:
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'chat_admission_guards'"
+                ).fetchone()
+            )
+
+    def test_v6_rejects_scope_revision_that_conflicts_with_files_binding(
+        self,
+    ) -> None:
+        """files 会话不得绕过 Repository 直接写入 architecture Scope。"""
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_sessions (
+                    chat_id, status, created_at, updated_at
+                ) VALUES ('chat-v6-files', 'active', ?, ?)
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_runs (
+                    run_id, chat_id, status, created_at, updated_at
+                ) VALUES ('run-v6-files', 'chat-v6-files', 'accepted', ?, ?)
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_session_scope_bindings (
+                    chat_id, scope_mode, architecture_id, created_at
+                ) VALUES ('chat-v6-files', 'files', NULL, ?)
+                """,
+                (_NOW,),
+            )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "does not match immutable session binding",
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO chat_scope_revisions (
+                        scope_revision_id, chat_id, source_mode,
+                        source_run_id, source_architecture_id, created_at
+                    ) VALUES (
+                        'scope-v6-files', 'chat-v6-files',
+                        'architecture_initial', 'run-v6-files', 7, ?
+                    )
+                    """,
+                    (_NOW,),
+                )
+
+    def test_v6_rejects_scope_revision_that_conflicts_with_architecture_binding(
+        self,
+    ) -> None:
+        """architecture 会话不得写入 files 模式的 Scope。"""
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_sessions (
+                    chat_id, status, created_at, updated_at
+                ) VALUES ('chat-v6-architecture', 'active', ?, ?)
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_runs (
+                    run_id, chat_id, status, created_at, updated_at
+                ) VALUES (
+                    'run-v6-architecture', 'chat-v6-architecture',
+                    'accepted', ?, ?
+                )
+                """,
+                (_NOW, _NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO chat_session_scope_bindings (
+                    chat_id, scope_mode, architecture_id, created_at
+                ) VALUES ('chat-v6-architecture', 'architecture', 7, ?)
+                """,
+                (_NOW,),
+            )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "does not match immutable session binding",
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO chat_scope_revisions (
+                        scope_revision_id, chat_id, source_mode,
+                        source_run_id, source_architecture_id, created_at
+                    ) VALUES (
+                        'scope-v6-architecture', 'chat-v6-architecture',
+                        'explicit', 'run-v6-architecture', NULL, ?
+                    )
+                    """,
+                    (_NOW,),
+                )
+
+    def test_v6_rejects_chat_architecture_id_above_javascript_safe_integer(
+        self,
+    ) -> None:
+        """数据库兜底约束必须和 Chat 公共合同使用同一个上界。"""
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_sessions (
+                    chat_id, status, created_at, updated_at
+                ) VALUES ('chat-v6-id', 'active', ?, ?)
+                """,
+                (_NOW, _NOW),
+            )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "JavaScript safe integer",
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO chat_session_scope_bindings (
+                        chat_id, scope_mode, architecture_id, created_at
+                    ) VALUES ('chat-v6-id', 'architecture', ?, ?)
+                    """,
+                    (MAX_CHAT_ARCHITECTURE_ID + 1, _NOW),
+                )
 
     def test_architecture_binding_scope_run_input_and_message_are_consistent(self) -> None:
         # 本用例刻意逐层写入 Schema v5 事实，因此不能调用已经会自动创建 files

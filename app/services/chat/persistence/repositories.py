@@ -60,6 +60,7 @@ from app.services.chat.domain.models import (
     ChatRunInputFile,
     ChatSession,
 )
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def _optional_architecture_id(value: Any, *, name: str) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be int or None")
-    if value < 1 or value > 9223372036854775807:
+    if value < 1 or value > MAX_CHAT_ARCHITECTURE_ID:
         raise ValueError(f"{name} is out of range")
     return value
 
@@ -1372,12 +1373,213 @@ def _add_architecture_chat_scope(connection: sqlite3.Connection) -> None:
         )
 
 
+def _add_chat_admission_guards_and_scope_binding_constraints(
+    connection: sqlite3.Connection,
+) -> None:
+    """迁移到 Schema v6：增加准入 Guard，并补齐 Binding/Scope 对称约束。
+
+    Guard 是正式 Session/run 之前的短期协调事实，因此不能外键依赖尚不存在的
+    ``chat_sessions``。它只按 token 条件消费，并由过期清理兜底。迁移同时拒绝历史
+    architecture Chat 中超过 JavaScript 安全整数的值，避免新合同上线后继续从 history
+    输出无法被浏览器精确解析的数字。
+    """
+
+    invalid_id_queries = (
+        (
+            "chat_session_scope_bindings",
+            """
+            SELECT COUNT(*) FROM chat_session_scope_bindings
+            WHERE architecture_id > ?
+            """,
+        ),
+        (
+            "chat_scope_revisions",
+            """
+            SELECT COUNT(*) FROM chat_scope_revisions
+            WHERE source_architecture_id > ?
+            """,
+        ),
+        (
+            "chat_run_inputs",
+            """
+            SELECT COUNT(*) FROM chat_run_inputs
+            WHERE requested_architecture_id > ?
+            """,
+        ),
+        (
+            "chat_messages",
+            """
+            SELECT COUNT(*) FROM chat_messages
+            WHERE architecture_id > ?
+            """,
+        ),
+    )
+    for table_name, query in invalid_id_queries:
+        invalid_count = int(
+            connection.execute(
+                query,
+                (MAX_CHAT_ARCHITECTURE_ID,),
+            ).fetchone()[0]
+        )
+        if invalid_count:
+            raise sqlite3.IntegrityError(
+                f"{table_name} contains architecture_id outside Chat safe range"
+            )
+
+    invalid_scope_binding_count = int(
+        connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM chat_scope_revisions AS revision
+            LEFT JOIN chat_session_scope_bindings AS binding
+              ON binding.chat_id = revision.chat_id
+            WHERE binding.chat_id IS NULL
+               OR (
+                    revision.source_mode = 'architecture_initial'
+                    AND (
+                        binding.scope_mode != 'architecture'
+                        OR binding.architecture_id
+                           != revision.source_architecture_id
+                    )
+               )
+               OR (
+                    revision.source_mode IN ('automatic_initial', 'explicit')
+                    AND binding.scope_mode != 'files'
+               )
+            """
+        ).fetchone()[0]
+    )
+    if invalid_scope_binding_count:
+        raise sqlite3.IntegrityError(
+            "chat scope revisions do not match immutable session bindings"
+        )
+
+    connection.execute(
+        f"""
+        CREATE TABLE chat_admission_guards (
+            chat_id TEXT PRIMARY KEY,
+            admission_token TEXT NOT NULL UNIQUE,
+            owner_instance_id TEXT NOT NULL,
+            scope_mode TEXT NOT NULL CHECK (
+                scope_mode IN ('files', 'architecture')
+            ),
+            architecture_id INTEGER,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CHECK (
+                (scope_mode = 'files' AND architecture_id IS NULL)
+                OR
+                (
+                    scope_mode = 'architecture'
+                    AND typeof(architecture_id) = 'integer'
+                    AND architecture_id
+                        BETWEEN 1 AND {MAX_CHAT_ARCHITECTURE_ID}
+                )
+            )
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX idx_chat_admission_guards_expires
+        ON chat_admission_guards(expires_at, chat_id)
+        """
+    )
+
+    connection.execute(
+        "DROP TRIGGER IF EXISTS trg_chat_scope_revision_architecture_binding_insert"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER trg_chat_scope_revision_binding_insert
+        BEFORE INSERT ON chat_scope_revisions
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM chat_session_scope_bindings AS binding
+            WHERE binding.chat_id = NEW.chat_id
+              AND (
+                  (
+                      NEW.source_mode = 'architecture_initial'
+                      AND binding.scope_mode = 'architecture'
+                      AND binding.architecture_id =
+                          NEW.source_architecture_id
+                  )
+                  OR
+                  (
+                      NEW.source_mode IN ('automatic_initial', 'explicit')
+                      AND binding.scope_mode = 'files'
+                      AND NEW.source_architecture_id IS NULL
+                  )
+              )
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'chat_scope_revision does not match immutable session binding'
+            );
+        END
+        """
+    )
+
+    # v5 表级 CHECK 仍兼容 64 位整数；v6 用触发器收紧 Chat 专属范围，避免重建四张
+    # 已经互相关联的权威表。现有数据已在本迁移开头完成对账。
+    for trigger_name, table_name, column_name in (
+        (
+            "trg_chat_binding_safe_architecture_insert",
+            "chat_session_scope_bindings",
+            "architecture_id",
+        ),
+        (
+            "trg_chat_revision_safe_architecture_insert",
+            "chat_scope_revisions",
+            "source_architecture_id",
+        ),
+        (
+            "trg_chat_run_input_safe_architecture_insert",
+            "chat_run_inputs",
+            "requested_architecture_id",
+        ),
+        (
+            "trg_chat_message_safe_architecture_insert",
+            "chat_messages",
+            "architecture_id",
+        ),
+    ):
+        connection.execute(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE INSERT ON {table_name}
+            WHEN NEW.{column_name} > {MAX_CHAT_ARCHITECTURE_ID}
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'Chat architecture_id exceeds JavaScript safe integer'
+                );
+            END
+            """
+        )
+    connection.execute(
+        f"""
+        CREATE TRIGGER trg_chat_run_input_safe_architecture_update
+        BEFORE UPDATE OF requested_architecture_id ON chat_run_inputs
+        WHEN NEW.requested_architecture_id > {MAX_CHAT_ARCHITECTURE_ID}
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'Chat architecture_id exceeds JavaScript safe integer'
+            );
+        END
+        """
+    )
+
+
 _CHAT_SCHEMA_MIGRATIONS = (
     (1, _create_chat_authority_schema),
     (2, _add_chat_constraints_and_indexes),
     (3, _add_integrity_triggers_and_refine_cleanup_job_identity),
     (4, _add_chat_scope_revisions),
     (5, _add_architecture_chat_scope),
+    (6, _add_chat_admission_guards_and_scope_binding_constraints),
 )
 
 

@@ -324,10 +324,36 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
         resolver.resolve_by_architecture_id(7)
 
         knowledge_base.list_document_records_by_architecture_id.assert_called_once_with(
-            7
+            7,
+            limit=21,
         )
         knowledge_base.list_document_records.assert_not_called()
         knowledge_base.get_document_record.assert_not_called()
+
+    def test_architecture_resolver_reads_only_limit_plus_one_candidates(
+        self,
+    ) -> None:
+        """Resolver 只需多读一条，即可让受理层判断类别是否超过文件上限。"""
+        for index, file_name in enumerate(
+            ("delta.pdf", "alpha.pdf", "charlie.pdf", "beta.pdf"),
+        ):
+            self._save_document(
+                file_name,
+                architecture_id=7,
+                document_id=f"doc-{index}",
+            )
+        resolver = DatabaseChatDocumentResolver(
+            self.knowledge_base,
+            architecture_candidate_limit=2,
+        )
+
+        candidates = resolver.resolve_by_architecture_id(7)
+
+        self.assertEqual("resolved", candidates.resolution_outcome)
+        self.assertEqual(
+            ("alpha.pdf", "beta.pdf", "charlie.pdf"),
+            tuple(item.file_name for item in candidates.documents),
+        )
 
     def test_architecture_resolver_does_not_hide_database_execution_failure(self) -> None:
         knowledge_base = Mock(spec=DatabaseService)

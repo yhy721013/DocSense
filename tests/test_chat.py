@@ -34,6 +34,7 @@ from app.services.chat import (
     ChatDeleteService,
     ChatHistoryService,
     ChatRunLockService,
+    ChatScopeSelector,
     ChatStore,
     ChatTitleService,
     DatabaseChatDocumentResolver,
@@ -358,7 +359,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             (
                 {"architectureId": True},
                 400,
-                "architectureId必须为1到9223372036854775807之间的正整数",
+                "architectureId必须为1到9007199254740991之间的正整数",
             ),
             (
                 {"architectureId": 1, "fileNames": []},
@@ -991,6 +992,59 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(429, response.status_code)
         self.assertIsNone(self.services.chat_store.sessions.get("1007"))
+
+    def test_same_chat_admission_conflict_returns_409_before_global_429(
+        self,
+    ) -> None:
+        """同一 chatId 已在准入窗口内时，即使全局容量已满也稳定返回 409。"""
+        executor = self.services.chat_run_executor
+        lease = self.services.chat_commands.reserve_chat_admission(
+            chat_id="1017",
+            scope_selector=ChatScopeSelector.for_files(()),
+        )
+        acquired = [
+            executor.try_acquire_stream_slot()
+            for _ in range(executor.max_concurrent_streams)
+        ]
+        self.assertEqual(
+            [True] * executor.max_concurrent_streams,
+            acquired,
+        )
+        try:
+            response = self._chat(
+                chat_id=1017,
+                file_names=[],
+                message="same chat must win",
+            )
+        finally:
+            self.services.chat_commands.release_chat_admission(lease=lease)
+            for _ in range(sum(acquired)):
+                executor.release_stream_slot()
+
+        self.assertEqual(409, response.status_code)
+        self.assertIsNone(self.services.chat_store.sessions.get("1017"))
+
+    def test_stream_capacity_exception_releases_admission_guard(self) -> None:
+        """容量适配器异常不得把同一 chatId 阻塞到 Guard 自然过期。"""
+        executor = self.services.chat_run_executor
+        with patch.object(
+            executor,
+            "try_acquire_stream_slot",
+            side_effect=RuntimeError("forced capacity failure"),
+        ):
+            response = self._chat(
+                chat_id=1020,
+                file_names=[],
+                message="capacity failure",
+            )
+
+        self.assertEqual(500, response.status_code)
+        self.assertIsNone(self.services.chat_store.sessions.get("1020"))
+        retry = self.services.chat_commands.reserve_chat_admission(
+            chat_id="1020",
+            scope_selector=ChatScopeSelector.for_files(()),
+        )
+        self.services.chat_commands.release_chat_admission(lease=retry)
 
     def test_continue_chat_reuses_session_and_reports_not_new(self) -> None:
         first = self._chat(chat_id=1008, file_names=[], message="first")

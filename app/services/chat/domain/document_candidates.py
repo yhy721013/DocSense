@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 _CANDIDATE_SCHEMA_VERSION = 2
 _LEGACY_CANDIDATE_SCHEMA_VERSION = 1
@@ -60,7 +61,7 @@ def _architecture_id(value: Any, *, name: str) -> int:
     """校验已经由 Web 层规范化的 architecture ID。"""
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be int")
-    if value < 1 or value > 9223372036854775807:
+    if value < 1 or value > MAX_CHAT_ARCHITECTURE_ID:
         raise ValueError(f"{name} is out of range")
     return value
 

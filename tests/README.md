@@ -567,6 +567,11 @@ Dispatcher、可靠队列或多实例运行时。
     `test_legacy_office_conversion.py`、`test_translation_module.py` 和架构门禁；再动态发现
     `test*.py` 并只排除既有 13 项。2026-07-29 发现 2,145 项、排除 13 项、执行 2,132 项，
     成功 2,129、失败 0、错误 0、跳过 3；未运行 `run.py` 或真实后台服务。
+50. 运行知识谱系类别文件对话全面审查修复门禁：执行 `test_chat*.py` 动态发现，2026-07-29
+    结果为 261 项通过；随后新增的容量适配器异常释放 Admission Guard 用例与全部 architecture
+    合同资产共 9 项通过。再执行 Database、AnythingLLM Chat Gateway、Dependency Container、
+    Architecture Boundary 和通用 Routes 相邻门禁，共 115 项通过；`compileall app tests` 与
+    `git diff --check` 通过。安全全仓后台尝试因无可观测进度被人工终止，不计入通过统计。
 
 ## 执行限制
 

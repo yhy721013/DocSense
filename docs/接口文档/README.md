@@ -52,7 +52,7 @@ Schema v1～v4；安全全仓动态发现 1,879 项、排除既有 13 项、执�
 ## 文件对话契约使用流程
 
 1. 修改路由、展示层或应用服务前，先确认接口路径、请求字段、响应字段、状态码、响应头和 SSE 事件是否受影响。
-2. `/llm/chat` 的既有字段和 SSE `chatInfo`、`textChunk`、`done` 格式属于冻结行为；其中 `chatId` 的值类型为正整数，JSON 请求严格拒绝字符串、布尔值、零和负数；内部 `run_id`、Scope Revision、租约和任务标识不得泄露。`fileNames` 的空/非空状态机和 history `files` 的取值语义不得借机扩展协议；已批准的 architecture 模式例外必须严格遵循 `知识谱系类别文件对话.md`，不能反向改变 fileNames 模式。
+2. `/llm/chat` 的既有字段和 SSE `chatInfo`、`textChunk`、`done`、`aborted`、`error` 格式属于冻结行为；其中 `chatId` 的值类型为正整数，JSON 请求严格拒绝字符串、布尔值、零和负数；内部 `run_id`、Scope Revision、租约和任务标识不得泄露。`fileNames` 的空/非空状态机和 history `files` 的取值语义不得借机扩展协议；已批准的 architecture 模式例外必须严格遵循 `知识谱系类别文件对话.md`，不能反向改变 fileNames 模式。
 3. 标题、中断、历史和删除接口也必须保持现有 JSON 结构及错误语义与 `chatId` 正整数契约；
    architecture 模式历史 user 消息使用 `architectureId` 的已批准例外除外。
 4. 如果产品确实需要新的可见运行状态、重放、续传或幂等能力，应独立设计并确认版本化接口，不能修改现有参数列表。

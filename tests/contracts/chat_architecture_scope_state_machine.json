@@ -25,7 +25,7 @@
   },
   "architectureId": {
     "minimum": 1,
-    "maximum": 9223372036854775807,
+    "maximum": 9007199254740991,
     "acceptedKinds": [
       "json_integer",
       "ascii_decimal_string"
@@ -83,7 +83,7 @@
     {
       "id": "architecture_id_invalid",
       "status": 400,
-      "text": "architectureId必须为1到9223372036854775807之间的正整数"
+      "text": "architectureId必须为1到9007199254740991之间的正整数"
     },
     {
       "id": "selector_conflict",

@@ -45,7 +45,12 @@ from app.services.chat.domain.models import (
     RESOURCE_WORKSPACE,
     SESSION_ACTIVE,
 )
-from app.services.chat.locking.lease import ChatRunLease, ChatRunLeaseLostError
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
+from app.services.chat.locking.lease import (
+    ChatAdmissionLease,
+    ChatRunLease,
+    ChatRunLeaseLostError,
+)
 from app.services.chat.persistence.store import ChatPersistenceStore
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
@@ -170,7 +175,7 @@ class ChatRunStreamRequest:
             and (
                 not isinstance(requested_architecture_id, int)
                 or requested_architecture_id < 1
-                or requested_architecture_id > 9223372036854775807
+                or requested_architecture_id > MAX_CHAT_ARCHITECTURE_ID
             )
         ):
             raise ValueError(
@@ -454,6 +459,7 @@ class SynchronousChatRunExecutor:
         message: str,
         file_names: Sequence[str] | None = None,
         scope_selector: ChatScopeSelector | None = None,
+        admission_lease: ChatAdmissionLease | None = None,
     ) -> PreparedChatRun:
         """解析不可变输入，并原子受理一条新的单会话运行。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
@@ -463,6 +469,13 @@ class SynchronousChatRunExecutor:
             ChatScopeSelector,
         ):
             raise TypeError("scope_selector must be ChatScopeSelector or None")
+        if admission_lease is not None and not isinstance(
+            admission_lease,
+            ChatAdmissionLease,
+        ):
+            raise TypeError(
+                "admission_lease must be ChatAdmissionLease or None"
+            )
         if scope_selector is None:
             normalized_file_names = _text_tuple(
                 () if file_names is None else file_names,
@@ -514,23 +527,37 @@ class SynchronousChatRunExecutor:
                 self._max_message_chars,
             )
             raise ValueError("message exceeds the configured chat message limit")
-        if normalized_selector.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
-            document_candidates = self.resolve_architecture_candidates(
+        resolved_admission = admission_lease
+        if resolved_admission is None:
+            resolved_admission = self._chat_commands.reserve_chat_admission(
                 chat_id=normalized_chat_id,
-                architecture_id=normalized_selector.architecture_id,
+                scope_selector=normalized_selector,
             )
-        else:
-            document_candidates = self.resolve_document_candidates(
+        try:
+            if normalized_selector.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
+                document_candidates = self.resolve_architecture_candidates(
+                    chat_id=normalized_chat_id,
+                    architecture_id=normalized_selector.architecture_id,
+                )
+            else:
+                document_candidates = self.resolve_document_candidates(
+                    chat_id=normalized_chat_id,
+                    file_names=normalized_file_names,
+                )
+            run = self._chat_commands.start_chat_run(
                 chat_id=normalized_chat_id,
-                file_names=normalized_file_names,
+                user_message=normalized_message,
+                document_candidates=document_candidates,
+                scope_selector=normalized_selector,
+                admission_lease=resolved_admission,
+                max_files_per_request=self._max_files_per_request,
             )
-        run = self._chat_commands.start_chat_run(
-            chat_id=normalized_chat_id,
-            user_message=normalized_message,
-            document_candidates=document_candidates,
-            scope_selector=normalized_selector,
-            max_files_per_request=self._max_files_per_request,
-        )
+        finally:
+            # 成功受理时 Guard 已在同一事务中消费；失败或容量回退时这里按 token
+            # 幂等释放，确保不会让 chatId 卡到过期时间。
+            self._chat_commands.release_chat_admission(
+                lease=resolved_admission
+            )
         requested_file_count: int | str = "unknown"
         effective_file_count: int | str = "unknown"
         selection_mode = "unknown"
@@ -1016,7 +1043,6 @@ class SynchronousChatRunExecutor:
                     f"{refs.context_ref}::{item.document.external_location}"
                 ),
             )
-        attached_by_location: dict[str, ChatDocumentRef] = {}
         if new_documents:
             logger.info(
                 "开始调用远端绑定新文件对话文档: chat_id=%s run_id=%s document_count=%d",
@@ -1028,14 +1054,62 @@ class SynchronousChatRunExecutor:
                 refs,
                 [item.document for item in new_documents],
             )
-            attached_by_location = {
-                item.external_location: item for item in attached if item.external_location
-            }
-            for item in new_documents:
-                attached_document = attached_by_location.get(
-                    item.document.external_location,
-                    item.document,
+            attached_by_location: dict[str, list[ChatDocumentRef]] = {}
+            for index, attached_document in enumerate(attached):
+                if not isinstance(attached_document, ChatDocumentRef):
+                    logger.error(
+                        "远端文档绑定结果类型无效，执行失败关闭: "
+                        "chat_id=%s run_id=%s result_index=%d result_type=%s",
+                        request.chat_id,
+                        request.run_id,
+                        index,
+                        type(attached_document).__name__,
+                    )
+                    raise ChatResourceError("远端文档绑定结果无效")
+                normalized_location = self._normalize_external_location(
+                    attached_document.external_location
                 )
+                if normalized_location:
+                    attached_by_location.setdefault(
+                        normalized_location,
+                        [],
+                    ).append(attached_document)
+
+            confirmed_documents: list[ChatDocumentRef] = []
+            for item in new_documents:
+                requested_location = self._normalize_external_location(
+                    item.document.external_location
+                )
+                matches = attached_by_location.get(requested_location, [])
+                if len(matches) != 1:
+                    logger.error(
+                        "远端文档绑定结果无法唯一确认，执行失败关闭: "
+                        "chat_id=%s run_id=%s matched_count=%d "
+                        "requested_document_count=%d returned_document_count=%d",
+                        request.chat_id,
+                        request.run_id,
+                        len(matches),
+                        len(new_documents),
+                        len(attached),
+                    )
+                    raise ChatResourceError("远端文档绑定结果无法唯一确认")
+                returned_document = matches[0]
+                # external_location 是本次绑定回执的匹配键；同一位置只允许唯一结果。
+                # 供应商可以返回规范化后的 document_ref，后续执行和本地 Binding 均以
+                # 该回执值为准，但不得用另一个远端位置替换已冻结的文档。
+                confirmed_documents.append(
+                    ChatDocumentRef(
+                        document_ref=returned_document.document_ref,
+                        external_location=requested_location,
+                    )
+                )
+
+            # 必须先完整确认全部回执，再写任何本地 Binding 或激活租约，避免半批成功。
+            for item, attached_document in zip(
+                new_documents,
+                confirmed_documents,
+                strict=True,
+            ):
                 stored_binding = self._store.document_bindings.add(
                     chat_id=request.chat_id,
                     file_name=item.file_name,
@@ -1077,6 +1151,11 @@ class SynchronousChatRunExecutor:
             len(selected),
         )
         return tuple(selected)
+
+    @staticmethod
+    def _normalize_external_location(value: str) -> str:
+        """统一远端文档位置分隔符，避免同一位置因平台写法不同而匹配失败。"""
+        return str(value or "").strip().replace("\\", "/")
 
     @staticmethod
     def _snapshot(document: ResolvedChatDocument) -> ChatRunDocumentSnapshot:

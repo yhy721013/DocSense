@@ -149,7 +149,9 @@ from app.services.chat.persistence.event_repository import (
     ChatRunEventStore,
 )
 from app.services.chat.locking.lock_service import (
+    DEFAULT_CHAT_ADMISSION_SECONDS,
     DEFAULT_STALE_RUN_SECONDS,
+    ChatAdmissionBusyError,
     ChatRunBusyError,
     ChatRunInactiveError,
     ChatRunLockService,
@@ -157,6 +159,7 @@ from app.services.chat.locking.lock_service import (
     ChatSessionUnavailableError,
 )
 from app.services.chat.locking.lease import (
+    ChatAdmissionLease,
     ChatRunCoordinator,
     ChatRunLease,
     ChatRunLeaseCapabilities,
@@ -191,6 +194,8 @@ from app.services.chat.persistence.store import (
 )
 
 __all__ = [
+    "ChatAdmissionBusyError",
+    "ChatAdmissionLease",
     "ChatArchitectureDocumentResolver",
     "ChatArchitectureCandidates",
     "ChatArchitectureIdConflictError",
@@ -291,6 +296,7 @@ __all__ = [
     "parse_chat_scoped_external_ref",
     "DatabaseChatDocumentResolver",
     "DEFAULT_STALE_RUN_SECONDS",
+    "DEFAULT_CHAT_ADMISSION_SECONDS",
     "LEASE_ACTIVE",
     "CLEANUP_JOB_FAILED",
     "CLEANUP_JOB_PENDING",

@@ -8,10 +8,16 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _ASSET_PATH = _TESTS_DIR / "contracts" / "chat_architecture_scope_state_machine.json"
 _FILES_SCOPE_ASSET_PATH = _TESTS_DIR / "contracts" / "chat_scope_state_machine.json"
+_REPOSITORY_ROOT = _TESTS_DIR.parent
+_FILES_CHAT_DOC_PATH = _REPOSITORY_ROOT / "docs" / "接口文档" / "文件对话.md"
+_ARCHITECTURE_CHAT_DOC_PATH = (
+    _REPOSITORY_ROOT / "docs" / "接口文档" / "知识谱系类别文件对话.md"
+)
 
 
 class ChatArchitectureContractAssetTests(unittest.TestCase):
@@ -56,6 +62,34 @@ class ChatArchitectureContractAssetTests(unittest.TestCase):
             public_contract["sseEventTypes"],
         )
 
+    def test_authoritative_docs_include_aborted_and_safe_integer_boundary(
+        self,
+    ) -> None:
+        """防止运行时黄金资产与两份权威 SSE/ID 文档再次发生漂移。"""
+        files_document = _FILES_CHAT_DOC_PATH.read_text(encoding="utf-8")
+        architecture_document = _ARCHITECTURE_CHAT_DOC_PATH.read_text(
+            encoding="utf-8"
+        )
+
+        for document in (files_document, architecture_document):
+            with self.subTest(document_chars=len(document)):
+                self.assertIn(
+                    "| `aborted` | `{\"chatId\":",
+                    document,
+                )
+                self.assertIn(
+                    "`done`、`aborted`",
+                    document,
+                )
+        self.assertIn(
+            f"`1..{MAX_CHAT_ARCHITECTURE_ID}`",
+            architecture_document,
+        )
+        self.assertIn(
+            "architectureId必须为1到9007199254740991之间的正整数",
+            architecture_document,
+        )
+
     def test_existing_file_names_asset_is_byte_frozen(self) -> None:
         """architecture 改造不得顺手改变既有 fileNames 黄金状态机。"""
         digest = hashlib.sha256(_FILES_SCOPE_ASSET_PATH.read_bytes()).hexdigest().upper()
@@ -68,7 +102,7 @@ class ChatArchitectureContractAssetTests(unittest.TestCase):
         rules = self.contract["architectureId"]
 
         self.assertEqual(1, rules["minimum"])
-        self.assertEqual(9223372036854775807, rules["maximum"])
+        self.assertEqual(MAX_CHAT_ARCHITECTURE_ID, rules["maximum"])
         self.assertEqual(
             ["json_integer", "ascii_decimal_string"],
             rules["acceptedKinds"],

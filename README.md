@@ -309,12 +309,13 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
    - 当前支持互斥的 `fileNames` 和 `architectureId` 两种范围模式；同一请求不能同时出现二者，同一 `chatId` 首次成功受理后会永久绑定范围模式，不能在后续请求中切换。
    - `fileNames` 模式中，该字段表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
    - 首次创建 `chatId` 且显式传入 `fileNames=[]` 时，受理事务把当时全部可用已解析文件冻结为 `automatic_initial` Scope；空知识库会冻结空范围，后续知识库新增文件不自动吸收。首次自动范围和任意显式范围都受 `DOCSENSE_CHAT_MAX_FILES` 约束。
-   - `architectureId` 模式中，每轮都必须传入与会话绑定值相同的规范化 ID。首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续只复用首次快照，不因类别新增、删除、重新解析或重新分类而动态刷新、追加或替换成员。
+   - `architectureId` 模式中，每轮都必须传入与会话绑定值相同的规范化 ID；Chat 专属范围为 `1..9007199254740991`，保证历史中的 JSON number 可被浏览器精确表示，不改变 Weaponry 等其他业务的 64 位 ID 合同。首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续只复用首次快照，不因类别新增、删除、重新解析或重新分类而动态刷新、追加或替换成员。
    - AnythingLLM Workspace 与本地 binding heads 继续累计历史绑定，但每轮模型只接收 Effective Scope 的文档引用；累计绑定不能替代或扩大 Active Scope。
    - `/llm/chat/history` 在 `fileNames` 模式下只为 user 消息返回该轮前端显式文件，空请求固定为 `files: []`；在 `architectureId` 模式下，user 消息只返回规范化后的 JSON number `architectureId`，不返回 `files`；assistant 消息不返回任一范围字段。
-   - 不可变会话 Binding、Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复冻结的 Effective Scope。当前持久化迁移已到 Schema v5；v5 在既有 Requested/Active/Effective Scope 的 Schema v4 基础上增加 architecture 模式绑定、运行输入与历史字段互斥约束。
+   - 不可变会话 Binding、Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复冻结的 Effective Scope。当前持久化迁移已到 Schema v6：v5 增加 architecture 模式绑定、运行输入与历史字段互斥约束；v6 增加正式受理前的持久化 Admission Guard、Chat 安全整数兜底和 files/architecture Scope 与 Binding 的对称约束。同一 `chatId` 冲突先于全局容量检查，因此与容量满同时发生时返回 409；Guard 本身不提前创建业务事实。
+   - 类别候选查询在 SQL 层最多读取 `DOCSENSE_CHAT_MAX_FILES + 1` 条用于超限判定，不把异常大类别完整装入内存。远端绑定必须按冻结的 `external_location` 得到唯一回执，缺失或重复时整批失败且不写部分 Binding；唯一回执允许提供规范化 `document_ref`。
    - Requested/Active/Effective Scope 阶段 0～7 已完成，architecture 类别文件对话阶段 0～7 也已完成并通过离线关闭验收。后者完成 248 项 Chat、85 项合同/网关/架构、142 项相邻模块回归；安全全仓发现 2,033 项、排除 13 项、执行 2,020 项，失败 0、错误 0、2 项既有平台条件跳过。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md` 和 `docs/重构记录/260728-知识谱系类别文件对话详细实施计划.md`。
-   - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
+   - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。SSE 的 `done`、`aborted`、`error` 都会结束本轮，其中 `aborted` 表示回答不完整，不等同于成功完成。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
    - `POST /llm/chat/title` 仅使用本地已提交消息生成标题；`POST /llm/chat/abort` 向当前活跃 run 写入持久化中断标志，执行器在后续事件边界观察到标志后发送 `aborted` 终态。没有活跃 run 时接口仍返回 HTTP 200，但 `aborted=false`。

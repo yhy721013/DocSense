@@ -22,6 +22,7 @@ from app.services.chat import (
     RUN_RUNNING,
     RUN_SUCCEEDED,
     ChatRunBusyError,
+    ChatAdmissionBusyError,
     ChatDocumentCandidate,
     ChatArchitectureCandidates,
     ChatArchitectureIdConflictError,
@@ -123,6 +124,91 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual("run-a", error.exception.active_run_id)
         self.assertEqual(RUN_SUCCEEDED, completed.status)
         self.assertEqual(RUN_ACCEPTED, second.status)
+
+    def test_admission_guard_is_exclusive_without_creating_business_facts(
+        self,
+    ) -> None:
+        """Guard 竞争只影响临时协调表，不得提前创建 Session、Scope 或 run。"""
+        selector = ChatScopeSelector.for_files(())
+        lease = self.locks.reserve_chat_admission(
+            chat_id="chat-admission",
+            scope_selector=selector,
+        )
+
+        with self.assertRaises(ChatAdmissionBusyError):
+            self.locks.reserve_chat_admission(
+                chat_id="chat-admission",
+                scope_selector=selector,
+            )
+
+        self.assertIsNone(self.store.sessions.get("chat-admission"))
+        self.assertEqual((), self.store.runs.list_active("chat-admission"))
+        self.assertIsNone(
+            self.store.scopes.get_current_revision("chat-admission")
+        )
+        self.locks.release_chat_admission(lease=lease)
+
+        retry = self.locks.reserve_chat_admission(
+            chat_id="chat-admission",
+            scope_selector=selector,
+        )
+        self.locks.release_chat_admission(lease=retry)
+
+    def test_admission_guard_is_consumed_by_atomic_run_acceptance(self) -> None:
+        """正式受理必须在同一事务中消费 Guard，且之后由活动 run 继续互斥。"""
+        selector = ChatScopeSelector.for_architecture(7)
+        lease = self.locks.reserve_chat_admission(
+            chat_id="chat-admission-accept",
+            scope_selector=selector,
+        )
+        run = self.locks.try_acquire_chat_run(
+            chat_id="chat-admission-accept",
+            run_id="run-admission-accept",
+            user_message="问题",
+            document_candidates=_architecture_candidates(7, "alpha.pdf"),
+            scope_selector=selector,
+            admission_lease=lease,
+        )
+
+        self.assertEqual(RUN_ACCEPTED, run.status)
+        with self.assertRaises(ChatRunBusyError):
+            self.locks.reserve_chat_admission(
+                chat_id="chat-admission-accept",
+                scope_selector=selector,
+            )
+        # 成功受理后的幂等释放不能影响已经提交的运行事实。
+        self.locks.release_chat_admission(lease=lease)
+        self.assertIsNotNone(self.store.runs.get("run-admission-accept"))
+
+    def test_expired_admission_guard_is_recovered_without_business_drift(
+        self,
+    ) -> None:
+        """请求崩溃遗留的过期 Guard 可回收，且不会伪造 Session 或运行事实。"""
+        selector = ChatScopeSelector.for_files(())
+        self.locks.reserve_chat_admission(
+            chat_id="chat-admission-expired",
+            scope_selector=selector,
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE chat_admission_guards
+                SET expires_at = '2000-01-01T00:00:00+00:00'
+                WHERE chat_id = 'chat-admission-expired'
+                """
+            )
+
+        recovered = self.locks.reserve_chat_admission(
+            chat_id="chat-admission-expired",
+            scope_selector=selector,
+        )
+
+        self.assertIsNone(self.store.sessions.get("chat-admission-expired"))
+        self.assertEqual(
+            (),
+            self.store.runs.list_active("chat-admission-expired"),
+        )
+        self.locks.release_chat_admission(lease=recovered)
 
     def test_new_session_uses_default_candidates_atomically(self) -> None:
         candidates = ChatDocumentSelectionCandidates(
