@@ -2,6 +2,7 @@
 
 from .callback_guard import SQLiteAnalysisCallbackAdapter
 from .callback_recovery import SQLiteAnalysisCallbackRecoverySource
+from .resource_activity import InMemoryAnalysisResourceActivityAdapter
 from .legacy_audit import LegacyAnalysisAuditAdapter, LegacyAnalysisAuditAdapterError
 from .legacy_files import (
     AnalysisFilePreparationError,
@@ -48,6 +49,7 @@ __all__ = (
     "LegacyAnalysisRagAdapterFactory",
     "LocalAnalysisDispatcherSnapshot",
     "LocalAnalysisTaskDispatcher",
+    "InMemoryAnalysisResourceActivityAdapter",
     "LegacyAnalysisTranslationService",
     "LocalAnalysisTaskWorkspaceAdapter",
     "SerializedAnalysisTranslationAdapter",

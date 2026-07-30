@@ -33,6 +33,7 @@ from app.modules.analysis.ports import (
     AnalysisKnowledgePort,
     AnalysisRagPort,
     AnalysisRagPortFactory,
+    AnalysisResourceActivityPort,
     AnalysisRagSessionOpenError,
     AnalysisRagSessionOpenRequest,
     AnalysisRagUploadDescriptor,
@@ -92,6 +93,8 @@ class RunAnalysisTask:
         resources: AnalysisResourcePort | None = None,
         callbacks: AnalysisCallbackPort | None = None,
         callback_url: str = "",
+        resource_close_running_grace_seconds: float = 300.0,
+        resource_activity: AnalysisResourceActivityPort | None = None,
     ) -> None:
         if not isinstance(task_commands, TaskCommandPort):
             raise TypeError("task_commands 必须实现 TaskCommandPort")
@@ -117,6 +120,37 @@ class RunAnalysisTask:
             raise TypeError("callback_url 必须是 str")
         if callbacks is None and callback_url.strip():
             raise ValueError("未注入 callbacks 时不得配置 callback_url")
+        if resource_activity is not None and not isinstance(
+            resource_activity,
+            AnalysisResourceActivityPort,
+        ):
+            raise TypeError(
+                "resource_activity 必须实现 "
+                "AnalysisResourceActivityPort 或为 None"
+            )
+        if (
+            isinstance(resource_close_running_grace_seconds, bool)
+            or not isinstance(
+                resource_close_running_grace_seconds,
+                (int, float),
+            )
+        ):
+            raise TypeError(
+                "resource_close_running_grace_seconds 必须是正有限数字"
+            )
+        normalized_close_grace_seconds = float(
+            resource_close_running_grace_seconds
+        )
+        if (
+            normalized_close_grace_seconds != normalized_close_grace_seconds
+            or normalized_close_grace_seconds
+            in (float("inf"), float("-inf"))
+            or normalized_close_grace_seconds <= 0.0
+            or normalized_close_grace_seconds > 7 * 24 * 60 * 60
+        ):
+            raise ValueError(
+                "resource_close_running_grace_seconds 必须是 0~604800 的正有限数字"
+            )
 
         # 每个 Application 实例只保存其注入 Port 和无状态协作器；单次执行状态始终在
         # ``execute`` 内新建，不能被另一个 TaskId、线程或未来 Worker 复用。
@@ -125,6 +159,10 @@ class RunAnalysisTask:
         self._files = files
         self._rag_factory = rag_factory
         self._resources = resources
+        self._resource_close_running_grace_seconds = (
+            normalized_close_grace_seconds
+        )
+        self._resource_activity = resource_activity
         self._model_workflow = _AnalysisModelWorkflow()
         self._audit_lifecycle = _AnalysisAuditLifecycle(audit)
         self._knowledge_handoff = _AnalysisKnowledgeHandoff(knowledge, translation)
@@ -172,7 +210,14 @@ class RunAnalysisTask:
         )
         state = _RagWorkflowState()
         resource_lifecycle = (
-            AnalysisResourceLifecycle(store=self._resources, execution=execution)
+            AnalysisResourceLifecycle(
+                store=self._resources,
+                execution=execution,
+                close_running_grace_seconds=(
+                    self._resource_close_running_grace_seconds
+                ),
+                resource_activity=self._resource_activity,
+            )
             if self._resources is not None
             else None
         )
@@ -181,6 +226,7 @@ class RunAnalysisTask:
             # Worker 调用，但绝不能在实例字段缓存某个任务的 Session 或资源版本。
             state.resource_checkpoint = resource_lifecycle.checkpoint_rag_state
         started_at = time.perf_counter()
+        resource_handed_off_to_factory = False
 
         try:
             # 第一次 expected TaskId 条件写既是进度事实，也是创建任何本地任务目录前的
@@ -248,6 +294,9 @@ class RunAnalysisTask:
                         resource_lifecycle.prepare_document_upload
                     )
                 resource_lifecycle.record_recall_state(state)
+                # 从此处开始由 Factory 作用域的 finally 负责释放活跃权；在此之前的
+                # 任意 return/Exception/BaseException 均由本层 finally 兜底。
+                resource_handed_off_to_factory = True
         except AnalysisTaskPersistenceError:
             # 条件写提交结果不确定时，绝不把可能成功的任务改写为失败，也不触发外部补偿。
             logger.critical(
@@ -279,6 +328,12 @@ class RunAnalysisTask:
                 error=error,
                 started_at=started_at,
             )
+        finally:
+            if (
+                resource_lifecycle is not None
+                and not resource_handed_off_to_factory
+            ):
+                resource_lifecycle.finish_worker()
 
         return self._execute_in_rag_factory(
             task_execution=claim.execution,
@@ -384,6 +439,11 @@ class RunAnalysisTask:
                 error=error,
                 started_at=started_at,
             )
+        finally:
+            # register 在记录可见前取得活跃权；无论成功、失败、stale、Callback 超时或
+            # Factory 退出异常，都必须在本次 Worker 完全停止推进后释放。
+            if resources is not None:
+                resources.finish_worker()
         if result is None:
             raise AnalysisApplicationContractError("RAG Factory 未返回执行结果")
         return result

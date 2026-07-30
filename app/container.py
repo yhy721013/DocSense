@@ -608,11 +608,13 @@ class ApplicationServices:
 
         logger.info(
             "文件分析基础设施能力校验通过: runtime_mode=%s dispatcher_type=%s "
-            "callback_http_timeout_seconds=%.3f callback_lease_seconds=%.3f",
+            "callback_http_timeout_seconds=%.3f callback_lease_seconds=%.3f "
+            "resource_close_running_grace_seconds=%.3f",
             self.analysis_runtime_config.runtime_mode,
             type(self.analysis_dispatcher).__name__,
             self.analysis_runtime_config.callback_http_timeout_seconds,
             self.analysis_runtime_config.callback_lease_seconds,
+            self.analysis_runtime_config.resource_close_running_grace_seconds,
         )
 
     def _validate_weaponry_infrastructure_capabilities(self) -> None:

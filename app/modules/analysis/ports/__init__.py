@@ -78,6 +78,7 @@ from .rag import (
     AnalysisRagUploadDescriptor,
 )
 from .resources import (
+    AnalysisResourceActivityPort,
     AnalysisResourceCommand,
     AnalysisResourcePort,
     AnalysisResourceRecord,
@@ -93,6 +94,7 @@ from .translation import (
 )
 
 __all__ = (
+    "AnalysisResourceActivityPort",
     "AnalysisAuditOutcome",
     "AnalysisAuditPort",
     "AppendAnalysisLifecycleEvents",

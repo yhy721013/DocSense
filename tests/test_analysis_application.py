@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterator
 import unittest
 
+from app.modules.analysis.adapters import InMemoryAnalysisResourceActivityAdapter
 from app.modules.analysis.application import RunAnalysisOutcome, RunAnalysisTask
 from app.modules.analysis.application import run_analysis as run_analysis_module
 from app.modules.analysis.application.model_workflow import _AnalysisModelWorkflow
@@ -379,6 +380,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
         *,
         rag_factory: object | None = None,
         resources: object | None = None,
+        resource_activity: object | None = None,
         callbacks: object | None = None,
         callback_url: str = "",
     ) -> RunAnalysisTask:
@@ -397,12 +399,13 @@ class RunAnalysisTaskTests(unittest.TestCase):
             audit=ports,
             translation=ports,
             resources=resources,
+            resource_activity=resource_activity,  # type: ignore[arg-type]
             callbacks=callbacks,
             callback_url=callback_url,
         )
 
     def test_public_import_surface_and_constructor_signature_exposes_optional_1f6_ports(self) -> None:
-        """1F-6 仅追加内部可选 Port；原有八项依赖仍保持关键字调用兼容。"""
+        """内部 close 协调仍显式注入；原有依赖保持关键字调用兼容。"""
 
         self.assertEqual(
             (
@@ -429,6 +432,8 @@ class RunAnalysisTaskTests(unittest.TestCase):
                 "resources",
                 "callbacks",
                 "callback_url",
+                "resource_close_running_grace_seconds",
+                "resource_activity",
             ),
             tuple(signature.parameters),
         )
@@ -890,8 +895,13 @@ class RunAnalysisTaskTests(unittest.TestCase):
         script = StrictAnalysisFakeScript()
         running, _bound = self._expect_happy_path(script)
         resources = _MemoryAnalysisResourceStore()
+        resource_activity = InMemoryAnalysisResourceActivityAdapter()
 
-        result = self._build_application(script, resources=resources).execute(running.task_id)
+        result = self._build_application(
+            script,
+            resources=resources,
+            resource_activity=resource_activity,
+        ).execute(running.task_id)
 
         self.assertEqual(RunAnalysisOutcome.SUCCEEDED, result.outcome)
         self.assertIsNotNone(resources.record)
@@ -901,6 +911,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
         self.assertEqual("permanent", payload["ownership"]["document"])
         self.assertEqual("confirmed", payload["cleanup"]["session_close"]["state"])
         self.assertEqual("confirmed", payload["cleanup"]["audit_append"]["state"])
+        self.assertFalse(resource_activity.is_active(resources.record.execution))
         script.assert_exhausted()
 
     def test_optional_callback_port_runs_once_after_success_terminal(self) -> None:

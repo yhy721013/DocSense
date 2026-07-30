@@ -351,6 +351,7 @@ class AnalysisInfrastructureConfig:
     dispatch_retry_max_seconds: float = 300.0
     resource_sweep_interval_seconds: float = 30.0
     resource_sweep_batch_size: int = 50
+    resource_close_running_grace_seconds: float = 300.0
     running_alert_seconds: float = 30.0
     stop_timeout_seconds: float = 5.0
     callback_http_timeout_seconds: float = 10.0
@@ -372,6 +373,7 @@ class AnalysisInfrastructureConfig:
             "dispatch_retry_base_seconds",
             "dispatch_retry_max_seconds",
             "resource_sweep_interval_seconds",
+            "resource_close_running_grace_seconds",
             "running_alert_seconds",
             "stop_timeout_seconds",
             "callback_http_timeout_seconds",
@@ -828,6 +830,10 @@ def load_analysis_infrastructure_config() -> AnalysisInfrastructureConfig:
         resource_sweep_batch_size=_strict_analysis_int(
             "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE",
             50,
+        ),
+        resource_close_running_grace_seconds=_strict_analysis_float(
+            "DOCSENSE_ANALYSIS_RESOURCE_CLOSE_RUNNING_GRACE_SECONDS",
+            300.0,
         ),
         running_alert_seconds=_strict_analysis_float(
             "DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS",

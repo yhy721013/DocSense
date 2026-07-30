@@ -279,9 +279,21 @@ class _AnalysisFailureConvergence:
             state=state,
             rag=rag,
             retain_document=retain_document,
-            on_close_result=(resources.record_close_result if resources is not None else None),
-            on_lifecycle_audited=(resources.mark_close_audited if resources is not None else None),
-            on_close_failure=(resources.record_close_failure if resources is not None else None),
+            on_close_result=(
+                resources.record_close_result
+                if resources is not None
+                else None
+            ),
+            on_lifecycle_audited=(
+                resources.mark_close_audited
+                if resources is not None
+                else None
+            ),
+            on_close_failure=(
+                resources.record_close_failure
+                if resources is not None
+                else None
+            ),
         )
 
     def finish_success(

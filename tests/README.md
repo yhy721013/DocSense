@@ -578,6 +578,18 @@ Dispatcher、可靠队列或多实例运行时。
     执行 2,176 项，失败 0、错误 0、跳过 3。AnythingLLM Desktop `1.15.0-r2` 的
     `lancedb`/Ollama Embedder 真实单实例验收应作为独立受控证据执行，不得通过自动化测试
     读取开发机 Provider 数据，也不得把该结果解释为生产、多实例或可靠队列能力。
+52. 运行文件分析资源活跃权与 close 恢复竞态门禁：
+    `venv\Scripts\python.exe -B -m unittest tests.test_analysis_resource_recovery
+    tests.test_analysis_application tests.test_analysis_dispatcher
+    tests.test_analysis_composition tests.test_analysis_deployment_config
+    tests.test_analysis_ports tests.test_analysis_production_adapters
+    tests.test_analysis_callback_guard tests.test_analysis_batch
+    tests.test_task_service tests.test_dependency_container
+    tests.test_architecture_boundaries tests.test_document_processing_architecture -q`。
+    2026-07-30 联合回归 198 项通过；安全全仓动态发现 2,191 项，精确排除既有 13 项后
+    执行 2,178 项，失败 0、错误 0、跳过 3。门禁必须覆盖终态 Callback 等待期间仍为
+    `tracking` 的记录、`session_close=running`、close 后审计窗口、活跃 Worker 零版本
+    写入，以及进程失活且保护期超时后只隔离不重放远端 close/delete。
 
 ## 执行限制
 
