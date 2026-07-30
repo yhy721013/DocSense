@@ -51,6 +51,7 @@ from app.ports import (
     MAX_RAG_FRESH_CONVERSATION_SWITCHES,
     PreparedDocumentRef,
     RagAttempt,
+    RagDocumentUploadOptions,
     RagExecutionTrace,
     RagLifecycleEvent,
     RagOperationError,
@@ -442,6 +443,7 @@ class _AnythingLLMRagSession:
         prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
+        document_upload: RagDocumentUploadOptions | None = None,
     ) -> RagResult:
         """一次性准备目标文档，并在同一线程内有限重试首次查询。
 
@@ -458,12 +460,20 @@ class _AnythingLLMRagSession:
         normalized_prompt = normalize_rag_prompt(prompt)
         validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
         self._validate_max_attempts(max_attempts)
+        if document_upload is not None and not isinstance(
+            document_upload,
+            RagDocumentUploadOptions,
+        ):
+            raise TypeError(
+                "document_upload 必须是 RagDocumentUploadOptions 或 None"
+            )
         self._analyse_started = True
 
         document: Optional[AnythingLLMDocument] = None
         try:
             document, content_sha256, ingested_file_name = self._upload_document(
                 normalized_file_path,
+                document_upload=document_upload,
             )
             self._uploaded_document = document
             self._content_sha256 = content_sha256
@@ -816,6 +826,8 @@ class _AnythingLLMRagSession:
     def _upload_document(
         self,
         file_path: str,
+        *,
+        document_upload: RagDocumentUploadOptions | None = None,
     ) -> tuple[AnythingLLMDocument, str, str]:
         """上传不可变文件快照，并返回文档及该快照的 SHA-256。
 
@@ -827,17 +839,30 @@ class _AnythingLLMRagSession:
             source_path = Path(file_path)
             if not source_path.is_file():
                 raise FileNotFoundError(f"待分析文件不存在或不是普通文件: {source_path}")
-            ingested_file_name = source_path.name
+            snapshot_name = (
+                document_upload.transport_file_name
+                if document_upload is not None
+                else source_path.name
+            )
+            metadata: dict[str, object] = {"docSource": self._source_marker}
+            if document_upload is not None:
+                # AnythingLLM 1.15 的上传 Processor 会把 title 传播到文档选择器与 Chunk
+                # metadata；真实 multipart 文件名则保持与载荷表示后缀一致。
+                metadata["title"] = document_upload.display_title
+            ingested_file_name = snapshot_name
             # 摘要和 multipart 请求必须使用同一个任务私有副本。调用方即使在分析期间替换
             # 原路径，也不会让后续永久知识库幂等键与 AnythingLLM 实际内容发生分叉。
             with tempfile.TemporaryDirectory(prefix="docsense-rag-") as temporary_dir:
+                # 快照物理名继续使用调用方受控 basename；multipart 名称作为独立参数
+                # 传给 Document Client，不能为了展示名改写 Artifact 或依赖临时路径。
                 snapshot_path = Path(temporary_dir) / source_path.name
                 shutil.copyfile(source_path, snapshot_path)
                 content_sha256 = self._sha256_file(snapshot_path)
                 document = self._document_client.upload_document(
                     str(snapshot_path),
                     user_id=self._user_id,
-                    metadata={"docSource": self._source_marker},
+                    metadata=metadata,
+                    upload_file_name=snapshot_name,
                 )
         except AnythingLLMUploadRejectedError as exc:
             if exc.cleanup_attempted:

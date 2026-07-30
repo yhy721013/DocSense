@@ -12,7 +12,7 @@
 | `knowledge_index_operation_service.py` | 知识索引操作服务。 |
 | `rag_resource_lease_service.py` | 既有 RAG 资源租约服务。 |
 | `report_service.py` | 报告生成遗留兼容实现；当前公开路由和生产组合根均不再调用，仅为黄金样例、旧测试与安全回滚观察保留。 |
-| `task_service.py` | 既有任务投影/审计/回调服务；阶段 1C-3 增量提供 SQLite execution、原子受理/领取、expected TaskId 条件写及 Guard fencing；阶段 1C-4 以幂等补列兼容审计 Schema v3；阶段 1C-5 新增 Guard 人工解除追加审计、任务资源恢复记录、终态权威 Artifact 所有权及可恢复清理扫描。报告模块已通过 tasks Adapter 使用这些单实例兼容能力，其他业务仍在后续波次迁移。 |
+| `task_service.py` | 既有任务投影/审计/回调服务；阶段 1C-3 增量提供 SQLite execution、原子受理/领取、expected TaskId 条件写及 Guard fencing；阶段 1C-4 以幂等补列兼容审计 Schema v3；阶段 1C-5 新增 Guard 人工解除追加审计、任务资源恢复记录、终态权威 Artifact 所有权及可恢复清理扫描。2026-07-29 又新增 `callback_delivery_attempt_events` 追加审计，将 file/report/weaponry 的初次发送、显式 check-task 授权、完成、过期冻结和不一致冻结与 Guard CAS 放在同一 SQLite 事务内；该能力仍仅是单实例兼容实现。 |
 | `translation_service.py` | 翻译业务服务。 |
 | `weaponry_service.py` | 武器谱遗留兼容实现；当前公开路由、生产组合根和新 Dispatcher 均不再调用，仅为旧黄金样例与兼容测试保留。 |
 

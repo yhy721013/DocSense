@@ -8,8 +8,10 @@ from app.services.chat.domain.document_candidates import (
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.domain.document_scope import ChatScopeSelector
 from app.services.chat.domain.models import ChatRun
 from app.services.chat.locking.lease import (
+    ChatAdmissionLease,
     ChatRunCoordinator,
     ChatRunLease,
     ChatRunLeaseCapabilities,
@@ -45,6 +47,8 @@ class ChatCommandService:
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
         document_candidates: ChatDocumentSelectionCandidates | None = None,
+        scope_selector: ChatScopeSelector | None = None,
+        admission_lease: ChatAdmissionLease | None = None,
         max_files_per_request: int | None = None,
     ) -> ChatRun:
         if document_candidates is not None and not isinstance(
@@ -62,6 +66,11 @@ class ChatCommandService:
                 "document_candidates cannot be combined with legacy "
                 "document tuples"
             )
+        if scope_selector is not None and not isinstance(
+            scope_selector,
+            ChatScopeSelector,
+        ):
+            raise TypeError("scope_selector must be ChatScopeSelector or None")
         explicit_count = (
             len(document_candidates.explicit_documents)
             if document_candidates is not None
@@ -72,11 +81,33 @@ class ChatCommandService:
             if document_candidates is not None
             else 0
         )
+        architecture_candidates = (
+            None
+            if document_candidates is None
+            else document_candidates.architecture_candidates
+        )
         logger.info(
             "准备启动文件对话运行: chat_id=%s message_chars=%d "
+            "scope_mode=%s requested_architecture_id=%s "
+            "architecture_candidate_outcome=%s "
             "explicit_candidate_count=%d default_candidate_count=%d",
             chat_id,
             len(str(user_message or "")),
+            (
+                scope_selector.scope_mode
+                if scope_selector is not None
+                else "legacy_files"
+            ),
+            (
+                scope_selector.architecture_id
+                if scope_selector is not None
+                else None
+            ),
+            (
+                architecture_candidates.resolution_outcome
+                if architecture_candidates is not None
+                else ""
+            ),
             explicit_count,
             default_count,
         )
@@ -86,6 +117,8 @@ class ChatCommandService:
             user_files=user_files,
             input_documents=input_documents,
             document_candidates=document_candidates,
+            scope_selector=scope_selector,
+            admission_lease=admission_lease,
             max_files_per_request=max_files_per_request,
         )
         logger.info(
@@ -97,6 +130,34 @@ class ChatCommandService:
             bool(run.owner_instance_id),
         )
         return run
+
+    def reserve_chat_admission(
+        self,
+        *,
+        chat_id: str,
+        scope_selector: ChatScopeSelector,
+    ) -> ChatAdmissionLease:
+        """在目录解析和全局容量申请前取得同一 chatId 的独占准入权。"""
+        if not isinstance(scope_selector, ChatScopeSelector):
+            raise TypeError("scope_selector must be ChatScopeSelector")
+        lease = self._run_coordinator.reserve_chat_admission(
+            chat_id=chat_id,
+            scope_selector=scope_selector,
+        )
+        logger.info(
+            "文件对话请求已取得准入权: chat_id=%s scope_mode=%s "
+            "requested_architecture_id=%s",
+            lease.chat_id,
+            lease.scope_mode,
+            lease.architecture_id,
+        )
+        return lease
+
+    def release_chat_admission(self, *, lease: ChatAdmissionLease) -> None:
+        """幂等释放未消费的准入权；正式受理成功时底层 Guard 已在事务中删除。"""
+        if not isinstance(lease, ChatAdmissionLease):
+            raise TypeError("lease must be ChatAdmissionLease")
+        self._run_coordinator.release_chat_admission(lease=lease)
 
     def complete_chat_run(self, *, run_id: str) -> ChatRun:
         run = self._run_coordinator.complete_run(run_id)

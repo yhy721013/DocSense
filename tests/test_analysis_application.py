@@ -11,10 +11,14 @@ from pathlib import Path
 from typing import Iterator
 import unittest
 
+from app.modules.analysis.adapters import InMemoryAnalysisResourceActivityAdapter
 from app.modules.analysis.application import RunAnalysisOutcome, RunAnalysisTask
 from app.modules.analysis.application import run_analysis as run_analysis_module
 from app.modules.analysis.application.model_workflow import _AnalysisModelWorkflow
 from app.modules.analysis.application.knowledge_handoff import _AnalysisKnowledgeHandoff
+from app.modules.analysis.application.workflow_models import (
+    _build_rag_upload_descriptor,
+)
 from app.modules.analysis.domain.architecture_recall import (
     ArchitecturePromptBudgetError,
     ArchitectureRecallCandidate,
@@ -25,6 +29,14 @@ from app.modules.analysis.domain.task_inputs import (
     AnalysisPolicySnapshot,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
+    AnalysisTaskInputV3,
+    AnalysisTaskInputV4,
+)
+from app.modules.document_processing.domain import (
+    ArtifactKind,
+    ArtifactMetadata,
+    ArtifactRef,
+    DocumentRepresentation,
 )
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
@@ -333,12 +345,111 @@ def _legacy_combined_fixture() -> tuple[
 class RunAnalysisTaskTests(unittest.TestCase):
     """每个测试都用严格 Script 证明未发生未配置的副作用。"""
 
+    def test_v4_upload_descriptor_uses_file_name_and_preserves_display_title(
+        self,
+    ) -> None:
+        """最终上传描述符必须消费冻结 V4 事实，不能重新回退到 originalFileName。"""
+
+        submission = AnalysisSubmissionSnapshot.from_request_params(
+            {
+                "fileName": "global-business-key.pdf",
+                "originalFileName": "资料.pdf",
+                "filePath": "https://example.invalid/global-business-key.pdf",
+            },
+            policy_snapshot=AnalysisPolicySnapshot.default(),
+        )
+        snapshot = AnalysisTaskInputV4.from_submission(
+            submission,
+            task_id="analysis-v4-upload-descriptor",
+            batch_id="8" * 32,
+            batch_sequence=1,
+            accepted_at="2026-07-30T13:00:00+08:00",
+            trace_id="analysis-v4-upload-descriptor-trace",
+        )
+        execution = AnalysisExecutionRef(
+            task_id=TaskId(snapshot.task_id),
+            file_name=snapshot.file_name,
+            batch_id=snapshot.batch_id,
+            batch_sequence=snapshot.batch_sequence,
+        )
+        artifact = ArtifactRef(
+            task_id=execution.task_id,
+            artifact_id="a" * 64,
+            step_key="b" * 64,
+            kind=ArtifactKind.RAG_PROJECTION,
+            representation=DocumentRepresentation.MARKDOWN,
+            metadata=ArtifactMetadata(
+                media_type="text/markdown; charset=utf-8",
+                size_bytes=16,
+                sha256="c" * 64,
+            ),
+        )
+        prepared = PreparedAnalysisDocument(
+            execution=execution,
+            source_path="C:/analysis/source.pdf",
+            upload_path="C:/analysis/internal-artifact",
+            original_text="正文",
+            rag_upload_artifact=artifact,
+            rag_projection_profile_id="d" * 64,
+        )
+
+        descriptor = _build_rag_upload_descriptor(
+            snapshot=snapshot,
+            prepared=prepared,
+        )
+
+        self.assertIsNotNone(descriptor)
+        assert descriptor is not None
+        self.assertEqual("global-business-key.md", descriptor.transport_file_name)
+        self.assertEqual("资料.pdf", descriptor.display_title)
+        self.assertEqual("business_key_v2", descriptor.naming_policy)
+
+    def test_knowledge_title_uses_v3_frozen_name_and_keeps_v1_compatibility(
+        self,
+    ) -> None:
+        """永久知识标题与首次上传标题同源，旧快照仍保持原有解析结果。"""
+
+        raw_params = {
+            "fileName": "business-hash.pdf",
+            "originalFileName": " 原始资料.pdf",
+            "filePath": "https://example.invalid/business-hash.pdf",
+        }
+        submission = AnalysisSubmissionSnapshot.from_request_params(
+            raw_params,
+            policy_snapshot=AnalysisPolicySnapshot.default(),
+        )
+        snapshot_v3 = AnalysisTaskInputV3.from_submission(
+            submission,
+            task_id="analysis-knowledge-title-v3",
+            batch_id="9" * 32,
+            batch_sequence=1,
+            accepted_at="2026-07-30T10:00:00+08:00",
+            trace_id="analysis-knowledge-title-trace",
+        )
+        self.assertEqual(
+            " 原始资料.pdf",
+            _AnalysisKnowledgeHandoff.knowledge_original_file_name(
+                snapshot=snapshot_v3,
+                legacy_original_name="legacy.pdf",
+            ),
+        )
+
+        snapshot_v1, _ = _fixture()
+        self.assertEqual(
+            "legacy.pdf",
+            _AnalysisKnowledgeHandoff.knowledge_original_file_name(
+                snapshot=snapshot_v1,
+                legacy_original_name="legacy.pdf",
+            ),
+        )
+
     def _build_application(
         self,
         script: StrictAnalysisFakeScript,
         *,
         rag_factory: object | None = None,
         resources: object | None = None,
+        resource_activity: object | None = None,
         callbacks: object | None = None,
         callback_url: str = "",
     ) -> RunAnalysisTask:
@@ -357,12 +468,13 @@ class RunAnalysisTaskTests(unittest.TestCase):
             audit=ports,
             translation=ports,
             resources=resources,
+            resource_activity=resource_activity,  # type: ignore[arg-type]
             callbacks=callbacks,
             callback_url=callback_url,
         )
 
     def test_public_import_surface_and_constructor_signature_exposes_optional_1f6_ports(self) -> None:
-        """1F-6 仅追加内部可选 Port；原有八项依赖仍保持关键字调用兼容。"""
+        """内部 close 协调仍显式注入；原有依赖保持关键字调用兼容。"""
 
         self.assertEqual(
             (
@@ -389,6 +501,8 @@ class RunAnalysisTaskTests(unittest.TestCase):
                 "resources",
                 "callbacks",
                 "callback_url",
+                "resource_close_running_grace_seconds",
+                "resource_activity",
             ),
             tuple(signature.parameters),
         )
@@ -778,8 +892,8 @@ class RunAnalysisTaskTests(unittest.TestCase):
         self.assertEqual("task.finish", script.calls[-5][0])
         script.assert_exhausted()
 
-    def test_full_translation_uses_converted_path_only_for_legacy_office(self) -> None:
-        """Legacy 用 processing OOXML；普通格式继续使用 raw source，避免扩大行为变化。"""
+    def test_full_translation_compatibility_fake_uses_prepared_path(self) -> None:
+        """1H-6 后无 Artifact 的旧 Fake 也必须使用 processing，而非 raw source。"""
 
         task_input, _task_execution = _fixture()
         execution = AnalysisExecutionRef(
@@ -824,7 +938,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
                     upload_path="C:/analysis/rag-input.pdf",
                     original_text="正文",
                 ),
-                "C:/analysis/raw.pdf",
+                "C:/analysis/normalized.pdf",
             ),
         ):
             with self.subTest(expected_path=expected_path):
@@ -850,8 +964,13 @@ class RunAnalysisTaskTests(unittest.TestCase):
         script = StrictAnalysisFakeScript()
         running, _bound = self._expect_happy_path(script)
         resources = _MemoryAnalysisResourceStore()
+        resource_activity = InMemoryAnalysisResourceActivityAdapter()
 
-        result = self._build_application(script, resources=resources).execute(running.task_id)
+        result = self._build_application(
+            script,
+            resources=resources,
+            resource_activity=resource_activity,
+        ).execute(running.task_id)
 
         self.assertEqual(RunAnalysisOutcome.SUCCEEDED, result.outcome)
         self.assertIsNotNone(resources.record)
@@ -861,6 +980,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
         self.assertEqual("permanent", payload["ownership"]["document"])
         self.assertEqual("confirmed", payload["cleanup"]["session_close"]["state"])
         self.assertEqual("confirmed", payload["cleanup"]["audit_append"]["state"])
+        self.assertFalse(resource_activity.is_active(resources.record.execution))
         script.assert_exhausted()
 
     def test_optional_callback_port_runs_once_after_success_terminal(self) -> None:

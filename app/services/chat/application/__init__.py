@@ -34,6 +34,7 @@ from app.services.chat.application.document_candidates import (
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.application.document_resolver import (
+    ChatArchitectureDocumentResolver,
     ChatDocumentCatalogConflictError,
     ChatDocumentNotFoundError,
     ChatDocumentResolver,
@@ -59,6 +60,7 @@ from app.services.chat.application.title_service import (
 )
 
 __all__ = [
+    "ChatArchitectureDocumentResolver",
     "ChatAbortResult",
     "ChatAbortService",
     "AbortNotificationCapabilities",

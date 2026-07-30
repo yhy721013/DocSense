@@ -5,11 +5,13 @@ DatabaseService 或文档 Resolver。保留本模块是为了兼容阶段 2 已�
 """
 
 from app.services.chat.domain.document_candidates import (
+    ChatArchitectureCandidates,
     ChatDocumentCandidate,
     ChatDocumentSelectionCandidates,
 )
 
 __all__ = [
+    "ChatArchitectureCandidates",
     "ChatDocumentCandidate",
     "ChatDocumentSelectionCandidates",
 ]

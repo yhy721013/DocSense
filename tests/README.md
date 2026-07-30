@@ -560,6 +560,36 @@ Dispatcher、可靠队列或多实例运行时。
     `test_stage1a1_check_task_contract.py` 和 `test_clean_runtime.py`；2026-07-27 的安全全仓结果为
     发现 1,758 项、排除 13 项、执行/成功 1,745 项、失败 0 项、错误 0 项、跳过 0 项。
 46. 最后执行 `git diff --check`，并检查没有将内部运行标识暴露给目标响应。
+47. 运行 report/weaponry 显式 unknown 重试关闭回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_callback_attempt_audit tests.test_analysis_callback_guard tests.test_analysis_ports tests.test_report_ports tests.test_report_callback_guard tests.test_report_callback_recovery tests.test_weaponry_stage1d6 tests.test_weaponry_strict_fakes tests.test_stage1a1_check_task_contract tests.test_progress_and_check_task tests.test_dependency_container tests.test_architecture_boundaries tests.test_stage0_contract_assets tests.test_stage1d_weaponry_contract_assets tests.test_analysis_contract_assets`；2026-07-29 结果为 262 项通过。安全全仓动态发现 2,055 项，精确排除既有 13 项后执行 2,042 项，成功 2,040、失败 0、错误 0、跳过 2。该证据只覆盖临时 SQLite/Fake 的单实例离线边界。
+48. 运行阶段 1H-7 关闭门禁：`venv\Scripts\python.exe -B -m unittest tests.test_document_processing_architecture tests.test_stage1h_closeout tests.test_stage1h_consumer_cutover tests.test_translation_module -q`；再按本文件既有 13 项精确排除清单执行安全全仓。2026-07-29 动态发现 2,128 项，排除 13 项，执行 2,115 项，成功 2,112、失败 0、错误 0、跳过 3；跳过项为两个仅 macOS 真实进程组用例和当前 Windows 无符号链接权限用例。
+49. 运行阶段 1H-R 全面审查修复门禁：先执行各 R 波次的
+    `test_document_processing_{artifacts,records,formats,mhtml}.py`、`test_stage1h_consumer_cutover.py`、
+    `test_legacy_office_conversion.py`、`test_translation_module.py` 和架构门禁；再动态发现
+    `test*.py` 并只排除既有 13 项。2026-07-29 发现 2,145 项、排除 13 项、执行 2,132 项，
+    成功 2,129、失败 0、错误 0、跳过 3；未运行 `run.py` 或真实后台服务。
+50. 运行知识谱系类别文件对话全面审查修复门禁：执行 `test_chat*.py` 动态发现，2026-07-29
+    结果为 261 项通过；随后新增的容量适配器异常释放 Admission Guard 用例与全部 architecture
+    合同资产共 9 项通过。再执行 Database、AnythingLLM Chat Gateway、Dependency Container、
+    Architecture Boundary 和通用 Routes 相邻门禁，共 115 项通过；`compileall app tests` 与
+    `git diff --check` 通过。安全全仓后台尝试因无可观测进度被人工终止，不计入通过统计。
+51. 运行文件分析 RAG 投影与业务原名上传命名门禁：先执行
+    `venv\Scripts\python.exe -B -m unittest tests.test_analysis_rag_naming tests.test_document_processing_rag_projection tests.test_analysis_rag_upload_pipeline tests.test_anythingllm_documents tests.test_anythingllm_rag_gateway tests.test_analysis_web_adapters tests.test_analysis_task_adapter tests.test_analysis_production_adapters tests.test_analysis_application tests.test_analysis_contract_assets tests.test_stage1h_consumer_cutover tests.test_document_processing_architecture tests.test_architecture_boundaries`；
+    再动态发现 `test*.py` 并精确排除既有 13 项。2026-07-30 发现 2,189 项、排除 13 项、
+    执行 2,176 项，失败 0、错误 0、跳过 3。AnythingLLM Desktop `1.15.0-r2` 的
+    `lancedb`/Ollama Embedder 真实单实例验收应作为独立受控证据执行，不得通过自动化测试
+    读取开发机 Provider 数据，也不得把该结果解释为生产、多实例或可靠队列能力。
+52. 运行文件分析资源活跃权与 close 恢复竞态门禁：
+    `venv\Scripts\python.exe -B -m unittest tests.test_analysis_resource_recovery
+    tests.test_analysis_application tests.test_analysis_dispatcher
+    tests.test_analysis_composition tests.test_analysis_deployment_config
+    tests.test_analysis_ports tests.test_analysis_production_adapters
+    tests.test_analysis_callback_guard tests.test_analysis_batch
+    tests.test_task_service tests.test_dependency_container
+    tests.test_architecture_boundaries tests.test_document_processing_architecture -q`。
+    2026-07-30 联合回归 198 项通过；安全全仓动态发现 2,191 项，精确排除既有 13 项后
+    执行 2,178 项，失败 0、错误 0、跳过 3。门禁必须覆盖终态 Callback 等待期间仍为
+    `tracking` 的记录、`session_close=running`、close 后审计窗口、活跃 Worker 零版本
+    写入，以及进程失活且保护期超时后只隔离不重放远端 close/delete。
 
 ## 执行限制
 

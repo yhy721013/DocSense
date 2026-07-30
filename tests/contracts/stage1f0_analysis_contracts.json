@@ -5,9 +5,9 @@
   "publicContractChanged": true,
   "interfaceAuthority": {
     "path": "docs/接口文档/文件处理和报告生成.md",
-    "sha256": "8752485821489C5B63CBB81BC2F61FF6C34BE9E47BDE411FB915EA689C78D1F3",
-    "lastApprovedAt": "2026-07-27",
-    "approvedChange": "GJB兜底定向选择通用要求；file outcome_unknown可由新的check-task按at-least-once语义显式补发，同请求重复fileName只处理一次"
+    "sha256": "6F8F333E346A44FF09411C7D63C0EADB365343181C956A1EDCB7455C11710955",
+    "lastApprovedAt": "2026-07-30",
+    "approvedChange": "保留既有fileName/originalFileName字段和值语义；RAG展示标题继续使用originalFileName，multipart上传名改由全局唯一fileName派生；保留RAG命名候选整批同步HTTP 400和缺失空值回退规则；file/report/weaponry outcome_unknown仍可由check-task按at-least-once语义显式补发"
   },
   "analysisSubmission": {
     "method": "POST",
@@ -116,6 +116,76 @@
         }
       },
       {
+        "id": "nonStringOriginalFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "valid.pdf",
+              "originalFileName": [
+                "invalid.pdf"
+              ],
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].originalFileName不是合法文件名"
+        }
+      },
+      {
+        "id": "pathOriginalFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "valid.pdf",
+              "originalFileName": "../private.pdf",
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].originalFileName不是合法文件名"
+        }
+      },
+      {
+        "id": "invalidTransportFileNameWithValidDisplayTitle",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "unsafe?.pdf",
+              "originalFileName": "合法展示名.pdf",
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].fileName不是合法文件名"
+        }
+      },
+      {
+        "id": "invalidFallbackFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "invalid.pdf ",
+              "originalFileName": null,
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].fileName不是合法文件名"
+        }
+      },
+      {
         "id": "duplicateFileName",
         "payload": {
           "businessType": "file",
@@ -221,7 +291,12 @@
         "error": "任务不存在"
       }
     },
-    "callbackRecovery": "file pending/failed终态回调在同步检查中按既有规则恢复；outcome_unknown仅由新的check-task按at-least-once语义显式补发，恢复结果不写入成功响应"
+    "callbackRecovery": "file/report/weaponry pending/failed终态回调在同步检查中按既有规则恢复；outcome_unknown仅由新的check-task按at-least-once语义显式补发，恢复结果不写入成功响应",
+    "validationBeforeSideEffects": "all-params-parse-and-normalize-before-any-callback",
+    "sameRequestDeduplication": "normalized-business-key-first-occurrence",
+    "responseCardinalityBasis": "original-params-count-before-deduplication",
+    "receiverIdempotencyRequired": true,
+    "newPublicFields": false
   },
   "fileProgress": {
     "transport": "WebSocket",

@@ -2,6 +2,7 @@
 
 from .callback_guard import SQLiteAnalysisCallbackAdapter
 from .callback_recovery import SQLiteAnalysisCallbackRecoverySource
+from .resource_activity import InMemoryAnalysisResourceActivityAdapter
 from .legacy_audit import LegacyAnalysisAuditAdapter, LegacyAnalysisAuditAdapterError
 from .legacy_files import (
     AnalysisFilePreparationError,
@@ -25,6 +26,7 @@ from .task_commands import (
     SQLiteAnalysisBatchCommandAdapter,
 )
 from .translation import (
+    ArtifactAnalysisTranslationAdapter,
     AnalysisTranslationExecutionCoordinator,
     LegacyAnalysisTranslationService,
     SerializedAnalysisTranslationAdapter,
@@ -32,6 +34,7 @@ from .translation import (
 
 __all__ = (
     "AnalysisTaskInputCodec",
+    "ArtifactAnalysisTranslationAdapter",
     "AnalysisTaskInputCodecError",
     "AnalysisResourceStoreConcurrencyError",
     "AnalysisTaskCommandAdapterError",
@@ -46,6 +49,7 @@ __all__ = (
     "LegacyAnalysisRagAdapterFactory",
     "LocalAnalysisDispatcherSnapshot",
     "LocalAnalysisTaskDispatcher",
+    "InMemoryAnalysisResourceActivityAdapter",
     "LegacyAnalysisTranslationService",
     "LocalAnalysisTaskWorkspaceAdapter",
     "SerializedAnalysisTranslationAdapter",

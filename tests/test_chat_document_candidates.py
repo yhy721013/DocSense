@@ -6,6 +6,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 
 from app.services.chat import (
+    ChatArchitectureCandidates,
     ChatDocumentCandidate,
     ChatDocumentSelectionCandidates,
 )
@@ -43,7 +44,7 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
                 new_session_default_documents=(_document("default.pdf"),),
             )
 
-    def test_payload_round_trip_uses_only_primitive_schema_v1_values(self) -> None:
+    def test_payload_round_trip_uses_only_primitive_schema_v2_values(self) -> None:
         candidates = ChatDocumentSelectionCandidates(
             new_session_default_documents=(
                 _document("alpha.pdf"),
@@ -54,7 +55,7 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
         payload = candidates.to_payload()
         restored = ChatDocumentSelectionCandidates.from_payload(payload)
 
-        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual(2, payload["schema_version"])
         self.assertIsInstance(payload["new_session_default_documents"], list)
         self.assertEqual(candidates, restored)
         payload["new_session_default_documents"][0]["file_name"] = "changed.pdf"
@@ -88,7 +89,7 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
         ).to_payload()
 
         invalid_version = dict(valid)
-        invalid_version["schema_version"] = 2
+        invalid_version["schema_version"] = 3
         with self.assertRaisesRegex(ValueError, "schema_version"):
             ChatDocumentSelectionCandidates.from_payload(invalid_version)
 
@@ -97,10 +98,78 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fields are invalid"):
             ChatDocumentSelectionCandidates.from_payload(unknown_field)
 
+        with self.assertRaisesRegex(ValueError, "fields are invalid"):
+            ChatDocumentSelectionCandidates.from_payload({})
+
         partial_document = dict(valid)
         partial_document["explicit_documents"] = [{"file_name": "alpha.pdf"}]
         with self.assertRaisesRegex(ValueError, "fields are invalid"):
             ChatDocumentSelectionCandidates.from_payload(partial_document)
+
+    def test_schema_v1_payload_remains_readable_during_internal_cutover(self) -> None:
+        payload = ChatDocumentSelectionCandidates(
+            explicit_documents=(_document("alpha.pdf"),)
+        ).to_payload()
+        payload["schema_version"] = 1
+        payload.pop("architecture_candidates")
+
+        restored = ChatDocumentSelectionCandidates.from_payload(payload)
+
+        self.assertEqual(("alpha.pdf",), tuple(
+            item.file_name for item in restored.explicit_documents
+        ))
+        self.assertIsNone(restored.architecture_candidates)
+
+    def test_architecture_candidates_are_strict_and_deep_frozen(self) -> None:
+        documents = [_document("alpha.pdf")]
+        architecture = ChatArchitectureCandidates(
+            architecture_id=7,
+            resolution_outcome="resolved",
+            documents=documents,  # type: ignore[arg-type]
+        )
+        candidates = ChatDocumentSelectionCandidates(
+            architecture_candidates=architecture
+        )
+        documents.append(_document("late.pdf"))
+
+        restored = ChatDocumentSelectionCandidates.from_payload(
+            candidates.to_payload()
+        )
+        self.assertEqual(candidates, restored)
+        self.assertEqual(
+            ("alpha.pdf",),
+            tuple(item.file_name for item in architecture.documents),
+        )
+        self.assertEqual(
+            architecture.documents,
+            candidates.effective_documents(session_created=True),
+        )
+        self.assertEqual((), candidates.effective_documents(session_created=False))
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            ChatDocumentSelectionCandidates(
+                explicit_documents=(_document("explicit.pdf"),),
+                architecture_candidates=architecture,
+            )
+
+    def test_architecture_outcomes_reject_partial_or_ambiguous_payloads(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            ChatArchitectureCandidates(
+                architecture_id=7,
+                resolution_outcome="resolved",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot contain documents"):
+            ChatArchitectureCandidates(
+                architecture_id=7,
+                resolution_outcome="not_found",
+                documents=(_document("partial.pdf"),),
+                error_code="architecture_catalog_not_found",
+            )
+        with self.assertRaisesRegex(ValueError, "error_code"):
+            ChatArchitectureCandidates(
+                architecture_id=7,
+                resolution_outcome="invalid",
+                error_code="wrong",
+            )
 
 
 if __name__ == "__main__":

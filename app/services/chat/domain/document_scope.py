@@ -6,31 +6,51 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.services.chat.domain.document_candidates import ChatDocumentCandidate
+from app.services.chat.domain.document_candidates import (
+    CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+    CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+    ChatArchitectureCandidates,
+    ChatDocumentCandidate,
+)
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
+
+
+CHAT_SCOPE_MODE_FILES = "files"
+CHAT_SCOPE_MODE_ARCHITECTURE = "architecture"
+CHAT_SCOPE_MODES = frozenset(
+    {CHAT_SCOPE_MODE_FILES, CHAT_SCOPE_MODE_ARCHITECTURE}
+)
 
 
 CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL = "automatic_initial"
 CHAT_SCOPE_SOURCE_EXPLICIT = "explicit"
+CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL = "architecture_initial"
 CHAT_SCOPE_SOURCE_MODES = frozenset(
     {
         CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL,
         CHAT_SCOPE_SOURCE_EXPLICIT,
+        CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL,
     }
 )
 
 CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL = "automatic_initial"
 CHAT_SCOPE_SELECTION_EXPLICIT = "explicit"
 CHAT_SCOPE_SELECTION_ACTIVE_REUSE = "active_scope_reuse"
+CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL = "architecture_initial"
+CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE = "architecture_reuse"
 CHAT_SCOPE_SELECTION_MODES = frozenset(
     {
         CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL,
         CHAT_SCOPE_SELECTION_EXPLICIT,
         CHAT_SCOPE_SELECTION_ACTIVE_REUSE,
+        CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+        CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE,
     }
 )
 
-_DECISION_SCHEMA_VERSION = 1
-_DECISION_FIELDS = frozenset(
+_DECISION_SCHEMA_VERSION = 2
+_LEGACY_DECISION_SCHEMA_VERSION = 1
+_DECISION_V1_FIELDS = frozenset(
     {
         "schema_version",
         "selection_mode",
@@ -40,6 +60,34 @@ _DECISION_FIELDS = frozenset(
         "effective_documents",
     }
 )
+_DECISION_V2_FIELDS = frozenset(
+    {
+        "schema_version",
+        "selection_mode",
+        "creates_scope_revision",
+        "scope_source_mode",
+        "requested_documents",
+        "effective_documents",
+        "requested_architecture_id",
+        "source_architecture_id",
+    }
+)
+
+
+class ChatScopeModeConflictError(ValueError):
+    """同一 chatId 试图切换文件范围模式。"""
+
+
+class ChatArchitectureIdConflictError(ValueError):
+    """architecture 会话请求了不同于不可变绑定的 ID。"""
+
+
+class ChatArchitectureScopeNotFoundError(ValueError):
+    """新 architecture 会话没有可冻结的直接文件。"""
+
+
+class ChatArchitectureScopeInvalidError(ValueError):
+    """新 architecture 会话的目录候选无法形成唯一有效范围。"""
 
 
 def _required_text(value: Any, *, name: str) -> str:
@@ -63,6 +111,148 @@ def _optional_text(value: Any, *, name: str) -> str:
     if normalized != value:
         raise ValueError(f"{name} must be normalized")
     return normalized
+
+
+def _architecture_id(value: Any, *, name: str) -> int:
+    """校验 Web 层已经规范化的正整数 ID，禁止 bool 混入。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be int")
+    if value < 1 or value > MAX_CHAT_ARCHITECTURE_ID:
+        raise ValueError(f"{name} is out of range")
+    return value
+
+
+def _optional_architecture_id(value: Any, *, name: str) -> int | None:
+    if value is None:
+        return None
+    return _architecture_id(value, name=name)
+
+
+def _freeze_file_names(values: Sequence[str], *, name: str) -> tuple[str, ...]:
+    """冻结已在 Web 层完成去重的文件名选择器。"""
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError(f"{name} must be a sequence")
+    result: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values):
+        normalized = _required_text(value, name=f"{name}[{index}]")
+        if normalized in seen:
+            raise ValueError(f"{name} contains duplicate file_name")
+        seen.add(normalized)
+        result.append(normalized)
+    return tuple(result)
+
+
+@dataclass(frozen=True)
+class ChatScopeSelector:
+    """前端本轮提交的严格二选一范围选择器。"""
+
+    scope_mode: str
+    file_names: tuple[str, ...] = ()
+    architecture_id: int | None = None
+
+    def __post_init__(self) -> None:
+        mode = _required_text(self.scope_mode, name="scope_mode")
+        if mode not in CHAT_SCOPE_MODES:
+            raise ValueError("scope_mode is not supported")
+        file_names = _freeze_file_names(self.file_names, name="file_names")
+        architecture_id = _optional_architecture_id(
+            self.architecture_id,
+            name="architecture_id",
+        )
+        if mode == CHAT_SCOPE_MODE_FILES:
+            if architecture_id is not None:
+                raise ValueError("files selector cannot contain architecture_id")
+        else:
+            if file_names:
+                raise ValueError("architecture selector cannot contain file_names")
+            if architecture_id is None:
+                raise ValueError("architecture selector requires architecture_id")
+        object.__setattr__(self, "scope_mode", mode)
+        object.__setattr__(self, "file_names", file_names)
+        object.__setattr__(self, "architecture_id", architecture_id)
+
+    @classmethod
+    def for_files(cls, file_names: Sequence[str]) -> "ChatScopeSelector":
+        if isinstance(file_names, (str, bytes)) or not isinstance(
+            file_names,
+            Sequence,
+        ):
+            raise TypeError("file_names must be a sequence")
+        return cls(scope_mode=CHAT_SCOPE_MODE_FILES, file_names=tuple(file_names))
+
+    @classmethod
+    def for_architecture(cls, architecture_id: int) -> "ChatScopeSelector":
+        return cls(
+            scope_mode=CHAT_SCOPE_MODE_ARCHITECTURE,
+            architecture_id=architecture_id,
+        )
+
+
+@dataclass(frozen=True)
+class ChatSessionScopeBinding:
+    """一个 chatId 已成功提交的不可变范围模式事实。"""
+
+    chat_id: str
+    scope_mode: str
+    architecture_id: int | None
+    created_at: str
+
+    def __post_init__(self) -> None:
+        chat_id = _required_text(self.chat_id, name="chat_id")
+        created_at = _required_text(self.created_at, name="created_at")
+        mode = _required_text(self.scope_mode, name="scope_mode")
+        if mode not in CHAT_SCOPE_MODES:
+            raise ValueError("scope_mode is not supported")
+        architecture_id = _optional_architecture_id(
+            self.architecture_id,
+            name="architecture_id",
+        )
+        if mode == CHAT_SCOPE_MODE_FILES and architecture_id is not None:
+            raise ValueError("files binding cannot contain architecture_id")
+        if mode == CHAT_SCOPE_MODE_ARCHITECTURE and architecture_id is None:
+            raise ValueError("architecture binding requires architecture_id")
+        object.__setattr__(self, "chat_id", chat_id)
+        object.__setattr__(self, "scope_mode", mode)
+        object.__setattr__(self, "architecture_id", architecture_id)
+        object.__setattr__(self, "created_at", created_at)
+
+
+def decide_chat_session_scope_binding(
+    *,
+    chat_id: str,
+    selector: ChatScopeSelector,
+    existing_binding: ChatSessionScopeBinding | None,
+    created_at: str,
+) -> tuple[ChatSessionScopeBinding, bool]:
+    """创建或校验不可变会话绑定，返回绑定及是否需要持久化。"""
+    normalized_chat_id = _required_text(chat_id, name="chat_id")
+    if not isinstance(selector, ChatScopeSelector):
+        raise TypeError("selector must be ChatScopeSelector")
+    if existing_binding is None:
+        return (
+            ChatSessionScopeBinding(
+                chat_id=normalized_chat_id,
+                scope_mode=selector.scope_mode,
+                architecture_id=selector.architecture_id,
+                created_at=created_at,
+            ),
+            True,
+        )
+    if not isinstance(existing_binding, ChatSessionScopeBinding):
+        raise TypeError("existing_binding must be ChatSessionScopeBinding or None")
+    if existing_binding.chat_id != normalized_chat_id:
+        raise ValueError("existing binding belongs to another chat")
+    if existing_binding.scope_mode != selector.scope_mode:
+        raise ChatScopeModeConflictError("chat scope mode is immutable")
+    if (
+        existing_binding.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE
+        and existing_binding.architecture_id != selector.architecture_id
+    ):
+        raise ChatArchitectureIdConflictError(
+            "chat architecture_id is immutable"
+        )
+    return existing_binding, False
 
 
 def _freeze_documents(
@@ -141,6 +331,7 @@ class ChatScopeRevision:
     source_run_id: str
     members: tuple[ChatDocumentCandidate, ...]
     created_at: str
+    source_architecture_id: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -167,7 +358,25 @@ class ChatScopeRevision:
         )
         if source_mode not in CHAT_SCOPE_SOURCE_MODES:
             raise ValueError("source_mode is not supported")
+        source_architecture_id = _optional_architecture_id(
+            self.source_architecture_id,
+            name="source_architecture_id",
+        )
+        if source_mode == CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL:
+            if source_architecture_id is None:
+                raise ValueError(
+                    "architecture scope revision requires source_architecture_id"
+                )
+        elif source_architecture_id is not None:
+            raise ValueError(
+                "file scope revision cannot contain source_architecture_id"
+            )
         object.__setattr__(self, "source_mode", source_mode)
+        object.__setattr__(
+            self,
+            "source_architecture_id",
+            source_architecture_id,
+        )
         object.__setattr__(
             self,
             "members",
@@ -218,6 +427,8 @@ class ChatScopeDecision:
     effective_documents: tuple[ChatDocumentCandidate, ...]
     creates_scope_revision: bool
     scope_source_mode: str = ""
+    requested_architecture_id: int | None = None
+    source_architecture_id: int | None = None
 
     def __post_init__(self) -> None:
         selection_mode = _required_text(
@@ -240,8 +451,50 @@ class ChatScopeDecision:
             self.scope_source_mode,
             name="scope_source_mode",
         )
+        requested_architecture_id = _optional_architecture_id(
+            self.requested_architecture_id,
+            name="requested_architecture_id",
+        )
+        source_architecture_id = _optional_architecture_id(
+            self.source_architecture_id,
+            name="source_architecture_id",
+        )
 
-        if selection_mode == CHAT_SCOPE_SELECTION_EXPLICIT:
+        if selection_mode == CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL:
+            if requested or not effective:
+                raise ValueError(
+                    "architecture initial selection requires effective documents only"
+                )
+            if not self.creates_scope_revision:
+                raise ValueError(
+                    "architecture initial selection must create scope revision"
+                )
+            if source_mode != CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL:
+                raise ValueError(
+                    "architecture initial selection source_mode is invalid"
+                )
+            if (
+                requested_architecture_id is None
+                or source_architecture_id != requested_architecture_id
+            ):
+                raise ValueError(
+                    "architecture initial selection IDs are inconsistent"
+                )
+        elif selection_mode == CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE:
+            if requested or not effective:
+                raise ValueError(
+                    "architecture reuse requires frozen effective documents only"
+                )
+            if self.creates_scope_revision or source_mode:
+                raise ValueError(
+                    "architecture reuse cannot create scope revision"
+                )
+            if (
+                requested_architecture_id is None
+                or source_architecture_id is not None
+            ):
+                raise ValueError("architecture reuse IDs are inconsistent")
+        elif selection_mode == CHAT_SCOPE_SELECTION_EXPLICIT:
             if not requested or effective != requested:
                 raise ValueError(
                     "explicit selection must use requested documents"
@@ -275,10 +528,29 @@ class ChatScopeDecision:
                     "active scope reuse cannot create scope revision"
                 )
 
+        if selection_mode not in {
+            CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+            CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE,
+        } and (
+            requested_architecture_id is not None
+            or source_architecture_id is not None
+        ):
+            raise ValueError("file scope decision cannot contain architecture IDs")
+
         object.__setattr__(self, "selection_mode", selection_mode)
         object.__setattr__(self, "requested_documents", requested)
         object.__setattr__(self, "effective_documents", effective)
         object.__setattr__(self, "scope_source_mode", source_mode)
+        object.__setattr__(
+            self,
+            "requested_architecture_id",
+            requested_architecture_id,
+        )
+        object.__setattr__(
+            self,
+            "source_architecture_id",
+            source_architecture_id,
+        )
 
     @property
     def requested_files(self) -> tuple[ChatRequestedFile, ...]:
@@ -306,20 +578,30 @@ class ChatScopeDecision:
                 document.to_payload()
                 for document in self.effective_documents
             ],
+            "requested_architecture_id": self.requested_architecture_id,
+            "source_architecture_id": self.source_architecture_id,
         }
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "ChatScopeDecision":
         if not isinstance(payload, Mapping):
             raise TypeError("payload must be a mapping")
-        if set(payload) != _DECISION_FIELDS:
+        if "schema_version" not in payload:
             raise ValueError("scope decision payload fields are invalid")
         schema_version = payload["schema_version"]
-        if (
-            isinstance(schema_version, bool)
-            or not isinstance(schema_version, int)
-            or schema_version != _DECISION_SCHEMA_VERSION
-        ):
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ValueError("unsupported scope decision schema_version")
+        if schema_version == _LEGACY_DECISION_SCHEMA_VERSION:
+            if set(payload) != _DECISION_V1_FIELDS:
+                raise ValueError("scope decision payload fields are invalid")
+            requested_architecture_id = None
+            source_architecture_id = None
+        elif schema_version == _DECISION_SCHEMA_VERSION:
+            if set(payload) != _DECISION_V2_FIELDS:
+                raise ValueError("scope decision payload fields are invalid")
+            requested_architecture_id = payload["requested_architecture_id"]
+            source_architecture_id = payload["source_architecture_id"]
+        else:
             raise ValueError("unsupported scope decision schema_version")
         return cls(
             selection_mode=payload["selection_mode"],
@@ -333,6 +615,8 @@ class ChatScopeDecision:
             ),
             creates_scope_revision=payload["creates_scope_revision"],
             scope_source_mode=payload["scope_source_mode"],
+            requested_architecture_id=requested_architecture_id,
+            source_architecture_id=source_architecture_id,
         )
 
 
@@ -401,17 +685,113 @@ def decide_chat_document_scope(
     )
 
 
+def decide_chat_architecture_scope(
+    *,
+    session_created: bool,
+    requested_architecture_id: int,
+    bound_architecture_id: int,
+    architecture_candidates: ChatArchitectureCandidates,
+    current_scope_documents: Sequence[ChatDocumentCandidate] | None,
+) -> ChatScopeDecision:
+    """按事务内会话事实决定 architecture 首次冻结或旧快照复用。
+
+    候选中的空目录或损坏结果只对真正的新 Session 生效。既有同 ID 会话必须忽略事务外
+    目录读取结果并复用持久化 Scope，从而在并发首轮交错时保持确定性。
+    """
+    if not isinstance(session_created, bool):
+        raise TypeError("session_created must be bool")
+    requested_id = _architecture_id(
+        requested_architecture_id,
+        name="requested_architecture_id",
+    )
+    bound_id = _architecture_id(
+        bound_architecture_id,
+        name="bound_architecture_id",
+    )
+    if requested_id != bound_id:
+        raise ChatArchitectureIdConflictError(
+            "requested architecture_id does not match binding"
+        )
+    if not isinstance(architecture_candidates, ChatArchitectureCandidates):
+        raise TypeError(
+            "architecture_candidates must be ChatArchitectureCandidates"
+        )
+    if architecture_candidates.architecture_id != requested_id:
+        raise ValueError("architecture candidates belong to another ID")
+    current = (
+        None
+        if current_scope_documents is None
+        else _freeze_documents(
+            current_scope_documents,
+            name="current_scope_documents",
+        )
+    )
+
+    if session_created:
+        if current is not None:
+            raise ValueError(
+                "new architecture session cannot already have active scope"
+            )
+        if (
+            architecture_candidates.resolution_outcome
+            == CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND
+        ):
+            raise ChatArchitectureScopeNotFoundError(
+                architecture_candidates.error_code
+            )
+        if (
+            architecture_candidates.resolution_outcome
+            == CHAT_ARCHITECTURE_CANDIDATE_INVALID
+        ):
+            raise ChatArchitectureScopeInvalidError(
+                architecture_candidates.error_code
+            )
+        return ChatScopeDecision(
+            selection_mode=CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+            requested_documents=(),
+            effective_documents=architecture_candidates.documents,
+            creates_scope_revision=True,
+            scope_source_mode=CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL,
+            requested_architecture_id=requested_id,
+            source_architecture_id=requested_id,
+        )
+
+    if current is None:
+        raise ValueError("existing architecture session is missing active scope")
+    return ChatScopeDecision(
+        selection_mode=CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE,
+        requested_documents=(),
+        effective_documents=current,
+        creates_scope_revision=False,
+        requested_architecture_id=requested_id,
+    )
+
+
 __all__ = [
+    "CHAT_SCOPE_MODE_ARCHITECTURE",
+    "CHAT_SCOPE_MODE_FILES",
+    "CHAT_SCOPE_MODES",
     "CHAT_SCOPE_SELECTION_ACTIVE_REUSE",
+    "CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL",
+    "CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE",
     "CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL",
     "CHAT_SCOPE_SELECTION_EXPLICIT",
     "CHAT_SCOPE_SELECTION_MODES",
     "CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL",
+    "CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL",
     "CHAT_SCOPE_SOURCE_EXPLICIT",
     "CHAT_SCOPE_SOURCE_MODES",
+    "ChatArchitectureIdConflictError",
+    "ChatArchitectureScopeInvalidError",
+    "ChatArchitectureScopeNotFoundError",
     "ChatRequestedFile",
+    "ChatScopeModeConflictError",
+    "ChatScopeSelector",
     "ChatScopeDecision",
     "ChatScopeHead",
     "ChatScopeRevision",
+    "ChatSessionScopeBinding",
+    "decide_chat_architecture_scope",
     "decide_chat_document_scope",
+    "decide_chat_session_scope_binding",
 ]

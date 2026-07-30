@@ -38,6 +38,7 @@ from app.services.chat.domain.resource_ids import (
     parse_chat_scoped_external_ref,
 )
 from app.services.chat.application.document_resolver import (
+    ChatArchitectureDocumentResolver,
     ChatDocumentCatalogConflictError,
     ChatDocumentNotFoundError,
     ChatDocumentResolver,
@@ -45,20 +46,34 @@ from app.services.chat.application.document_resolver import (
     ResolvedChatDocument,
 )
 from app.services.chat.application.document_candidates import (
+    ChatArchitectureCandidates,
     ChatDocumentCandidate,
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_MODE_ARCHITECTURE,
+    CHAT_SCOPE_MODE_FILES,
     CHAT_SCOPE_SELECTION_ACTIVE_REUSE,
+    CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL,
+    CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE,
     CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL,
     CHAT_SCOPE_SELECTION_EXPLICIT,
     CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL,
+    CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL,
     CHAT_SCOPE_SOURCE_EXPLICIT,
+    ChatArchitectureIdConflictError,
+    ChatArchitectureScopeInvalidError,
+    ChatArchitectureScopeNotFoundError,
     ChatRequestedFile,
+    ChatScopeModeConflictError,
+    ChatScopeSelector,
     ChatScopeDecision,
     ChatScopeHead,
     ChatScopeRevision,
+    ChatSessionScopeBinding,
+    decide_chat_architecture_scope,
     decide_chat_document_scope,
+    decide_chat_session_scope_binding,
 )
 from app.services.chat.application.history_service import ChatHistoryService
 from app.services.chat.application.run_executor import (
@@ -134,7 +149,9 @@ from app.services.chat.persistence.event_repository import (
     ChatRunEventStore,
 )
 from app.services.chat.locking.lock_service import (
+    DEFAULT_CHAT_ADMISSION_SECONDS,
     DEFAULT_STALE_RUN_SECONDS,
+    ChatAdmissionBusyError,
     ChatRunBusyError,
     ChatRunInactiveError,
     ChatRunLockService,
@@ -142,6 +159,7 @@ from app.services.chat.locking.lock_service import (
     ChatSessionUnavailableError,
 )
 from app.services.chat.locking.lease import (
+    ChatAdmissionLease,
     ChatRunCoordinator,
     ChatRunLease,
     ChatRunLeaseCapabilities,
@@ -155,6 +173,7 @@ from app.services.chat.persistence.repositories import (
     ChatRunRepository,
     ChatRunInputRepository,
     ChatScopeRepository,
+    ChatSessionScopeBindingRepository,
     ChatSessionRepository,
     chat_scope_revision_id_for_run,
     ensure_chat_schema,
@@ -175,6 +194,13 @@ from app.services.chat.persistence.store import (
 )
 
 __all__ = [
+    "ChatAdmissionBusyError",
+    "ChatAdmissionLease",
+    "ChatArchitectureDocumentResolver",
+    "ChatArchitectureCandidates",
+    "ChatArchitectureIdConflictError",
+    "ChatArchitectureScopeInvalidError",
+    "ChatArchitectureScopeNotFoundError",
     "ChatCleanupJob",
     "ChatCleanupJobRepository",
     "ChatDocumentBinding",
@@ -204,6 +230,8 @@ __all__ = [
     "ChatResourceLease",
     "ChatResourceLeaseService",
     "ChatRequestedFile",
+    "ChatScopeModeConflictError",
+    "ChatScopeSelector",
     "ChatRun",
     "ChatRunEvent",
     "ChatRunEventRepository",
@@ -225,10 +253,12 @@ __all__ = [
     "ChatRunInputRepository",
     "ChatRunRepository",
     "ChatScopeRepository",
+    "ChatSessionScopeBindingRepository",
     "ChatRunStreamRequest",
     "ChatScopeDecision",
     "ChatScopeHead",
     "ChatScopeRevision",
+    "ChatSessionScopeBinding",
     "ChatSessionDeleteBusyError",
     "ChatSessionUnavailableError",
     "ChatSession",
@@ -253,14 +283,20 @@ __all__ = [
     "chat_scope_revision_id_for_run",
     "chat_thread_lease_id",
     "chat_workspace_lease_id",
+    "CHAT_SCOPE_MODE_ARCHITECTURE",
+    "CHAT_SCOPE_MODE_FILES",
     "CHAT_SCOPE_SELECTION_ACTIVE_REUSE",
+    "CHAT_SCOPE_SELECTION_ARCHITECTURE_INITIAL",
+    "CHAT_SCOPE_SELECTION_ARCHITECTURE_REUSE",
     "CHAT_SCOPE_SELECTION_AUTOMATIC_INITIAL",
     "CHAT_SCOPE_SELECTION_EXPLICIT",
     "CHAT_SCOPE_SOURCE_AUTOMATIC_INITIAL",
+    "CHAT_SCOPE_SOURCE_ARCHITECTURE_INITIAL",
     "CHAT_SCOPE_SOURCE_EXPLICIT",
     "parse_chat_scoped_external_ref",
     "DatabaseChatDocumentResolver",
     "DEFAULT_STALE_RUN_SECONDS",
+    "DEFAULT_CHAT_ADMISSION_SECONDS",
     "LEASE_ACTIVE",
     "CLEANUP_JOB_FAILED",
     "CLEANUP_JOB_PENDING",
@@ -309,6 +345,8 @@ __all__ = [
     "SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES",
     "SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES",
     "ensure_chat_schema",
+    "decide_chat_architecture_scope",
     "decide_chat_document_scope",
+    "decide_chat_session_scope_binding",
     "record_chat_run_events",
 ]

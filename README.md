@@ -7,7 +7,7 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 - 文件解析：`POST /llm/analysis`
 - 报告生成：`POST /llm/generate-report`
 - 武器装备知识谱系解析：`POST /llm/weaponry`
-- 文件内容对话：`POST /llm/chat`（附加标题生成 `POST /llm/chat/title`、历史查询 `GET /llm/chat/history`、生成中断 `POST /llm/chat/abort` 及删除 `POST /llm/chat/delete`）
+- 文件内容与知识谱系类别对话：`POST /llm/chat`（附加标题生成 `POST /llm/chat/title`、历史查询 `GET /llm/chat/history`、生成中断 `POST /llm/chat/abort` 及删除 `POST /llm/chat/delete`）
 - 分类节点变更：`POST /llm/reassign`
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
@@ -25,13 +25,15 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/`、`app/adapters/web/`、`app/presenters/` | HTTP/WS/SSE 入参解析、框架映射、协议流式与响应展示、本地调试入口 | `llm.py` `report_requests.py` `report_submission.py` |
 | 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；文件分析、报告、武器谱和统一任务边界均已迁入 | `analysis/` `report/` `weaponry/` `tasks/` |
-| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 保留任务兼容存储、共享翻译编排、文件对话应用与旧实现回归证据；公开文件分析路由不再调用旧 Analysis Runner | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
+| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；文件分析、报告、武器谱、共享文档处理、翻译和统一任务边界均已迁入 | `analysis/` `report/` `weaponry/` `document_processing/` `translation/` `tasks/` |
+| 迁移期业务层 | `app/services/llm_service/`、`app/services/chat/` | 保留任务兼容存储、旧翻译编排、文件对话应用与旧实现回归证据；公开文件分析路由不再调用旧 Analysis Runner，当前生产翻译由独立模块装配 | `analysis_service.py` `weaponry_service.py` `task_service.py` `chat/application/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
-| 迁移期工具层 | `app/services/utils/` | 回调、文件/OCR 预处理，以及尚未迁移完成的 legacy AnythingLLM Facade/RAG 流程 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
-| 翻译能力层 | `app/services/translator/` | 文档/文本翻译底层实现，被业务翻译服务封装调用 | `core.py` `document_handler.py` `mhtml_handler.py` `txt_handler.py` |
+| 迁移期工具层 | `app/services/utils/` | 回调、下载、legacy AnythingLLM/RAG 流程及文档处理兼容 Facade；MHTML/OCR 唯一实现已迁入共享模块 | `anythingllm_client.py` `rag_pipeline.py` `callback_client.py` `file_downloader.py` `ocr_preprocessor.py` |
+| 共享文档处理层 | `app/modules/document_processing/` | Artifact/Profile/Lineage、MHTML/LibreOffice/MinerU/OCR Processor、本地 Store/Record 与统一准备流水线 | `domain/` `application/` `ports/` `adapters/` |
+| 翻译能力层 | `app/modules/translation/` | 只读取 prepared Markdown/Text Artifact；语言引擎、分段和安全 Renderer 与格式转换解耦 | `domain/` `application/` `ports/` `adapters/` |
+| 迁移期翻译 Facade | `app/services/translator/` | 保留旧 Python 导入签名和待清理 Handler；生产全文翻译已不再从这里执行文件转换 | `core.py` `document_handler.py` `mhtml_handler.py` |
 
 ### 2.2 主要调用方向
 
@@ -39,12 +41,24 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `llm_service -> ports`：新链路只依赖供应商无关 Port/Factory；旧链路在迁移期仍使用 legacy Facade。
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
-5. `llm_service -> core/utils`：写任务状态、发布进度、下载和规范化文件、发送回调。
-6. `llm_service.translation_service -> translator`：翻译能力由 `translation_service.py` 统一编排。
+5. `report/analysis adapters -> document_processing`：下载后的原始文件只进入一条 Artifact 流水线；
+   RAG、正文读取和全文翻译共享 prepared Artifact。
+6. `analysis/weaponry adapters -> translation`：全文只调用 `TranslatePreparedDocument`，摘要与
+   Weaponry 纯文本只调用实例级 TranslationEngine。
 7. `check-task -> report/weaponry/analysis application`：三类业务分别通过
    `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously`、
    `RecoverAnalysisCallbackSynchronously` 与正常 Worker 共用 execution 级 Callback Guard；file 不再
    回退到兼容 Task Service。三类业务均保留甲方规定的请求内同步恢复副作用。
+
+阶段 1H-0～1H-7 及关闭后 1H-R 全面审查修复已完成代码与安全离线验收。1H-R 恢复扫描
+PDF 的 RAG-only 原件降级、保留结构化 Markdown/图片、增加显式 Processing Record 对账、
+Artifact Catalog、读租约/锁回收和有界本地容量。上游系统保存的原始上传文档不由
+DocumentProcessing 删除；任务共享 Store 中的 source/prepared Artifact 在当前阶段继续保留，
+只即时清理能证明所有权的 Processor scratch、失败候选和 `.part`。旧 Handler/Service/Facade 因
+兼容代码和测试引用尚未物理删除，但永久架构门禁禁止当前生产链重新从旧转换路径取得执行权。
+未来 Artifact GC 必须基于数据库引用、保留期、删除资格、lease/fencing 和审计状态实施。
+Analysis/Report accepted 时冻结全部处理/翻译运行参数仍属于阶段 2 的内部 Task Schema 升级，
+MinIO、可靠队列、多实例一致性与生产容量证明仍属于后续阶段。
 
 ### 2.3 analysis/report/weaponry 请求到回调的链路
 
@@ -78,6 +92,8 @@ app/
     tasks/                          # 统一任务 Domain/Application/Ports/兼容 Adapter
     analysis/                       # 文件分析 Domain/Application/Ports/生产 Adapter
     report/                         # 报告 Domain/Application/Ports/生产形态 Adapter
+    document_processing/            # Artifact/Profile/Lineage 与通用文档 Processor
+    translation/                    # prepared Artifact 翻译与实例级语言引擎
   ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
   integrations/
     anythingllm/                    # Transport、策略、原子 Client、Gateway 与任务级 Factory
@@ -158,19 +174,20 @@ requirements.txt                    # 当前根目录实际提供的 Python 依�
 - `pending`：任务初始回调状态，尚未记录回调成功、失败或跳过
 - `success`：回调成功
 - `failed`：回调失败（可通过 `/llm/check-task` 触发补发）
-- `outcome_unknown`：请求可能已经送达但响应结果未知；后台不自动重试，file 类型可由新的 `/llm/check-task` 明确按至少一次语义补发
+- `outcome_unknown`：请求可能已经送达但响应结果未知；后台不自动重试，file、report、weaponry 三类业务均只能由新的 `/llm/check-task` 请求明确按至少一次语义授权补发
 - `skipped`：任务已完成，但当前部署未配置 `CALLBACK_URL`，因此无需向外部系统回调
 
 `/llm/check-task` 只会在当前已配置 `CALLBACK_URL` 时补发 `pending`、`failed`，以及由新的
-file check-task 请求明确授权的 `outcome_unknown` 终态结果。同一请求内规范化后重复的 fileName
-只处理首次出现项。`outcome_unknown` 补发可能产生重复业务回调，接收方必须按 fileName 和业务结果
-幂等处理；普通 Worker 和后台维护线程仍不得自动补发。
+check-task 请求明确授权的 `outcome_unknown` 终态结果。路由会在任何回调副作用前完整校验全部
+`params`，再分别按 `fileName`、规范化 `reportId` 或规范化 `architectureId` 稳定去重；同一请求中的
+每个唯一业务键最多进入一次检查和一次可能的发送权竞争。`outcome_unknown` 补发可能产生重复业务
+回调，接收方必须按对应业务键和业务结果幂等处理；普通 Worker 和后台维护线程仍不得自动补发。
 `skipped` 不增加回调尝试次数且不可重放；任务进入该状态后再配置 URL，也不会通过
-check-task 自动补发。报告类型每次实际外发前还会原子复核 latest execution 并取得 Callback
-Guard 租约：同一 execution 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
+check-task 自动补发。三类业务每次实际外发前都会原子复核 latest execution 并取得 Callback
+Guard 租约：同一 callback attempt 的并发恢复最多发送一次，新任务已提交时旧回调判定 stale 并跳过。
 HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 
-同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 或 `outcome_unknown` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID、attempt 与租约 fencing 条件写回状态。进程中断后的过期租约先冻结为 `outcome_unknown`，不会由后台自动接管发送；下一次新的 file check-task 可明确授权至少一次补发。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
+同名文件任务处于 `status=0/1` 时不能重复受理；任务已进入业务终态但 `callback_status=pending` 时也会暂时返回 HTTP `409`，以保护结果提交到首次回调完成之间的交接窗口。`failed` 或 `outcome_unknown` 任务在 `/llm/check-task` 实际补发期间会持有有界 SQLite 发送租约，同样暂不接受重跑；补发结束会以 execution ID、attempt 与租约 fencing 条件写回状态。进程中断后的过期租约先冻结为 `outcome_unknown`，不会由后台自动接管发送；下一次对应业务类型的 `/llm/check-task` 请求可明确授权至少一次补发。首次回调成功、失败或明确跳过且没有在途补发时可重新受理；若进程在首次交接窗口中断，可先通过 `/llm/check-task` 补发或把空回调配置迁移为 `skipped`。
 
 ## 5. 接口行为说明（按当前代码核对）
 
@@ -181,7 +198,7 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
 | WS | `/llm/progress` | 任务进度订阅（目标公开契约只保留无 action 格式） |
-| POST | `/llm/chat` | 基于指定文件内容发起对话请求（SSE 流式响应下发） |
+| POST | `/llm/chat` | 基于 `fileNames` 或 `architectureId` 冻结范围发起对话请求（SSE 流式响应下发） |
 | POST | `/llm/chat/title` | 根据指定会话的本地已提交消息生成标题 |
 | GET | `/llm/chat/history` | 查询指定会话在本地持久化的已提交消息 |
 | POST | `/llm/chat/abort` | 请求中断指定会话当前活跃的生成任务 |
@@ -276,6 +293,7 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 4. `/llm/check-task`
    - 支持 `file` / `report` / `weaponry`。
    - 支持批量检查（`params` 多项）；`params` 必须为非空对象数组，任一非对象元素会使整次请求按既有 HTTP 400 错误体失败。
+   - 去重只影响内部检查与恢复次数；单项缺失返回 HTTP 404、批量含缺失项仍返回 HTTP 200 的判定始终以原始 `params` 项数为准。
    - 负责人于 2026-07-25 明确同意后，成功响应已统一为 HTTP 200 空响应体；内部仍执行必要的同步回调补发，批量缺失项不阻断其余存在项处理，400/404 错误体保持不变。
    - 成功响应不公开任务状态、进度、回调状态、恢复结果或内部执行标识；调用方以既有业务键、Progress 与最终回调跟踪结果。
 
@@ -288,12 +306,16 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
-   - `fileNames` 表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
+   - 当前支持互斥的 `fileNames` 和 `architectureId` 两种范围模式；同一请求不能同时出现二者，同一 `chatId` 首次成功受理后会永久绑定范围模式，不能在后续请求中切换。
+   - `fileNames` 模式中，该字段表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
    - 首次创建 `chatId` 且显式传入 `fileNames=[]` 时，受理事务把当时全部可用已解析文件冻结为 `automatic_initial` Scope；空知识库会冻结空范围，后续知识库新增文件不自动吸收。首次自动范围和任意显式范围都受 `DOCSENSE_CHAT_MAX_FILES` 约束。
+   - `architectureId` 模式中，每轮都必须传入与会话绑定值相同的规范化 ID；Chat 专属范围为 `1..9007199254740991`，保证历史中的 JSON number 可被浏览器精确表示，不改变 Weaponry 等其他业务的 64 位 ID 合同。首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续只复用首次快照，不因类别新增、删除、重新解析或重新分类而动态刷新、追加或替换成员。
    - AnythingLLM Workspace 与本地 binding heads 继续累计历史绑定，但每轮模型只接收 Effective Scope 的文档引用；累计绑定不能替代或扩大 Active Scope。
-   - `/llm/chat/history` 的用户 `files` 只展示该轮前端显式文件；空请求始终返回 `files: []`，不会把自动全量或继承范围展开到历史。Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复 Requested/Effective 两套事实。
-   - Requested/Active/Effective Scope 阶段 0～7 已完成。当前通过 204 项 Chat 回归及安全全仓发现 1,879/排除 13/执行 1,866 项；开发 Chat 库已精确清理并重建 Schema v1～v4。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md`。
-   - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。
+   - `/llm/chat/history` 在 `fileNames` 模式下只为 user 消息返回该轮前端显式文件，空请求固定为 `files: []`；在 `architectureId` 模式下，user 消息只返回规范化后的 JSON number `architectureId`，不返回 `files`；assistant 消息不返回任一范围字段。
+   - 不可变会话 Binding、Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复冻结的 Effective Scope。当前持久化迁移已到 Schema v6：v5 增加 architecture 模式绑定、运行输入与历史字段互斥约束；v6 增加正式受理前的持久化 Admission Guard、Chat 安全整数兜底和 files/architecture Scope 与 Binding 的对称约束。同一 `chatId` 冲突先于全局容量检查，因此与容量满同时发生时返回 409；Guard 本身不提前创建业务事实。
+   - 类别候选查询在 SQL 层最多读取 `DOCSENSE_CHAT_MAX_FILES + 1` 条用于超限判定，不把异常大类别完整装入内存。远端绑定必须按冻结的 `external_location` 得到唯一回执，缺失或重复时整批失败且不写部分 Binding；唯一回执允许提供规范化 `document_ref`。
+   - Requested/Active/Effective Scope 阶段 0～7 已完成，architecture 类别文件对话阶段 0～7 也已完成并通过离线关闭验收。后者完成 248 项 Chat、85 项合同/网关/架构、142 项相邻模块回归；安全全仓发现 2,033 项、排除 13 项、执行 2,020 项，失败 0、错误 0、2 项既有平台条件跳过。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md` 和 `docs/重构记录/260728-知识谱系类别文件对话详细实施计划.md`。
+   - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。SSE 的 `done`、`aborted`、`error` 都会结束本轮，其中 `aborted` 表示回答不完整，不等同于成功完成。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
    - `POST /llm/chat/title` 仅使用本地已提交消息生成标题；`POST /llm/chat/abort` 向当前活跃 run 写入持久化中断标志，执行器在后续事件边界观察到标志后发送 `aborted` 终态。没有活跃 run 时接口仍返回 HTTP 200，但 `aborted=false`。

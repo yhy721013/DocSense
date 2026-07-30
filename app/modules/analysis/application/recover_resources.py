@@ -25,6 +25,8 @@ from app.modules.analysis.ports import (
     AnalysisRagCloseResult,
     AnalysisRagLifecycleEvent,
     AnalysisRagLifecycleOutcome,
+    AnalysisRagUploadDescriptor,
+    AnalysisResourceActivityPort,
     AnalysisResourceCommand,
     AnalysisResourcePort,
     AnalysisResourceRecord,
@@ -40,9 +42,12 @@ from .workflow_models import _RagWorkflowState
 logger = logging.getLogger(__name__)
 
 _RESOURCE_SCHEMA_VERSION_V1 = 1
-_RESOURCE_SCHEMA_VERSION = 2
+_RESOURCE_SCHEMA_VERSION_V2 = 2
+_RESOURCE_SCHEMA_VERSION = 3
 _FINAL_CLEANUP_STATES = frozenset({"confirmed", "known_not_applied", "not_required"})
 _RECOVERABLE_CLOSE_STATES = frozenset({"confirmed", "known_not_applied"})
+_DEFAULT_CLOSE_RUNNING_GRACE_SECONDS = 300.0
+_MAX_CLOSE_RUNNING_GRACE_SECONDS = 7 * 24 * 60 * 60
 
 
 def _utc_now() -> datetime:
@@ -51,15 +56,35 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _utc_iso(clock: Callable[[], datetime]) -> str:
-    """把注入时钟规范化为 SQLite 可比较的 UTC ISO 时间。"""
+def _utc_value(clock: Callable[[], datetime]) -> datetime:
+    """读取并规范化注入时钟，避免同一步骤因重复取时产生边界漂移。"""
 
     value = clock()
     if not isinstance(value, datetime):
         raise TypeError("resource recovery clock 必须返回 datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("resource recovery clock 必须返回带时区 datetime")
-    return value.astimezone(timezone.utc).isoformat()
+    return value.astimezone(timezone.utc)
+
+
+def _utc_iso(clock: Callable[[], datetime]) -> str:
+    """把注入时钟规范化为 SQLite 可比较的 UTC ISO 时间。"""
+
+    return _utc_value(clock).isoformat()
+
+
+def _parse_aware_utc(value: object, *, name: str) -> datetime:
+    """严格解析内部 ISO 时间；坏时间不能驱动恢复线程修改资源事实。"""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} 必须是非空 ISO 时间")
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise ValueError(f"{name} 不是合法 ISO 时间") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} 必须包含时区")
+    return parsed.astimezone(timezone.utc)
 
 
 def _safe_reason(value: object, *, maximum: int = 160) -> str:
@@ -187,13 +212,48 @@ class AnalysisResourceLifecycle:
         *,
         store: AnalysisResourcePort,
         execution: AnalysisExecutionRef,
+        clock: Callable[[], datetime] = _utc_now,
+        close_running_grace_seconds: float = (
+            _DEFAULT_CLOSE_RUNNING_GRACE_SECONDS
+        ),
+        resource_activity: AnalysisResourceActivityPort | None = None,
     ) -> None:
         if not isinstance(store, AnalysisResourcePort):
             raise TypeError("store 必须实现 AnalysisResourcePort")
         if not isinstance(execution, AnalysisExecutionRef):
             raise TypeError("execution 必须是 AnalysisExecutionRef")
+        if not callable(clock):
+            raise TypeError("clock 必须可调用")
+        if resource_activity is not None and not isinstance(
+            resource_activity,
+            AnalysisResourceActivityPort,
+        ):
+            raise TypeError(
+                "resource_activity 必须实现 AnalysisResourceActivityPort 或为 None"
+            )
+        if (
+            isinstance(close_running_grace_seconds, bool)
+            or not isinstance(close_running_grace_seconds, (int, float))
+        ):
+            raise TypeError("close_running_grace_seconds 必须是正有限数字")
+        normalized_grace_seconds = float(close_running_grace_seconds)
+        if (
+            normalized_grace_seconds != normalized_grace_seconds
+            or normalized_grace_seconds
+            in (float("inf"), float("-inf"))
+            or not 0.0
+            < normalized_grace_seconds
+            <= _MAX_CLOSE_RUNNING_GRACE_SECONDS
+        ):
+            raise ValueError(
+                "close_running_grace_seconds 必须是 0~604800 的正有限数字"
+            )
         self._store = store
         self._execution = execution
+        self._clock = clock
+        self._close_running_grace_seconds = normalized_grace_seconds
+        self._resource_activity = resource_activity
+        self._resource_activity_acquired = False
         self._record: AnalysisResourceRecord | None = None
 
     @property
@@ -206,6 +266,24 @@ class AnalysisResourceLifecycle:
 
         return self._record
 
+    def begin_worker(self) -> None:
+        """登记当前 Worker 正在推进资源生命周期；必须在资源记录可见前调用。"""
+
+        if self._resource_activity_acquired:
+            raise AnalysisResourceLifecycleError("当前资源已登记活跃生命周期 Worker")
+        if self._resource_activity is not None:
+            self._resource_activity.acquire(self._execution)
+        self._resource_activity_acquired = True
+
+    def finish_worker(self) -> None:
+        """幂等释放进程内活跃权；close deadline 继续处理进程崩溃场景。"""
+
+        if not self._resource_activity_acquired:
+            return
+        if self._resource_activity is not None:
+            self._resource_activity.release(self._execution)
+        self._resource_activity_acquired = False
+
     def register(
         self,
         *,
@@ -213,6 +291,7 @@ class AnalysisResourceLifecycle:
         source_path: str,
         upload_path: str,
         state: _RagWorkflowState,
+        upload_descriptor: AnalysisRagUploadDescriptor | None = None,
         processing_path: str | None = None,
     ) -> None:
         """在创建任何远端 RAG 资源前登记 ``tracking`` 记录。"""
@@ -230,31 +309,67 @@ class AnalysisResourceLifecycle:
                 raise ValueError(f"{name} 必须是非空 str")
         if not isinstance(state, _RagWorkflowState):
             raise TypeError("state 必须是 _RagWorkflowState")
+        if upload_descriptor is not None:
+            if not isinstance(upload_descriptor, AnalysisRagUploadDescriptor):
+                raise TypeError(
+                    "upload_descriptor 必须是 AnalysisRagUploadDescriptor 或 None"
+                )
+            if upload_descriptor.artifact.task_id != self._execution.task_id:
+                raise AnalysisResourceLifecycleError(
+                    "RAG 上传描述符不属于当前 execution"
+                )
 
-        record = self._store.create(
-            AnalysisResourceCommand(
-                execution=self._execution,
-                expected_state=None,
-                expected_version=None,
-                target_state=AnalysisResourceState.TRACKING,
-                record_payload=FrozenJsonObject.from_mapping(
-                    self._initial_payload(
-                        task_root=task_root,
-                        source_path=source_path,
-                        processing_path=resolved_processing_path,
-                        upload_path=upload_path,
-                        state=state,
+        # 先取得活跃权再创建可扫描记录，消除“记录已可见、Worker 尚未登记”的窗口。
+        self.begin_worker()
+        try:
+            record = self._store.create(
+                AnalysisResourceCommand(
+                    execution=self._execution,
+                    expected_state=None,
+                    expected_version=None,
+                    target_state=AnalysisResourceState.TRACKING,
+                    record_payload=FrozenJsonObject.from_mapping(
+                        self._initial_payload(
+                            task_root=task_root,
+                            source_path=source_path,
+                            processing_path=resolved_processing_path,
+                            upload_path=upload_path,
+                            upload_descriptor=upload_descriptor,
+                            state=state,
+                        ),
+                        name="analysis_resource_initial",
                     ),
-                    name="analysis_resource_initial",
-                ),
+                )
             )
-        )
-        self._require_record(record, operation="register")
-        if record.state is not AnalysisResourceState.TRACKING:
+            self._require_record(record, operation="register")
+            if record.state is not AnalysisResourceState.TRACKING:
+                raise AnalysisResourceLifecycleError(
+                    "已有资源记录不是 tracking，禁止当前 Worker 继续创建外部资源"
+                )
+            self._record = record
+        except Exception:
+            self.finish_worker()
+            raise
+
+    def prepare_document_upload(self) -> None:
+        """在首次文档上传请求前以 CAS 持久化副作用意图。
+
+        CAS 失败时调用方必须停止，绝不能继续发起 HTTP。CAS 成功后若进程崩溃，恢复端
+        只能看到 ``started_unknown``，因此会保留现场而不会猜测文档未上传或自动重放。
+        """
+
+        record = self._require_tracking_record("prepare_document_upload")
+        payload = self._payload(record)
+        upload = self._mapping(payload.get("upload"), name="upload")
+        state = upload.get("delivery_state")
+        if state == "confirmed":
+            return
+        if state != "not_started":
             raise AnalysisResourceLifecycleError(
-                "已有资源记录不是 tracking，禁止当前 Worker 继续创建外部资源"
+                "RAG 文档上传状态不是 not_started，禁止重复发起外部上传"
             )
-        self._record = record
+        upload["delivery_state"] = "started_unknown"
+        self._advance(payload, AnalysisResourceState.TRACKING)
 
     def checkpoint_rag_state(self, state: _RagWorkflowState) -> None:
         """在每次取得 RAG Session 或生命周期事件后立即保存引用。"""
@@ -265,6 +380,34 @@ class AnalysisResourceLifecycle:
         payload = self._payload(record)
         payload["rag"] = self._rag_payload(state)
         payload["audit"] = self._audit_payload(state, previous=payload.get("audit"))
+        upload = payload.get("upload")
+        if isinstance(upload, Mapping) and state.session is not None:
+            upload = dict(upload)
+            payload["upload"] = upload
+            if state.session.document_bound:
+                artifact = self._mapping(
+                    upload.get("artifact"),
+                    name="upload.artifact",
+                )
+                expected_sha256 = str(artifact.get("sha256") or "").strip().lower()
+                expected_file_name = str(
+                    upload.get("transport_file_name") or ""
+                )
+                if (
+                    state.session.content_sha256 != expected_sha256
+                    or state.session.ingested_file_name != expected_file_name
+                ):
+                    state.preserve_scene = True
+                    self._set_diagnosis(
+                        payload,
+                        stage="document_upload",
+                        reason="uploaded_document_identity_mismatch",
+                    )
+                    self._advance(payload, AnalysisResourceState.QUARANTINED)
+                    raise AnalysisResourceLifecycleError(
+                        "RAG 已绑定文档身份与登记上传描述符不一致"
+                    )
+                upload["delivery_state"] = "confirmed"
 
         has_unknown = any(
             event.outcome is AnalysisRagLifecycleOutcome.OUTCOME_UNKNOWN
@@ -411,8 +554,19 @@ class AnalysisResourceLifecycle:
             self._advance(payload, AnalysisResourceState.QUARANTINED)
             raise AnalysisResourceLifecycleError("临时文档所有权不明确，禁止自动清理")
 
+        now = _utc_value(self._clock)
+        recovery_not_before = now + timedelta(
+            seconds=self._close_running_grace_seconds
+        )
         payload["cleanup"] = {
-            "session_close": {"state": "planned", "retain_document": retain_document},
+            "session_close": {
+                "state": "planned",
+                "retain_document": retain_document,
+                # ``prepare_close`` 与 ``mark_close_running`` 之间也存在极短竞态窗口。
+                # 先写保护期，维护线程在当前 Worker 有机会开始外部 close 前不得改版本。
+                "worker_started_at": now.isoformat(),
+                "recovery_not_before": recovery_not_before.isoformat(),
+            },
             "document": {
                 "state": "not_required" if retain_document else "planned",
                 "retain_document": retain_document,
@@ -433,7 +587,12 @@ class AnalysisResourceLifecycle:
         session_close = self._mapping(cleanup.get("session_close"), name="cleanup.session_close")
         if session_close.get("state") != "planned":
             raise AnalysisResourceLifecycleError("RAG close 未处于 planned，禁止重复外部调用")
+        now = _utc_value(self._clock)
         session_close["state"] = "running"
+        session_close["worker_started_at"] = now.isoformat()
+        session_close["recovery_not_before"] = (
+            now + timedelta(seconds=self._close_running_grace_seconds)
+        ).isoformat()
         document = self._mapping(cleanup.get("document"), name="cleanup.document")
         if document.get("state") == "planned":
             document["state"] = "running"
@@ -460,6 +619,14 @@ class AnalysisResourceLifecycle:
             )
             self._advance(payload, AnalysisResourceState.QUARANTINED)
             return
+        # close 已返回后，当前 Worker 还要追加生命周期审计。维护线程在同一保护期内
+        # 只能观察，不能抢先执行同一幂等审计并推进版本，否则 Worker 的 cleaned CAS
+        # 会被制造成“关闭失败”。
+        cleanup = self._mapping(payload["cleanup"], name="cleanup")
+        self._mapping(
+            cleanup.get("audit_append"),
+            name="cleanup.audit_append",
+        )["state"] = "running"
         self._advance(payload, AnalysisResourceState.CLEANUP_PENDING)
 
     def _apply_close_result(
@@ -559,8 +726,24 @@ class AnalysisResourceLifecycle:
             return
         audit_append = self._mapping(cleanup.get("audit_append"), name="cleanup.audit_append")
         audit_append["state"] = "outcome_unknown"
+        self._clear_close_worker_protection(payload)
         self._set_diagnosis(payload, stage="audit_append", reason=_safe_reason(error))
         self._advance(payload, AnalysisResourceState.AUDIT_PENDING)
+
+    @staticmethod
+    def _clear_close_worker_protection(payload: dict[str, Any]) -> None:
+        """已知 Worker 不会继续推进时移除保护期，允许恢复器补幂等审计。"""
+
+        cleanup = AnalysisResourceLifecycle._mapping(
+            payload.get("cleanup"),
+            name="cleanup",
+        )
+        session_close = AnalysisResourceLifecycle._mapping(
+            cleanup.get("session_close"),
+            name="cleanup.session_close",
+        )
+        session_close.pop("worker_started_at", None)
+        session_close.pop("recovery_not_before", None)
 
     def quarantine(self, *, stage: str, reason: str) -> None:
         """显式隔离当前资源，避免调用方继续使用不可靠的外部事实。"""
@@ -581,10 +764,15 @@ class AnalysisResourceLifecycle:
         source_path: str,
         processing_path: str,
         upload_path: str,
+        upload_descriptor: AnalysisRagUploadDescriptor | None,
         state: _RagWorkflowState,
     ) -> dict[str, object]:
-        return {
-            "schema_version": _RESOURCE_SCHEMA_VERSION,
+        payload: dict[str, object] = {
+            "schema_version": (
+                _RESOURCE_SCHEMA_VERSION
+                if upload_descriptor is not None
+                else _RESOURCE_SCHEMA_VERSION_V2
+            ),
             "local": {
                 "task_root": task_root,
                 "source_path": source_path,
@@ -608,6 +796,36 @@ class AnalysisResourceLifecycle:
                 "close_events": [],
             },
             "diagnosis": {"stage": "", "reason": ""},
+        }
+        if upload_descriptor is not None:
+            payload["upload"] = self._upload_payload(upload_descriptor)
+        return payload
+
+    @staticmethod
+    def _upload_payload(
+        descriptor: AnalysisRagUploadDescriptor,
+    ) -> dict[str, object]:
+        """保存可恢复的不可变上传身份，不保存宿主路径或 Provider 字段。"""
+
+        artifact = descriptor.artifact
+        return {
+            "delivery_state": "not_started",
+            "representation": descriptor.representation.value,
+            "media_type": descriptor.media_type,
+            "transport_file_name": descriptor.transport_file_name,
+            "display_title": descriptor.display_title,
+            "projection_profile_id": descriptor.projection_profile_id,
+            "naming_policy": descriptor.naming_policy,
+            "artifact": {
+                "artifact_id": artifact.artifact_id,
+                "step_key": artifact.step_key,
+                "kind": artifact.kind.value,
+                "representation": artifact.representation.value,
+                "media_type": artifact.metadata.media_type,
+                "size_bytes": artifact.metadata.size_bytes,
+                "sha256": artifact.metadata.sha256,
+                "ordinal": artifact.ordinal,
+            },
         }
 
     @staticmethod
@@ -691,6 +909,7 @@ class AnalysisResourceLifecycle:
         payload = record.record_payload.to_dict()
         if payload.get("schema_version") not in {
             _RESOURCE_SCHEMA_VERSION_V1,
+            _RESOURCE_SCHEMA_VERSION_V2,
             _RESOURCE_SCHEMA_VERSION,
         }:
             raise AnalysisResourceLifecycleError("资源记录 schema_version 不受当前用例支持")
@@ -698,6 +917,10 @@ class AnalysisResourceLifecycle:
             if not isinstance(payload.get(key), Mapping):
                 raise AnalysisResourceLifecycleError(f"资源记录缺少有效 {key} 对象")
             payload[key] = dict(payload[key])
+        if payload.get("schema_version") == _RESOURCE_SCHEMA_VERSION:
+            if not isinstance(payload.get("upload"), Mapping):
+                raise AnalysisResourceLifecycleError("资源记录缺少有效 upload 对象")
+            payload["upload"] = dict(payload["upload"])
         return payload
 
     @staticmethod
@@ -776,11 +999,19 @@ class RecoverAnalysisResources:
         retry_base_seconds: float = 5.0,
         retry_max_seconds: float = 300.0,
         max_deferrals: int = 3,
+        resource_activity: AnalysisResourceActivityPort | None = None,
     ) -> None:
         if not isinstance(store, AnalysisResourcePort):
             raise TypeError("store 必须实现 AnalysisResourcePort")
         if not isinstance(audit, AnalysisAuditPort):
             raise TypeError("audit 必须实现 AnalysisAuditPort")
+        if resource_activity is not None and not isinstance(
+            resource_activity,
+            AnalysisResourceActivityPort,
+        ):
+            raise TypeError(
+                "resource_activity 必须实现 AnalysisResourceActivityPort 或为 None"
+            )
         if not callable(clock):
             raise TypeError("clock 必须可调用")
         for name, value in (
@@ -799,6 +1030,7 @@ class RecoverAnalysisResources:
         self._retry_base_seconds = float(retry_base_seconds)
         self._retry_max_seconds = float(retry_max_seconds)
         self._max_deferrals = max_deferrals
+        self._resource_activity = resource_activity
 
     def run_once(self, *, limit: int) -> AnalysisResourceSweepResult:
         """扫描不超过 ``limit`` 条到期记录；单轮不执行任何外部删除。"""
@@ -866,6 +1098,9 @@ class RecoverAnalysisResources:
 
         try:
             payload = self._payload(record)
+            protected = self._protect_active_resource_worker(record)
+            if protected is not None:
+                return protected
             if record.state is AnalysisResourceState.TRACKING:
                 return self._quarantine(
                     record,
@@ -889,8 +1124,21 @@ class RecoverAnalysisResources:
         record: AnalysisResourceRecord,
         payload: dict[str, Any],
     ) -> AnalysisResourceRecoveryResult:
+        protected = self._protect_close_deadline(record, payload)
+        if protected is not None:
+            return protected
         cleanup = self._mapping(payload.get("cleanup"), "cleanup")
         close_state = self._mapping(cleanup.get("session_close"), "cleanup.session_close").get("state")
+        if close_state == "running":
+            # 保护期耗尽后仍停在 running，无法判断外部 close 是否已经生效。把所有可能
+            # 受该动作影响的所有权标为未知并隔离，绝不自动重放 close/delete。
+            self._mark_running_close_unknown(payload)
+            return self._quarantine(
+                record,
+                payload,
+                stage="recovery",
+                reason="close_running_deadline_expired",
+            )
         if close_state not in _RECOVERABLE_CLOSE_STATES:
             return self._quarantine(
                 record,
@@ -905,6 +1153,9 @@ class RecoverAnalysisResources:
         record: AnalysisResourceRecord,
         payload: dict[str, Any],
     ) -> AnalysisResourceRecoveryResult:
+        protected = self._protect_close_deadline(record, payload)
+        if protected is not None:
+            return protected
         cleanup = self._mapping(payload.get("cleanup"), "cleanup")
         close_state = self._mapping(cleanup.get("session_close"), "cleanup.session_close").get("state")
         if close_state in _RECOVERABLE_CLOSE_STATES:
@@ -920,6 +1171,92 @@ class RecoverAnalysisResources:
             stage="audit",
             reason="interaction_audit_not_reliably_closed",
         )
+
+    def _protect_active_resource_worker(
+        self,
+        record: AnalysisResourceRecord,
+    ) -> AnalysisResourceRecoveryResult | None:
+        """当前进程 Worker 存活时只观察，覆盖 Callback 与 close 的完整窗口。"""
+
+        if (
+            self._resource_activity is None
+            or not self._resource_activity.is_active(record.execution)
+        ):
+            return None
+        logger.debug(
+            "文件分析资源仍由当前进程Worker持有，本轮只观察: "
+            "task_id=%s state=%s version=%s",
+            record.execution.task_id,
+            record.state.value,
+            record.version,
+        )
+        return AnalysisResourceRecoveryResult(
+            record.execution,
+            AnalysisResourceRecoveryOutcome.PENDING,
+            "resource_owner_active",
+        )
+
+    def _protect_close_deadline(
+        self,
+        record: AnalysisResourceRecord,
+        payload: Mapping[str, Any],
+    ) -> AnalysisResourceRecoveryResult | None:
+        """保护仍在持久时限内的 close，不读取标题猜身份，也不修改资源版本。
+
+        进程内活跃权已在 ``recover`` 入口检查。此处只处理进程崩溃后遗留的 deadline；
+        时限最终会到期，恢复器再依据 close state 幂等补审计或 fail-closed 隔离。
+        """
+
+        cleanup = self._mapping(payload.get("cleanup"), "cleanup")
+        session_close = self._mapping(
+            cleanup.get("session_close"),
+            "cleanup.session_close",
+        )
+        raw_deadline = session_close.get("recovery_not_before")
+        if raw_deadline in (None, ""):
+            # 兼容历史资源记录：没有保护事实时维持既有保守恢复语义。
+            return None
+        deadline = _parse_aware_utc(
+            raw_deadline,
+            name="cleanup.session_close.recovery_not_before",
+        )
+        if _utc_value(self._clock) >= deadline:
+            return None
+        logger.debug(
+            "文件分析资源仍由活跃关闭Worker保护，本轮只观察: "
+            "task_id=%s state=%s version=%s",
+            record.execution.task_id,
+            record.state.value,
+            record.version,
+        )
+        return AnalysisResourceRecoveryResult(
+            record.execution,
+            AnalysisResourceRecoveryOutcome.PENDING,
+            "close_owner_active",
+        )
+
+    @staticmethod
+    def _mark_running_close_unknown(payload: dict[str, Any]) -> None:
+        """保护期耗尽时把可能已发生的远端动作显式降为未知事实。"""
+
+        cleanup = RecoverAnalysisResources._mapping(
+            payload.get("cleanup"),
+            "cleanup",
+        )
+        session_close = RecoverAnalysisResources._mapping(
+            cleanup.get("session_close"),
+            "cleanup.session_close",
+        )
+        session_close["state"] = "outcome_unknown"
+        document = RecoverAnalysisResources._mapping(
+            cleanup.get("document"),
+            "cleanup.document",
+        )
+        if document.get("state") != "not_required":
+            document["state"] = "outcome_unknown"
+        ownership = payload.get("ownership")
+        if isinstance(ownership, dict):
+            ownership["document"] = "unknown"
 
     def _lookup_interaction_receipt(
         self,
@@ -1126,6 +1463,7 @@ class RecoverAnalysisResources:
         payload = record.record_payload.to_dict()
         if payload.get("schema_version") not in {
             _RESOURCE_SCHEMA_VERSION_V1,
+            _RESOURCE_SCHEMA_VERSION_V2,
             _RESOURCE_SCHEMA_VERSION,
         }:
             raise ValueError("资源记录 schema_version 不受支持")

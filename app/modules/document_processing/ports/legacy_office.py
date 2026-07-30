@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .domain import LegacyOfficePreparationResult
+from ..domain import LegacyOfficePreparationResult
 
 
 @runtime_checkable

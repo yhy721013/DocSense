@@ -167,6 +167,25 @@ class AnalysisResourceScanBatch:
 
 
 @runtime_checkable
+class AnalysisResourceActivityPort(Protocol):
+    """当前运行实例的资源生命周期活跃权。
+
+    SQLite 单实例实现使用进程内集合，覆盖资源登记、Callback、close 与审计；未来可靠
+    队列/多实例实现可替换为带 owner、lease 与 fencing 的共享租约。该 Port 只回答
+    “当前 owner 是否仍活跃”，不执行任何远端 I/O。
+    """
+
+    def acquire(self, execution: AnalysisExecutionRef) -> None:
+        ...
+
+    def release(self, execution: AnalysisExecutionRef) -> None:
+        ...
+
+    def is_active(self, execution: AnalysisExecutionRef) -> bool:
+        ...
+
+
+@runtime_checkable
 class AnalysisResourcePort(Protocol):
     """资源事实存储；所有推进必须使用 state+version CAS。"""
 
@@ -209,6 +228,7 @@ class AnalysisResourcePort(Protocol):
 
 
 __all__ = (
+    "AnalysisResourceActivityPort",
     "AnalysisResourceCommand",
     "AnalysisResourcePort",
     "AnalysisResourceRecord",

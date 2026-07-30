@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import threading
@@ -10,6 +11,7 @@ import unittest
 
 from app.modules.analysis.adapters import (
     AnalysisResourceStoreConcurrencyError,
+    InMemoryAnalysisResourceActivityAdapter,
     SQLiteAnalysisBatchCommandAdapter,
     SQLiteAnalysisResourceStoreAdapter,
 )
@@ -41,6 +43,9 @@ from app.modules.analysis.ports import (
 )
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+
+
+_AFTER_CLOSE_WORKER_DEADLINE = datetime(2100, 1, 1, tzinfo=timezone.utc)
 
 
 def _command(prefix: str) -> object:
@@ -257,13 +262,159 @@ class AnalysisResourceRecoveryTests(unittest.TestCase):
             self.assertEqual(AnalysisResourceState.CLEANUP_PENDING, record.state)
 
             audit = _AuditAppendFake()
-            result = RecoverAnalysisResources(store=self._store(service), audit=audit).recover(record)
+            result = RecoverAnalysisResources(
+                store=self._store(service),
+                audit=audit,
+                clock=lambda: _AFTER_CLOSE_WORKER_DEADLINE,
+            ).recover(record)
             self.assertEqual(AnalysisResourceRecoveryOutcome.CLEANED, result.outcome)
             self.assertEqual(1, len(audit.append_commands))
             cleaned = self._store(service).get(execution)
             self.assertIsNotNone(cleaned)
             assert cleaned is not None
             self.assertEqual(AnalysisResourceState.CLEANED, cleaned.state)
+
+    def test_running_close_is_not_mutated_before_recovery_deadline(self) -> None:
+        """活跃 Worker 的 Callback、close、审计窗口都只能观察，不能破坏 CAS。"""
+
+        with workspace_tempdir() as runtime_directory:
+            service = LLMTaskService(str(Path(runtime_directory) / "tasks.sqlite3"))
+            execution = _execution(service, "resource-running-protected")
+            state = _state(execution)
+            started_at = datetime(2026, 7, 30, 2, 0, tzinfo=timezone.utc)
+            resource_activity = InMemoryAnalysisResourceActivityAdapter()
+            lifecycle = AnalysisResourceLifecycle(
+                store=self._store(service),
+                execution=execution,
+                clock=lambda: started_at,
+                close_running_grace_seconds=60.0,
+                resource_activity=resource_activity,
+            )
+            lifecycle.register(
+                task_root="C:/analysis/resource-running-protected",
+                source_path="C:/analysis/resource-running-protected/source.txt",
+                upload_path="C:/analysis/resource-running-protected/upload.txt",
+                state=state,
+            )
+            self._commit_knowledge(lifecycle, execution, state)
+            tracking = lifecycle.record
+            assert tracking is not None
+            tracking_version = tracking.version
+            recovery = RecoverAnalysisResources(
+                store=self._store(service),
+                audit=_AuditAppendFake(),
+                clock=lambda: started_at + timedelta(hours=1),
+                resource_activity=resource_activity,
+            )
+            callback_waiting = recovery.recover(tracking)
+            self.assertEqual(
+                AnalysisResourceRecoveryOutcome.PENDING,
+                callback_waiting.outcome,
+            )
+            self.assertEqual("resource_owner_active", callback_waiting.reason)
+            persisted = self._store(service).get(execution)
+            assert persisted is not None
+            self.assertEqual(tracking_version, persisted.version)
+
+            lifecycle.prepare_close(retain_document=True)
+            lifecycle.mark_close_running()
+            running = lifecycle.record
+            assert running is not None
+            running_version = running.version
+
+            audit = _AuditAppendFake()
+            recovery = RecoverAnalysisResources(
+                store=self._store(service),
+                audit=audit,
+                # 即使持久 deadline 已经过期，只要当前单实例 Worker 仍明确存活，
+                # 维护线程也不得把一个未设 HTTP timeout 的长 close 抢走。
+                clock=lambda: started_at + timedelta(hours=1),
+                resource_activity=resource_activity,
+            )
+            protected = recovery.recover(running)
+
+            self.assertEqual(
+                AnalysisResourceRecoveryOutcome.PENDING,
+                protected.outcome,
+            )
+            self.assertEqual("resource_owner_active", protected.reason)
+            self.assertEqual([], audit.append_commands)
+            persisted = self._store(service).get(execution)
+            assert persisted is not None
+            self.assertEqual(AnalysisResourceState.CLEANUP_PENDING, persisted.state)
+            self.assertEqual(running_version, persisted.version)
+
+            # 维护线程没有修改版本后，原 Worker 仍能按既有 CAS 顺利保存 close 结果和
+            # 审计完成事实；close 已返回、审计仍在追加的短窗口同样必须保持只观察。
+            lifecycle.record_close_result(_confirmed_close(execution, state))
+            close_recorded = lifecycle.record
+            assert close_recorded is not None
+            close_recorded_version = close_recorded.version
+            audit_running = recovery.recover(close_recorded)
+            self.assertEqual(
+                AnalysisResourceRecoveryOutcome.PENDING,
+                audit_running.outcome,
+            )
+            self.assertEqual("resource_owner_active", audit_running.reason)
+            persisted = self._store(service).get(execution)
+            assert persisted is not None
+            self.assertEqual(close_recorded_version, persisted.version)
+
+            # 这正是线上 close_state_running 以及其后审计窗口竞态的回归门禁。
+            lifecycle.mark_close_audited()
+            lifecycle.finish_worker()
+            cleaned = self._store(service).get(execution)
+            assert cleaned is not None
+            self.assertEqual(AnalysisResourceState.CLEANED, cleaned.state)
+
+    def test_expired_running_close_is_quarantined_without_replaying_remote_close(self) -> None:
+        """活跃保护期耗尽后只能记录外部结果未知并隔离，绝不能自动重放 close。"""
+
+        with workspace_tempdir() as runtime_directory:
+            service = LLMTaskService(str(Path(runtime_directory) / "tasks.sqlite3"))
+            execution = _execution(service, "resource-running-expired")
+            state = _state(execution)
+            started_at = datetime(2026, 7, 30, 2, 0, tzinfo=timezone.utc)
+            lifecycle = AnalysisResourceLifecycle(
+                store=self._store(service),
+                execution=execution,
+                clock=lambda: started_at,
+                close_running_grace_seconds=60.0,
+            )
+            lifecycle.register(
+                task_root="C:/analysis/resource-running-expired",
+                source_path="C:/analysis/resource-running-expired/source.txt",
+                upload_path="C:/analysis/resource-running-expired/upload.txt",
+                state=state,
+            )
+            self._commit_knowledge(lifecycle, execution, state)
+            lifecycle.prepare_close(retain_document=True)
+            lifecycle.mark_close_running()
+            running = lifecycle.record
+            assert running is not None
+
+            audit = _AuditAppendFake()
+            expired = RecoverAnalysisResources(
+                store=self._store(service),
+                audit=audit,
+                clock=lambda: started_at + timedelta(seconds=61),
+            ).recover(running)
+
+            self.assertEqual(
+                AnalysisResourceRecoveryOutcome.QUARANTINED,
+                expired.outcome,
+            )
+            self.assertEqual("close_running_deadline_expired", expired.reason)
+            self.assertEqual([], audit.append_commands)
+            quarantined = self._store(service).get(execution)
+            assert quarantined is not None
+            self.assertEqual(AnalysisResourceState.QUARANTINED, quarantined.state)
+            payload = quarantined.record_payload.to_dict()
+            self.assertEqual(
+                "outcome_unknown",
+                payload["cleanup"]["session_close"]["state"],
+            )
+            self.assertEqual("unknown", payload["ownership"]["document"])
 
     def test_terminal_resource_record_cannot_be_reopened_through_sqlite_service(self) -> None:
         """即使绕过 Port DTO，SQLite 写边界也不能复活 cleaned 终态。"""
@@ -283,6 +434,7 @@ class AnalysisResourceRecoveryTests(unittest.TestCase):
             result = RecoverAnalysisResources(
                 store=self._store(service),
                 audit=_AuditAppendFake(),
+                clock=lambda: _AFTER_CLOSE_WORKER_DEADLINE,
             ).recover(record)
             self.assertEqual(AnalysisResourceRecoveryOutcome.CLEANED, result.outcome)
             cleaned = self._store(service).get(execution)
@@ -390,6 +542,7 @@ class AnalysisResourceRecoveryTests(unittest.TestCase):
             recovery = RecoverAnalysisResources(
                 store=self._store(service),
                 audit=audit,
+                clock=lambda: _AFTER_CLOSE_WORKER_DEADLINE,
                 max_deferrals=1,
                 retry_base_seconds=1.0,
                 retry_max_seconds=1.0,
@@ -495,6 +648,7 @@ class AnalysisResourceRecoveryTests(unittest.TestCase):
             sweep = RecoverAnalysisResources(
                 store=self._store(service),
                 audit=_AuditAppendFake(),
+                clock=lambda: _AFTER_CLOSE_WORKER_DEADLINE,
             ).run_once(limit=10)
 
             self.assertEqual(2, sweep.scanned_count)

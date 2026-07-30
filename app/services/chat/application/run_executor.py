@@ -12,12 +12,21 @@ from typing import Protocol, runtime_checkable
 from app.ports import ChatConversationFactory, ChatDocumentRef, ChatResourceError, ChatSessionRefs
 from app.services.chat.application.command_service import ChatCommandService
 from app.services.chat.domain.document_candidates import (
+    CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+    CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
+    ChatArchitectureCandidates,
     ChatDocumentCandidate,
     ChatDocumentSelectionCandidates,
 )
 from app.services.chat.application.document_resolver import (
+    ChatArchitectureDocumentResolver,
     ChatDocumentResolver,
     ResolvedChatDocument,
+)
+from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_MODE_ARCHITECTURE,
+    CHAT_SCOPE_MODE_FILES,
+    ChatScopeSelector,
 )
 from app.services.chat.domain.chat_id import chat_id_public_value
 from app.services.chat.domain.resource_ids import (
@@ -36,7 +45,12 @@ from app.services.chat.domain.models import (
     RESOURCE_WORKSPACE,
     SESSION_ACTIVE,
 )
-from app.services.chat.locking.lease import ChatRunLease, ChatRunLeaseLostError
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
+from app.services.chat.locking.lease import (
+    ChatAdmissionLease,
+    ChatRunLease,
+    ChatRunLeaseLostError,
+)
 from app.services.chat.persistence.store import ChatPersistenceStore
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
@@ -91,6 +105,7 @@ class ChatRunStreamRequest:
     # 因而真正的空请求会保持为空，不会触发该兼容分支。
     requested_file_names: tuple[str, ...] | None = None
     requested_file_original_names: tuple[str, ...] | None = None
+    requested_architecture_id: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -126,8 +141,12 @@ class ChatRunStreamRequest:
             self.requested_file_names is None
             and self.requested_file_original_names is None
         ):
-            requested_file_names = self.file_names
-            requested_file_original_names = self.file_original_names
+            if self.requested_architecture_id is None:
+                requested_file_names = self.file_names
+                requested_file_original_names = self.file_original_names
+            else:
+                requested_file_names = ()
+                requested_file_original_names = ()
         elif (
             self.requested_file_names is None
             or self.requested_file_original_names is None
@@ -149,6 +168,22 @@ class ChatRunStreamRequest:
             raise ValueError(
                 "requested_file_names and requested_file_original_names "
                 "must have the same length"
+            )
+        requested_architecture_id = self.requested_architecture_id
+        if isinstance(requested_architecture_id, bool) or (
+            requested_architecture_id is not None
+            and (
+                not isinstance(requested_architecture_id, int)
+                or requested_architecture_id < 1
+                or requested_architecture_id > MAX_CHAT_ARCHITECTURE_ID
+            )
+        ):
+            raise ValueError(
+                "requested_architecture_id must be a positive integer or None"
+            )
+        if requested_architecture_id is not None and requested_file_names:
+            raise ValueError(
+                "requested architecture and requested files are mutually exclusive"
             )
         # 非空的前端选择会完整替换活动范围，因此受理完成后两套顺序必须一致。
         # 空请求则允许有效范围来自首次全量快照或已有活动范围。
@@ -173,6 +208,11 @@ class ChatRunStreamRequest:
             self,
             "requested_file_original_names",
             requested_file_original_names,
+        )
+        object.__setattr__(
+            self,
+            "requested_architecture_id",
+            requested_architecture_id,
         )
         documents = tuple(self.documents)
         if any(not isinstance(item, ChatRunDocumentSnapshot) for item in documents):
@@ -266,6 +306,13 @@ class SynchronousChatRunExecutor:
         self._chat_commands = chat_commands
         self._conversation_factory = conversation_factory
         self._document_resolver = document_resolver
+        # file Resolver 仍保持既有最小协议；architecture 是按需校验的独立能力，
+        # 避免所有旧 Fake 因新增方法被迫伪造从未使用的行为。
+        self._architecture_document_resolver = (
+            document_resolver
+            if isinstance(document_resolver, ChatArchitectureDocumentResolver)
+            else None
+        )
         self._max_files_per_request = max_files_per_request
         self._max_message_chars = max_message_chars
         self._max_output_chars = max_output_chars
@@ -349,22 +396,120 @@ class SynchronousChatRunExecutor:
             )
         )
 
+    def resolve_architecture_candidates(
+        self,
+        *,
+        chat_id: str,
+        architecture_id: int,
+    ) -> ChatDocumentSelectionCandidates:
+        """准备 architecture 候选，但绝不替已有会话刷新目录快照。
+
+        已存在不可变 Binding 时只构造一个不会被采用的有界占位 outcome，交给
+        Coordinator 先校验 mode/ID 并复用旧 Head。只有尚无 Binding 的竞争首轮才读取
+        精确类别目录；即使多个首轮并发都读取，最终也只有事务赢家能够冻结候选。
+        """
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        if isinstance(architecture_id, bool) or not isinstance(
+            architecture_id,
+            int,
+        ):
+            raise TypeError("architecture_id must be int")
+        binding = self._store.session_scope_bindings.get(normalized_chat_id)
+        if binding is not None:
+            logger.info(
+                "已有文件对话范围绑定，跳过 architecture 目录重查: "
+                "chat_id=%s requested_architecture_id=%s "
+                "bound_scope_mode=%s bound_architecture_id=%s",
+                normalized_chat_id,
+                architecture_id,
+                binding.scope_mode,
+                binding.architecture_id,
+            )
+            return ChatDocumentSelectionCandidates(
+                architecture_candidates=ChatArchitectureCandidates(
+                    architecture_id=architecture_id,
+                    resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+                    error_code=CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
+                )
+            )
+        resolver = self._architecture_document_resolver
+        if resolver is None:
+            raise TypeError(
+                "document_resolver must implement "
+                "ChatArchitectureDocumentResolver for architecture scope"
+            )
+        candidates = resolver.resolve_by_architecture_id(architecture_id)
+        logger.info(
+            "architecture 文件对话候选已冻结: chat_id=%s "
+            "requested_architecture_id=%s architecture_candidate_outcome=%s "
+            "candidate_count=%d",
+            normalized_chat_id,
+            architecture_id,
+            candidates.resolution_outcome,
+            len(candidates.documents),
+        )
+        return ChatDocumentSelectionCandidates(
+            architecture_candidates=candidates
+        )
+
     def prepare_chat_run(
         self,
         *,
         chat_id: str,
         message: str,
-        file_names: Sequence[str],
+        file_names: Sequence[str] | None = None,
+        scope_selector: ChatScopeSelector | None = None,
+        admission_lease: ChatAdmissionLease | None = None,
     ) -> PreparedChatRun:
         """解析不可变输入，并原子受理一条新的单会话运行。"""
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_message = _required_text(message, name="message")
-        normalized_file_names = _text_tuple(file_names, name="file_names")
+        if scope_selector is not None and not isinstance(
+            scope_selector,
+            ChatScopeSelector,
+        ):
+            raise TypeError("scope_selector must be ChatScopeSelector or None")
+        if admission_lease is not None and not isinstance(
+            admission_lease,
+            ChatAdmissionLease,
+        ):
+            raise TypeError(
+                "admission_lease must be ChatAdmissionLease or None"
+            )
+        if scope_selector is None:
+            normalized_file_names = _text_tuple(
+                () if file_names is None else file_names,
+                name="file_names",
+            )
+            normalized_selector = ChatScopeSelector.for_files(
+                normalized_file_names
+            )
+        elif scope_selector.scope_mode == CHAT_SCOPE_MODE_FILES:
+            normalized_file_names = scope_selector.file_names
+            if file_names is not None and _text_tuple(
+                file_names,
+                name="file_names",
+            ) != normalized_file_names:
+                raise ValueError(
+                    "file_names does not match the provided scope_selector"
+                )
+            normalized_selector = scope_selector
+        else:
+            if file_names is not None:
+                raise ValueError(
+                    "architecture scope cannot be combined with file_names"
+                )
+            normalized_file_names = ()
+            normalized_selector = scope_selector
         logger.info(
-            "开始受理文件对话运行: chat_id=%s message_chars=%d requested_file_count=%d",
+            "开始受理文件对话运行: chat_id=%s message_chars=%d "
+            "scope_mode=%s requested_file_count=%d "
+            "requested_architecture_id=%s",
             normalized_chat_id,
             len(normalized_message),
+            normalized_selector.scope_mode,
             len(normalized_file_names),
+            normalized_selector.architecture_id,
         )
         if len(normalized_file_names) > self._max_files_per_request:
             logger.warning(
@@ -382,16 +527,37 @@ class SynchronousChatRunExecutor:
                 self._max_message_chars,
             )
             raise ValueError("message exceeds the configured chat message limit")
-        document_candidates = self.resolve_document_candidates(
-            chat_id=normalized_chat_id,
-            file_names=normalized_file_names,
-        )
-        run = self._chat_commands.start_chat_run(
-            chat_id=normalized_chat_id,
-            user_message=normalized_message,
-            document_candidates=document_candidates,
-            max_files_per_request=self._max_files_per_request,
-        )
+        resolved_admission = admission_lease
+        if resolved_admission is None:
+            resolved_admission = self._chat_commands.reserve_chat_admission(
+                chat_id=normalized_chat_id,
+                scope_selector=normalized_selector,
+            )
+        try:
+            if normalized_selector.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
+                document_candidates = self.resolve_architecture_candidates(
+                    chat_id=normalized_chat_id,
+                    architecture_id=normalized_selector.architecture_id,
+                )
+            else:
+                document_candidates = self.resolve_document_candidates(
+                    chat_id=normalized_chat_id,
+                    file_names=normalized_file_names,
+                )
+            run = self._chat_commands.start_chat_run(
+                chat_id=normalized_chat_id,
+                user_message=normalized_message,
+                document_candidates=document_candidates,
+                scope_selector=normalized_selector,
+                admission_lease=resolved_admission,
+                max_files_per_request=self._max_files_per_request,
+            )
+        finally:
+            # 成功受理时 Guard 已在同一事务中消费；失败或容量回退时这里按 token
+            # 幂等释放，确保不会让 chatId 卡到过期时间。
+            self._chat_commands.release_chat_admission(
+                lease=resolved_admission
+            )
         requested_file_count: int | str = "unknown"
         effective_file_count: int | str = "unknown"
         selection_mode = "unknown"
@@ -573,6 +739,7 @@ class SynchronousChatRunExecutor:
             requested_file_original_names=tuple(
                 item.original_name for item in run_input.requested_files
             ),
+            requested_architecture_id=run_input.requested_architecture_id,
         )
 
     def stream_chat_run(
@@ -876,7 +1043,6 @@ class SynchronousChatRunExecutor:
                     f"{refs.context_ref}::{item.document.external_location}"
                 ),
             )
-        attached_by_location: dict[str, ChatDocumentRef] = {}
         if new_documents:
             logger.info(
                 "开始调用远端绑定新文件对话文档: chat_id=%s run_id=%s document_count=%d",
@@ -888,14 +1054,62 @@ class SynchronousChatRunExecutor:
                 refs,
                 [item.document for item in new_documents],
             )
-            attached_by_location = {
-                item.external_location: item for item in attached if item.external_location
-            }
-            for item in new_documents:
-                attached_document = attached_by_location.get(
-                    item.document.external_location,
-                    item.document,
+            attached_by_location: dict[str, list[ChatDocumentRef]] = {}
+            for index, attached_document in enumerate(attached):
+                if not isinstance(attached_document, ChatDocumentRef):
+                    logger.error(
+                        "远端文档绑定结果类型无效，执行失败关闭: "
+                        "chat_id=%s run_id=%s result_index=%d result_type=%s",
+                        request.chat_id,
+                        request.run_id,
+                        index,
+                        type(attached_document).__name__,
+                    )
+                    raise ChatResourceError("远端文档绑定结果无效")
+                normalized_location = self._normalize_external_location(
+                    attached_document.external_location
                 )
+                if normalized_location:
+                    attached_by_location.setdefault(
+                        normalized_location,
+                        [],
+                    ).append(attached_document)
+
+            confirmed_documents: list[ChatDocumentRef] = []
+            for item in new_documents:
+                requested_location = self._normalize_external_location(
+                    item.document.external_location
+                )
+                matches = attached_by_location.get(requested_location, [])
+                if len(matches) != 1:
+                    logger.error(
+                        "远端文档绑定结果无法唯一确认，执行失败关闭: "
+                        "chat_id=%s run_id=%s matched_count=%d "
+                        "requested_document_count=%d returned_document_count=%d",
+                        request.chat_id,
+                        request.run_id,
+                        len(matches),
+                        len(new_documents),
+                        len(attached),
+                    )
+                    raise ChatResourceError("远端文档绑定结果无法唯一确认")
+                returned_document = matches[0]
+                # external_location 是本次绑定回执的匹配键；同一位置只允许唯一结果。
+                # 供应商可以返回规范化后的 document_ref，后续执行和本地 Binding 均以
+                # 该回执值为准，但不得用另一个远端位置替换已冻结的文档。
+                confirmed_documents.append(
+                    ChatDocumentRef(
+                        document_ref=returned_document.document_ref,
+                        external_location=requested_location,
+                    )
+                )
+
+            # 必须先完整确认全部回执，再写任何本地 Binding 或激活租约，避免半批成功。
+            for item, attached_document in zip(
+                new_documents,
+                confirmed_documents,
+                strict=True,
+            ):
                 stored_binding = self._store.document_bindings.add(
                     chat_id=request.chat_id,
                     file_name=item.file_name,
@@ -937,6 +1151,11 @@ class SynchronousChatRunExecutor:
             len(selected),
         )
         return tuple(selected)
+
+    @staticmethod
+    def _normalize_external_location(value: str) -> str:
+        """统一远端文档位置分隔符，避免同一位置因平台写法不同而匹配失败。"""
+        return str(value or "").strip().replace("\\", "/")
 
     @staticmethod
     def _snapshot(document: ResolvedChatDocument) -> ChatRunDocumentSnapshot:
@@ -1234,6 +1453,7 @@ class ChatRunEventRecorder:
                     request.requested_file_original_names,
                 )
             ),
+            architecture_id=request.requested_architecture_id,
         )
 
     def _commit_user(self, message_id: str) -> None:

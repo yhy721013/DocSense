@@ -1055,6 +1055,11 @@
     "checkTask": {
       "status": "public-contract-active",
       "synchronousCallbackRecoverySideEffect": "must-remain",
+      "explicitOutcomeUnknownRecovery": "new-request-at-least-once",
+      "sameRequestNormalizedArchitectureIdDeduplication": "first-occurrence-only",
+      "validationBeforeAnyCallbackSideEffect": true,
+      "receiverIdempotencyKey": "normalized-architectureId-and-business-result",
+      "automaticWorkerOrMaintenanceUnknownRetry": false,
       "newPublicFields": false
     }
   },

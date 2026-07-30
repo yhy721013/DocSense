@@ -8,7 +8,11 @@ from typing import Any, Callable
 
 from app.modules.analysis.domain.errors import AnalysisContractError
 from app.modules.analysis.domain.result_mapping import resolve_storage_architecture_id
-from app.modules.analysis.domain.task_inputs import AnalysisTaskInputV1, FrozenJsonObject
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisTaskInputV1,
+    AnalysisTaskInputV3,
+    FrozenJsonObject,
+)
 from app.modules.analysis.ports import (
     AnalysisExecutionRef,
     AnalysisKnowledgeDocumentMetadata,
@@ -90,7 +94,10 @@ class _AnalysisKnowledgeHandoff:
             document=state.session,
             metadata=AnalysisKnowledgeDocumentMetadata(
                 file_name=snapshot.file_name,
-                original_file_name=plan.original_name,
+                original_file_name=self.knowledge_original_file_name(
+                    snapshot=snapshot,
+                    legacy_original_name=plan.original_name,
+                ),
                 attributes=FrozenJsonObject.from_mapping(attributes, name="knowledge_attributes"),
             ),
         )
@@ -117,6 +124,27 @@ class _AnalysisKnowledgeHandoff:
         state.preserve_scene = True
         raise _AnalysisKnownFailure("knowledge_index_unknown", result.detail_code)
 
+    @staticmethod
+    def knowledge_original_file_name(
+        *,
+        snapshot: AnalysisTaskInputV1,
+        legacy_original_name: str,
+    ) -> str:
+        """解析永久知识展示名，同时保持旧快照的恢复兼容语义。
+
+        V3/V4 任务沿用受理时冻结且已经过合同校验的展示标题，使永久知识
+        ``original_name`` 与首次上传的 ``metadata.title`` 严格一致。旧 V1/V2
+        快照没有该事实，继续使用历史 plan 值。
+        """
+
+        if not isinstance(snapshot, AnalysisTaskInputV1):
+            raise TypeError("snapshot 必须是 AnalysisTaskInputV1")
+        if not isinstance(legacy_original_name, str) or not legacy_original_name.strip():
+            raise ValueError("legacy_original_name 必须是非空字符串")
+        if isinstance(snapshot, AnalysisTaskInputV3):
+            return snapshot.rag_naming.display_title
+        return legacy_original_name
+
     def enrich_translations(
         self,
         *,
@@ -134,17 +162,23 @@ class _AnalysisKnowledgeHandoff:
             snapshot.raw_params.to_dict().get("enableFullTranslation", True)
         )
         if enable_full_translation:
-            request = AnalysisTranslationRequest(
-                execution=execution,
-                kind=AnalysisTranslationKind.DOCUMENT,
-                # 仅 Legacy Office 改读转换后的 OOXML；PDF/MHTML 等既有格式继续读取
-                # 原始下载文件，避免集成新能力时扩大已上线的全文翻译行为变化。
-                source_path=(
-                    prepared.processing_path
-                    if prepared.internal_prepared_basename
-                    else prepared.source_path
-                ),
-            )
+            if prepared.prepared_artifact is not None:
+                request = AnalysisTranslationRequest(
+                    execution=execution,
+                    kind=AnalysisTranslationKind.DOCUMENT,
+                    # 生产文件 Adapter 必须提供该引用；RAG、正文读取和全文翻译共享
+                    # 同一份 prepared Artifact，Translation Application 不接收路径。
+                    prepared_artifact=prepared.prepared_artifact,
+                )
+            else:
+                # 两级 OCR 均明确失败时，生产 Adapter 会让 RAG 使用原 PDF，同时不提供
+                # prepared 文本 Artifact。这里沿用既有兼容请求形态，生产 Translation
+                # Adapter 会稳定返回可降级失败，公开翻译字段保持为空。
+                request = AnalysisTranslationRequest(
+                    execution=execution,
+                    kind=AnalysisTranslationKind.DOCUMENT,
+                    source_path=prepared.processing_path,
+                )
         else:
             summary = file_item.get("summary", "")
             if not isinstance(summary, str) or not summary:

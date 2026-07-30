@@ -822,7 +822,7 @@ class LocalPersistentTaskDispatcher:
             if snapshot.running_count:
                 now = self._monotonic()
                 if now >= self._next_running_warning_at:
-                    self._logger.warning(
+                    self._logger.debug(
                         "发现%s running execution，仅观察且禁止自动重置: count=%d "
                         "oldest_running_age_seconds=%s task_ids=%s",
                         self._settings.business_label,

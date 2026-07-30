@@ -588,6 +588,22 @@ class Stage1DWeaponryContractAssetTests(unittest.TestCase):
             "must-remain",
             boundary["checkTask"]["synchronousCallbackRecoverySideEffect"],
         )
+        self.assertEqual(
+            "new-request-at-least-once",
+            boundary["checkTask"]["explicitOutcomeUnknownRecovery"],
+        )
+        self.assertEqual(
+            "first-occurrence-only",
+            boundary["checkTask"][
+                "sameRequestNormalizedArchitectureIdDeduplication"
+            ],
+        )
+        self.assertTrue(
+            boundary["checkTask"]["validationBeforeAnyCallbackSideEffect"]
+        )
+        self.assertFalse(
+            boundary["checkTask"]["automaticWorkerOrMaintenanceUnknownRetry"]
+        )
 
     def test_asset_is_strict_json_and_records_the_open_exit_gate(self) -> None:
         _assert_all_numbers_are_finite(self, self.contract)

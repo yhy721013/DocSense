@@ -159,7 +159,9 @@ class AnalysisContractAssetTests(unittest.TestCase):
         self.assertEqual(1, self.contract["schemaVersion"])
         self.assertEqual("1F-0", self.contract["stage"])
         self.assertTrue(self.contract["publicContractChanged"])
-        self.assertEqual("2026-07-27", authority["lastApprovedAt"])
+        self.assertEqual("2026-07-30", authority["lastApprovedAt"])
+        self.assertIn("RAG命名候选整批同步HTTP 400", authority["approvedChange"])
+        self.assertIn("outcome_unknown", authority["approvedChange"])
         self.assertEqual(authority["sha256"], observed_sha256)
         self.assertEqual(
             self.contract,
@@ -256,6 +258,64 @@ class AnalysisContractAssetTests(unittest.TestCase):
         self.assertIsNotNone(execution["batch_id"])
         self.assertIsNotNone(execution["batch_sequence"])
 
+    def test_invalid_rag_name_rejects_whole_batch_before_admission(self) -> None:
+        """中间项名称非法时，前后合法项也不得先建 execution 或触发提交用例。"""
+
+        self._ensure_route_runtime()
+        assert self.services is not None
+        assert self.services.analysis_submit is not None
+        payload = {
+            "businessType": "file",
+            "params": [
+                {
+                    "fileName": "before-valid.pdf",
+                    "originalFileName": "合法资料.pdf",
+                    "filePath": "http://127.0.0.1:8000/before-valid.pdf",
+                },
+                {
+                    "fileName": "middle-invalid.pdf",
+                    "originalFileName": "folder/非法资料.pdf",
+                    "filePath": "http://127.0.0.1:8000/middle-invalid.pdf",
+                },
+                {
+                    "fileName": "after-valid.pdf",
+                    "originalFileName": "另一份合法资料.pdf",
+                    "filePath": "http://127.0.0.1:8000/after-valid.pdf",
+                },
+            ],
+        }
+        with (
+            patch.object(
+                self.services.analysis_submit,
+                "execute",
+                wraps=self.services.analysis_submit.execute,
+            ) as submit,
+            patch(
+                "app.modules.analysis.adapters.legacy_files."
+                "LegacyAnalysisFilePreparationAdapter.prepare"
+            ) as prepare_file,
+            patch(
+                "app.modules.analysis.adapters.legacy_rag."
+                "LegacyAnalysisRagAdapterFactory.create"
+            ) as create_rag,
+        ):
+            response = self.client.post("/llm/analysis", json=payload)
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(
+            {"error": "params[1].originalFileName不是合法文件名"},
+            response.get_json(),
+        )
+        submit.assert_not_called()
+        prepare_file.assert_not_called()
+        create_rag.assert_not_called()
+        for file_name in (
+            "before-valid.pdf",
+            "middle-invalid.pdf",
+            "after-valid.pdf",
+        ):
+            self.assertIsNone(self.task_service.get_task("file", file_name))
+
     def test_submission_conflict_busy_and_unhandled_failure_are_preserved(
         self,
     ) -> None:
@@ -348,6 +408,20 @@ class AnalysisContractAssetTests(unittest.TestCase):
         )
         self.assertEqual(check_task["success"]["status"], response.status_code)
         self.assertEqual(check_task["success"]["body"].encode("utf-8"), response.data)
+        self.assertEqual(
+            "all-params-parse-and-normalize-before-any-callback",
+            check_task["validationBeforeSideEffects"],
+        )
+        self.assertEqual(
+            "normalized-business-key-first-occurrence",
+            check_task["sameRequestDeduplication"],
+        )
+        self.assertEqual(
+            "original-params-count-before-deduplication",
+            check_task["responseCardinalityBasis"],
+        )
+        self.assertTrue(check_task["receiverIdempotencyRequired"])
+        self.assertFalse(check_task["newPublicFields"])
 
         response = self.client.post(
             check_task["path"],

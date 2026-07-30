@@ -61,6 +61,7 @@ class AnalysisInfrastructureConfigTests(unittest.TestCase):
         self.assertEqual("single_instance", config.runtime_mode)
         self.assertEqual(5.0, config.dispatch_retry_base_seconds)
         self.assertEqual(300.0, config.dispatch_retry_max_seconds)
+        self.assertEqual(300.0, config.resource_close_running_grace_seconds)
         self.assertGreater(
             config.callback_lease_seconds,
             required_http_lease_seconds(config.callback_http_timeout_seconds),
@@ -79,6 +80,10 @@ class AnalysisInfrastructureConfigTests(unittest.TestCase):
                 callback_http_timeout_seconds=10.0,
                 callback_lease_seconds=required_http_lease_seconds(10.0),
             )
+        with self.assertRaises(AnalysisInfrastructureConfigurationError):
+            AnalysisInfrastructureConfig(
+                resource_close_running_grace_seconds=0.0,
+            )
 
     def test_environment_loader_fails_fast_instead_of_silently_falling_back(self) -> None:
         with patch.dict(
@@ -90,6 +95,7 @@ class AnalysisInfrastructureConfigTests(unittest.TestCase):
                 "DOCSENSE_ANALYSIS_DISPATCH_RETRY_MAX_SECONDS": "20",
                 "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_INTERVAL_SECONDS": "15",
                 "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE": "8",
+                "DOCSENSE_ANALYSIS_RESOURCE_CLOSE_RUNNING_GRACE_SECONDS": "90",
                 "DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS": "10",
                 "DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS": "4",
                 "DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS": "2",
@@ -101,6 +107,7 @@ class AnalysisInfrastructureConfigTests(unittest.TestCase):
         self.assertEqual(12, config.accepted_batch_size)
         self.assertEqual(2.0, config.dispatch_retry_base_seconds)
         self.assertEqual(20.0, config.dispatch_retry_max_seconds)
+        self.assertEqual(90.0, config.resource_close_running_grace_seconds)
 
         with patch.dict(
             os.environ,
@@ -174,6 +181,14 @@ class AnalysisCompositionTests(unittest.TestCase):
             self.assertIs(services.callback_recovery.callbacks, callbacks)
             self.assertIs(services.dispatcher.task_commands, task_commands)
             self.assertIs(services.dispatcher.execution_limiter, limiter)
+            self.assertIs(
+                services.resource_activity,
+                services.runner._resource_activity,
+            )
+            self.assertIs(
+                services.resource_activity,
+                services.resource_recovery._resource_activity,
+            )
 
             snapshot = services.dispatcher.snapshot()
             self.assertEqual("new", snapshot.lifecycle_state)

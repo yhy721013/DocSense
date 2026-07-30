@@ -14,6 +14,7 @@ import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from app import create_app
 from app.modules.analysis.adapters import (
@@ -439,6 +440,115 @@ class CheckTaskRouteContractTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         self.assertEqual(b"", response.data)
+
+    def test_report_duplicate_normalized_ids_only_trigger_one_recovery(self) -> None:
+        """一个请求中的等价 reportId 只能授权一轮同步回调恢复。"""
+
+        self.task_service.create_report_task(
+            132,
+            {"businessType": "report", "params": [{"reportId": 132}]},
+        )
+        with patch.object(
+            self.services.report_callback_recovery,
+            "execute",
+            return_value=False,
+        ) as recover:
+            response = self.client.post(
+                "/llm/check-task",
+                json={
+                    "businessType": "report",
+                    "params": [{"reportId": 132}, {"reportId": "000132"}],
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(b"", response.data)
+        self.assertEqual(1, recover.call_count)
+
+    def test_weaponry_duplicate_normalized_ids_only_trigger_one_recovery(
+        self,
+    ) -> None:
+        """一个请求中的等价 architectureId 只能授权一轮同步回调恢复。"""
+
+        self.task_service.create_weaponry_task(
+            10502,
+            {
+                "businessType": "weaponry",
+                "params": {"architectureId": 10502},
+            },
+        )
+        assert self.services.weaponry_services is not None
+        with patch.object(
+            self.services.weaponry_services.callback_recovery,
+            "execute",
+            return_value=False,
+        ) as recover:
+            response = self.client.post(
+                "/llm/check-task",
+                json={
+                    "businessType": "weaponry",
+                    "params": [
+                        {"architectureId": 10502},
+                        {"architectureId": "00010502"},
+                    ],
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(b"", response.data)
+        self.assertEqual(1, recover.call_count)
+
+    def test_batch_is_fully_validated_before_report_recovery_side_effect(self) -> None:
+        """后置非法项必须在任何 report Callback 恢复之前拒绝整次请求。"""
+
+        self.task_service.create_report_task(
+            132,
+            {"businessType": "report", "params": [{"reportId": 132}]},
+        )
+        with patch.object(
+            self.services.report_callback_recovery,
+            "execute",
+            return_value=False,
+        ) as recover:
+            response = self.client.post(
+                "/llm/check-task",
+                json={
+                    "businessType": "report",
+                    "params": [{"reportId": 132}, {"reportId": "invalid"}],
+                },
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(
+            {"error": "reportId必须是整数或整数字符串"},
+            response.get_json(),
+        )
+        recover.assert_not_called()
+
+    def test_duplicate_missing_items_keep_original_batch_200_semantics(self) -> None:
+        """去重后只有一个键时仍按原始多项请求保持批量缺失 200。"""
+
+        cases = (
+            (
+                "report",
+                [{"reportId": 404}, {"reportId": "000404"}],
+            ),
+            (
+                "weaponry",
+                [
+                    {"architectureId": 404},
+                    {"architectureId": "000404"},
+                ],
+            ),
+        )
+        for business_type, params in cases:
+            with self.subTest(business_type=business_type):
+                response = self.client.post(
+                    "/llm/check-task",
+                    json={"businessType": business_type, "params": params},
+                )
+                self.assertEqual(200, response.status_code)
+                self.assertEqual(b"", response.data)
 
     def test_pending_callback_is_replayed_and_persisted_as_success(self) -> None:
         """终态 pending 回调在 check-task 中成功补发后必须持久化 success。"""

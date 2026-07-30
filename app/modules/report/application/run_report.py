@@ -172,6 +172,12 @@ class RunReportTask:
             raise TypeError("resources 必须实现 ReportResourceRecoveryPort")
         self._resources = resources
 
+    @property
+    def callbacks(self) -> ReportCallbackPort:
+        """暴露只读依赖身份，供组合根阻止正常 Worker 与恢复入口使用两套发送权。"""
+
+        return self._callbacks
+
     def execute(self, task_id: TaskId) -> RunReportResult:
         """恢复、领取并执行一个报告任务；重复派发会幂等收敛。"""
 

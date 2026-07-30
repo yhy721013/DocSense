@@ -201,6 +201,7 @@ class ChatRunInput:
     requested_files: tuple[ChatRequestedFile, ...] = ()
     effective_scope_revision_id: str = ""
     selection_mode: str = "legacy_input"
+    requested_architecture_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,7 @@ class ChatMessage:
     sequence_no: int
     created_at: str
     files: tuple[ChatMessageFile, ...] = ()
+    architecture_id: int | None = None
 
 
 @dataclass(frozen=True)

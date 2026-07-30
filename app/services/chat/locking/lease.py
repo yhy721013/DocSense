@@ -12,12 +12,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from app.services.chat.domain.events import ChatStreamEvent
+from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 from app.services.chat.domain.models import ChatRun
 
 if TYPE_CHECKING:
     from app.services.chat.domain.document_candidates import (
         ChatDocumentSelectionCandidates,
     )
+    from app.services.chat.domain.document_scope import ChatScopeSelector
 
 
 def _required_text(value: str, *, name: str) -> str:
@@ -103,6 +105,67 @@ class ChatRunLease:
         return bool(self.lease_token and self.fencing_token is not None)
 
 
+@dataclass(frozen=True)
+class ChatAdmissionLease:
+    """一次 ``chatId`` 请求在正式受理前持有的短期准入证明。
+
+    该证明不属于公开接口，也不表示 Session、Scope 或 run 已经创建。它只负责让同一
+    ``chatId`` 的并发请求先得到稳定 409，再由持有者申请全局流容量。未来共享数据库
+    实现应把 token 与过期时间作为条件删除/消费的一部分。
+    """
+
+    chat_id: str
+    owner_instance_id: str
+    admission_token: str
+    scope_mode: str
+    architecture_id: int | None
+    expires_at: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chat_id", _required_text(self.chat_id, name="chat_id"))
+        object.__setattr__(
+            self,
+            "owner_instance_id",
+            _required_text(self.owner_instance_id, name="owner_instance_id"),
+        )
+        object.__setattr__(
+            self,
+            "admission_token",
+            _required_text(self.admission_token, name="admission_token"),
+        )
+        object.__setattr__(
+            self,
+            "scope_mode",
+            _required_text(self.scope_mode, name="scope_mode"),
+        )
+        object.__setattr__(
+            self,
+            "expires_at",
+            _required_text(self.expires_at, name="expires_at"),
+        )
+        if self.scope_mode not in {"files", "architecture"}:
+            raise ValueError("scope_mode must be files or architecture")
+        architecture_id = self.architecture_id
+        if isinstance(architecture_id, bool) or (
+            architecture_id is not None
+            and (
+                not isinstance(architecture_id, int)
+                or architecture_id < 1
+                or architecture_id > MAX_CHAT_ARCHITECTURE_ID
+            )
+        ):
+            raise ValueError(
+                "architecture_id must be a JavaScript-safe positive integer "
+                "or None"
+            )
+        if self.scope_mode == "files" and architecture_id is not None:
+            raise ValueError("files admission lease cannot bind architecture_id")
+        if self.scope_mode == "architecture" and architecture_id is None:
+            raise ValueError(
+                "architecture admission lease requires architecture_id"
+            )
+
+
 class ChatRunLeaseLostError(RuntimeError):
     """执行者提交心跳或终态时已不再拥有对应运行的运行权。"""
 
@@ -135,9 +198,24 @@ class ChatRunCoordinator(Protocol):
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
         document_candidates: "ChatDocumentSelectionCandidates | None" = None,
+        scope_selector: "ChatScopeSelector | None" = None,
+        admission_lease: ChatAdmissionLease | None = None,
         max_files_per_request: int | None = None,
     ) -> ChatRun:
         """原子选择文档、受理运行，并保持同一会话的活动运行互斥。"""
+        ...
+
+    def reserve_chat_admission(
+        self,
+        *,
+        chat_id: str,
+        scope_selector: "ChatScopeSelector",
+    ) -> ChatAdmissionLease:
+        """在不创建业务事实的前提下取得同一 chatId 的独占准入证明。"""
+        ...
+
+    def release_chat_admission(self, *, lease: ChatAdmissionLease) -> None:
+        """按 token 幂等释放尚未被正式受理事务消费的准入证明。"""
         ...
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:
@@ -257,6 +335,7 @@ class ChatRunCoordinator(Protocol):
 
 
 __all__ = [
+    "ChatAdmissionLease",
     "ChatRunCoordinator",
     "ChatRunLease",
     "ChatRunLeaseCapabilities",

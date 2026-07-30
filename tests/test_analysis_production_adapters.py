@@ -27,7 +27,13 @@ from app.modules.analysis.domain.task_inputs import (
     AnalysisDocumentProcessingPolicySnapshot,
     FrozenJsonObject,
 )
-from app.modules.document_processing import LegacyOfficeConversionError
+from app.modules.document_processing import (
+    ArtifactKind,
+    ArtifactMetadata,
+    ArtifactRef,
+    DocumentRepresentation,
+    LegacyOfficeConversionError,
+)
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
     AnalysisExecutionRef,
@@ -46,6 +52,7 @@ from app.modules.analysis.ports import (
     AnalysisRagRequest,
     AnalysisRagSessionOpenError,
     AnalysisRagSessionOpenRequest,
+    AnalysisRagUploadDescriptor,
     AnalysisRecallAuditRecord,
     AppendAnalysisLifecycleEvents,
     FinalizeAnalysisRecallAudit,
@@ -125,6 +132,8 @@ class _KnowledgePortFake:
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self.calls: list[str] = []
+        self.last_document = None
+        self.last_metadata = None
 
     def ensure_collection(self, spec):  # type: ignore[no-untyped-def]
         self.calls.append("ensure_collection")
@@ -136,6 +145,8 @@ class _KnowledgePortFake:
 
     def store_prepared_document(self, collection, document, metadata, *, operation_context, idempotency_key):  # type: ignore[no-untyped-def]
         self.calls.append("store_prepared_document")
+        self.last_document = document
+        self.last_metadata = metadata
         if self.mode == "released":
             raise KnowledgeIndexDocumentReleasedError("document released")
         if self.mode == "retained":
@@ -188,8 +199,10 @@ class _NativeRagSessionFake:
             trace_id="adapter-trace",
         )
         self.closed_with: bool | None = None
+        self.document_upload = None
 
-    def analyse(self, file_path: str, prompt: str, *, prompt_kind, require_sources: bool, max_attempts: int):  # type: ignore[no-untyped-def]
+    def analyse(self, file_path: str, prompt: str, *, prompt_kind, require_sources: bool, max_attempts: int, document_upload=None):  # type: ignore[no-untyped-def]
+        self.document_upload = document_upload
         prepared = PreparedDocumentRef(
             document_ref="document:adapter",
             external_location="location:adapter",
@@ -584,6 +597,37 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                 else:
                     self.assertTrue(result.detail_code)
 
+    def test_knowledge_handoff_keeps_original_and_ingested_names_separate(self) -> None:
+        """永久转交保留业务原名，同时沿用会话确认的真实上传名与文档身份。"""
+
+        execution = _execution("analysis-knowledge-name-semantics")
+        session = _bound_session(execution)
+        request = AnalysisKnowledgeWriteRequest(
+            execution=execution,
+            architecture_id=103,
+            idempotency_key="document:v1:name-semantics",
+            document=session,
+            metadata=AnalysisKnowledgeDocumentMetadata(
+                file_name=execution.file_name,
+                original_file_name=" 原始资料.pdf",
+                attributes=FrozenJsonObject.from_mapping({}),
+            ),
+        )
+        port = _KnowledgePortFake("committed")
+
+        result = LegacyAnalysisKnowledgeAdapter(
+            _KnowledgeFactoryFake(port)
+        ).persist(request)
+
+        self.assertEqual(AnalysisKnowledgeWriteOutcome.COMMITTED, result.outcome)
+        self.assertEqual(" 原始资料.pdf", port.last_metadata.original_name)
+        self.assertEqual(session.ingested_file_name, port.last_metadata.ingested_file_name)
+        self.assertEqual(session.document_ref, port.last_document.document_ref)
+        self.assertEqual(
+            session.document_location,
+            port.last_document.external_location,
+        )
+
     def test_knowledge_adapter_treats_malformed_post_commit_result_as_unknown(self) -> None:
         """外部写入返回后再发现结果不完整时，必须保留现场而不是抛普通异常。"""
 
@@ -648,6 +692,61 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
         self.assertEqual(
             (f"llm-file-{execution.task_id.value}", "analysis-adapter-demo"),
             gateway.open_names,
+        )
+
+    def test_rag_adapter_maps_provider_neutral_upload_descriptor(self) -> None:
+        """Analysis Adapter 只映射通用 DTO，不直接构造供应商 metadata。"""
+
+        execution = _execution("analysis-rag-upload-options")
+        native_session = _NativeRagSessionFake()
+        factory = _DocumentRagFactoryFake(_DocumentRagGatewayFake(native_session))
+        artifact = ArtifactRef(
+            task_id=execution.task_id,
+            artifact_id="a" * 64,
+            step_key="b" * 64,
+            kind=ArtifactKind.RAG_PROJECTION,
+            representation=DocumentRepresentation.MARKDOWN,
+            metadata=ArtifactMetadata(
+                media_type="text/markdown; charset=utf-8",
+                size_bytes=16,
+                sha256="c" * 64,
+            ),
+        )
+        descriptor = AnalysisRagUploadDescriptor(
+            artifact=artifact,
+            representation=DocumentRepresentation.MARKDOWN,
+            media_type=artifact.metadata.media_type,
+            transport_file_name="Nimitz (CVN 68) class.md",
+            display_title="Nimitz (CVN 68) class.pdf",
+            projection_profile_id="d" * 64,
+        )
+
+        with LegacyAnalysisRagAdapterFactory(factory).create(execution) as adapter:
+            opened = adapter.open_session(
+                AnalysisRagSessionOpenRequest(
+                    execution=execution,
+                    upload_path="C:/runtime/prepared.md",
+                    upload_descriptor=descriptor,
+                )
+            )
+            adapter.execute(
+                AnalysisRagRequest(
+                    execution=execution,
+                    session=opened.session,
+                    operation=AnalysisRagOperation.EXTRACTION,
+                    prompt="请抽取字段",
+                    attempt_number=1,
+                )
+            )
+
+        self.assertIsNotNone(native_session.document_upload)
+        self.assertEqual(
+            "Nimitz (CVN 68) class.md",
+            native_session.document_upload.transport_file_name,
+        )
+        self.assertEqual(
+            "Nimitz (CVN 68) class.pdf",
+            native_session.document_upload.display_title,
         )
 
     def test_rag_adapter_does_not_reuse_previous_response_when_stage_switch_fails(self) -> None:
@@ -1009,6 +1108,18 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                         AnalysisRagLifecycleEvent(4, "document_bind", 1, AnalysisRagLifecycleOutcome.SUCCEEDED, session.document_ref),
                     ),
                     outcome=AnalysisAuditOutcome.SUCCEEDED,
+                    document_upload=FrozenJsonObject.from_mapping(
+                        {
+                            "representation": "markdown",
+                            "media_type": "text/markdown; charset=utf-8",
+                            "transport_file_name": "原始资料.md",
+                            "display_title": "原始资料.pdf",
+                            "artifact_sha256": "c" * 64,
+                            "artifact_id": "a" * 64,
+                            "projection_profile_id": "d" * 64,
+                        },
+                        name="analysis_upload_audit",
+                    ),
                 )
             )
             self.assertEqual(
@@ -1037,6 +1148,14 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
             rows = service.get_llm_interactions("file", execution.file_name)
             self.assertEqual(1, len(rows))
             self.assertEqual(execution.task_id.value, rows[0]["execution_id"])
+            self.assertEqual(
+                "原始资料.md",
+                rows[0]["document_upload"]["transport_file_name"],
+            )
+            self.assertEqual(
+                "原始资料.pdf",
+                rows[0]["document_upload"]["display_title"],
+            )
 
     def test_audit_adapter_persists_context_only_open_failure(self) -> None:
         """Conversation 创建和 Context 回滚均失败时，仍须保存 Context 恢复引用。"""

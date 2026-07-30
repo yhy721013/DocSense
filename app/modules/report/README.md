@@ -66,10 +66,12 @@ latest 复核与 Hub 写入在同业务键原子发布区间完成，不同业�
 2026-07-17 阶段关闭后的审查补强新增 `RecoverReportCallbackSynchronously`：报告类型
 `/llm/check-task` 按甲方要求在请求内尝试必要恢复，但候选读取不构成发送权，必须再次通过
 SQLite Callback Guard 的 latest/lease/fencing 原子校验。显式 check-task 可以重新授权
-`failed/rejected` 的明确结果，`delivery_outcome_unknown` 仍冻结且不得自动重发；50 个并发
-恢复请求最多一方外发。Guard 过期扫描已进入隔离维护线程，过期 `sending` 只冻结为 unknown，
-绝不因扫描而重发。未来 callback Worker 是后台兜底触发源，必须复用同一应用服务和 Guard，
-不能替换甲方同步入口或形成第二套发送权。
+`failed/rejected` 的明确结果。2026-07-29 起，新的 check-task 也可显式授权
+`delivery_outcome_unknown` 的 at-least-once 补发；这不是后台自动重试，接收端必须按规范化
+`reportId` 和业务结果幂等。同一请求先完整校验、按业务键去重，每个唯一键最多竞争一次；
+同一 attempt 的 50 个并发恢复请求仍最多一方外发。Guard 过期扫描已进入隔离维护线程，过期
+`sending` 只冻结为 unknown，绝不因扫描而重发。未来 callback Worker 是后台兜底触发源，
+必须复用同一应用服务和 Guard，不能替换甲方同步入口或形成第二套发送权。
 
 ## 公开入口与禁止依赖
 

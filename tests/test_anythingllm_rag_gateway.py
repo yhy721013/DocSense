@@ -40,6 +40,7 @@ from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.ports import (
     DocumentRagPort,
     DocumentRagSession,
+    RagDocumentUploadOptions,
     RagOperationError,
     RagPromptKind,
 )
@@ -203,6 +204,40 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         self.assertIn("AnythingLLM 来源归属校验完成", log_text)
         self.assertIn("AnythingLLM 查询完成", log_text)
         self.assertNotIn(harness.SOURCE_MARKER, log_text)
+
+    def test_analyse_uses_business_upload_name_and_original_title(self) -> None:
+        """文件分析可独立指定 multipart 名称和业务展示标题。"""
+
+        harness = _GatewayHarness()
+        result = harness.open_session().analyse(
+            str(_SAMPLE_FILE_PATH),
+            "分析文档",
+            document_upload=RagDocumentUploadOptions(
+                transport_file_name="Nimitz (CVN 68) class.md",
+                display_title="Nimitz (CVN 68) class.pdf",
+            ),
+        )
+
+        upload_call = harness.document_client.upload_document.call_args
+        uploaded_snapshot = Path(upload_call.args[0])
+        self.assertEqual(_SAMPLE_FILE_PATH.name, uploaded_snapshot.name)
+        self.assertEqual(
+            "Nimitz (CVN 68) class.md",
+            upload_call.kwargs["upload_file_name"],
+        )
+        self.assertEqual(
+            {
+                "docSource": harness.SOURCE_MARKER,
+                "title": "Nimitz (CVN 68) class.pdf",
+            },
+            upload_call.kwargs["metadata"],
+        )
+        self.assertEqual(
+            "Nimitz (CVN 68) class.md",
+            result.prepared_document.ingested_file_name,
+        )
+        # 上传使用任务私有快照；离开上传函数后临时文件必须已经清理。
+        self.assertFalse(uploaded_snapshot.exists())
 
     def test_prepared_document_records_actual_mhtml_normalized_upload_name(self) -> None:
         """RAG 端口必须携带 MHTML 转换后真正提交给 AnythingLLM 的文件名。"""

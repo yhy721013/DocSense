@@ -9,18 +9,32 @@ import sqlite3
 from threading import Barrier
 from unittest.mock import patch
 
+from app.services.chat.domain import (
+    CHAT_ARCHITECTURE_CANDIDATE_INVALID,
+    CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
+    CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
+    CHAT_ARCHITECTURE_ERROR_INVALID,
+    CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
+)
 from app.services.chat import (
     RUN_FAILED,
     RUN_ACCEPTED,
     RUN_RUNNING,
     RUN_SUCCEEDED,
     ChatRunBusyError,
+    ChatAdmissionBusyError,
     ChatDocumentCandidate,
+    ChatArchitectureCandidates,
+    ChatArchitectureIdConflictError,
+    ChatArchitectureScopeInvalidError,
+    ChatArchitectureScopeNotFoundError,
     ChatDocumentSelectionCandidates,
     ChatRunInactiveError,
     ChatRunLockService,
     ChatStore,
     ChatHistoryService,
+    ChatScopeModeConflictError,
+    ChatScopeSelector,
     MESSAGE_COMMITTED,
     MESSAGE_DISCARDED,
 )
@@ -33,6 +47,43 @@ def _document_candidate(file_name: str) -> ChatDocumentCandidate:
         original_name=f"{file_name}.original",
         document_ref=f"document:{file_name}",
         external_location=f"custom-documents/{file_name}.json",
+    )
+
+
+def _architecture_candidates(
+    architecture_id: int,
+    *file_names: str,
+) -> ChatDocumentSelectionCandidates:
+    """构造无需访问知识目录或远端服务的 architecture 候选。"""
+    return ChatDocumentSelectionCandidates(
+        architecture_candidates=ChatArchitectureCandidates(
+            architecture_id=architecture_id,
+            resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
+            documents=tuple(_document_candidate(name) for name in file_names),
+        )
+    )
+
+
+def _failed_architecture_candidates(
+    architecture_id: int,
+    *,
+    invalid: bool = False,
+) -> ChatDocumentSelectionCandidates:
+    """构造交由受理事务延迟裁决的空目录或损坏目录结果。"""
+    return ChatDocumentSelectionCandidates(
+        architecture_candidates=ChatArchitectureCandidates(
+            architecture_id=architecture_id,
+            resolution_outcome=(
+                CHAT_ARCHITECTURE_CANDIDATE_INVALID
+                if invalid
+                else CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND
+            ),
+            error_code=(
+                CHAT_ARCHITECTURE_ERROR_INVALID
+                if invalid
+                else CHAT_ARCHITECTURE_ERROR_NOT_FOUND
+            ),
+        )
     )
 
 
@@ -73,6 +124,91 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual("run-a", error.exception.active_run_id)
         self.assertEqual(RUN_SUCCEEDED, completed.status)
         self.assertEqual(RUN_ACCEPTED, second.status)
+
+    def test_admission_guard_is_exclusive_without_creating_business_facts(
+        self,
+    ) -> None:
+        """Guard 竞争只影响临时协调表，不得提前创建 Session、Scope 或 run。"""
+        selector = ChatScopeSelector.for_files(())
+        lease = self.locks.reserve_chat_admission(
+            chat_id="chat-admission",
+            scope_selector=selector,
+        )
+
+        with self.assertRaises(ChatAdmissionBusyError):
+            self.locks.reserve_chat_admission(
+                chat_id="chat-admission",
+                scope_selector=selector,
+            )
+
+        self.assertIsNone(self.store.sessions.get("chat-admission"))
+        self.assertEqual((), self.store.runs.list_active("chat-admission"))
+        self.assertIsNone(
+            self.store.scopes.get_current_revision("chat-admission")
+        )
+        self.locks.release_chat_admission(lease=lease)
+
+        retry = self.locks.reserve_chat_admission(
+            chat_id="chat-admission",
+            scope_selector=selector,
+        )
+        self.locks.release_chat_admission(lease=retry)
+
+    def test_admission_guard_is_consumed_by_atomic_run_acceptance(self) -> None:
+        """正式受理必须在同一事务中消费 Guard，且之后由活动 run 继续互斥。"""
+        selector = ChatScopeSelector.for_architecture(7)
+        lease = self.locks.reserve_chat_admission(
+            chat_id="chat-admission-accept",
+            scope_selector=selector,
+        )
+        run = self.locks.try_acquire_chat_run(
+            chat_id="chat-admission-accept",
+            run_id="run-admission-accept",
+            user_message="问题",
+            document_candidates=_architecture_candidates(7, "alpha.pdf"),
+            scope_selector=selector,
+            admission_lease=lease,
+        )
+
+        self.assertEqual(RUN_ACCEPTED, run.status)
+        with self.assertRaises(ChatRunBusyError):
+            self.locks.reserve_chat_admission(
+                chat_id="chat-admission-accept",
+                scope_selector=selector,
+            )
+        # 成功受理后的幂等释放不能影响已经提交的运行事实。
+        self.locks.release_chat_admission(lease=lease)
+        self.assertIsNotNone(self.store.runs.get("run-admission-accept"))
+
+    def test_expired_admission_guard_is_recovered_without_business_drift(
+        self,
+    ) -> None:
+        """请求崩溃遗留的过期 Guard 可回收，且不会伪造 Session 或运行事实。"""
+        selector = ChatScopeSelector.for_files(())
+        self.locks.reserve_chat_admission(
+            chat_id="chat-admission-expired",
+            scope_selector=selector,
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE chat_admission_guards
+                SET expires_at = '2000-01-01T00:00:00+00:00'
+                WHERE chat_id = 'chat-admission-expired'
+                """
+            )
+
+        recovered = self.locks.reserve_chat_admission(
+            chat_id="chat-admission-expired",
+            scope_selector=selector,
+        )
+
+        self.assertIsNone(self.store.sessions.get("chat-admission-expired"))
+        self.assertEqual(
+            (),
+            self.store.runs.list_active("chat-admission-expired"),
+        )
+        self.locks.release_chat_admission(lease=recovered)
 
     def test_new_session_uses_default_candidates_atomically(self) -> None:
         candidates = ChatDocumentSelectionCandidates(
@@ -127,8 +263,356 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertNotIn("alpha.pdf", selection_log)
         self.assertNotIn("document:alpha.pdf", selection_log)
 
-    def test_existing_session_without_scope_fails_closed(self) -> None:
-        """迁移后异常缺失 Head 的既有会话不得静默退化为空范围。"""
+    def test_architecture_initial_admission_persists_one_frozen_scope(self) -> None:
+        """首轮必须原子提交 Binding、Revision、run input 与消息选择器。"""
+        run = self.locks.try_acquire_chat_run(
+            chat_id="chat-architecture-initial",
+            run_id="run-architecture-initial",
+            user_message="请总结类别",
+            document_candidates=_architecture_candidates(
+                7,
+                "alpha.pdf",
+                "beta.pdf",
+            ),
+            scope_selector=ChatScopeSelector.for_architecture(7),
+            max_files_per_request=2,
+        )
+
+        binding = self.store.session_scope_bindings.get(run.chat_id)
+        run_input = self.store.run_inputs.get(run.run_id)
+        revision = self.store.scopes.get_current_revision(run.chat_id)
+        messages = self.store.messages.list_by_chat(run.chat_id)
+        self.assertIsNotNone(binding)
+        self.assertIsNotNone(run_input)
+        self.assertIsNotNone(revision)
+        assert binding is not None
+        assert run_input is not None
+        assert revision is not None
+        self.assertEqual("architecture", binding.scope_mode)
+        self.assertEqual(7, binding.architecture_id)
+        self.assertEqual("architecture_initial", run_input.selection_mode)
+        self.assertEqual(7, run_input.requested_architecture_id)
+        self.assertEqual(
+            ("alpha.pdf", "beta.pdf"),
+            tuple(item.file_name for item in run_input.files),
+        )
+        self.assertEqual((), run_input.requested_files)
+        self.assertEqual("architecture_initial", revision.source_mode)
+        self.assertEqual(7, revision.source_architecture_id)
+        self.assertEqual(7, messages[0].architecture_id)
+        self.assertEqual((), messages[0].files)
+
+    def test_architecture_reuse_ignores_current_not_found_candidates(self) -> None:
+        """已有同 ID 会话只复用旧快照，不受当前目录空结果影响。"""
+        initial = self.locks.try_acquire_chat_run(
+            chat_id="chat-architecture-reuse",
+            run_id="run-architecture-first",
+            user_message="首轮",
+            document_candidates=_architecture_candidates(11, "frozen.pdf"),
+            scope_selector=ChatScopeSelector.for_architecture(11),
+            max_files_per_request=1,
+        )
+        self.locks.issue_execution_lease(run_id=initial.run_id)
+        self.locks.complete_run(initial.run_id)
+
+        reused = self.locks.try_acquire_chat_run(
+            chat_id=initial.chat_id,
+            run_id="run-architecture-reuse",
+            user_message="后续",
+            document_candidates=_failed_architecture_candidates(11),
+            scope_selector=ChatScopeSelector.for_architecture(11),
+            max_files_per_request=1,
+        )
+
+        run_input = self.store.run_inputs.get(reused.run_id)
+        self.assertIsNotNone(run_input)
+        assert run_input is not None
+        self.assertEqual("architecture_reuse", run_input.selection_mode)
+        self.assertEqual(11, run_input.requested_architecture_id)
+        self.assertEqual(
+            ("frozen.pdf",),
+            tuple(item.file_name for item in run_input.files),
+        )
+        self.assertEqual(
+            1,
+            len(self.store.scopes.list_revisions_by_chat(initial.chat_id)),
+        )
+
+    def test_architecture_conflicts_are_reported_before_active_run(self) -> None:
+        """模式和 ID 冲突优先于同 chat 的 active run 冲突。"""
+        self.locks.try_acquire_chat_run(
+            chat_id="chat-architecture-conflict",
+            run_id="run-architecture-active",
+            user_message="首轮",
+            document_candidates=_architecture_candidates(21, "frozen.pdf"),
+            scope_selector=ChatScopeSelector.for_architecture(21),
+            max_files_per_request=1,
+        )
+
+        with self.assertRaises(ChatArchitectureIdConflictError):
+            self.locks.try_acquire_chat_run(
+                chat_id="chat-architecture-conflict",
+                run_id="run-wrong-id",
+                user_message="错误 ID",
+                document_candidates=_architecture_candidates(22, "other.pdf"),
+                scope_selector=ChatScopeSelector.for_architecture(22),
+                max_files_per_request=1,
+            )
+        with self.assertRaises(ChatScopeModeConflictError):
+            self.locks.try_acquire_chat_run(
+                chat_id="chat-architecture-conflict",
+                run_id="run-wrong-mode",
+                user_message="错误模式",
+                document_candidates=ChatDocumentSelectionCandidates(
+                    explicit_documents=(_document_candidate("other.pdf"),)
+                ),
+                scope_selector=ChatScopeSelector.for_files(("other.pdf",)),
+                max_files_per_request=1,
+            )
+
+        self.assertIsNone(self.store.runs.get("run-wrong-id"))
+        self.assertIsNone(self.store.runs.get("run-wrong-mode"))
+
+    def test_architecture_empty_invalid_and_limit_failures_roll_back_all(self) -> None:
+        """新会话目录错误或超限不得留下 Session、Binding 或其他孤儿事实。"""
+        cases = (
+            (
+                "not-found",
+                _failed_architecture_candidates(31),
+                ChatArchitectureScopeNotFoundError,
+                5,
+            ),
+            (
+                "invalid",
+                _failed_architecture_candidates(32, invalid=True),
+                ChatArchitectureScopeInvalidError,
+                5,
+            ),
+            (
+                "over-limit",
+                _architecture_candidates(33, "a.pdf", "b.pdf"),
+                ValueError,
+                1,
+            ),
+        )
+        for suffix, candidates, expected_error, limit in cases:
+            with self.subTest(suffix=suffix):
+                chat_id = f"chat-architecture-{suffix}"
+                architecture_id = candidates.architecture_candidates.architecture_id
+                with self.assertRaises(expected_error):
+                    self.locks.try_acquire_chat_run(
+                        chat_id=chat_id,
+                        run_id=f"run-{suffix}",
+                        user_message="问题",
+                        document_candidates=candidates,
+                        scope_selector=ChatScopeSelector.for_architecture(
+                            architecture_id
+                        ),
+                        max_files_per_request=limit,
+                    )
+                self.assertIsNone(self.store.sessions.get(chat_id))
+                self.assertIsNone(
+                    self.store.session_scope_bindings.get(chat_id)
+                )
+                self.assertIsNone(self.store.runs.get(f"run-{suffix}"))
+                self.assertIsNone(self.store.scopes.get_head(chat_id))
+                self.assertEqual((), self.store.messages.list_by_chat(chat_id))
+
+    def test_fifty_concurrent_architecture_admissions_freeze_once(self) -> None:
+        """50 个同 ID 首轮竞争只能产生一个 run、Binding 和 Revision。"""
+        worker_count = 50
+        barrier = Barrier(worker_count)
+        candidates = _architecture_candidates(41, "frozen.pdf")
+        selector = ChatScopeSelector.for_architecture(41)
+
+        def attempt(index: int) -> str:
+            barrier.wait()
+            try:
+                self.locks.try_acquire_chat_run(
+                    chat_id="chat-architecture-concurrent",
+                    run_id=f"run-architecture-{index}",
+                    user_message=f"question-{index}",
+                    document_candidates=candidates,
+                    scope_selector=selector,
+                    max_files_per_request=1,
+                )
+                return "accepted"
+            except ChatRunBusyError:
+                return "busy"
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            outcomes = list(executor.map(attempt, range(worker_count)))
+
+        self.assertEqual(1, outcomes.count("accepted"))
+        self.assertEqual(49, outcomes.count("busy"))
+        binding = self.store.session_scope_bindings.get(
+            "chat-architecture-concurrent"
+        )
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertEqual(41, binding.architecture_id)
+        self.assertEqual(
+            1,
+            len(self.store.scopes.list_revisions_by_chat(
+                "chat-architecture-concurrent"
+            )),
+        )
+
+    def test_fifty_mixed_architecture_ids_bind_exactly_one_id(self) -> None:
+        """同一 chatId 的混合 ID 竞争只能冻结胜方 ID，败方不得留下脏数据。"""
+
+        worker_count = 50
+        barrier = Barrier(worker_count)
+
+        def attempt(index: int) -> str:
+            architecture_id = 51 if index % 2 == 0 else 52
+            barrier.wait()
+            try:
+                self.locks.try_acquire_chat_run(
+                    chat_id="chat-architecture-mixed-ids",
+                    run_id=f"run-architecture-mixed-id-{index}",
+                    user_message=f"question-{index}",
+                    document_candidates=_architecture_candidates(
+                        architecture_id,
+                        f"frozen-{architecture_id}.pdf",
+                    ),
+                    scope_selector=ChatScopeSelector.for_architecture(
+                        architecture_id
+                    ),
+                    max_files_per_request=1,
+                )
+                return "accepted"
+            except ChatRunBusyError:
+                return "busy"
+            except ChatArchitectureIdConflictError:
+                return "architecture_id_conflict"
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            outcomes = list(executor.map(attempt, range(worker_count)))
+
+        self.assertEqual(1, outcomes.count("accepted"))
+        self.assertEqual(24, outcomes.count("busy"))
+        self.assertEqual(25, outcomes.count("architecture_id_conflict"))
+        binding = self.store.session_scope_bindings.get(
+            "chat-architecture-mixed-ids"
+        )
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertIn(binding.architecture_id, (51, 52))
+        self.assertEqual(
+            1,
+            len(self.store.scopes.list_revisions_by_chat(
+                "chat-architecture-mixed-ids"
+            )),
+        )
+        self.assertEqual(
+            1,
+            len(self.store.messages.list_by_chat(
+                "chat-architecture-mixed-ids"
+            )),
+        )
+
+    def test_fifty_mixed_scope_modes_bind_exactly_one_mode(self) -> None:
+        """同一 chatId 的文件/类别模式竞争只能固化胜方模式。"""
+
+        worker_count = 50
+        barrier = Barrier(worker_count)
+
+        def attempt(index: int) -> str:
+            is_architecture = index % 2 == 0
+            barrier.wait()
+            try:
+                if is_architecture:
+                    candidates = _architecture_candidates(
+                        53,
+                        "architecture.pdf",
+                    )
+                    selector = ChatScopeSelector.for_architecture(53)
+                else:
+                    candidates = ChatDocumentSelectionCandidates(
+                        explicit_documents=(
+                            _document_candidate("explicit.pdf"),
+                        )
+                    )
+                    selector = ChatScopeSelector.for_files(("explicit.pdf",))
+                self.locks.try_acquire_chat_run(
+                    chat_id="chat-mixed-scope-modes",
+                    run_id=f"run-mixed-scope-mode-{index}",
+                    user_message=f"question-{index}",
+                    document_candidates=candidates,
+                    scope_selector=selector,
+                    max_files_per_request=1,
+                )
+                return "accepted"
+            except ChatRunBusyError:
+                return "busy"
+            except ChatScopeModeConflictError:
+                return "scope_mode_conflict"
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            outcomes = list(executor.map(attempt, range(worker_count)))
+
+        self.assertEqual(1, outcomes.count("accepted"))
+        self.assertEqual(24, outcomes.count("busy"))
+        self.assertEqual(25, outcomes.count("scope_mode_conflict"))
+        binding = self.store.session_scope_bindings.get(
+            "chat-mixed-scope-modes"
+        )
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertIn(binding.scope_mode, ("files", "architecture"))
+        self.assertEqual(
+            1,
+            len(self.store.scopes.list_revisions_by_chat(
+                "chat-mixed-scope-modes"
+            )),
+        )
+        self.assertEqual(
+            1,
+            len(self.store.messages.list_by_chat(
+                "chat-mixed-scope-modes"
+            )),
+        )
+
+    def test_fifty_different_chats_can_freeze_same_architecture(self) -> None:
+        """不同 chatId 共享类别 ID 时应相互隔离，且均可独立冻结快照。"""
+
+        worker_count = 50
+        barrier = Barrier(worker_count)
+        candidates = _architecture_candidates(61, "shared.pdf")
+        selector = ChatScopeSelector.for_architecture(61)
+
+        def attempt(index: int) -> str:
+            barrier.wait()
+            chat_id = f"chat-shared-architecture-{index}"
+            self.locks.try_acquire_chat_run(
+                chat_id=chat_id,
+                run_id=f"run-shared-architecture-{index}",
+                user_message=f"question-{index}",
+                document_candidates=candidates,
+                scope_selector=selector,
+                max_files_per_request=1,
+            )
+            return chat_id
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            chat_ids = tuple(executor.map(attempt, range(worker_count)))
+
+        self.assertEqual(worker_count, len(chat_ids))
+        for chat_id in chat_ids:
+            binding = self.store.session_scope_bindings.get(chat_id)
+            self.assertIsNotNone(binding)
+            assert binding is not None
+            self.assertEqual("architecture", binding.scope_mode)
+            self.assertEqual(61, binding.architecture_id)
+            self.assertEqual(
+                1,
+                len(self.store.scopes.list_revisions_by_chat(chat_id)),
+            )
+            self.assertEqual(1, len(self.store.messages.list_by_chat(chat_id)))
+
+    def test_existing_session_without_binding_fails_closed(self) -> None:
+        """Schema v5 既有会话缺失不可变 Binding 时必须优先失败关闭。"""
 
         self.store.sessions.create_or_get(chat_id="chat-existing")
         candidates = ChatDocumentSelectionCandidates(
@@ -139,7 +623,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "^existing chat session is missing active scope$",
+            "^existing chat session is missing immutable scope binding$",
         ):
             self.locks.try_acquire_chat_run(
                 chat_id="chat-existing",
@@ -243,6 +727,9 @@ class ChatRunLockServiceTests(unittest.TestCase):
                 )
 
         self.assertIsNone(self.store.sessions.get("chat-write-failure"))
+        self.assertIsNone(
+            self.store.session_scope_bindings.get("chat-write-failure")
+        )
         self.assertIsNone(self.store.runs.get("run-write-failure"))
         self.assertIsNone(self.store.run_inputs.get("run-write-failure"))
         self.assertIsNone(

@@ -28,6 +28,9 @@ from app.integrations.anythingllm.errors import (
 from app.integrations.anythingllm.models import AnythingLLMDocument, AnythingLLMSource
 
 
+FIXTURE_ROOT = Path(__file__).resolve().parent / "contracts" / "anythingllm_v115"
+
+
 class AnythingLLMDocumentClientTests(unittest.TestCase):
     """验证文档客户端只处理上传、永久删除和元数据更新原子接口。"""
 
@@ -211,6 +214,49 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
 
         self.transport.post_multipart.assert_not_called()
 
+    def test_upload_file_name_is_independent_from_local_read_path(self) -> None:
+        """multipart filename 可独立指定，且 metadata.title 原值不被改写。"""
+
+        self.transport.post_multipart.return_value = {
+            "documents": [
+                {
+                    "id": "doc-business-name",
+                    "location": (
+                        "custom-documents/"
+                        "Nimitz (CVN 68) class.md-doc-business-name.json"
+                    ),
+                    "title": "Nimitz (CVN 68) class.pdf",
+                }
+            ]
+        }
+        self.client.upload_document(
+            str(self.file_path),
+            upload_file_name="Nimitz (CVN 68) class.md",
+            metadata={"title": "Nimitz (CVN 68) class.pdf"},
+        )
+
+        request_kwargs = self.transport.post_multipart.call_args.kwargs
+        self.assertEqual(
+            "Nimitz (CVN 68) class.md",
+            request_kwargs["files"]["file"][0],
+        )
+        self.assertEqual(
+            {"title": "Nimitz (CVN 68) class.pdf"},
+            json.loads(request_kwargs["data"]["metadata"]),
+        )
+        self.assertEqual("示例.txt", self.file_path.name)
+
+    def test_invalid_upload_file_name_fails_before_http(self) -> None:
+        """路径或控制字符不能进入 multipart Content-Disposition。"""
+
+        for invalid in ("../escape.md", "folder/name.md", "bad\r\nname.md"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.client.upload_document(
+                    str(self.file_path),
+                    upload_file_name=invalid,
+                )
+        self.transport.post_multipart.assert_not_called()
+
     def test_upload_metadata_rejects_non_finite_numbers_before_http(self) -> None:
         """NaN 不是严格 JSON，不能进入可重试上传请求或协调身份。"""
         with self.assertRaises(ValueError):
@@ -355,10 +401,13 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
         self.assertIn("delay_seconds=3.0", logs)
 
     def test_upload_retries_reuse_the_original_serialized_source_marker(self) -> None:
-        """调用方在退避期间修改 Mapping 也不能改变同一逻辑上传的来源身份。"""
+        """有限重试必须复用冻结来源、业务标题和 multipart 文件名。"""
         original_marker = "docsense_ref:0123456789abcdef0123456789abcdef"
         replacement_marker = "docsense_ref:ffffffffffffffffffffffffffffffff"
-        metadata = {"docSource": original_marker}
+        metadata = {
+            "docSource": original_marker,
+            "title": " 原始资料.pdf",
+        }
         temporary_error = AnythingLLMHTTPError(
             "处理器离线",
             status_code=500,
@@ -383,15 +432,25 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
             self.transport,
             sleep=mutate_metadata_during_backoff,
         )
-        client.upload_document(str(self.file_path), metadata=metadata)
+        client.upload_document(
+            str(self.file_path),
+            upload_file_name=" 原始资料.md",
+            metadata=metadata,
+        )
 
         serialized_values = [
             call.kwargs["data"]["metadata"]
             for call in self.transport.post_multipart.call_args_list
         ]
+        upload_names = [
+            call.kwargs["files"]["file"][0]
+            for call in self.transport.post_multipart.call_args_list
+        ]
         self.assertEqual(2, len(serialized_values))
         self.assertTrue(all(original_marker in value for value in serialized_values))
         self.assertTrue(all(replacement_marker not in value for value in serialized_values))
+        self.assertTrue(all(" 原始资料.pdf" in value for value in serialized_values))
+        self.assertEqual([" 原始资料.md", " 原始资料.md"], upload_names)
 
     def test_upload_does_not_retry_unrecognized_http_error(self) -> None:
         """非白名单 HTTP 错误必须立即抛出，避免自动重放未知副作用请求。"""
@@ -1000,6 +1059,92 @@ class AnythingLLMDocumentClientTests(unittest.TestCase):
             self.client.delete_xlsx_folder(token)
 
         self.transport.delete_json.assert_not_called()
+
+
+class AnythingLLMV115ContractFixtureTests(unittest.TestCase):
+    """冻结 AnythingLLM 1.15.0 的存储身份、展示标题和 Chunk 来源边界。
+
+    夹具只保留协议形状和脱敏标识，不包含真实正文、用户目录或凭证。测试刻意区分
+    Provider 的 UUID ``filename/location``、业务 ``metadata.title`` 与 DocSense
+    ``document_ref``，避免后续再次把展示字段误当成远端所有权证明。
+    """
+
+    @staticmethod
+    def _fixture(name: str) -> dict[str, object]:
+        """读取一个版本化 JSON 夹具，并要求根节点保持对象形状。"""
+
+        payload = json.loads(
+            (FIXTURE_ROOT / name).read_text(encoding="utf-8")
+        )
+        if not isinstance(payload, dict):
+            raise AssertionError(f"AnythingLLM 夹具根节点必须是对象: {name}")
+        return payload
+
+    def test_upload_response_keeps_business_title_separate_from_location(self) -> None:
+        """上传响应的业务 title 可以保留原后缀，location 仍使用实际载荷名。"""
+
+        payload = self._fixture("upload_response.json")
+        documents = payload["documents"]
+        self.assertIsInstance(documents, list)
+        document_payload = documents[0]  # type: ignore[index]
+        document = AnythingLLMDocument.from_payload(document_payload)
+
+        self.assertEqual("Nimitz (CVN 68) class.pdf", document.title)
+        self.assertIn("Nimitz-CVN-68-class.md-", document.location)
+        self.assertTrue(document.location.endswith(".json"))
+        self.assertEqual(
+            "document:8bd127c1-bf39-43f5-be98-7013ec77c9dd",
+            document.document_ref,
+        )
+        self.assertNotEqual(document.title, Path(document.location).name)
+
+    def test_workspace_record_preserves_title_inside_metadata(self) -> None:
+        """Workspace 行的顶层 filename 是存储名，metadata 才保存业务标题。"""
+
+        payload = self._fixture("workspace_response.json")
+        workspace = payload["workspace"]
+        self.assertIsInstance(workspace, list)
+        workspace_record = workspace[0]  # type: ignore[index]
+        document_record = workspace_record["documents"][0]  # type: ignore[index]
+        metadata = json.loads(document_record["metadata"])  # type: ignore[index]
+
+        self.assertNotIn("title", document_record)
+        self.assertEqual(
+            "Nimitz (CVN 68) class.pdf",
+            metadata["title"],
+        )
+        self.assertEqual(
+            document_record["filename"],  # type: ignore[index]
+            Path(document_record["docpath"]).name,  # type: ignore[index]
+        )
+
+        # 当前统一 DTO 对未展开 metadata 的 Workspace 行会回退到 filename。该现象是
+        # DocSense 的兼容投影，不代表 Provider 改写了 metadata.title。
+        projected = AnythingLLMDocument.from_payload(document_record)
+        self.assertEqual(document_record["filename"], projected.title)  # type: ignore[index]
+        self.assertNotEqual(metadata["title"], projected.title)
+
+    def test_picker_and_vector_cache_use_business_title_for_display_and_chunks(
+        self,
+    ) -> None:
+        """UI picker 与 Chunk sourceDocument 都应读取业务 title，而非 UUID 文件名。"""
+
+        picker = self._fixture("document_picker_response.json")
+        local_files = picker["localFiles"]
+        item = local_files["items"][0]["items"][0]  # type: ignore[index]
+        vector_cache = self._fixture("vector_cache_excerpt.json")
+        chunk = vector_cache["chunks"][0]  # type: ignore[index]
+        metadata = chunk["metadata"]  # type: ignore[index]
+
+        expected_title = "Nimitz (CVN 68) class.pdf"
+        self.assertEqual(expected_title, item["title"])
+        self.assertEqual(expected_title, metadata["title"])
+        self.assertIn(
+            f"sourceDocument: {expected_title}",
+            metadata["text"],
+        )
+        self.assertNotIn(item["name"], metadata["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

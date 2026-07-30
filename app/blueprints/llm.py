@@ -10,9 +10,11 @@ from flask_sock import Sock
 
 from app.adapters.web import (
     ArchitectureIdValidationError,
+    ChatScopeSelectorValidationError,
     ReportIdValidationError,
     normalize_architecture_id,
     normalize_report_id,
+    parse_chat_scope_selector,
 )
 from app.adapters.web.flask import (
     AnalysisPresentedResponse,
@@ -56,11 +58,16 @@ from app.presenters.weaponry_submission import (
     WeaponrySubmissionResponsePresenter,
 )
 from app.services.chat import (
+    ChatAdmissionBusyError,
+    ChatArchitectureIdConflictError,
+    ChatArchitectureScopeInvalidError,
+    ChatArchitectureScopeNotFoundError,
     ChatDeleteBusyError,
     ChatDeleteCleanupError,
     ChatDeleteNotFoundError,
     ChatDocumentNotFoundError,
     ChatRunBusyError,
+    ChatScopeModeConflictError,
     ChatSessionUnavailableError,
     ChatTitleEmptyHistoryError,
     ChatTitleGenerationError,
@@ -187,8 +194,8 @@ def _analysis_policy_snapshot(
 ) -> AnalysisPolicySnapshot:
     """在受理边界冻结本次 Analysis 的运行策略。
 
-    Worker 只读取持久化的 ``AnalysisTaskInputV2``（历史任务兼容 V1），不得在后续执行时
-    重新读取环境变量。
+    Worker 只读取持久化的 ``AnalysisTaskInputV4``（历史任务兼容 V1/V2/V3），不得在后续
+    执行时重新读取环境变量。
     因此每次公开请求只从已验证的容器配置复制一次策略快照，并随同批量事务保存。
     """
 
@@ -483,6 +490,7 @@ def llm_weaponry():
 def llm_check_task():
     services = _services()
     task_service = services.task_service
+    trace_id = uuid4().hex
     payload = request.get_json(silent=True) or {}
     business_type = payload.get("businessType")
     if business_type not in {"file", "report", "weaponry"}:
@@ -500,10 +508,17 @@ def llm_check_task():
         )
         return jsonify({"error": "params不能为空"}), 400
 
-    missing_count = 0
-    callback_replayed_count = 0
-    duplicate_file_count = 0
-    processed_file_keys: set[str] = set()
+    # check-task 会在当前 HTTP 请求线程内执行必要的 Callback 恢复，因此它不是纯查询。
+    # 必须先完整校验所有业务键，再进入任何任务读取或网络副作用；否则前面的合法项可能
+    # 已经发出回调，后面的非法项却让整次请求返回 400，形成难以解释的部分执行。
+    #
+    # 同一业务键允许存在多种公开表示，例如 report 的 132/"000132" 和 weaponry 的
+    # 10502/"00010502"。去重必须发生在规范化之后，并稳定保留首次出现顺序，确保一个
+    # HTTP 请求对同一逻辑任务至多授权一轮恢复。原始 params 数量仍用于既有单项 404/
+    # 批量 200 判定，不能因内部去重擅自改变公开状态码。
+    parsed_items: list[tuple[int, str, str | int]] = []
+    first_index_by_key: dict[str, int] = {}
+    duplicate_item_count = 0
     for index, params in enumerate(params_list):
         if business_type == "file":
             business_key = params.get("fileName")
@@ -514,19 +529,7 @@ def llm_check_task():
                 )
                 return jsonify({"error": "fileName不能为空"}), 400
             normalized_key = business_key.strip()
-            # 同一 HTTP 请求内的重复 fileName 只处理首次出现项。check-task 是带回调
-            # 副作用的命令；若逐项执行重复键，前一次明确失败后第二项可能立即形成新的
-            # attempt，违背调用方“一次请求只触发一轮补发”的直觉。稳定去重不改变
-            # 参数、响应体或状态码，且保留首次出现顺序。
-            if normalized_key in processed_file_keys:
-                duplicate_file_count += 1
-                logger.info(
-                    "任务查询请求跳过重复文件项: fileName=%s index=%s",
-                    normalized_key,
-                    index,
-                )
-                continue
-            processed_file_keys.add(normalized_key)
+            normalized_value: str | int = normalized_key
         elif business_type == "weaponry":
             architecture_id = params.get("architectureId")
             if architecture_id is None:
@@ -548,6 +551,7 @@ def llm_check_task():
                 )
                 return jsonify({"error": str(exc)}), 400
             normalized_key = normalized_architecture_id.business_key
+            normalized_value = normalized_architecture_id.value
         else:
             report_id = params.get("reportId")
             if report_id is None:
@@ -567,6 +571,26 @@ def llm_check_task():
                 )
                 return jsonify({"error": str(exc)}), 400
             normalized_key = normalized_report_id.business_key
+            normalized_value = normalized_report_id.value
+
+        first_index = first_index_by_key.get(normalized_key)
+        if first_index is not None:
+            duplicate_item_count += 1
+            logger.info(
+                "任务查询请求跳过规范化重复项: business_type=%s index=%d "
+                "first_index=%d trace_id=%s",
+                business_type,
+                index,
+                first_index,
+                trace_id,
+            )
+            continue
+        first_index_by_key[normalized_key] = index
+        parsed_items.append((index, normalized_key, normalized_value))
+
+    missing_count = 0
+    callback_replayed_count = 0
+    for original_index, normalized_key, normalized_value in parsed_items:
 
         task = task_service.get_task(business_type, normalized_key)
         if not task:
@@ -581,7 +605,7 @@ def llm_check_task():
                 "批量任务查询项未找到任务: businessType=%s businessKey=%s index=%s",
                 business_type,
                 normalized_key,
-                index,
+                original_index,
             )
             # 批量缺失项不终止其余项的回调恢复；成功体不再公开占位任务快照。
             missing_count += 1
@@ -592,14 +616,16 @@ def llm_check_task():
             # 遗留直发方法，而是与正常 Worker 共用 execution 级 latest-wins、Guard 和
             # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
             replayed = services.report_callback_recovery.execute(
-                ReportId.from_public_value(normalized_report_id.value)
+                ReportId.from_public_value(normalized_value),  # type: ignore[arg-type]
+                request_trace_id=trace_id,
             )
         elif business_type == "weaponry":
             weaponry_services = services.weaponry_services
             if weaponry_services is None:
                 raise RuntimeError("应用容器未装配武器谱运行链")
             replayed = weaponry_services.callback_recovery.execute(
-                normalized_architecture_id.value
+                normalized_value,  # type: ignore[arg-type]
+                request_trace_id=trace_id,
             )
         else:
             analysis_callback_recovery = services.analysis_callback_recovery
@@ -608,7 +634,10 @@ def llm_check_task():
                 # 缺少新恢复链，必须显式失败，不能回退到旧 replay 以免形成第二个 owner。
                 logger.error("文件 check-task 缺少新回调恢复链，拒绝使用遗留恢复器")
                 raise RuntimeError("应用容器未装配文件分析回调恢复链")
-            replayed = analysis_callback_recovery.execute(normalized_key)
+            replayed = analysis_callback_recovery.execute(
+                normalized_key,
+                request_trace_id=trace_id,
+            )
         # 保持原有“恢复后重读”的一致性门禁，但不再把内部状态投影到 HTTP 响应。
         refreshed_task = task_service.get_task(business_type, normalized_key)
         if refreshed_task is None:
@@ -616,7 +645,7 @@ def llm_check_task():
                 "任务回调恢复后重新读取失败: businessType=%s businessKey=%s index=%s",
                 business_type,
                 normalized_key,
-                index,
+                original_index,
             )
             raise RuntimeError("任务回调恢复后不存在")
         if replayed:
@@ -624,13 +653,15 @@ def llm_check_task():
 
     logger.info(
         "任务检查与必要回调恢复已完成: businessType=%s requested_count=%d "
-        "missing_count=%d duplicate_file_count=%d callback_replayed_count=%d "
-        "status_code=200",
+        "unique_count=%d missing_count=%d duplicate_item_count=%d "
+        "callback_replayed_count=%d status_code=200 trace_id=%s",
         business_type,
         len(params_list),
+        len(parsed_items),
         missing_count,
-        duplicate_file_count,
+        duplicate_item_count,
         callback_replayed_count,
+        trace_id,
     )
     # 公开接口只承诺检查已完成；任务状态、进度、Callback 细节继续留在内部存储。
     return _empty_http_response(200)
@@ -828,14 +859,15 @@ def llm_chat():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    file_names = params.get("fileNames")
-    if not isinstance(file_names, list):
+    try:
+        scope_selector = parse_chat_scope_selector(params)
+    except ChatScopeSelectorValidationError as exc:
         logger.warning(
-            "文件对话请求被拒绝: fileNames类型无效 chatId=%s file_names_type=%s",
+            "文件对话请求被拒绝: 范围选择器无效 chatId=%s error_type=%s",
             chat_id,
-            type(file_names).__name__,
+            exc.__class__.__name__,
         )
-        return jsonify({"error": "fileNames必须为数组"}), 400
+        return jsonify({"error": str(exc)}), 400
 
     message = params.get("message")
     if not isinstance(message, str) or not message.strip():
@@ -852,55 +884,79 @@ def llm_chat():
         return jsonify({"error": "message超过文件对话长度上限"}), 400
     logger.info(
         "文件对话请求参数校验通过: "
-        "chatId=%s raw_requested_file_count=%d message_length=%d",
+        "chatId=%s scope_mode=%s normalized_requested_file_count=%d "
+        "requested_architecture_id=%s message_length=%d",
         chat_id,
-        len(file_names),
+        scope_selector.scope_mode,
+        len(scope_selector.file_names),
+        scope_selector.architecture_id,
         len(message),
     )
-
-    normalized_file_names: list[str] = []
-    seen_file_names: set[str] = set()
-
-    # 对话入参中的 fileNames 是业务侧哈希文件名。Blueprint 这里只负责元素类型、
-    # 空白值和首次出现顺序去重；文件存在性、目录一致性以及首次空数组的自动选择，
-    # 均由 Application/Coordinator 在受理边界统一判定，避免路由层复制业务规则。
-    for index, fn in enumerate(file_names):
-        if not isinstance(fn, str) or not fn.strip():
-            logger.warning(
-                "文件对话请求被拒绝: fileNames中包含无效文件名 chatId=%s index=%s",
-                chat_id,
-                index,
-            )
-            return jsonify({"error": "fileNames中包含无效文件名"}), 400
-        normalized_file_name = fn.strip()
-        if normalized_file_name in seen_file_names:
-            logger.debug(
-                "文件对话请求去重重复文件名: chatId=%s index=%s",
-                chat_id,
-                index,
-            )
-            continue
-        seen_file_names.add(normalized_file_name)
-        normalized_file_names.append(normalized_file_name)
-
-    logger.info(
-        "文件对话引用文件校验完成: "
-        "chatId=%s normalized_requested_file_count=%d",
-        chat_id,
-        len(normalized_file_names),
-    )
-    if len(normalized_file_names) > CHAT_MAX_FILES_PER_REQUEST:
+    if len(scope_selector.file_names) > CHAT_MAX_FILES_PER_REQUEST:
         logger.warning(
             "文件对话请求被拒绝：文件数量超过上限: "
             "chatId=%s requested_file_count=%d limit=%d",
             chat_id,
-            len(normalized_file_names),
+            len(scope_selector.file_names),
             CHAT_MAX_FILES_PER_REQUEST,
         )
         return jsonify({"error": "fileNames超过文件对话数量上限"}), 400
 
     chat_run_executor = services.chat_run_executor
-    if not chat_run_executor.try_acquire_stream_slot():
+    try:
+        admission_lease = services.chat_commands.reserve_chat_admission(
+            chat_id=chat_id,
+            scope_selector=scope_selector,
+        )
+    except ChatScopeModeConflictError:
+        logger.warning(
+            "文件对话准入被拒绝：会话范围模式冲突: chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话的范围模式不匹配"}), 409
+    except ChatArchitectureIdConflictError:
+        logger.warning(
+            "architecture 文件对话准入被拒绝：会话类别 ID 冲突: "
+            "chatId=%s requestedArchitectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({"error": "当前对话已绑定其他architectureId"}), 409
+    except (
+        ChatAdmissionBusyError,
+        ChatRunBusyError,
+        ChatSessionUnavailableError,
+    ):
+        logger.warning(
+            "文件对话准入被拒绝：同一 chatId 已有请求或运行: chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
+    except ValueError as exc:
+        logger.warning(
+            "文件对话准入校验失败: chatId=%s error_type=%s",
+            chat_id,
+            exc.__class__.__name__,
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        stream_slot_available = chat_run_executor.try_acquire_stream_slot()
+    except Exception:
+        # 容量适配器异常时尚未创建任何 Session/run；必须先按 token 释放 Guard，
+        # 避免同一 chatId 在异常恢复后仍被临时准入事实阻塞。
+        services.chat_commands.release_chat_admission(
+            lease=admission_lease
+        )
+        logger.exception(
+            "文件对话流容量许可获取异常，已释放准入 Guard: chatId=%s",
+            chat_id,
+        )
+        raise
+    if not stream_slot_available:
+        services.chat_commands.release_chat_admission(
+            lease=admission_lease
+        )
         logger.warning(
             "文件对话请求被拒绝：进程内流并发容量已满: chatId=%s max_concurrent_streams=%d",
             chat_id,
@@ -925,7 +981,8 @@ def llm_chat():
         prepared_run = chat_run_executor.prepare_chat_run(
             chat_id=chat_id,
             message=message,
-            file_names=tuple(normalized_file_names),
+            scope_selector=scope_selector,
+            admission_lease=admission_lease,
         )
     except ChatDocumentNotFoundError as exc:
         _release_stream_slot()
@@ -934,6 +991,44 @@ def llm_chat():
             chat_id,
         )
         return jsonify({"error": str(exc)}), 404
+    except ChatArchitectureScopeNotFoundError:
+        _release_stream_slot()
+        logger.warning(
+            "architecture 文件对话请求被拒绝：类别不存在或为空: "
+            "chatId=%s architectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({
+            "error": "architectureId对应类别不存在或没有可用于对话的文件"
+        }), 404
+    except ChatArchitectureScopeInvalidError:
+        _release_stream_slot()
+        logger.warning(
+            "architecture 文件对话请求被拒绝：类别目录无法形成有效范围: "
+            "chatId=%s architectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({
+            "error": "architectureId对应类别文件无法形成有效对话范围"
+        }), 400
+    except ChatScopeModeConflictError:
+        _release_stream_slot()
+        logger.warning(
+            "文件对话请求被拒绝：会话范围模式冲突: chatId=%s",
+            chat_id,
+        )
+        return jsonify({"error": "当前对话的范围模式不匹配"}), 409
+    except ChatArchitectureIdConflictError:
+        _release_stream_slot()
+        logger.warning(
+            "architecture 文件对话请求被拒绝：会话类别 ID 冲突: "
+            "chatId=%s requestedArchitectureId=%s",
+            chat_id,
+            scope_selector.architecture_id,
+        )
+        return jsonify({"error": "当前对话已绑定其他architectureId"}), 409
     except (ChatRunBusyError, ChatSessionUnavailableError):
         _release_stream_slot()
         logger.warning(
@@ -958,10 +1053,13 @@ def llm_chat():
 
     logger.info(
         "文件对话运行已分配，准备创建流式响应: "
-        "chatId=%s runId=%s requested_file_count=%d",
+        "chatId=%s runId=%s scope_mode=%s requested_file_count=%d "
+        "requested_architecture_id=%s",
         chat_id,
         prepared_run.run_id,
-        len(normalized_file_names),
+        scope_selector.scope_mode,
+        len(scope_selector.file_names),
+        scope_selector.architecture_id,
     )
 
     try:

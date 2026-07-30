@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from uuid import uuid4
 
 from app.modules.analysis.ports import (
     AnalysisCallbackAcquireOutcome,
@@ -82,11 +83,19 @@ class RecoverAnalysisCallbackSynchronously:
 
         return self._callbacks
 
-    def execute(self, file_name: str) -> bool:
+    def execute(self, file_name: str, *, request_trace_id: str = "") -> bool:
         """同步尝试一次补发；仅严格 2xx 的 ``delivered`` 返回 ``True``。"""
 
         if not isinstance(file_name, str) or not file_name.strip():
             raise ValueError("file_name 必须是非空 str")
+        if not isinstance(request_trace_id, str):
+            raise TypeError("request_trace_id 必须是 str")
+        normalized_trace_id = request_trace_id.strip()
+        if len(normalized_trace_id) > 128:
+            raise ValueError("request_trace_id 最多 128 个字符")
+        # Web 入口会传入本次 check-task trace；离线用例或其他内部调用若尚未携带，
+        # 在用例边界生成一个仅供审计关联的内部 trace，禁止使用原任务 trace 冒充本次授权。
+        effective_trace_id = normalized_trace_id or uuid4().hex
         normalized_file_name = file_name.strip()
         if not self._try_enter_local_recovery(normalized_file_name):
             # 跟随者不等待、也不把 owner 的结果伪造为自己的成功。公开 check-task 未来
@@ -101,7 +110,11 @@ class RecoverAnalysisCallbackSynchronously:
             candidate = self._source.load_recoverable(normalized_file_name)
             if candidate is None:
                 return False
-            return self._attempt_candidate(candidate, allow_wait=True)
+            return self._attempt_candidate(
+                candidate,
+                allow_wait=True,
+                request_trace_id=effective_trace_id,
+            )
         finally:
             self._leave_local_recovery(normalized_file_name)
 
@@ -125,6 +138,7 @@ class RecoverAnalysisCallbackSynchronously:
         candidate: AnalysisCallbackRecoveryCandidate,
         *,
         allow_wait: bool,
+        request_trace_id: str,
     ) -> bool:
         """对一个已验证候选获取发送权；最多等待并重新读取一次。"""
 
@@ -140,6 +154,7 @@ class RecoverAnalysisCallbackSynchronously:
                 allow_failed_retry=True,
                 allow_outcome_unknown_retry=True,
                 expected_callback_attempts=candidate.callback_attempts,
+                request_trace_id=request_trace_id,
             )
         )
         if not isinstance(acquire, AnalysisCallbackAcquireResult):
@@ -163,7 +178,11 @@ class RecoverAnalysisCallbackSynchronously:
             # 完成（包括明确失败），底层递增后的 callback_attempts 会使本次 acquire
             # 返回 stale，从而把同一批并发 check-task 收敛为至多一次 HTTP。下一次独立
             # check-task 会重新读取新快照，仍可显式发起一轮恢复。
-            return self._attempt_candidate(candidate, allow_wait=False)
+            return self._attempt_candidate(
+                candidate,
+                allow_wait=False,
+                request_trace_id=request_trace_id,
+            )
         if acquire.outcome is not AnalysisCallbackAcquireOutcome.ACQUIRED:
             logger.info(
                 "文件分析同步回调未取得发送权: task_id=%s file_name=%s outcome=%s",

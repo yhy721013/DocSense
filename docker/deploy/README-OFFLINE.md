@@ -280,6 +280,7 @@ DOCSENSE_ANALYSIS_DISPATCH_RETRY_BASE_SECONDS=5
 DOCSENSE_ANALYSIS_DISPATCH_RETRY_MAX_SECONDS=300
 DOCSENSE_ANALYSIS_RESOURCE_SWEEP_INTERVAL_SECONDS=30
 DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE=50
+DOCSENSE_ANALYSIS_RESOURCE_CLOSE_RUNNING_GRACE_SECONDS=300
 DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS=30
 DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS=5
 DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS=10
@@ -291,6 +292,9 @@ DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS=30
   多实例开关。
 - `DISPATCH_BATCH_SIZE` 与 `RESOURCE_SWEEP_BATCH_SIZE` 只限制单次扫描量，不限制 SQLite 中可持久保存的
   accepted 积压量。领取前基础设施错误按 base/max 执行持久化指数退避，避免单个坏任务热循环。
+- `RESOURCE_CLOSE_RUNNING_GRACE_SECONDS` 是进程崩溃后的持久恢复保护期。当前
+  single-instance Worker 仍持有资源生命周期活跃权时，维护线程只观察且不修改资源版本；活跃权消失并且
+  保护期超时后，只允许把未知远端结果隔离，禁止自动重放 close/delete。
 - Callback lease 必须严格大于 HTTP timeout 加连接、响应读取和安全余量；任何非法数值或超时关系都会
   fail fast，不会静默退回默认值。
 - 当前公开 `/llm/analysis` 与 file 类型 `/llm/check-task` 已接入阶段 1F 唯一运行链。

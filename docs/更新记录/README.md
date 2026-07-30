@@ -2,6 +2,26 @@
 
 本目录保存已经实施、正在实施或需要长期追溯的设计决策与改造记录。它用于解释“为什么这样改、改动范围、验证方式和剩余边界”，但不替代接口文档的对外契约地位。
 
+## 文件分析 RAG 投影与上传命名
+
+| 文件 | 作用 |
+| --- | --- |
+| `260730-文件分析RAG投影与业务原名上传命名执行记录.md` | 完成 RAG-only Markdown Base64 投影、业务原名/multipart/Provider 身份分离、非法名称整批 HTTP 400、任务 V3 快照、审计与资源恢复接线；后续修复 Callback 等待/close 与维护线程的资源版本竞态，记录 2,178 项安全全仓回归和 AnythingLLM Desktop 1.15.0-r2 单实例真实验收，生产发布仍待独立窗口。 |
+
+## 阶段 1H 共享文档处理
+
+| 文件 | 作用 |
+| --- | --- |
+| `260729-阶段1H-0基线与并发路径修复执行记录.md` | 冻结 DocumentProcessing/Artifact/Translation 当前调用与资源所有权、公开契约只读 Hash、自建语料和临时依赖；记录经确认增加的 1H-0R Windows 并发路径规范化修复及 138 项离线回归。 |
+| `260729-阶段1H-1共享处理内核与本地Artifact执行记录.md` | 建立不可变 Artifact/Profile/Lineage、稳定幂等键、Port/Application、严格 Fake、本地原子 Artifact Store 和模块自有 SQLite Processing Record；同步阶段 2～4 迁移边界并完成 160 项离线回归。 |
+| `260729-阶段1H-2Legacy-Office通用Artifact纳管执行记录.md` | 将唯一 LibreOffice/OOXML 安全内核迁入 Adapter 包，以冻结 Profile 和通用 Processor 生成 normalized OOXML Artifact/Lineage；保留无重复实现的旧 Facade，并通过 143 项离线回归。 |
+| `260729-阶段1H-3MHTML独立处理执行记录.md` | 迁出 MHTML MIME/正文纯规则和浏览器 Processor，清零两条 Translator 反向依赖；冻结确定失败降级、未知结果协调及固定 `--no-sandbox` 策略，并通过 170 项离线回归。 |
+| `260729-阶段1H-4MinerU-OCR与通用格式执行记录.md` | 将 MinerU、内置 OCR 和通用直通校验迁入 DocumentProcessing；落地 FIFO 重型许可、外部提交意图/供应商身份及 outcome unknown 对账边界，并通过 188 项离线回归。 |
+| `260729-阶段1H-5独立Translation模块执行记录.md` | 建立只接受 prepared Artifact 的 Translation Domain/Application/Ports/Adapters，迁入 HYMT/Argos/Ollama 唯一运行时和安全 Renderer，将引擎锁缩到实例调用，并通过 199 项离线回归。 |
+| `260729-阶段1H-6业务调用方单路径切换执行记录.md` | 按 Utils、Report、Analysis、Translation/Weaponry 顺序切换统一 Artifact 流水线；同一请求无新旧双执行，固定保留 MHTML `--no-sandbox`，并通过 956 项扩大离线回归。 |
+| `260729-阶段1H-7关闭验收与Artifact保留执行记录.md` | 完成永久依赖门禁、50 任务/100 Artifact 隔离、遗留三类引用矩阵和 Artifact 保留/未来 GC 语义；安全全仓发现 2,128 项、排除 13 项、执行 2,115 项且 failure/error 为 0，接口文档零修改。 |
+| `260729-阶段1H关闭后全面审查修复执行记录.md` | 修复 PDF 降级漂移、富 Markdown/图片生命周期、MHTML/MinerU 结果所有权、Processing Record 显式对账、MinerU Profile 脱敏、读租约/锁回收/有界容量和 Artifact Catalog；不改公开接口，并明确 accepted 全配置快照、真实服务和多实例仍属后续门禁。 |
+
 ## Legacy Office 分支集成记录
 
 | 文件 | 作用 |
@@ -23,6 +43,7 @@
 
 | 文件 | 作用 |
 | --- | --- |
+| `260729-知识谱系类别文件对话全面审查修复执行记录.md` | 收紧 Chat `architectureId` 为 JavaScript 安全整数，新增持久化 Admission Guard 与 409 优先、Schema v6 对称约束、有界类别读取、远端绑定唯一确认，并补齐 SSE `aborted` 权威合同和未来 v6 发布门禁。 |
 | `260401-文件对话接口后端设计.md` | 文件对话后端的早期设计说明。 |
 | `260405-文件对话接口实现计划.md` | 早期文件对话实施计划。 |
 | `260424-文件对话接口需求变更.md` | 文件对话需求调整记录。 |
@@ -46,6 +67,14 @@
 | `260728-文件对话请求与活动范围分离阶段5执行记录.md` | 阶段 5 历史、日志与调试一致性：history 只投影 requested，1,000 个 effective 文件不扩大空请求历史；调试 `fileNames` 校正为 Active Scope，bindings 独立脱敏计数且不新增 JSON 字段；204 项 Chat 回归通过。 |
 | `260728-文件对话请求与活动范围分离阶段6执行记录.md` | 阶段 6 开发 Chat 库精确清理与安全全仓回归：空库重建 Schema v1～v4，发现 1,879/排除 13/执行 1,866 项全部通过；证据限定为 Windows、SQLite 单实例与离线 Fake。 |
 | `260728-文件对话请求与活动范围分离阶段7关闭验收执行记录.md` | 阶段 7 最终关闭：同步权威接口文档且公开字段零增删，完成 204 项 Chat、70 项契约/网关/容器/架构、1,866 项安全全仓及静态审计；开发分支 SQLite 单实例离线计划关闭。 |
+| `260728-知识谱系类别文件对话阶段0合同黄金资产与基线执行记录.md` | architecture 类别文件对话阶段 0：冻结互斥选择器、直接文件快照、不可变会话绑定、错误优先级、历史字段和 SSE 不变量；10 项合同、211 项 Chat 及发现 1,993/排除 13/执行 1,980 项安全全仓基线通过，生产代码尚未修改。 |
+| `260728-知识谱系类别文件对话阶段1选择器与纯领域执行记录.md` | 阶段 1 实现未接路由的严格二选一 Web Parser、Candidate Schema v2、不可变 Session Binding、architecture initial/reuse 纯状态机和 Domain AST 隔离；57 项定向及 223 项 Chat 回归通过。 |
+| `260728-知识谱系类别文件对话阶段2目录查询与Resolver执行记录.md` | 阶段 2 增加 exact architecture 参数化 SQL、直接文件稳定目录读取、有界 resolved/not_found/invalid Resolver 和独立 capability Protocol；50 项 Database/Resolver/架构及 228 项 Chat 回归通过，生产路由未切换。 |
+| `260728-知识谱系类别文件对话阶段3持久化Schema-v5执行记录.md` | 阶段 3 落地 Schema v5、不可变 Session Binding、architecture Scope Revision、运行输入和消息一致性门禁；14 项 Scope、86 项持久化/容器及 232 项 Chat 回归通过，Coordinator 尚未接线。 |
+| `260728-知识谱系类别文件对话阶段4原子受理编排执行记录.md` | 阶段 4 将 Binding→冲突优先级→Head/Revision→run/input/message 串入同一受理事务；87 项定向及 237 项 Chat 回归通过，公开路由尚未切换。 |
+| `260728-知识谱系类别文件对话阶段5路由执行与历史切换执行记录.md` | 阶段 5 完成 `/llm/chat` selector、architecture Resolver/快照执行、获批错误映射和 history 字段互斥；242 项 Chat 及 82 项相邻门禁通过。 |
+| `260728-知识谱系类别文件对话阶段6并发恢复与安全全仓执行记录.md` | 阶段 6 验收 run_id 重启恢复、远端额外文档不扩张、混合 ID/模式及 50 会话并发隔离，完成资源租约日志摘要化；248 项 Chat 及发现 2,033/排除 13/执行 2,020 项安全全仓回归通过。 |
+| `260728-知识谱系类别文件对话阶段7关闭验收执行记录.md` | 阶段 7 同步权威合同和计划状态，完成 248 项 Chat、85 项合同/网关/架构、142 项相邻模块及发现 2,033/排除 13/执行 2,020 项安全全仓复验；当前功能分支 SQLite 单实例离线计划关闭。 |
 | `260715-阶段1A-1接口契约基线执行记录.md` | check-task/Progress 当前与目标契约分层、离线测试结果，以及已确认的严格 params/action 错误连接策略。 |
 | `260715-阶段1A-2模块骨架与架构边界执行记录.md` | tasks/Flask Adapter 包骨架、AST 导入门禁、规则自证、完整回归结果与 1A-3 后续边界。 |
 | `260716-阶段1A-3内部任务契约执行记录.md` | 不可变 Task/Progress DTO、三类 Port、两个应用服务、Fake 契约测试、波次 1A 门禁与完整回归。 |
@@ -113,6 +142,7 @@
 | `260727-阶段1F-5B唯一生产链路由接线与离线验收记录.md` | 1F-5B 的 `/llm/analysis` Parser → Submit → Presenter 路由接线、file check-task 新 Callback Recovery owner、永久 AST/契约回归与生产预检边界；代码/离线验收完成，真实目标库发布尚待确认。 |
 | `260727-阶段1F-7B关闭验收执行记录.md` | 1F-7B 的 408 项定向回归、发现 1,752/排除 13/执行 1,739 项安全全仓回归、旧执行器引用盘点和文档收口；代码/离线关闭验收完成，真实目标库发布仍待确认。 |
 | `260727-阶段1F关闭后全面审查修复与清库发布收口执行记录.md` | 1F 关闭后对 file `outcome_unknown` 显式 check-task 至少一次补发、请求内去重、毒快照回调、投影原子收敛、资源统计、Dispatcher 致命退出和 `clean.py` fail-closed 的修复；同步权威接口说明但不增删公开字段，并按停服清库重建制度把只读预检保留为存量/恢复诊断工具。 |
+| `260729-report与weaponry显式unknown重试执行记录.md` | 按 U0～U7 实施 report/weaponry check-task 显式 at-least-once unknown 补发、三类型完整预校验与规范化去重、Guard attempt CAS/追加审计、组合根单发送权和接口黄金资产同步；公开字段与状态码不变，仍限 SQLite 单实例离线证据。 |
 
 其余文件记录知识库、日志、运行时路径、技术选型等相关演进，阅读时应按业务主题选择。
 

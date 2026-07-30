@@ -25,6 +25,7 @@ from app.services.chat.persistence.repositories import (
     ChatRunInputRepository,
     ChatRunRepository,
     ChatScopeRepository,
+    ChatSessionScopeBindingRepository,
     ChatSessionRepository,
     ensure_chat_schema,
 )
@@ -138,6 +139,7 @@ class ChatPersistenceStore(Protocol):
     runs: ChatRunRepository
     run_inputs: ChatRunInputRepository
     scopes: ChatScopeRepository
+    session_scope_bindings: ChatSessionScopeBindingRepository
     events: ChatRunEventStore
     messages: ChatMessageRepository
     resource_leases: ChatResourceLeaseService
@@ -162,6 +164,10 @@ class ChatStore:
         self.runs = ChatRunRepository(db_path, initialize=False)
         self.run_inputs = ChatRunInputRepository(db_path, initialize=False)
         self.scopes = ChatScopeRepository(db_path, initialize=False)
+        self.session_scope_bindings = ChatSessionScopeBindingRepository(
+            db_path,
+            initialize=False,
+        )
         self.events = ChatRunEventRepository(db_path, initialize=False)
         self.messages = ChatMessageRepository(db_path, initialize=False)
         self.resource_leases = ChatResourceLeaseService(

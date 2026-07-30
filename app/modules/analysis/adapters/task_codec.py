@@ -1,6 +1,6 @@
 """文件分析 Worker 输入的严格 JSON Codec。
 
-此 Codec 在持久化边界写入 ``AnalysisTaskInputV2``，并严格兼容读取历史 V1；它不读取
+此 Codec 在持久化边界写入 ``AnalysisTaskInputV4``，并严格兼容读取历史 V1/V2/V3；它不读取
 数据库、不生成任务身份，也不尝试修复历史脏数据。未知 schema、缺少字段、额外字段以及
 任务身份不一致都必须失败关闭，避免错误 payload 被错误的 Worker 重放。
 """
@@ -17,11 +17,19 @@ from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_EFFECTIVE_RANGE_KEYS,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
     AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV2,
+    AnalysisTaskInputV3,
+    AnalysisTaskInputV4,
     FrozenJsonObject,
+)
+from app.modules.analysis.domain.rag_naming import (
+    AnalysisRagNamingSnapshot,
+    AnalysisRagNamingSnapshotV3,
 )
 
 
@@ -35,7 +43,7 @@ class AnalysisTaskInputCodecError(ValueError):
 
 
 class AnalysisTaskInputCodec:
-    """严格编解码 V1/V2 输入，保持公开 ``params`` 的未知字段和值语义。"""
+    """严格编解码 V1–V4 输入，保持公开 ``params`` 的未知字段和值语义。"""
 
     _V1_ENVELOPE_KEYS = (
         "schema_version",
@@ -53,7 +61,9 @@ class AnalysisTaskInputCodec:
         "trace_id",
     )
     _V2_ENVELOPE_KEYS = _V1_ENVELOPE_KEYS + ("document_processing_policy",)
-    # 保留历史私有测试入口；当前 V2 合同使用显式 ``_V2_ENVELOPE_KEYS``。
+    _V3_ENVELOPE_KEYS = _V2_ENVELOPE_KEYS + ("rag_naming",)
+    _V4_ENVELOPE_KEYS = _V3_ENVELOPE_KEYS
+    # 保留历史私有测试入口；各版本合同使用上方显式 Envelope 字段集合。
     _ENVELOPE_KEYS = _V1_ENVELOPE_KEYS
 
     @classmethod
@@ -61,7 +71,7 @@ class AnalysisTaskInputCodec:
         """投影为可持久化字典，返回值不与领域快照共享可变引用。"""
 
         if not isinstance(task_input, AnalysisTaskInputV1):
-            raise TypeError("task_input 必须是 AnalysisTaskInputV1/V2")
+            raise TypeError("task_input 必须是 AnalysisTaskInputV1/V2/V3/V4")
         effective_ranges = task_input.effective_ranges.to_dict()
         raw_params = task_input.raw_params.to_dict()
         compacted_range_count = 0
@@ -91,6 +101,8 @@ class AnalysisTaskInputCodec:
             payload["document_processing_policy"] = (
                 task_input.document_processing_policy.to_dict()
             )
+        if isinstance(task_input, AnalysisTaskInputV3):
+            payload["rag_naming"] = task_input.rag_naming.to_dict()
         logger.debug(
             "文件分析任务输入已编码: task_id=%s batch_id=%s batch_sequence=%d "
             "compacted_range_count=%d",
@@ -178,6 +190,8 @@ class AnalysisTaskInputCodec:
             or schema_version
             not in {
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
             }
         ):
@@ -234,7 +248,7 @@ class AnalysisTaskInputCodec:
             }
             if schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1:
                 task_input = AnalysisTaskInputV1(**common_fields)  # type: ignore[arg-type]
-            else:
+            elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2:
                 task_input = AnalysisTaskInputV2(
                     **common_fields,  # type: ignore[arg-type]
                     document_processing_policy=(
@@ -246,8 +260,44 @@ class AnalysisTaskInputCodec:
                         )
                     ),
                 )
+            elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3:
+                task_input = AnalysisTaskInputV3(
+                    **common_fields,  # type: ignore[arg-type]
+                    document_processing_policy=(
+                        AnalysisDocumentProcessingPolicySnapshot.from_mapping(
+                            cls._require_mapping(
+                                payload["document_processing_policy"],
+                                "document_processing_policy",
+                            )
+                        )
+                    ),
+                    rag_naming=AnalysisRagNamingSnapshotV3.from_mapping(
+                        cls._require_mapping(
+                            payload["rag_naming"],
+                            "rag_naming",
+                        )
+                    ),
+                )
+            else:
+                task_input = AnalysisTaskInputV4(
+                    **common_fields,  # type: ignore[arg-type]
+                    document_processing_policy=(
+                        AnalysisDocumentProcessingPolicySnapshot.from_mapping(
+                            cls._require_mapping(
+                                payload["document_processing_policy"],
+                                "document_processing_policy",
+                            )
+                        )
+                    ),
+                    rag_naming=AnalysisRagNamingSnapshot.from_mapping(
+                        cls._require_mapping(
+                            payload["rag_naming"],
+                            "rag_naming",
+                        )
+                    ),
+                )
         except (AnalysisContractError, TypeError, KeyError, ValueError) as exc:
-            raise AnalysisTaskInputCodecError("任务输入 payload 不符合 V1 合同") from exc
+            raise AnalysisTaskInputCodecError("任务输入 payload 不符合版本合同") from exc
 
         cls._validate_expected_identity(
             task_input,
@@ -275,11 +325,15 @@ class AnalysisTaskInputCodec:
         if any(not isinstance(key, str) for key in payload):
             raise AnalysisTaskInputCodecError("任务输入字段名必须全部是 str")
         actual_keys = frozenset(payload)
-        expected_keys = frozenset(
-            cls._V1_ENVELOPE_KEYS
-            if schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1
-            else cls._V2_ENVELOPE_KEYS
-        )
+        if schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1:
+            version_keys = cls._V1_ENVELOPE_KEYS
+        elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2:
+            version_keys = cls._V2_ENVELOPE_KEYS
+        elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3:
+            version_keys = cls._V3_ENVELOPE_KEYS
+        else:
+            version_keys = cls._V4_ENVELOPE_KEYS
+        expected_keys = frozenset(version_keys)
         if actual_keys == expected_keys:
             return
         missing = sorted(expected_keys - actual_keys)

@@ -6,9 +6,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.ports import ChatDocumentRef
+from app.ports import ChatChunk, ChatDocumentRef, ChatSessionRefs
+from app.services.chat.domain import CHAT_ARCHITECTURE_CANDIDATE_RESOLVED
 from app.services.chat import (
+    ChatArchitectureCandidates,
     ChatCommandService,
+    ChatDocumentCandidate,
     ChatRunEventRepository,
     ChatRunLockService,
     ChatRunExecutor,
@@ -16,6 +19,8 @@ from app.services.chat import (
     ChatRunStreamRequest,
     ChatStreamEvent,
     ChatStore,
+    ChatSessionScopeBinding,
+    ChatScopeSelector,
     ResolvedChatDocument,
     MESSAGE_COMMITTED,
     MESSAGE_DISCARDED,
@@ -31,6 +36,7 @@ from app.services.chat import (
     record_chat_run_events,
 )
 from tests.fakes import FakeChatConversationFactory
+from tests.fakes.chat import FakeChatConversationPort
 
 
 class _StaticDocumentResolver:
@@ -67,6 +73,44 @@ class _StaticDocumentResolver:
                 ),
             )
             for file_name in self.all_file_names
+        )
+
+
+class _ArchitectureDocumentResolver(_StaticDocumentResolver):
+    """同时提供 architecture 精确解析能力的离线测试替身。"""
+
+    def __init__(
+        self,
+        *,
+        architecture_file_names=(),
+        fail_if_architecture_called: bool = False,
+    ) -> None:
+        super().__init__()
+        self.architecture_file_names = tuple(architecture_file_names)
+        self.fail_if_architecture_called = fail_if_architecture_called
+        self.resolve_architecture_calls: list[int] = []
+
+    def resolve_by_architecture_id(
+        self,
+        architecture_id: int,
+    ) -> ChatArchitectureCandidates:
+        """返回固定类别快照；可配置为一旦被重查就立即暴露测试失败。"""
+
+        self.resolve_architecture_calls.append(architecture_id)
+        if self.fail_if_architecture_called:
+            raise AssertionError("existing architecture scope must not be re-resolved")
+        return ChatArchitectureCandidates(
+            architecture_id=architecture_id,
+            resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
+            documents=tuple(
+                ChatDocumentCandidate(
+                    file_name=file_name,
+                    original_name=f"{file_name}.original",
+                    document_ref=f"document:{file_name}",
+                    external_location=f"custom-documents/{file_name}.json",
+                )
+                for file_name in self.architecture_file_names
+            ),
         )
 
 
@@ -155,6 +199,14 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.store = ChatStore(self.db_path)
         self.commands = ChatCommandService(ChatRunLockService(self.db_path))
         self.store.sessions.create_or_get(chat_id="10001")
+        self.store.session_scope_bindings.create(
+            ChatSessionScopeBinding(
+                chat_id="10001",
+                scope_mode="files",
+                architecture_id=None,
+                created_at="2026-07-28T00:00:00+00:00",
+            )
+        )
         self.store.runs.create(run_id="run-1", chat_id="10001")
         self.store.runs.mark_running("run-1")
         self.request = ChatRunStreamRequest(
@@ -859,6 +911,140 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
                 all(item.run_id == prepared.run_id for item in leases)
             )
 
+    def test_missing_remote_attachment_receipt_fails_closed_without_binding(
+        self,
+    ) -> None:
+        """远端未回传所请求位置时，禁止用原始 document_ref 假装绑定成功。"""
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20006",
+            message="question",
+            file_names=("alpha.pdf",),
+        )
+
+        with patch.object(
+            FakeChatConversationPort,
+            "attach_documents",
+            return_value=(),
+        ):
+            events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(["error"], [
+            event.event_type for event in events
+        ])
+        self.assertEqual(
+            (),
+            self.store.document_bindings.list_current_by_chat(
+                "20006"
+            ),
+        )
+        run = self.store.runs.get(prepared.run_id)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
+
+    def test_duplicate_remote_attachment_receipt_fails_closed_without_binding(
+        self,
+    ) -> None:
+        """同一远端位置出现多个回执时无法确定规范身份，整批不得落本地 Binding。"""
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20007",
+            message="question",
+            file_names=("alpha.pdf",),
+        )
+        location = "custom-documents/alpha.pdf.json"
+
+        with patch.object(
+            FakeChatConversationPort,
+            "attach_documents",
+            return_value=(
+                ChatDocumentRef(
+                    document_ref="document:canonical-a",
+                    external_location=location,
+                ),
+                ChatDocumentRef(
+                    document_ref="document:canonical-b",
+                    external_location=location,
+                ),
+            ),
+        ):
+            events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(["error"], [
+            event.event_type for event in events
+        ])
+        self.assertEqual(
+            (),
+            self.store.document_bindings.list_current_by_chat(
+                "20007"
+            ),
+        )
+
+    def test_unique_remote_attachment_receipt_can_canonicalize_document_ref(
+        self,
+    ) -> None:
+        """位置唯一匹配后，以供应商回执的规范 document_ref 驱动模型并持久化。"""
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=self.resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            chat_id="20008",
+            message="question",
+            file_names=("alpha.pdf",),
+        )
+
+        with (
+            patch.object(
+                FakeChatConversationPort,
+                "attach_documents",
+                return_value=(
+                    ChatDocumentRef(
+                        document_ref="document:canonical-alpha",
+                        external_location=r"custom-documents\alpha.pdf.json",
+                    ),
+                ),
+            ),
+            patch.object(
+                FakeChatConversationPort,
+                "stream_message",
+                return_value=iter((ChatChunk("answer", 1),)),
+            ) as stream_message,
+        ):
+            events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(
+            ["chatInfo", "textChunk", "done"],
+            [event.event_type for event in events],
+        )
+        bindings = self.store.document_bindings.list_current_by_chat("20008")
+        self.assertEqual(1, len(bindings))
+        self.assertEqual("document:canonical-alpha", bindings[0].document_ref)
+        self.assertEqual(
+            "custom-documents/alpha.pdf.json",
+            bindings[0].external_location,
+        )
+        self.assertEqual(
+            ("document:canonical-alpha",),
+            stream_message.call_args.kwargs["document_refs"],
+        )
+
     def test_default_execution_uses_accepted_snapshot_after_catalog_changes(
         self,
     ) -> None:
@@ -959,6 +1145,156 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             if item.role == MESSAGE_ROLE_USER
         )
         self.assertEqual((), user_message.files)
+
+    def test_restarted_executor_recovers_frozen_architecture_scope_from_sqlite(
+        self,
+    ) -> None:
+        """类别运行受理后重建进程时，只凭 run_id 恢复已冻结的有效范围。"""
+
+        resolver = _ArchitectureDocumentResolver(
+            architecture_file_names=("alpha.pdf",)
+        )
+        prepared = self._executor(resolver).prepare_chat_run(
+            chat_id="30011",
+            message="question",
+            scope_selector=ChatScopeSelector.for_architecture(71),
+        )
+
+        # 新进程的目录解析器被设置为“禁止调用”：若执行阶段试图根据当前类别
+        # 重新解析文件，本测试会立即失败，从而证明 Worker 仅消费持久化快照。
+        restarted_store = ChatStore(self.db_path)
+        restarted_commands = ChatCommandService(
+            ChatRunLockService(self.db_path)
+        )
+        restarted_resolver = _ArchitectureDocumentResolver(
+            architecture_file_names=("changed-after-acceptance.pdf",),
+            fail_if_architecture_called=True,
+        )
+        restarted_factory = FakeChatConversationFactory(
+            stream_contents=("answer",)
+        )
+        restarted_executor = SynchronousChatRunExecutor(
+            store=restarted_store,
+            chat_commands=restarted_commands,
+            conversation_factory=restarted_factory,
+            document_resolver=restarted_resolver,
+        )
+
+        events = list(restarted_executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual(
+            ["chatInfo", "textChunk", "done"],
+            [item.event_type for item in events],
+        )
+        self.assertEqual([], restarted_resolver.resolve_architecture_calls)
+        self.assertEqual(
+            ("document:alpha.pdf",),
+            restarted_factory.ports[0].stream_message_calls[0][2],
+        )
+        user_message = next(
+            item
+            for item in restarted_store.messages.list_by_chat("30011")
+            if item.role == MESSAGE_ROLE_USER
+        )
+        self.assertEqual(71, user_message.architecture_id)
+        self.assertEqual((), user_message.files)
+
+    def test_architecture_scope_ignores_extra_remote_workspace_documents(
+        self,
+    ) -> None:
+        """远端 Workspace 多出的文件不得被静默加入类别对话的模型范围。"""
+
+        resolver = _ArchitectureDocumentResolver(
+            architecture_file_names=("alpha.pdf",)
+        )
+        factory = FakeChatConversationFactory(stream_contents=("answer",))
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=factory,
+            document_resolver=resolver,
+        )
+        selector = ChatScopeSelector.for_architecture(72)
+        first = executor.prepare_chat_run(
+            chat_id="30012",
+            message="first",
+            scope_selector=selector,
+        )
+        list(executor.execute_chat_run(first.run_id))
+
+        # 模拟供应商 Workspace 被其他流程额外挂入文档。该文档真实存在于远端测试
+        # 替身中，但不属于本 chatId 的持久化 Scope Revision。
+        session = self.store.sessions.get("30012")
+        self.assertIsNotNone(session)
+        assert session is not None
+        with factory.create() as conversation:
+            conversation.attach_documents(
+                ChatSessionRefs(
+                    context_ref=session.workspace_ref,
+                    conversation_ref=session.thread_ref,
+                ),
+                (
+                    ChatDocumentRef(
+                        document_ref="document:beta.pdf",
+                        external_location="custom-documents/beta.pdf.json",
+                    ),
+                ),
+            )
+
+        second = executor.prepare_chat_run(
+            chat_id="30012",
+            message="reuse",
+            scope_selector=selector,
+        )
+        list(executor.execute_chat_run(second.run_id))
+
+        self.assertEqual([72], resolver.resolve_architecture_calls)
+        self.assertEqual(
+            ("document:alpha.pdf",),
+            factory.ports[2].stream_message_calls[0][2],
+        )
+        current_scope = self.store.scopes.get_current_revision("30012")
+        self.assertIsNotNone(current_scope)
+        assert current_scope is not None
+        self.assertEqual(
+            ("alpha.pdf",),
+            tuple(item.file_name for item in current_scope.members),
+        )
+
+    def test_architecture_execution_logs_do_not_leak_scope_or_body(self) -> None:
+        """类别对话日志只保留计数和审计键，不输出文件身份、位置或正文。"""
+
+        secret_file_name = "private-contract.pdf"
+        secret_document_ref = f"document:{secret_file_name}"
+        secret_location = f"custom-documents/{secret_file_name}.json"
+        secret_message = "confidential-message-body"
+        resolver = _ArchitectureDocumentResolver(
+            architecture_file_names=(secret_file_name,)
+        )
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(
+                stream_contents=("answer",)
+            ),
+            document_resolver=resolver,
+        )
+
+        with self.assertLogs("app.services.chat", level="INFO") as captured:
+            prepared = executor.prepare_chat_run(
+                chat_id="30013",
+                message=secret_message,
+                scope_selector=ChatScopeSelector.for_architecture(73),
+            )
+            list(executor.execute_chat_run(prepared.run_id))
+
+        combined_logs = "\n".join(captured.output)
+        self.assertIn("requested_architecture_id=73", combined_logs)
+        self.assertIn("lease_token=", combined_logs)
+        self.assertNotIn(secret_file_name, combined_logs)
+        self.assertNotIn(secret_document_ref, combined_logs)
+        self.assertNotIn(secret_location, combined_logs)
+        self.assertNotIn(secret_message, combined_logs)
 
     def test_workspace_bindings_accumulate_but_explicit_scope_replaces_model_range(
         self,

@@ -163,6 +163,29 @@ class Stage0ContractAssetTests(unittest.TestCase):
             ["file", "report", "weaponry"],
             check_task["documentedBusinessTypes"],
         )
+        self.assertEqual(
+            "all-params-parse-and-normalize-before-any-callback",
+            check_task["validationBeforeSideEffects"],
+        )
+        self.assertEqual(
+            "normalized-reportId-first-occurrence",
+            check_task["sameRequestDeduplication"]["report"],
+        )
+        self.assertEqual(
+            "normalized-architectureId-first-occurrence",
+            check_task["sameRequestDeduplication"]["weaponry"],
+        )
+        self.assertEqual(
+            ["file", "report", "weaponry"],
+            check_task["explicitUnknownRecovery"]["businessTypes"],
+        )
+        self.assertFalse(
+            check_task["explicitUnknownRecovery"]["automaticWorkerRetry"]
+        )
+        self.assertEqual(
+            "original-params-count-before-deduplication",
+            check_task["responseCardinalityBasis"],
+        )
         self.assertEqual("implemented", check_task["implementationStatus"])
         self.assertEqual("1B", check_task["implementationWave"])
 

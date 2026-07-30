@@ -616,6 +616,10 @@ class _AnalysisModelWorkflow:
         )
         state.last_prompt = prompt
         prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        if not state.session.document_bound:
+            # Legacy Gateway 在首次 execute 内上传文档。必须先提交资源 CAS，失败时不能
+            # 继续调用 Adapter；提交后崩溃则保持 started_unknown，禁止猜测重放。
+            state.checkpoint_document_upload_intent()
         try:
             result = rag.execute(request)
         except AnalysisRagExecutionError as error:

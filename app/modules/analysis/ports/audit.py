@@ -173,6 +173,7 @@ class AnalysisInteractionAuditRecord:
     lifecycle_events: tuple[AnalysisRagLifecycleEvent, ...]
     outcome: AnalysisAuditOutcome
     error_code: str = ""
+    document_upload: FrozenJsonObject | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -244,6 +245,11 @@ class AnalysisInteractionAuditRecord:
                 raise ValueError("成功交互审计不得携带失败信息")
         elif not self.error_code.strip():
             raise ValueError("失败交互审计必须携带 error_code")
+        if self.document_upload is not None and not isinstance(
+            self.document_upload,
+            FrozenJsonObject,
+        ):
+            raise TypeError("document_upload 必须是 FrozenJsonObject 或 None")
 
 
 @dataclass(frozen=True)

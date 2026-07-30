@@ -15,6 +15,9 @@ from typing import Any
 from app.modules.analysis.adapters.local_dispatcher import (
     LocalAnalysisTaskDispatcher,
 )
+from app.modules.analysis.adapters.resource_activity import (
+    InMemoryAnalysisResourceActivityAdapter,
+)
 from app.modules.analysis.application import (
     FreezeExpiredAnalysisCallbackGuards,
     RecoverAnalysisCallbackSynchronously,
@@ -33,6 +36,7 @@ from app.modules.analysis.ports import (
     AnalysisKnowledgePort,
     AnalysisPoisonTaskCommandPort,
     AnalysisRagPortFactory,
+    AnalysisResourceActivityPort,
     AnalysisResourcePort,
     AnalysisTaskWorkspacePort,
     AnalysisTranslationPort,
@@ -61,6 +65,7 @@ class AnalysisApplicationServices:
     callbacks: AnalysisCallbackPort
     callback_recovery: RecoverAnalysisCallbackSynchronously
     resource_recovery: RecoverAnalysisResources
+    resource_activity: AnalysisResourceActivityPort
     task_commands: TaskCommandPort[
         object,
         AnalysisTaskInputV1,
@@ -155,11 +160,13 @@ def compose_analysis_application_services(
     callback_guard_maintenance = FreezeExpiredAnalysisCallbackGuards(callbacks)
     # 资源恢复只补齐可证明幂等的审计写入；与 Dispatcher 的 accepted 退避共用同一组
     # 受限 base/max，避免把一个故障域配置成无限快速重试、另一个无限长时间沉默。
+    resource_activity = InMemoryAnalysisResourceActivityAdapter()
     resource_recovery = RecoverAnalysisResources(
         store=resources,
         audit=audit,
         retry_base_seconds=config.dispatch_retry_base_seconds,
         retry_max_seconds=config.dispatch_retry_max_seconds,
+        resource_activity=resource_activity,
     )
     runner = RunAnalysisTask(
         task_commands=task_commands,
@@ -173,6 +180,10 @@ def compose_analysis_application_services(
         resources=resources,
         callbacks=callbacks,
         callback_url=callback_url,
+        resource_close_running_grace_seconds=(
+            config.resource_close_running_grace_seconds
+        ),
+        resource_activity=resource_activity,
     )
     dispatcher = LocalAnalysisTaskDispatcher(
         task_commands=task_commands,
@@ -199,6 +210,7 @@ def compose_analysis_application_services(
         callbacks=callbacks,
         callback_recovery=callback_recovery,
         resource_recovery=resource_recovery,
+        resource_activity=resource_activity,
         task_commands=task_commands,
         progress_publisher=progress_publisher,
         execution_limiter=execution_limiter,

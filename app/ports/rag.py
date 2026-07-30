@@ -394,10 +394,9 @@ class PreparedDocumentRef:
             str(self.ingested_file_name or "")
             .replace("\\", "/")
             .rsplit("/", 1)[-1]
-            .strip()
         )
         if (
-            not normalized_ingested_file_name
+            not normalized_ingested_file_name.strip()
             or normalized_ingested_file_name in {".", ".."}
         ):
             raise ValueError("PreparedDocumentRef.ingested_file_name 必须是有效文件名")
@@ -469,6 +468,27 @@ class RagOperationError(RuntimeError):
         self.trace = trace
 
 
+@dataclass(frozen=True)
+class RagDocumentUploadOptions:
+    """业务层交给 RAG Provider Adapter 的不可变上传展示选项。
+
+    本 DTO 不包含具体供应商字段名。``transport_file_name`` 控制文档内容的传输文件名，
+    ``display_title`` 表示业务展示标题；本地 Artifact 路径始终由调用方单独提供。
+    """
+
+    transport_file_name: str
+    display_title: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("transport_file_name", "display_title"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} 必须是非空 str")
+        file_name = self.transport_file_name.replace("\\", "/").rsplit("/", 1)[-1]
+        if file_name != self.transport_file_name or file_name in {"", ".", ".."}:
+            raise ValueError("transport_file_name 必须是有效 basename")
+
+
 @runtime_checkable
 class DocumentRagSession(Protocol):
     """一个文件任务独占的隔离 RAG 会话。"""
@@ -481,6 +501,7 @@ class DocumentRagSession(Protocol):
         prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
+        document_upload: RagDocumentUploadOptions | None = None,
     ) -> RagResult:
         """准备目标文档并按显式用途完成首次查询；整个会话只允许调用一次。"""
         ...

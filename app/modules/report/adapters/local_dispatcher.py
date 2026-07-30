@@ -156,6 +156,12 @@ class LocalReportTaskDispatcher:
     def execution_limiter(self) -> TaskExecutionPermitPort | None:
         return self._kernel.execution_limiter
 
+    @property
+    def callbacks(self) -> ReportCallbackPort:
+        """返回维护线程使用的 Guard Adapter，仅供组合根校验实例身份。"""
+
+        return self._callbacks
+
     def dispatch(self, task_id: TaskId) -> None:
         self._kernel.dispatch(task_id)
 

@@ -298,6 +298,20 @@ _CALLBACK_DELIVERY_OUTCOMES = frozenset(
         "stale",
     }
 )
+_CALLBACK_DELIVERY_TRIGGERS = frozenset(
+    {"initial_delivery", "explicit_check_task_recovery"}
+)
+_EXPLICIT_UNKNOWN_RETRY_BUSINESS_TYPES = frozenset(
+    {"file", "report", "weaponry"}
+)
+_CALLBACK_ATTEMPT_EVENT_TYPES = frozenset(
+    {
+        "authorized",
+        "completed",
+        "lease_expired_unknown",
+        "guard_inconsistent_unknown",
+    }
+)
 _REPORT_RESOURCE_STATES = frozenset(
     {"tracking", "cleanup_pending", "audit_pending", "cleaned", "quarantined"}
 )
@@ -520,6 +534,7 @@ class LLMTaskService:
                     audit_idempotency_key TEXT,
                     trace_digest TEXT NOT NULL DEFAULT '',
                     trace_id TEXT NOT NULL DEFAULT '',
+                    document_upload_json TEXT NOT NULL DEFAULT '{}',
                     workspace_name TEXT NOT NULL DEFAULT '',
                     workspace_slug TEXT NOT NULL DEFAULT '',
                     thread_slug TEXT NOT NULL DEFAULT '',
@@ -601,6 +616,12 @@ class LLMTaskService:
                 table="llm_interactions",
                 column="trace_id",
                 definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_interactions",
+                column="document_upload_json",
+                definition="TEXT NOT NULL DEFAULT '{}'",
             )
             conn.execute(
                 """
@@ -891,6 +912,56 @@ class LLMTaskService:
                 ON callback_guard_release_audits (
                     business_type, business_key, released_at, id
                 )
+                """
+            )
+            # 每次 Callback 发送权及其最终收敛结果使用独立的追加式事件账本。该表不与
+            # 人工解除审计复用：前者证明某一 attempt 为什么获得发送权、最终如何收敛，
+            # 后者证明运维人员为何解除业务键冻结。两类证据拥有不同生命周期和唯一键。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS callback_delivery_attempt_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    business_type TEXT NOT NULL,
+                    business_key TEXT NOT NULL,
+                    owner_execution_id TEXT NOT NULL,
+                    callback_attempt INTEGER NOT NULL
+                        CHECK (callback_attempt >= 0),
+                    lease_version INTEGER NOT NULL CHECK (lease_version >= 0),
+                    trigger TEXT NOT NULL
+                        CHECK (trigger IN (
+                            'initial_delivery',
+                            'explicit_check_task_recovery'
+                        )),
+                    event_type TEXT NOT NULL
+                        CHECK (event_type IN (
+                            'authorized',
+                            'completed',
+                            'lease_expired_unknown',
+                            'guard_inconsistent_unknown'
+                        )),
+                    delivery_outcome TEXT NOT NULL DEFAULT '',
+                    request_trace_id TEXT NOT NULL DEFAULT '',
+                    occurred_at TEXT NOT NULL,
+                    UNIQUE (
+                        business_type, business_key, owner_execution_id,
+                        lease_version, event_type
+                    )
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_callback_attempt_events_key
+                ON callback_delivery_attempt_events (
+                    business_type, business_key, occurred_at, id
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_callback_attempt_events_trace
+                ON callback_delivery_attempt_events (request_trace_id, id)
+                WHERE request_trace_id <> ''
                 """
             )
             # 每个 report execution 独占一份资源恢复记录。record_payload 保存供应商无关
@@ -2583,7 +2654,109 @@ class LLMTaskService:
         return row is not None
 
     @staticmethod
+    def _append_callback_delivery_attempt_event(
+        conn: sqlite3.Connection,
+        *,
+        business_type: str,
+        business_key: str,
+        owner_execution_id: str,
+        callback_attempt: int,
+        lease_version: int,
+        trigger: str,
+        event_type: str,
+        delivery_outcome: str,
+        request_trace_id: str,
+        occurred_at: str,
+    ) -> None:
+        """在调用方事务内追加一条 Callback attempt 事件。
+
+        本方法故意不捕获 SQLite 错误。授权、完成或冻结只要无法留下对应审计，就必须
+        回滚同一事务中的 Guard、execution 与最新投影，避免出现“已经允许发送但没有
+        可追溯授权原因”的分裂事实。
+        """
+
+        if trigger not in _CALLBACK_DELIVERY_TRIGGERS:
+            raise ValueError("未知 callback delivery trigger")
+        if event_type not in _CALLBACK_ATTEMPT_EVENT_TYPES:
+            raise ValueError("未知 callback attempt event_type")
+        conn.execute(
+            """
+            INSERT INTO callback_delivery_attempt_events (
+                business_type, business_key, owner_execution_id,
+                callback_attempt, lease_version, trigger, event_type,
+                delivery_outcome, request_trace_id, occurred_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                business_type,
+                business_key,
+                owner_execution_id,
+                callback_attempt,
+                lease_version,
+                trigger,
+                event_type,
+                delivery_outcome,
+                request_trace_id,
+                occurred_at,
+            ),
+        )
+
+    @classmethod
+    def _append_callback_delivery_attempt_followup_event(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        business_type: str,
+        business_key: str,
+        owner_execution_id: str,
+        lease_version: int,
+        event_type: str,
+        delivery_outcome: str,
+        occurred_at: str,
+    ) -> bool:
+        """沿用授权事件的 attempt、trigger 与 trace 追加收敛事件。
+
+        升级前已经处于 sending 的历史 Guard 没有授权事件，允许继续按旧逻辑收敛，
+        因此返回 ``False`` 而不是伪造 trigger。升级后取得的租约一定先在同一事务写入
+        authorized；其审计插入异常会直接回滚调用方事务。
+        """
+
+        authorization = conn.execute(
+            """
+            SELECT callback_attempt, trigger, request_trace_id
+            FROM callback_delivery_attempt_events
+            WHERE business_type = ? AND business_key = ?
+              AND owner_execution_id = ? AND lease_version = ?
+              AND event_type = 'authorized'
+            """,
+            (
+                business_type,
+                business_key,
+                owner_execution_id,
+                lease_version,
+            ),
+        ).fetchone()
+        if authorization is None:
+            return False
+        cls._append_callback_delivery_attempt_event(
+            conn,
+            business_type=business_type,
+            business_key=business_key,
+            owner_execution_id=owner_execution_id,
+            callback_attempt=int(authorization["callback_attempt"]),
+            lease_version=lease_version,
+            trigger=str(authorization["trigger"]),
+            event_type=event_type,
+            delivery_outcome=delivery_outcome,
+            request_trace_id=str(authorization["request_trace_id"]),
+            occurred_at=occurred_at,
+        )
+        return True
+
+    @classmethod
     def _transition_callback_guard_to_unknown(
+        cls,
         conn: sqlite3.Connection,
         *,
         business_type: str,
@@ -2613,6 +2786,27 @@ class LLMTaskService:
         )
         if cursor.rowcount != 1:
             return False
+        guard = conn.execute(
+            """
+            SELECT lease_version
+            FROM callback_delivery_guards
+            WHERE business_type = ? AND business_key = ?
+              AND owner_execution_id = ?
+            """,
+            (business_type, business_key, owner_execution_id),
+        ).fetchone()
+        if guard is None:
+            raise RuntimeError("callback Guard 冻结后无法读取 fencing 版本")
+        cls._append_callback_delivery_attempt_followup_event(
+            conn,
+            business_type=business_type,
+            business_key=business_key,
+            owner_execution_id=owner_execution_id,
+            lease_version=int(guard["lease_version"]),
+            event_type="lease_expired_unknown",
+            delivery_outcome="delivery_outcome_unknown",
+            occurred_at=now,
+        )
         conn.execute(
             """
             UPDATE llm_task_executions
@@ -2653,14 +2847,17 @@ class LLMTaskService:
         allow_failed_retry: bool = False,
         allow_outcome_unknown_retry: bool = False,
         expected_callback_attempts: int | None = None,
+        delivery_trigger: str = "initial_delivery",
+        request_trace_id: str = "",
     ) -> Dict[str, Any]:
         """原子复核 latest owner 并取得带 fencing token 的回调发送权。
 
         该事务是 HTTP 投递的唯一授权点。调用方在事务外执行的 ``is_latest`` 只能减少
         无效请求，不能替代这里的复核。过期 sending 租约不会被自动重抢，因为旧 HTTP
         请求是否到达接收方已经无法证明；后台路径必须冻结为 ``outcome_unknown``。
-        只有 file ``/llm/check-task`` 可以显式请求 at-least-once 补发，并继续受
-        callback_attempts、latest owner、Guard owner 与 fencing token 约束。
+        只有业务白名单内的显式 ``/llm/check-task`` 恢复可以请求 at-least-once
+        unknown 补发，并继续受 callback_attempts、latest owner、Guard owner 与
+        fencing token 约束。trigger 与 trace 只进入内部追加式审计，不属于公开接口。
         """
 
         execution_id = _required_internal_text(
@@ -2679,6 +2876,17 @@ class LLMTaskService:
             lease_token,
             name="lease_token",
         )
+        normalized_trigger = _required_internal_text(
+            delivery_trigger,
+            name="delivery_trigger",
+        )
+        if normalized_trigger not in _CALLBACK_DELIVERY_TRIGGERS:
+            raise ValueError("未知 callback delivery_trigger")
+        if not isinstance(request_trace_id, str):
+            raise TypeError("request_trace_id必须是str")
+        normalized_trace_id = request_trace_id.strip()
+        if len(normalized_trace_id) > 128:
+            raise ValueError("request_trace_id最多128个字符")
         if isinstance(lease_seconds, bool) or not isinstance(
             lease_seconds,
             (int, float),
@@ -2706,12 +2914,14 @@ class LLMTaskService:
                 "expected_callback_attempts只允许用于同步失败恢复"
             )
         if allow_outcome_unknown_retry and (
-            normalized_business_type != _ANALYSIS_BATCH_BUSINESS_TYPE
+            normalized_business_type
+            not in _EXPLICIT_UNKNOWN_RETRY_BUSINESS_TYPES
             or not allow_failed_retry
             or expected_callback_attempts is None
+            or normalized_trigger != "explicit_check_task_recovery"
         ):
             raise ValueError(
-                "outcome_unknown显式补发只允许file check-task携带attempt快照"
+                "outcome_unknown显式补发只允许白名单业务的check-task携带attempt快照"
             )
         if (
             normalized_business_type == _ANALYSIS_BATCH_BUSINESS_TYPE
@@ -2895,6 +3105,7 @@ class LLMTaskService:
                                 normalized_acquired_at,
                             ),
                         )
+                        inconsistent_lease_version = 0
                     else:
                         conn.execute(
                             """
@@ -2913,6 +3124,22 @@ class LLMTaskService:
                                 normalized_business_key,
                             ),
                         )
+                        inconsistent_lease_version = int(guard["lease_version"])
+                    # 该分支是损坏状态的保守冻结，不构成新的发送授权。记录投影当前
+                    # attempt 便于审计定位，但绝不能递增 callback_attempts。
+                    self._append_callback_delivery_attempt_event(
+                        conn,
+                        business_type=normalized_business_type,
+                        business_key=normalized_business_key,
+                        owner_execution_id=execution_id,
+                        callback_attempt=int(latest["callback_attempts"]),
+                        lease_version=inconsistent_lease_version,
+                        trigger=normalized_trigger,
+                        event_type="guard_inconsistent_unknown",
+                        delivery_outcome="guard_state_inconsistent",
+                        request_trace_id=normalized_trace_id,
+                        occurred_at=normalized_acquired_at,
+                    )
                     logger.critical(
                         "callback execution 与 Guard 状态不一致，已冻结为 outcome_unknown: "
                         "business_type=%s business_key=%s execution_id=%s guard_state=%s",
@@ -3034,6 +3261,20 @@ class LLMTaskService:
                     )
                     if projection_cursor.rowcount != 1:
                         raise RuntimeError("callback Guard 与最新投影未能原子同步")
+                    callback_attempt = int(latest["callback_attempts"]) + 1
+                    self._append_callback_delivery_attempt_event(
+                        conn,
+                        business_type=normalized_business_type,
+                        business_key=normalized_business_key,
+                        owner_execution_id=execution_id,
+                        callback_attempt=callback_attempt,
+                        lease_version=fencing_token,
+                        trigger=normalized_trigger,
+                        event_type="authorized",
+                        delivery_outcome="",
+                        request_trace_id=normalized_trace_id,
+                        occurred_at=normalized_acquired_at,
+                    )
                     result.update(
                         {
                             "outcome": "acquired",
@@ -3044,24 +3285,28 @@ class LLMTaskService:
                     )
                     if explicit_unknown_retry:
                         logger.warning(
-                            "file check-task 已显式授权 outcome_unknown 至少一次补发，"
+                            "check-task 已显式授权 outcome_unknown 至少一次补发，"
                             "接收方可能收到重复业务回调: business_key=%s "
-                            "execution_id=%s expected_callback_attempts=%s "
-                            "fencing_token=%s",
+                            "business_type=%s execution_id=%s "
+                            "expected_callback_attempts=%s fencing_token=%s trace_id=%s",
                             normalized_business_key,
+                            normalized_business_type,
                             execution_id,
                             expected_callback_attempts,
                             fencing_token,
+                            normalized_trace_id or "-",
                         )
 
         logger.info(
             "callback Guard 获取完成: business_type=%s business_key=%s "
-            "execution_id=%s outcome=%s fencing_token=%s",
+            "execution_id=%s outcome=%s fencing_token=%s trigger=%s trace_id=%s",
             normalized_business_type,
             normalized_business_key,
             execution_id,
             result["outcome"],
             result.get("fencing_token", "-"),
+            normalized_trigger,
+            normalized_trace_id or "-",
         )
         return result
 
@@ -3195,6 +3440,16 @@ class LLMTaskService:
                     # 切换，抛错会回滚 Guard 与 execution 更新；外部 HTTP 可能已送达，
                     # 调用方不得在当前请求内再次发送。
                     raise RuntimeError("callback 完成时最新投影不存在或已切换")
+                self._append_callback_delivery_attempt_followup_event(
+                    conn,
+                    business_type=normalized_business_type,
+                    business_key=normalized_business_key,
+                    owner_execution_id=execution_id,
+                    lease_version=fencing_token,
+                    event_type="completed",
+                    delivery_outcome=normalized_outcome,
+                    occurred_at=normalized_completed_at,
+                )
                 completed = True
 
         if not completed:
@@ -3571,6 +3826,64 @@ class LLMTaskService:
             normalized_released_by,
         )
         return outcome
+
+    def list_callback_delivery_attempt_events(
+        self,
+        *,
+        business_type: str,
+        business_key: str,
+        limit: int = 100,
+    ) -> tuple[Dict[str, Any], ...]:
+        """按时间倒序读取内部 Callback attempt 事件，不向公开接口投影。"""
+
+        normalized_business_type = _required_internal_text(
+            business_type,
+            name="business_type",
+        )
+        normalized_business_key = _required_internal_text(
+            business_key,
+            name="business_key",
+        )
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or limit > 1000
+        ):
+            raise ValueError("limit必须是1到1000之间的整数")
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, business_type, business_key, owner_execution_id,
+                       callback_attempt, lease_version, trigger, event_type,
+                       delivery_outcome, request_trace_id, occurred_at
+                FROM callback_delivery_attempt_events
+                WHERE business_type = ? AND business_key = ?
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT ?
+                """,
+                (
+                    normalized_business_type,
+                    normalized_business_key,
+                    limit,
+                ),
+            ).fetchall()
+        return tuple(
+            {
+                "id": int(row["id"]),
+                "business_type": row["business_type"],
+                "business_key": row["business_key"],
+                "owner_execution_id": row["owner_execution_id"],
+                "callback_attempt": int(row["callback_attempt"]),
+                "lease_version": int(row["lease_version"]),
+                "trigger": row["trigger"],
+                "event_type": row["event_type"],
+                "delivery_outcome": row["delivery_outcome"],
+                "request_trace_id": row["request_trace_id"],
+                "occurred_at": row["occurred_at"],
+            }
+            for row in rows
+        )
 
     def list_callback_delivery_guard_release_audits(
         self,
@@ -6067,6 +6380,7 @@ class LLMTaskService:
         status: str,
         error_message: str = "",
         audit_idempotency_key: str | None = None,
+        document_upload_facts: Mapping[str, Any] | None = None,
     ) -> InteractionAuditResult:
         """原子持久化主交互、全部模型调用和初始资源生命周期事件。
 
@@ -6103,6 +6417,16 @@ class LLMTaskService:
             raise ValueError("成功审计不得携带失败阶段或错误信息")
         if status == "failed" and not normalized_error:
             raise ValueError("失败审计必须包含 error_message")
+        if document_upload_facts is not None and not isinstance(
+            document_upload_facts,
+            Mapping,
+        ):
+            raise TypeError("document_upload_facts 必须是 Mapping 或 None")
+        serialized_document_upload = (
+            self._serialize(dict(document_upload_facts))
+            if document_upload_facts is not None
+            else "{}"
+        )
 
         final_attempt = trace.attempts[-1] if trace.attempts else None
         normalized_prompt = normalize_rag_prompt(prompt)
@@ -6200,6 +6524,11 @@ class LLMTaskService:
             "attempts": attempt_digest_payload,
             "lifecycle_events": lifecycle_rows,
         }
+        # 旧 V1/V2 审计不传该字段时保持原 digest 形状，避免升级后破坏既有幂等重放。
+        if document_upload_facts is not None:
+            trace_digest_payload["document_upload"] = json.loads(
+                serialized_document_upload
+            )
         serialized_trace = json.dumps(
             trace_digest_payload,
             ensure_ascii=False,
@@ -6256,12 +6585,13 @@ class LLMTaskService:
                     business_type, business_key, execution_id,
                     audit_schema_version, audit_idempotency_key, trace_digest,
                     trace_id,
+                    document_upload_json,
                     workspace_name, workspace_slug, thread_slug,
                     prompt, response, sources_json, status,
                     error_message, workspace_cleanup_status,
                     workspace_cleanup_error, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_business_type,
@@ -6271,6 +6601,7 @@ class LLMTaskService:
                     normalized_audit_key,
                     trace_digest,
                     trace.trace_id,
+                    serialized_document_upload,
                     trace.context_name,
                     trace.context_ref or "",
                     trace.conversation_ref or "",
@@ -6759,6 +7090,7 @@ class LLMTaskService:
                 SELECT id, business_type, business_key, workspace_name,
                        execution_id, audit_schema_version,
                        audit_idempotency_key, trace_digest, trace_id,
+                       document_upload_json,
                        workspace_slug, thread_slug, prompt, response,
                        sources_json, status, error_message,
                        workspace_cleanup_status, workspace_cleanup_error,
@@ -6783,6 +7115,9 @@ class LLMTaskService:
         interaction["sources"] = self._deserialize(
             interaction.pop("sources_json")
         ) or []
+        interaction["document_upload"] = self._deserialize(
+            interaction.pop("document_upload_json")
+        ) or {}
         return interaction
 
     def get_llm_interactions(
@@ -6797,6 +7132,7 @@ class LLMTaskService:
                 SELECT id, business_type, business_key, workspace_name,
                        execution_id, audit_schema_version,
                        audit_idempotency_key, trace_digest, trace_id,
+                       document_upload_json,
                        workspace_slug, thread_slug, prompt, response,
                        sources_json, status, error_message,
                        workspace_cleanup_status, workspace_cleanup_error,
@@ -6812,6 +7148,9 @@ class LLMTaskService:
         for row in rows:
             item = dict(row)
             item["sources"] = self._deserialize(item.pop("sources_json")) or []
+            item["document_upload"] = self._deserialize(
+                item.pop("document_upload_json")
+            ) or {}
             interactions.append(item)
         return interactions
 

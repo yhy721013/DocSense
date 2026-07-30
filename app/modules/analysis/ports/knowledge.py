@@ -27,11 +27,15 @@ class AnalysisKnowledgeDocumentMetadata:
     attributes: FrozenJsonObject
 
     def __post_init__(self) -> None:
-        for field_name in ("file_name", "original_file_name"):
-            value = getattr(self, field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{field_name} 必须是非空 str")
-            object.__setattr__(self, field_name, value.strip())
+        if not isinstance(self.file_name, str) or not self.file_name.strip():
+            raise ValueError("file_name 必须是非空 str")
+        object.__setattr__(self, "file_name", self.file_name.strip())
+        # originalFileName 是公开请求业务原值；只判空，不做 trim 或规范化。
+        if (
+            not isinstance(self.original_file_name, str)
+            or not self.original_file_name.strip()
+        ):
+            raise ValueError("original_file_name 必须是非空 str")
         if not isinstance(self.attributes, FrozenJsonObject):
             raise TypeError("attributes 必须是 FrozenJsonObject")
 

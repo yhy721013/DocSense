@@ -229,13 +229,16 @@ class LocalAnalysisTaskDispatcher:
         logger.info(
             "文件分析 Dispatcher 配置确认: runtime_mode=%s accepted_batch_size=%d "
             "dispatch_retry_base_seconds=%.3f dispatch_retry_max_seconds=%.3f "
-            "resource_sweep_batch_size=%d callback_http_timeout_seconds=%.3f "
+            "resource_sweep_batch_size=%d "
+            "resource_close_running_grace_seconds=%.3f "
+            "callback_http_timeout_seconds=%.3f "
             "callback_lease_seconds=%.3f",
             self._config.runtime_mode,
             self._config.accepted_batch_size,
             self._config.dispatch_retry_base_seconds,
             self._config.dispatch_retry_max_seconds,
             self._config.resource_sweep_batch_size,
+            self._config.resource_close_running_grace_seconds,
             self._config.callback_http_timeout_seconds,
             self._config.callback_lease_seconds,
         )
