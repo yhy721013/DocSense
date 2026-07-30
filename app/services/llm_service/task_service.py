@@ -534,6 +534,7 @@ class LLMTaskService:
                     audit_idempotency_key TEXT,
                     trace_digest TEXT NOT NULL DEFAULT '',
                     trace_id TEXT NOT NULL DEFAULT '',
+                    document_upload_json TEXT NOT NULL DEFAULT '{}',
                     workspace_name TEXT NOT NULL DEFAULT '',
                     workspace_slug TEXT NOT NULL DEFAULT '',
                     thread_slug TEXT NOT NULL DEFAULT '',
@@ -615,6 +616,12 @@ class LLMTaskService:
                 table="llm_interactions",
                 column="trace_id",
                 definition="TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                conn,
+                table="llm_interactions",
+                column="document_upload_json",
+                definition="TEXT NOT NULL DEFAULT '{}'",
             )
             conn.execute(
                 """
@@ -6373,6 +6380,7 @@ class LLMTaskService:
         status: str,
         error_message: str = "",
         audit_idempotency_key: str | None = None,
+        document_upload_facts: Mapping[str, Any] | None = None,
     ) -> InteractionAuditResult:
         """原子持久化主交互、全部模型调用和初始资源生命周期事件。
 
@@ -6409,6 +6417,16 @@ class LLMTaskService:
             raise ValueError("成功审计不得携带失败阶段或错误信息")
         if status == "failed" and not normalized_error:
             raise ValueError("失败审计必须包含 error_message")
+        if document_upload_facts is not None and not isinstance(
+            document_upload_facts,
+            Mapping,
+        ):
+            raise TypeError("document_upload_facts 必须是 Mapping 或 None")
+        serialized_document_upload = (
+            self._serialize(dict(document_upload_facts))
+            if document_upload_facts is not None
+            else "{}"
+        )
 
         final_attempt = trace.attempts[-1] if trace.attempts else None
         normalized_prompt = normalize_rag_prompt(prompt)
@@ -6506,6 +6524,11 @@ class LLMTaskService:
             "attempts": attempt_digest_payload,
             "lifecycle_events": lifecycle_rows,
         }
+        # 旧 V1/V2 审计不传该字段时保持原 digest 形状，避免升级后破坏既有幂等重放。
+        if document_upload_facts is not None:
+            trace_digest_payload["document_upload"] = json.loads(
+                serialized_document_upload
+            )
         serialized_trace = json.dumps(
             trace_digest_payload,
             ensure_ascii=False,
@@ -6562,12 +6585,13 @@ class LLMTaskService:
                     business_type, business_key, execution_id,
                     audit_schema_version, audit_idempotency_key, trace_digest,
                     trace_id,
+                    document_upload_json,
                     workspace_name, workspace_slug, thread_slug,
                     prompt, response, sources_json, status,
                     error_message, workspace_cleanup_status,
                     workspace_cleanup_error, created_at, completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_business_type,
@@ -6577,6 +6601,7 @@ class LLMTaskService:
                     normalized_audit_key,
                     trace_digest,
                     trace.trace_id,
+                    serialized_document_upload,
                     trace.context_name,
                     trace.context_ref or "",
                     trace.conversation_ref or "",
@@ -7065,6 +7090,7 @@ class LLMTaskService:
                 SELECT id, business_type, business_key, workspace_name,
                        execution_id, audit_schema_version,
                        audit_idempotency_key, trace_digest, trace_id,
+                       document_upload_json,
                        workspace_slug, thread_slug, prompt, response,
                        sources_json, status, error_message,
                        workspace_cleanup_status, workspace_cleanup_error,
@@ -7089,6 +7115,9 @@ class LLMTaskService:
         interaction["sources"] = self._deserialize(
             interaction.pop("sources_json")
         ) or []
+        interaction["document_upload"] = self._deserialize(
+            interaction.pop("document_upload_json")
+        ) or {}
         return interaction
 
     def get_llm_interactions(
@@ -7103,6 +7132,7 @@ class LLMTaskService:
                 SELECT id, business_type, business_key, workspace_name,
                        execution_id, audit_schema_version,
                        audit_idempotency_key, trace_digest, trace_id,
+                       document_upload_json,
                        workspace_slug, thread_slug, prompt, response,
                        sources_json, status, error_message,
                        workspace_cleanup_status, workspace_cleanup_error,
@@ -7118,6 +7148,9 @@ class LLMTaskService:
         for row in rows:
             item = dict(row)
             item["sources"] = self._deserialize(item.pop("sources_json")) or []
+            item["document_upload"] = self._deserialize(
+                item.pop("document_upload_json")
+            ) or {}
             interactions.append(item)
         return interactions
 

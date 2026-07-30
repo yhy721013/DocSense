@@ -53,6 +53,10 @@ class ProcessingRecordConflictError(ProcessingRecordError):
         super().__init__("processing_record_conflict", message)
 
 
+class RagProjectionError(DocumentProcessingError):
+    """RAG-only 文本投影无法确定性生成。"""
+
+
 __all__ = [
     "ArtifactConflictError",
     "ArtifactError",
@@ -60,4 +64,5 @@ __all__ = [
     "DocumentProcessingError",
     "ProcessingRecordConflictError",
     "ProcessingRecordError",
+    "RagProjectionError",
 ]

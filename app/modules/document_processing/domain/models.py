@@ -83,6 +83,7 @@ class ArtifactKind(str, Enum):
     SOURCE = "source"
     NORMALIZED = "normalized"
     PREPARED = "prepared"
+    RAG_PROJECTION = "rag_projection"
     TRANSLATION_BILINGUAL = "translation_bilingual"
     TRANSLATION_MONOLINGUAL = "translation_monolingual"
     QUARANTINE = "quarantine"

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "capturedDate": "2026-07-29",
+  "capturedDate": "2026-07-30",
   "publicContractHashes": {
-    "docs/接口文档/README.md": "C1F9CE40AD15D9DA81CC0F2090663E9B906BC255562C95FFF570AEFB05295D01",
-    "docs/接口文档/文件处理和报告生成.md": "513770604F4A428AB7FA7487F7D9D770AF7F0DBB1F0430035FC80B8635B13B09",
+    "docs/接口文档/README.md": "C6485DEF5A418D033B74D1803D83AD7678B44A08028E8CC4B64D5E7FC1B14DB7",
+    "docs/接口文档/文件处理和报告生成.md": "3AE2EBA8B64A0444F6A254E31636D791ECA231D8284728FF32382E09D379C4DE",
     "docs/接口文档/知识谱系解析.md": "D92B4D2AF50945D22F985A6B68301C7614DDA15161B11F01EB8B2CB7B310FB6F"
   },
   "temporaryConversionCouplings": [],
@@ -24,6 +24,7 @@
     "app/container.py",
     "app/modules/analysis/adapters/legacy_files.py",
     "app/modules/analysis/ports/files.py",
+    "app/modules/analysis/ports/rag.py",
     "app/modules/analysis/ports/translation.py",
     "app/modules/report/adapters/legacy_files.py",
     "app/modules/report/adapters/local_artifacts.py",

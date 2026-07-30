@@ -13,16 +13,18 @@ from app.modules.analysis.adapters import (
 )
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
     AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV2,
+    AnalysisTaskInputV3,
 )
 
 
 def _params(
-    file_name: str = "  demo.txt  ",
+    file_name: str = " demo.txt",
     *,
     original_file_name: object = "原始 demo.txt",
     include_original_file_name: bool = True,
@@ -66,7 +68,7 @@ def _task_input_v2(
     *,
     suffix: str = "xls",
 ) -> AnalysisTaskInputV2:
-    """构造携带不可变文档处理策略的当前 V2 输入。"""
+    """构造携带不可变文档处理策略的历史 V2 输入。"""
 
     params = _params(extension_index=index)
     params["filePath"] = f"https://example.invalid/files/{index}.{suffix}"
@@ -90,6 +92,35 @@ def _task_input_v2(
     )
 
 
+def _task_input_v3(
+    index: int = 1,
+    *,
+    suffix: str = "xls",
+) -> AnalysisTaskInputV3:
+    """构造当前 V3 输入，冻结处理策略和供应商无关的 RAG 命名事实。"""
+
+    params = _params(extension_index=index)
+    params["filePath"] = f"https://example.invalid/files/{index}.{suffix}"
+    submission = AnalysisSubmissionSnapshot.from_request_params(
+        params,
+        policy_snapshot=AnalysisPolicySnapshot.default(),
+        document_processing_policy=(
+            AnalysisDocumentProcessingPolicySnapshot.for_source(
+                str(params["filePath"]),
+                allowed_version_series="26.2",
+            )
+        ),
+    )
+    return AnalysisTaskInputV3.from_submission(
+        submission,
+        task_id=f"analysis-task-v3-{index}",
+        batch_id=f"{index:032x}",
+        batch_sequence=1,
+        accepted_at="2026-07-30T10:00:00+08:00",
+        trace_id=f"trace-analysis-v3-{index}",
+    )
+
+
 class AnalysisTaskSnapshotTests(unittest.TestCase):
     """锁定受理时深冻结、名称语义与策略快照的边界。"""
 
@@ -103,7 +134,7 @@ class AnalysisTaskSnapshotTests(unittest.TestCase):
         raw_params["unknownExtension"]["new"] = "不应泄漏"  # type: ignore[index]
 
         frozen_params = submission.raw_params.to_dict()
-        self.assertEqual("  demo.txt  ", frozen_params["fileName"])
+        self.assertEqual(" demo.txt", frozen_params["fileName"])
         self.assertEqual(1, frozen_params["unknownExtension"]["nested"][1]["index"])  # type: ignore[index]
         self.assertNotIn("new", frozen_params["unknownExtension"])  # type: ignore[operator]
         self.assertEqual("demo.txt", submission.file_name)
@@ -122,7 +153,7 @@ class AnalysisTaskSnapshotTests(unittest.TestCase):
         cases = (
             (_params(include_original_file_name=False), False, ""),
             (_params(original_file_name=""), True, ""),
-            (_params(original_file_name=" 原始名称.txt "), True, " 原始名称.txt "),
+            (_params(original_file_name=" 原始名称.txt"), True, " 原始名称.txt"),
         )
         for raw_params, expected_present, expected_value in cases:
             with self.subTest(expected_present=expected_present, expected_value=expected_value):
@@ -180,14 +211,17 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
             restored.raw_params.to_dict(),
         )
 
-    def test_v2_round_trip_freezes_legacy_office_and_single_sheet_policy(self) -> None:
-        """当前受理必须写 V2；重启解码后不能读取新的环境开关替换策略。"""
+    def test_v2_round_trip_remains_readable_with_frozen_processing_policy(self) -> None:
+        """历史 V2 可恢复，且重启解码不能读取新环境开关替换既有策略。"""
 
         task_input = _task_input_v2()
         payload = AnalysisTaskInputCodec.encode(task_input)
         restored = AnalysisTaskInputCodec.decode(payload)
 
-        self.assertEqual(ANALYSIS_TASK_INPUT_SCHEMA_VERSION, payload["schema_version"])
+        self.assertEqual(
+            ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
+            payload["schema_version"],
+        )
         self.assertEqual(
             list(AnalysisTaskInputCodec._V2_ENVELOPE_KEYS),  # type: ignore[attr-defined]
             list(payload),
@@ -201,7 +235,31 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
         )
         self.assertEqual(task_input, restored)
 
-    def test_v1_payload_remains_readable_but_tampered_v2_policy_is_rejected(self) -> None:
+    def test_v3_round_trip_freezes_rag_naming_without_changing_public_names(self) -> None:
+        """当前 V3 必须把命名事实持久化，而非由 Worker 重读 raw params 临时推导。"""
+
+        task_input = _task_input_v3()
+        payload = AnalysisTaskInputCodec.encode(task_input)
+        restored = AnalysisTaskInputCodec.decode(payload)
+
+        self.assertEqual(ANALYSIS_TASK_INPUT_SCHEMA_VERSION, payload["schema_version"])
+        self.assertEqual(
+            list(AnalysisTaskInputCodec._V3_ENVELOPE_KEYS),  # type: ignore[attr-defined]
+            list(payload),
+        )
+        self.assertIsInstance(restored, AnalysisTaskInputV3)
+        assert isinstance(restored, AnalysisTaskInputV3)
+        self.assertEqual("原始 demo.txt", restored.original_file_name)
+        self.assertEqual("原始 demo.txt", restored.rag_naming.display_title)
+        self.assertEqual("原始 demo.md", restored.rag_naming.markdown_transport_file_name)
+        self.assertEqual("原始 demo.pdf", restored.rag_naming.pdf_transport_file_name)
+        self.assertEqual(
+            _params()["originalFileName"],
+            restored.raw_params.to_dict()["originalFileName"],
+        )
+        self.assertEqual(task_input, restored)
+
+    def test_v1_v2_payloads_remain_readable_but_tampering_is_rejected(self) -> None:
         """历史 accepted V1 可恢复；V2 指纹或策略字段被改写时必须失败关闭。"""
 
         legacy_payload = AnalysisTaskInputCodec.encode(_task_input())
@@ -213,6 +271,11 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
         ] = "multi-sheet-v2"
         with self.assertRaises(AnalysisTaskInputCodecError):
             AnalysisTaskInputCodec.decode(current_payload)
+
+        naming_payload = AnalysisTaskInputCodec.encode(_task_input_v3())
+        naming_payload["rag_naming"]["markdown_transport_file_name"] = "shadow.md"  # type: ignore[index]
+        with self.assertRaises(AnalysisTaskInputCodecError):
+            AnalysisTaskInputCodec.decode(naming_payload)
 
     def test_payload_and_decode_result_do_not_share_mutable_references(self) -> None:
         task_input = _task_input()
@@ -273,7 +336,7 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
         cases: tuple[tuple[str, dict[str, object], dict[str, str]], ...] = (
             (
                 "unknown_schema",
-                dict(base_payload, schema_version=2),
+                dict(base_payload, schema_version=99),
                 {},
             ),
             (
@@ -318,8 +381,8 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
         serialized = AnalysisTaskInputCodec.encode_json(_task_input())
         duplicate_envelope = serialized[:-1] + ',"trace_id":"duplicate"}'
         duplicate_nested = serialized.replace(
-            '"fileName":"  demo.txt  ",',
-            '"fileName":"  demo.txt  ","fileName":"shadow.txt",',
+            '"fileName":" demo.txt",',
+            '"fileName":" demo.txt","fileName":"shadow.txt",',
             1,
         )
         for payload in (duplicate_envelope, duplicate_nested):

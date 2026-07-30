@@ -31,8 +31,14 @@ from app.modules.document_processing.adapters import (
     LocalDocumentPreparationAdapter,
     LocalDocumentPreparationError,
     LocalDocumentPreparationRequest,
+    MarkdownRagProjectionProcessorAdapter,
     ScannedPDFEngine,
     SQLiteProcessingRecordAdapter,
+    build_markdown_rag_projection_profile,
+)
+from app.modules.document_processing.application import (
+    PrepareDocument,
+    ProjectDocumentForRag,
 )
 from app.modules.report.adapters import (
     LegacyReportFileAdapter,
@@ -362,6 +368,19 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             document_preparer = self._document_preparer(root / "document")
+            rag_projector = ProjectDocumentForRag(
+                prepare_document=PrepareDocument(
+                    processor=MarkdownRagProjectionProcessorAdapter(
+                        source_store=document_preparer.artifact_store,
+                        materialization_root=root / "rag-projection-scratch",
+                    ),
+                    artifact_store=document_preparer.artifact_store,
+                    records=SQLiteProcessingRecordAdapter(
+                        root / "document" / "processing.sqlite3"
+                    ),
+                ),
+                profile=build_markdown_rag_projection_profile(),
+            )
 
             def downloader(_url, file_name, destination, _timeout, _max_bytes):
                 path = Path(destination) / file_name
@@ -371,6 +390,7 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             adapter = LegacyAnalysisFilePreparationAdapter(
                 downloader=downloader,
                 document_preparer=document_preparer,
+                rag_projector=rag_projector,
                 normalizer=lambda _: self.fail(
                     "新 Analysis 路径不得调用旧 normalizer"
                 ),
@@ -391,6 +411,11 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             )
 
             self.assertIsNotNone(prepared.prepared_artifact)
+            self.assertIsNotNone(prepared.rag_upload_artifact)
+            self.assertNotEqual(
+                prepared.prepared_artifact,
+                prepared.rag_upload_artifact,
+            )
             self.assertEqual(prepared.processing_path, prepared.upload_path)
             self.assertEqual(
                 "Analysis prepared input",

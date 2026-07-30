@@ -77,7 +77,12 @@ class AnalysisFilePreparationRequest:
 
 @dataclass(frozen=True)
 class PreparedAnalysisDocument:
-    """准备完成后的任务级文档引用；正文由 Adapter 管理，不在 Port 中复制可变文件对象。"""
+    """准备完成后的任务级文档引用。
+
+    ``prepared_artifact`` 是正文、结果映射和全文翻译使用的 canonical Artifact；
+    ``rag_upload_artifact`` 是允许送入 RAG Provider 的最终内容。二者必须显式分开，
+    避免为了检索移除 Base64 图片时反向污染业务正文与翻译结果。
+    """
 
     execution: AnalysisExecutionRef
     source_path: str
@@ -86,6 +91,8 @@ class PreparedAnalysisDocument:
     processing_path: str = ""
     internal_prepared_basename: str = ""
     prepared_artifact: ArtifactRef | None = None
+    rag_upload_artifact: ArtifactRef | None = None
+    rag_projection_profile_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -115,6 +122,22 @@ class PreparedAnalysisDocument:
                 raise TypeError("prepared_artifact 必须是 ArtifactRef 或 None")
             if self.prepared_artifact.task_id != self.execution.task_id:
                 raise ValueError("prepared_artifact 不属于当前 analysis task")
+        if self.rag_upload_artifact is not None:
+            if not isinstance(self.rag_upload_artifact, ArtifactRef):
+                raise TypeError("rag_upload_artifact 必须是 ArtifactRef 或 None")
+            if self.rag_upload_artifact.task_id != self.execution.task_id:
+                raise ValueError("rag_upload_artifact 不属于当前 analysis task")
+        if not isinstance(self.rag_projection_profile_id, str):
+            raise TypeError("rag_projection_profile_id 必须是 str")
+        profile_id = self.rag_projection_profile_id.strip().lower()
+        if profile_id and (
+            len(profile_id) != 64
+            or any(character not in "0123456789abcdef" for character in profile_id)
+        ):
+            raise ValueError("rag_projection_profile_id 必须是 SHA-256")
+        if profile_id and self.rag_upload_artifact is None:
+            raise ValueError("存在 RAG 投影 Profile 时必须提供 rag_upload_artifact")
+        object.__setattr__(self, "rag_projection_profile_id", profile_id)
 
 
 @runtime_checkable

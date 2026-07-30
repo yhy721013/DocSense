@@ -5,9 +5,9 @@
   "publicContractChanged": true,
   "interfaceAuthority": {
     "path": "docs/接口文档/文件处理和报告生成.md",
-    "sha256": "A565F7ED512CDC81CD5ECCECA7AD58C082AB0D672937F6514A895106C1451F84",
-    "lastApprovedAt": "2026-07-29",
-    "approvedChange": "file/report/weaponry outcome_unknown均可由新的check-task按at-least-once语义显式补发；整批先校验、按规范化业务键去重，响应分支仍按原始params项数判定"
+    "sha256": "1216CAD89100C50C8133261740C9A8568833CFE773E9387890A2D58C73D4CBE2",
+    "lastApprovedAt": "2026-07-30",
+    "approvedChange": "保留既有fileName/originalFileName字段和值语义；新增RAG命名候选整批同步HTTP 400和缺失空值回退规则；file/report/weaponry outcome_unknown仍可由check-task按at-least-once语义显式补发"
   },
   "analysisSubmission": {
     "method": "POST",
@@ -113,6 +113,59 @@
         "status": 400,
         "body": {
           "error": "filePath不能为空"
+        }
+      },
+      {
+        "id": "nonStringOriginalFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "valid.pdf",
+              "originalFileName": [
+                "invalid.pdf"
+              ],
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].originalFileName不是合法文件名"
+        }
+      },
+      {
+        "id": "pathOriginalFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "valid.pdf",
+              "originalFileName": "../private.pdf",
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].originalFileName不是合法文件名"
+        }
+      },
+      {
+        "id": "invalidFallbackFileName",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "invalid.pdf ",
+              "originalFileName": null,
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].fileName不是合法文件名"
         }
       },
       {

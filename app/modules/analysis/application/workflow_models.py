@@ -19,14 +19,20 @@ from app.modules.analysis.domain.classification_rules import (
     _DataStandardClassificationProfile,
     _JaneClassificationProfile,
 )
-from app.modules.analysis.domain.task_inputs import FrozenJsonObject
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisTaskInputV1,
+    AnalysisTaskInputV3,
+    FrozenJsonObject,
+)
 from app.modules.analysis.ports import (
     AnalysisInteractionAttempt,
     AnalysisInteractionAuditReceipt,
     AnalysisRagLifecycleEvent,
     AnalysisRagOperation,
     AnalysisRagSessionRef,
+    AnalysisRagUploadDescriptor,
     AnalysisRecallAuditReceipt,
+    PreparedAnalysisDocument,
 )
 
 
@@ -90,6 +96,52 @@ class AnalysisTaskPersistenceError(RuntimeError):
     """任务事实条件写发生异常或确认丢失；禁止再写相反终态。"""
 
 
+def _build_rag_upload_descriptor(
+    *,
+    snapshot: AnalysisTaskInputV1,
+    prepared: PreparedAnalysisDocument,
+) -> AnalysisRagUploadDescriptor | None:
+    """结合冻结命名事实与实际 Artifact 形成最终上传描述符。
+
+    该纯工厂只依赖 Analysis 自身快照和 Port DTO，不读取文件系统、环境或 Provider 响应。
+    V1/V2 存量任务继续沿用历史上传路径的 basename；V3 任务严格复用受理时冻结的业务
+    名称。未来可靠队列在其他实例重放时，可以据此得到相同的供应商无关描述符。
+    """
+
+    artifact = prepared.rag_upload_artifact
+    if artifact is None:
+        if isinstance(snapshot, AnalysisTaskInputV3):
+            raise AnalysisApplicationContractError(
+                "V3 文件分析准备结果缺少 RAG 上传 Artifact"
+            )
+        return None
+    representation = artifact.representation
+    if representation.value not in {"markdown", "pdf"}:
+        raise AnalysisApplicationContractError("RAG 上传 Artifact 表示不受支持")
+
+    if isinstance(snapshot, AnalysisTaskInputV3):
+        naming = snapshot.rag_naming
+        transport_file_name = naming.transport_file_name_for(
+            representation.value
+        )
+        display_title = naming.display_title
+        naming_policy = "business_name_v1"
+    else:
+        # 兼容路径只提取 basename，不访问宿主文件系统，也不改变 Windows/POSIX 分隔符。
+        transport_file_name = prepared.upload_path.replace("\\", "/").rsplit("/", 1)[-1]
+        display_title = transport_file_name
+        naming_policy = "legacy_path_basename"
+    return AnalysisRagUploadDescriptor(
+        artifact=artifact,
+        representation=representation,
+        media_type=artifact.metadata.media_type,
+        transport_file_name=transport_file_name,
+        display_title=display_title,
+        projection_profile_id=prepared.rag_projection_profile_id,
+        naming_policy=naming_policy,
+    )
+
+
 class _AnalysisKnownFailure(RuntimeError):
     """带稳定阶段/错误码的业务失败，避免把异常正文投影到公开状态。"""
 
@@ -137,12 +189,18 @@ class _RagWorkflowState:
     interaction_audit_attempted: bool = False
     preserve_scene: bool = False
     retain_document: bool = False
+    upload_descriptor: AnalysisRagUploadDescriptor | None = None
     # 由 RunAnalysisTask 在注入 Resource Port 时设置；每个 state 仅属于一次 execute，
     # 不会把另一个任务的资源事实、线程或可变回调带入当前任务。
     resource_checkpoint: Callable[["_RagWorkflowState"], None] | None = field(
         default=None,
         repr=False,
     )
+    document_upload_intent_checkpoint: Callable[[], None] | None = field(
+        default=None,
+        repr=False,
+    )
+    document_upload_intent_recorded: bool = False
 
     def checkpoint_resource_facts(self) -> None:
         """在取得新的 RAG 外部引用后立即落库，失败时 fail closed 保留现场。"""
@@ -156,6 +214,19 @@ class _RagWorkflowState:
             # 具体错误仍会由 Application 的失败收敛记录；这里不输出任何外部引用或正文。
             self.preserve_scene = True
             raise
+
+    def checkpoint_document_upload_intent(self) -> None:
+        """在第一次 RAG execute 前保存上传意图，且同一执行只允许一次。"""
+
+        if self.document_upload_intent_recorded:
+            return
+        if self.document_upload_intent_checkpoint is not None:
+            try:
+                self.document_upload_intent_checkpoint()
+            except Exception:
+                self.preserve_scene = True
+                raise
+        self.document_upload_intent_recorded = True
 
 
 __all__ = (

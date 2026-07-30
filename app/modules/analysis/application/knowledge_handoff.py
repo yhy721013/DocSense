@@ -8,7 +8,11 @@ from typing import Any, Callable
 
 from app.modules.analysis.domain.errors import AnalysisContractError
 from app.modules.analysis.domain.result_mapping import resolve_storage_architecture_id
-from app.modules.analysis.domain.task_inputs import AnalysisTaskInputV1, FrozenJsonObject
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisTaskInputV1,
+    AnalysisTaskInputV3,
+    FrozenJsonObject,
+)
 from app.modules.analysis.ports import (
     AnalysisExecutionRef,
     AnalysisKnowledgeDocumentMetadata,
@@ -90,7 +94,10 @@ class _AnalysisKnowledgeHandoff:
             document=state.session,
             metadata=AnalysisKnowledgeDocumentMetadata(
                 file_name=snapshot.file_name,
-                original_file_name=plan.original_name,
+                original_file_name=self.knowledge_original_file_name(
+                    snapshot=snapshot,
+                    legacy_original_name=plan.original_name,
+                ),
                 attributes=FrozenJsonObject.from_mapping(attributes, name="knowledge_attributes"),
             ),
         )
@@ -116,6 +123,27 @@ class _AnalysisKnowledgeHandoff:
         state.retain_document = True
         state.preserve_scene = True
         raise _AnalysisKnownFailure("knowledge_index_unknown", result.detail_code)
+
+    @staticmethod
+    def knowledge_original_file_name(
+        *,
+        snapshot: AnalysisTaskInputV1,
+        legacy_original_name: str,
+    ) -> str:
+        """解析永久知识展示名，同时保持旧快照的恢复兼容语义。
+
+        V3 任务沿用受理时冻结且已经过合同校验的展示标题，使永久知识
+        ``original_name`` 与首次上传的 ``metadata.title`` 严格一致。旧 V1/V2
+        快照没有该事实，继续使用历史 plan 值。
+        """
+
+        if not isinstance(snapshot, AnalysisTaskInputV1):
+            raise TypeError("snapshot 必须是 AnalysisTaskInputV1")
+        if not isinstance(legacy_original_name, str) or not legacy_original_name.strip():
+            raise ValueError("legacy_original_name 必须是非空字符串")
+        if isinstance(snapshot, AnalysisTaskInputV3):
+            return snapshot.rag_naming.display_title
+        return legacy_original_name
 
     def enrich_translations(
         self,

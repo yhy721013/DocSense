@@ -178,6 +178,11 @@ class LegacyAnalysisAuditAdapter(AnalysisAuditPort):
                 status=status,
                 error_message=error_message,
                 audit_idempotency_key=record.idempotency_key,
+                document_upload_facts=(
+                    record.document_upload.to_dict()
+                    if record.document_upload is not None
+                    else None
+                ),
             )
         except Exception as exc:
             logger.critical(

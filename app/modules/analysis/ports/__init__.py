@@ -75,6 +75,7 @@ from .rag import (
     AnalysisRagSessionOpenResult,
     AnalysisRagSessionOpenStage,
     AnalysisRagSessionRef,
+    AnalysisRagUploadDescriptor,
 )
 from .resources import (
     AnalysisResourceCommand,
@@ -145,6 +146,7 @@ __all__ = (
     "AnalysisRagSessionOpenResult",
     "AnalysisRagSessionOpenStage",
     "AnalysisRagSessionRef",
+    "AnalysisRagUploadDescriptor",
     "AnalysisRecallAuditReceipt",
     "AnalysisRecallAuditRecord",
     "AnalysisResourceCommand",

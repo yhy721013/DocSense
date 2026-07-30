@@ -11,6 +11,10 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import ContextManager, Protocol, runtime_checkable
 
+from app.modules.document_processing.domain import (
+    ArtifactRef,
+    DocumentRepresentation,
+)
 from .common import AnalysisExecutionRef
 
 
@@ -54,6 +58,73 @@ class AnalysisRagLifecycleOutcome(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     OUTCOME_UNKNOWN = "outcome_unknown"
+
+
+@dataclass(frozen=True)
+class AnalysisRagUploadDescriptor:
+    """首次远端上传前冻结的供应商无关文档描述符。
+
+    Artifact 身份和内容摘要来自共享文档处理边界；业务展示名与 multipart 传输名来自
+    受理快照。描述符不包含宿主路径，未来可靠队列可以只凭 ArtifactRef 重新物化内容，
+    不需要复制当前 Worker 的临时目录结构。
+    """
+
+    artifact: ArtifactRef
+    representation: DocumentRepresentation
+    media_type: str
+    transport_file_name: str
+    display_title: str
+    projection_profile_id: str = ""
+    naming_policy: str = "business_name_v1"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact, ArtifactRef):
+            raise TypeError("artifact 必须是 ArtifactRef")
+        if not isinstance(self.representation, DocumentRepresentation):
+            raise TypeError("representation 必须是 DocumentRepresentation")
+        if self.representation not in {
+            DocumentRepresentation.MARKDOWN,
+            DocumentRepresentation.PDF,
+        }:
+            raise ValueError("RAG 最终上传表示只允许 Markdown/PDF")
+        if self.artifact.representation is not self.representation:
+            raise ValueError("RAG 描述符表示与 Artifact 不一致")
+        media_type = _required_text(self.media_type, name="media_type").lower()
+        if media_type != self.artifact.metadata.media_type:
+            raise ValueError("RAG 描述符 media_type 与 Artifact 不一致")
+        object.__setattr__(self, "media_type", media_type)
+        # ``transport_file_name`` 与 ``display_title`` 都是受理时已经冻结的业务事实。
+        # 这里只验证，不做 strip/改写；否则前置空格等合法字符会在 Adapter 边界静默丢失，
+        # 造成重试、审计以及永久知识元数据看到不同的名称。
+        for field_name in ("transport_file_name", "display_title"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} 必须是非空字符串")
+        object.__setattr__(
+            self,
+            "naming_policy",
+            _required_text(self.naming_policy, name="naming_policy"),
+        )
+        file_name = self.transport_file_name.replace("\\", "/").rsplit("/", 1)[-1]
+        if file_name != self.transport_file_name or file_name in {"", ".", ".."}:
+            raise ValueError("transport_file_name 必须是有效 basename")
+        expected_suffix = (
+            ".md"
+            if self.representation is DocumentRepresentation.MARKDOWN
+            else ".pdf"
+        )
+        if not file_name.lower().endswith(expected_suffix):
+            raise ValueError("transport_file_name 后缀与上传表示不一致")
+        profile_id = str(self.projection_profile_id or "").strip().lower()
+        if self.representation is DocumentRepresentation.MARKDOWN:
+            if (
+                len(profile_id) != 64
+                or any(character not in "0123456789abcdef" for character in profile_id)
+            ):
+                raise ValueError("Markdown RAG 描述符必须包含投影 profile_id")
+        elif profile_id:
+            raise ValueError("PDF 降级上传不得声明 Markdown 投影 profile_id")
+        object.__setattr__(self, "projection_profile_id", profile_id)
 
 
 @dataclass(frozen=True)
@@ -113,6 +184,7 @@ class AnalysisRagSessionOpenRequest:
 
     execution: AnalysisExecutionRef
     upload_path: str
+    upload_descriptor: AnalysisRagUploadDescriptor | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -122,6 +194,16 @@ class AnalysisRagSessionOpenRequest:
             "upload_path",
             _required_text(self.upload_path, name="upload_path"),
         )
+        if self.upload_descriptor is not None:
+            if not isinstance(
+                self.upload_descriptor,
+                AnalysisRagUploadDescriptor,
+            ):
+                raise TypeError(
+                    "upload_descriptor 必须是 AnalysisRagUploadDescriptor 或 None"
+                )
+            if self.upload_descriptor.artifact.task_id != self.execution.task_id:
+                raise ValueError("upload_descriptor 不属于当前 execution")
 
 
 @dataclass(frozen=True)
@@ -166,7 +248,11 @@ class AnalysisRagSessionRef:
         normalized = {
             name: str(value or "").strip()
             for name, value in document_values.items()
+            if name != "ingested_file_name"
         }
+        normalized["ingested_file_name"] = str(
+            document_values["ingested_file_name"] or ""
+        )
         if any(normalized.values()) and not all(normalized.values()):
             raise ValueError("文档引用必须整体为空或整体完整")
         if any(normalized.values()):
@@ -176,12 +262,13 @@ class AnalysisRagSessionRef:
                 or any(character not in "0123456789abcdef" for character in digest)
             ):
                 raise ValueError("content_sha256 必须是 64 位小写十六进制摘要")
-            file_name = (
-                normalized["ingested_file_name"]
-                .replace("\\", "/")
-                .rsplit("/", 1)[-1]
-            )
-            if file_name in {"", ".", ".."}:
+            file_name = normalized["ingested_file_name"]
+            basename = file_name.replace("\\", "/").rsplit("/", 1)[-1]
+            if (
+                basename != file_name
+                or not file_name.strip()
+                or file_name in {".", ".."}
+            ):
                 raise ValueError("ingested_file_name 必须是有效文件名")
             normalized["content_sha256"] = digest
             normalized["ingested_file_name"] = file_name

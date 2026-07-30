@@ -65,6 +65,7 @@ from app.modules.document_processing.adapters import (
     SQLiteProcessingRecordAdapter,
 )
 from app.modules.document_processing.composition import (
+    build_local_project_document_for_rag,
     configure_document_processing_environment,
 )
 from app.modules.report.adapters import (
@@ -1050,6 +1051,15 @@ def create_application_services() -> ApplicationServices:
             llm_config.task_db_path
         ),
     )
+    # RAG 投影与 canonical 文档准备共用 Artifact 根和处理记录库，但由独立用例负责，
+    # 从装配层保证文件分析业务不依赖 AnythingLLM，也不把检索专用变换塞回正文链。
+    analysis_rag_projector = build_local_project_document_for_rag(
+        db_path=llm_config.task_db_path,
+        artifact_root=RUNTIME_DIR / "document_processing" / "artifacts",
+        materialization_root=(
+            RUNTIME_DIR / "document_processing" / "rag_projection_materializations"
+        ),
+    )
     translation_model_name = os.getenv(
         "DOCSENSE_TRANSLATION_MODEL",
         "Qwen3-4B-Instruct-2507-Q4_K_M",
@@ -1239,6 +1249,7 @@ def create_application_services() -> ApplicationServices:
             download_timeout_seconds=llm_config.download_timeout,
             legacy_office_preparer=legacy_office_preparer,
             document_preparer=document_preparer,
+            rag_projector=analysis_rag_projector,
             document_scanned_pdf_engine=ScannedPDFEngine(
                 ocr_config.analysis_scanned_pdf_engine
             ),

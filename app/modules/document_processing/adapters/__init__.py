@@ -13,6 +13,12 @@ from .local_pipeline import (
     LocalPreparedArtifact,
     ScannedPDFEngine,
 )
+from .markdown_rag_projection import (
+    MARKDOWN_RAG_PROJECTION_PROCESSOR_FINGERPRINT,
+    MARKDOWN_RAG_PROJECTION_PROCESSOR_ID,
+    MarkdownRagProjectionProcessorAdapter,
+    build_markdown_rag_projection_profile,
+)
 from .mineru import (
     MINERU_PROCESSOR_FINGERPRINT,
     MINERU_PROCESSOR_ID,
@@ -40,11 +46,14 @@ __all__ = [
     "LocalDocumentPreparationError",
     "LocalDocumentPreparationRequest",
     "LocalPreparedArtifact",
+    "MARKDOWN_RAG_PROJECTION_PROCESSOR_FINGERPRINT",
+    "MARKDOWN_RAG_PROJECTION_PROCESSOR_ID",
     "MINERU_PROCESSOR_FINGERPRINT",
     "MINERU_PROCESSOR_ID",
     "MinerUConverter",
     "MinerUDocumentProcessorAdapter",
     "MinerUOperationObserver",
+    "MarkdownRagProjectionProcessorAdapter",
     "PASSTHROUGH_PROCESSOR_FINGERPRINT",
     "PASSTHROUGH_PROCESSOR_ID",
     "ResourceLimitedDocumentProcessorAdapter",
@@ -53,6 +62,7 @@ __all__ = [
     "ScannedPDFEngine",
     "ValidatedPassthroughDocumentProcessorAdapter",
     "build_mineru_profile",
+    "build_markdown_rag_projection_profile",
     "mineru_endpoint_fingerprint",
     "build_passthrough_profile",
 ]

@@ -12,9 +12,11 @@ from pathlib import Path
 
 from app.modules.document_processing.adapters import (
     LocalArtifactStoreAdapter,
+    MarkdownRagProjectionProcessorAdapter,
     ResourceLimitedDocumentProcessorAdapter,
     SQLiteMinerUOperationObserver,
     SQLiteProcessingRecordAdapter,
+    build_markdown_rag_projection_profile,
 )
 from app.modules.document_processing.adapters.builtin_ocr import (
     BuiltinOCRDocumentProcessorAdapter,
@@ -25,7 +27,10 @@ from app.modules.document_processing.adapters.libreoffice import (
 from app.modules.document_processing.adapters.mineru import (
     MinerUDocumentProcessorAdapter,
 )
-from app.modules.document_processing.application import PrepareDocument
+from app.modules.document_processing.application import (
+    PrepareDocument,
+    ProjectDocumentForRag,
+)
 from app.modules.document_processing.ports import (
     DocumentProcessorPort,
     LegacyOfficePreparer,
@@ -156,10 +161,35 @@ def build_local_builtin_ocr_prepare_document(
     )
 
 
+def build_local_project_document_for_rag(
+    *,
+    db_path: str | Path,
+    artifact_root: str | Path,
+    materialization_root: str | Path,
+) -> ProjectDocumentForRag:
+    """装配单实例 RAG Markdown 投影；Store/Record 与准备链使用同一物理边界。"""
+
+    artifact_store = LocalArtifactStoreAdapter(artifact_root)
+    processor = MarkdownRagProjectionProcessorAdapter(
+        source_store=artifact_store,
+        materialization_root=materialization_root,
+    )
+    prepare = PrepareDocument(
+        processor=processor,
+        artifact_store=artifact_store,
+        records=SQLiteProcessingRecordAdapter(db_path),
+    )
+    return ProjectDocumentForRag(
+        prepare_document=prepare,
+        profile=build_markdown_rag_projection_profile(),
+    )
+
+
 __all__ = [
     "build_local_builtin_ocr_prepare_document",
     "build_local_libreoffice_prepare_document",
     "build_local_mineru_prepare_document",
     "build_local_prepare_document",
+    "build_local_project_document_for_rag",
     "configure_document_processing_environment",
 ]

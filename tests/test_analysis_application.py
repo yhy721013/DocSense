@@ -25,6 +25,7 @@ from app.modules.analysis.domain.task_inputs import (
     AnalysisPolicySnapshot,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
+    AnalysisTaskInputV3,
 )
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
@@ -332,6 +333,45 @@ def _legacy_combined_fixture() -> tuple[
 
 class RunAnalysisTaskTests(unittest.TestCase):
     """每个测试都用严格 Script 证明未发生未配置的副作用。"""
+
+    def test_knowledge_title_uses_v3_frozen_name_and_keeps_v1_compatibility(
+        self,
+    ) -> None:
+        """永久知识标题与首次上传标题同源，旧快照仍保持原有解析结果。"""
+
+        raw_params = {
+            "fileName": "business-hash.pdf",
+            "originalFileName": " 原始资料.pdf",
+            "filePath": "https://example.invalid/business-hash.pdf",
+        }
+        submission = AnalysisSubmissionSnapshot.from_request_params(
+            raw_params,
+            policy_snapshot=AnalysisPolicySnapshot.default(),
+        )
+        snapshot_v3 = AnalysisTaskInputV3.from_submission(
+            submission,
+            task_id="analysis-knowledge-title-v3",
+            batch_id="9" * 32,
+            batch_sequence=1,
+            accepted_at="2026-07-30T10:00:00+08:00",
+            trace_id="analysis-knowledge-title-trace",
+        )
+        self.assertEqual(
+            " 原始资料.pdf",
+            _AnalysisKnowledgeHandoff.knowledge_original_file_name(
+                snapshot=snapshot_v3,
+                legacy_original_name="legacy.pdf",
+            ),
+        )
+
+        snapshot_v1, _ = _fixture()
+        self.assertEqual(
+            "legacy.pdf",
+            _AnalysisKnowledgeHandoff.knowledge_original_file_name(
+                snapshot=snapshot_v1,
+                legacy_original_name="legacy.pdf",
+            ),
+        )
 
     def _build_application(
         self,

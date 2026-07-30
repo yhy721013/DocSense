@@ -7,6 +7,7 @@ from .errors import (
     DocumentProcessingError,
     ProcessingRecordConflictError,
     ProcessingRecordError,
+    RagProjectionError,
 )
 from .legacy_office import (
     LEGACY_OFFICE_SAFE_ERROR_MESSAGE,
@@ -50,6 +51,7 @@ __all__ = [
     "ProcessingProfile",
     "ProcessingRecordConflictError",
     "ProcessingRecordError",
+    "RagProjectionError",
     "derive_artifact_id",
     "derive_step_key",
     "extract_mhtml_text",

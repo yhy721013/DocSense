@@ -108,7 +108,7 @@ class AnalysisRequestParserTests(unittest.TestCase):
         ):
             parse_analysis_payload(invalid_json_value)
 
-        payload = _valid_payload("  adapter-demo.txt  ")
+        payload = _valid_payload(" adapter-demo.txt")
         payload["params"][0]["unknownExtension"] = {  # type: ignore[index]
             "empty": "",
             "items": ["first", {"nested": "original"}],
@@ -118,7 +118,7 @@ class AnalysisRequestParserTests(unittest.TestCase):
         self.assertIs(parsed.params[0], projection_params.values[0])  # type: ignore[union-attr]
         payload["params"][0]["unknownExtension"]["items"][1]["nested"] = "mutated"  # type: ignore[index]
 
-        self.assertEqual("  adapter-demo.txt  ", parsed.params[0].to_dict()["fileName"])
+        self.assertEqual(" adapter-demo.txt", parsed.params[0].to_dict()["fileName"])
         self.assertEqual(
             "original",
             parsed.params[0].to_dict()["unknownExtension"]["items"][1]["nested"],  # type: ignore[index]
@@ -133,6 +133,42 @@ class AnalysisRequestParserTests(unittest.TestCase):
             "original",
             command.submissions[0].raw_params.to_dict()["unknownExtension"]["items"][1]["nested"],  # type: ignore[index]
         )
+
+    def test_original_file_name_presence_and_raw_value_semantics_are_frozen(self) -> None:
+        """缺失、显式空值和业务原值必须保持既有差异，不能被上传命名规则回写。"""
+
+        cases = (
+            ("missing", object(), False, ""),
+            ("null", None, True, ""),
+            ("empty", "", True, ""),
+            ("blank", "   ", True, ""),
+            (
+                "business-value",
+                " Nimitz (CVN 68) class.pdf",
+                True,
+                " Nimitz (CVN 68) class.pdf",
+            ),
+        )
+        for case_id, original_name, expected_present, expected_value in cases:
+            with self.subTest(case=case_id):
+                payload = _valid_payload(f"{case_id}.txt")
+                params = payload["params"][0]  # type: ignore[index]
+                if case_id != "missing":
+                    params["originalFileName"] = original_name
+                parsed = parse_analysis_payload(payload)
+                command = parsed.to_batch_command(
+                    policy_snapshot=AnalysisPolicySnapshot.default(),
+                    trace_id=f"analysis-original-name-{case_id}",
+                )
+                submission = command.submissions[0]
+
+                self.assertEqual(expected_present, submission.original_file_name_present)
+                self.assertEqual(expected_value, submission.original_file_name)
+                raw_params = submission.raw_params.to_dict()
+                if case_id == "missing":
+                    self.assertNotIn("originalFileName", raw_params)
+                else:
+                    self.assertEqual(original_name, raw_params["originalFileName"])
 
     def test_flask_request_reader_preserves_bounded_and_malformed_json_boundaries(self) -> None:
         with self.assertRaises(AnalysisRequestValidationError) as captured:

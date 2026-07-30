@@ -21,6 +21,10 @@ from app.modules.analysis.domain.models import (
     MAX_ANALYSIS_REQUEST_BYTES,
 )
 from app.modules.analysis.domain.ranges import validate_analysis_architecture_ranges
+from app.modules.analysis.domain.rag_naming import (
+    AnalysisRagNamingSnapshot,
+    RagNameValidationError,
+)
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_BUSINESS_TYPE,
     AnalysisDocumentProcessingPolicySnapshot,
@@ -222,6 +226,36 @@ def parse_analysis_payload(payload: object) -> ParsedAnalysisRequest:
         if not isinstance(file_path, str) or not file_path.strip():
             logger.warning("文件分析请求被拒绝: filePath为空 index=%d", index)
             raise AnalysisRequestValidationError("filePath不能为空")
+        try:
+            AnalysisRagNamingSnapshot.from_public_names(
+                original_file_name=params.get("originalFileName"),
+                file_name=file_name,
+            )
+        except RagNameValidationError as exc:
+            original_value = params.get("originalFileName")
+            rejected_field = (
+                "originalFileName"
+                if original_value is not None
+                and (
+                    not isinstance(original_value, str)
+                    or bool(original_value.strip())
+                )
+                else "fileName"
+            )
+            # 非法名称可能包含换行、控制字符或敏感业务文本。日志只保留稳定原因、长度和
+            # 短摘要，既可跨实例聚合，也不会把原值注入日志。
+            logger.warning(
+                "文件分析请求被拒绝: RAG命名候选非法 "
+                "index=%d field=%s reason=%s value_length=%d value_digest=%s",
+                index,
+                rejected_field,
+                exc.reason_code,
+                exc.value_length,
+                exc.value_digest[:12],
+            )
+            raise AnalysisRequestValidationError(
+                f"params[{index}].{rejected_field}不是合法文件名"
+            ) from exc
         try:
             validate_analysis_architecture_ranges(params)
         except ArchitectureTreeValidationError as exc:

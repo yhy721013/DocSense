@@ -169,6 +169,23 @@ class _AnalysisAuditLifecycle:
         if not state.lifecycle_events:
             raise AnalysisApplicationContractError("交互审计缺少生命周期事件")
         prompt = state.last_prompt or "文件分析会话打开失败"
+        descriptor = state.upload_descriptor
+        document_upload = (
+            FrozenJsonObject.from_mapping(
+                {
+                    "representation": descriptor.representation.value,
+                    "media_type": descriptor.media_type,
+                    "transport_file_name": descriptor.transport_file_name,
+                    "display_title": descriptor.display_title,
+                    "artifact_sha256": descriptor.artifact.metadata.sha256,
+                    "artifact_id": descriptor.artifact.artifact_id,
+                    "projection_profile_id": descriptor.projection_profile_id,
+                },
+                name="analysis_interaction_document_upload",
+            )
+            if descriptor is not None
+            else None
+        )
         record = AnalysisInteractionAuditRecord(
             execution=execution,
             idempotency_key=f"analysis-rag:{execution.task_id.value}",
@@ -180,6 +197,7 @@ class _AnalysisAuditLifecycle:
             lifecycle_events=tuple(state.lifecycle_events),
             outcome=outcome,
             error_code=error_code,
+            document_upload=document_upload,
         )
         state.interaction_audit_attempted = True
         receipt = self._audit.persist_interaction(record)

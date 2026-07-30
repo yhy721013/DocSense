@@ -22,6 +22,7 @@ from app.modules.analysis.domain.task_inputs import (
     AnalysisDocumentProcessingPolicySnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV2,
+    AnalysisTaskInputV3,
 )
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
@@ -34,6 +35,7 @@ from app.modules.analysis.ports import (
     AnalysisRagPortFactory,
     AnalysisRagSessionOpenError,
     AnalysisRagSessionOpenRequest,
+    AnalysisRagUploadDescriptor,
     AnalysisResourcePort,
     AnalysisTaskWorkspacePort,
     AnalysisTranslationPort,
@@ -54,6 +56,7 @@ from .workflow_models import (
     RunAnalysisResult,
     _AnalysisWorkflowPlan,
     _RagWorkflowState,
+    _build_rag_upload_descriptor,
 )
 
 
@@ -206,6 +209,11 @@ class RunAnalysisTask:
                 )
             )
             self._failure_convergence.require_prepared_document(prepared, execution)
+            upload_descriptor = _build_rag_upload_descriptor(
+                snapshot=snapshot,
+                prepared=prepared,
+            )
+            state.upload_descriptor = upload_descriptor
             if not self._failure_convergence.update_progress(
                 claim.execution,
                 *_PROGRESS_PARSING,
@@ -233,7 +241,12 @@ class RunAnalysisTask:
                     processing_path=prepared.processing_path,
                     upload_path=prepared.upload_path,
                     state=state,
+                    upload_descriptor=upload_descriptor,
                 )
+                if upload_descriptor is not None:
+                    state.document_upload_intent_checkpoint = (
+                        resource_lifecycle.prepare_document_upload
+                    )
                 resource_lifecycle.record_recall_state(state)
         except AnalysisTaskPersistenceError:
             # 条件写提交结果不确定时，绝不把可能成功的任务改写为失败，也不触发外部补偿。
@@ -276,6 +289,7 @@ class RunAnalysisTask:
             state=state,
             started_at=started_at,
             resources=resource_lifecycle,
+            upload_descriptor=upload_descriptor,
         )
 
     def _execute_in_rag_factory(
@@ -289,6 +303,7 @@ class RunAnalysisTask:
         state: _RagWorkflowState,
         started_at: float,
         resources: AnalysisResourceLifecycle | None,
+        upload_descriptor: AnalysisRagUploadDescriptor | None,
     ) -> RunAnalysisResult:
         """在任务级 Factory 中执行 RAG，并隔离 Transport 释放异常。
 
@@ -316,6 +331,7 @@ class RunAnalysisTask:
                     rag=rag,
                     started_at=started_at,
                     resources=resources,
+                    upload_descriptor=upload_descriptor,
                 )
         except AnalysisTaskPersistenceError:
             # 条件写确认丢失时没有资格猜测最终状态；与普通 Factory 异常分开处理，禁止
@@ -384,6 +400,7 @@ class RunAnalysisTask:
         rag: AnalysisRagPort,
         started_at: float,
         resources: AnalysisResourceLifecycle | None,
+        upload_descriptor: AnalysisRagUploadDescriptor | None,
     ) -> RunAnalysisResult:
         """在已创建的任务级 Factory 内完成模型、审计、知识库和翻译阶段。"""
 
@@ -392,6 +409,7 @@ class RunAnalysisTask:
                 AnalysisRagSessionOpenRequest(
                     execution=execution,
                     upload_path=prepared.upload_path,
+                    upload_descriptor=upload_descriptor,
                 )
             )
             if opened.session.execution != execution:

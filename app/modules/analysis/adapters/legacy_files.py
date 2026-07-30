@@ -28,7 +28,11 @@ from app.modules.document_processing.adapters import (
     LocalDocumentPreparationRequest,
     ScannedPDFEngine,
 )
-from app.modules.document_processing.domain import DocumentRepresentation
+from app.modules.document_processing.application import ProjectDocumentForRag
+from app.modules.document_processing.domain import (
+    DocumentRepresentation,
+    ProcessingOutcome,
+)
 from app.modules.analysis.ports.files import (
     AnalysisFilePreparationRequest,
     AnalysisTaskWorkspace,
@@ -146,6 +150,7 @@ class LegacyAnalysisFilePreparationAdapter:
         text_reader: TextReader | None = None,
         legacy_office_preparer: LegacyOfficePreparer | None = None,
         document_preparer: LocalDocumentPreparationAdapter | None = None,
+        rag_projector: ProjectDocumentForRag | None = None,
         document_scanned_pdf_engine: ScannedPDFEngine = (
             ScannedPDFEngine.MINERU
         ),
@@ -181,6 +186,13 @@ class LegacyAnalysisFilePreparationAdapter:
             getattr(document_preparer, "prepare", None)
         ):
             raise TypeError("document_preparer 必须实现 prepare")
+        if rag_projector is not None and not isinstance(
+            rag_projector,
+            ProjectDocumentForRag,
+        ):
+            raise TypeError("rag_projector 必须是 ProjectDocumentForRag 或 None")
+        if rag_projector is not None and document_preparer is None:
+            raise ValueError("rag_projector 必须与 document_preparer 一起注入")
         if not isinstance(document_scanned_pdf_engine, ScannedPDFEngine):
             raise TypeError(
                 "document_scanned_pdf_engine 必须是 ScannedPDFEngine"
@@ -194,6 +206,7 @@ class LegacyAnalysisFilePreparationAdapter:
         self._text_reader = text_reader or self._read_original_text
         self._legacy_office_preparer = legacy_office_preparer
         self._document_preparer = document_preparer
+        self._rag_projector = rag_projector
         self._document_scanned_pdf_engine = document_scanned_pdf_engine
 
     def prepare(
@@ -285,7 +298,11 @@ class LegacyAnalysisFilePreparationAdapter:
         downloaded_path: Path,
         normalized_dir: Path,
     ) -> PreparedAnalysisDocument:
-        """把同一 prepared Artifact 映射给 RAG、正文读取和全文翻译。"""
+        """分别形成 canonical 正文与最终 RAG 上传 Artifact。
+
+        Markdown/Text 的 canonical Artifact 必须先经过 RAG-only 投影；PDF 两级文本提取
+        明确失败时仍复用原 PDF。投影仅改变检索输入，不覆盖正文读取和全文翻译来源。
+        """
 
         preparer = self._document_preparer
         assert preparer is not None
@@ -315,10 +332,39 @@ class LegacyAnalysisFilePreparationAdapter:
                     scanned_pdf_engine=self._document_scanned_pdf_engine,
                 )
             )
-            rag_artifact = prepared.rag_artifact
+            canonical_rag_artifact = prepared.rag_artifact
+            if canonical_rag_artifact.representation in {
+                DocumentRepresentation.MARKDOWN,
+                DocumentRepresentation.TEXT,
+            }:
+                if self._rag_projector is None:
+                    raise AnalysisFilePreparationError("RAG Markdown 投影能力未配置")
+                projected = self._rag_projector.execute(
+                    canonical_rag_artifact,
+                    trace_id=(
+                        f"analysis:{request.execution.task_id.value}:rag-projection"
+                    ),
+                )
+                if (
+                    projected.outcome is not ProcessingOutcome.SUCCEEDED
+                    or projected.artifact is None
+                ):
+                    logger.error(
+                        "文件分析 RAG 投影失败: task_id=%s outcome=%s "
+                        "error_code=%s source_artifact_id=%s",
+                        request.execution.task_id,
+                        projected.outcome.value,
+                        projected.error_code or "-",
+                        canonical_rag_artifact.artifact_id[:12],
+                    )
+                    raise AnalysisFilePreparationError("文件分析 RAG 投影失败")
+                rag_artifact = projected.artifact
+                projection_profile_id = self._rag_projector.profile_id
+            else:
+                rag_artifact = canonical_rag_artifact
+                projection_profile_id = ""
             suffix = {
                 DocumentRepresentation.MARKDOWN: ".md",
-                DocumentRepresentation.TEXT: ".txt",
                 DocumentRepresentation.PDF: ".pdf",
             }.get(rag_artifact.representation)
             if suffix is None:  # pragma: no cover - LocalPreparedArtifact 已强制集合
@@ -386,6 +432,8 @@ class LegacyAnalysisFilePreparationAdapter:
             original_text=original_text,
             internal_prepared_basename=upload_path.name,
             prepared_artifact=prepared.prepared_artifact,
+            rag_upload_artifact=rag_artifact,
+            rag_projection_profile_id=projection_profile_id,
         )
 
     def _prepare_processing_path(

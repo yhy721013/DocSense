@@ -572,6 +572,12 @@ Dispatcher、可靠队列或多实例运行时。
     合同资产共 9 项通过。再执行 Database、AnythingLLM Chat Gateway、Dependency Container、
     Architecture Boundary 和通用 Routes 相邻门禁，共 115 项通过；`compileall app tests` 与
     `git diff --check` 通过。安全全仓后台尝试因无可观测进度被人工终止，不计入通过统计。
+51. 运行文件分析 RAG 投影与业务原名上传命名门禁：先执行
+    `venv\Scripts\python.exe -B -m unittest tests.test_analysis_rag_naming tests.test_document_processing_rag_projection tests.test_analysis_rag_upload_pipeline tests.test_anythingllm_documents tests.test_anythingllm_rag_gateway tests.test_analysis_web_adapters tests.test_analysis_task_adapter tests.test_analysis_production_adapters tests.test_analysis_application tests.test_analysis_contract_assets tests.test_stage1h_consumer_cutover tests.test_document_processing_architecture tests.test_architecture_boundaries`；
+    再动态发现 `test*.py` 并精确排除既有 13 项。2026-07-30 发现 2,189 项、排除 13 项、
+    执行 2,176 项，失败 0、错误 0、跳过 3。AnythingLLM Desktop `1.15.0-r2` 的
+    `lancedb`/Ollama Embedder 真实单实例验收应作为独立受控证据执行，不得通过自动化测试
+    读取开发机 Provider 数据，也不得把该结果解释为生产、多实例或可靠队列能力。
 
 ## 执行限制
 

@@ -4,14 +4,15 @@
 
 - 文档日期：2026-07-30
 - 计划层级：L3 文件级专项实施计划
-- 当前状态：需求已确认，代码尚未实施
+- 当前状态：P0～P7 已实施并通过离线与受控真实 Provider 验收；尚未部署生产环境
 - 适用范围：`POST /llm/analysis` 文件分析链路及其 AnythingLLM 临时/永久文档生命周期
-- 目标 Provider 基线：AnythingLLM Desktop `1.15.0`
+- 目标 Provider 基线：AnythingLLM Desktop `1.15.0`；实测版本为 `1.15.0-r2`
 - 公开契约变化：不增删任何请求、响应、Callback、Progress、SSE 或 WebSocket 字段；新增一种
   `originalFileName` 非法时的同步 HTTP `400` 校验结果
 
 本文档同时回答 AnythingLLM 1.15.0 的标题、上传文件名、Workspace 展示名和 RAG Chunk
-来源字段之间的关系，并在此基础上冻结后续开发计划。本文档是实施设计，不代表功能已经上线。
+来源字段之间的关系，并记录 P0～P7 的实际实施与验收结果。当前工作树已经完成代码和受控验收，
+但尚未经过生产发布窗口，因此“已实施”不等同于“已上线”或“production ready”。
 
 ---
 
@@ -209,7 +210,7 @@ HTTP 上传名称回答的是：
 
 - Worker 可在任意实例解析 Artifact reader；
 - 对象 key 不需要包含用户文件名；
-- 重试与接管只需复用已持久化的 `transport_file_name`；
+- 重试与接管只需复用已持久化的命名快照和最终上传描述符；
 - 同名上传不会覆盖，外部所有权仍由 location/document_ref 证明；
 - 可靠队列消息只携带稳定引用与冻结描述符，不携带宿主机路径。
 
@@ -425,7 +426,9 @@ AnythingLLM 调用之前。
 
 #### 目标
 
-在任何任务或外部副作用前完成确定性命名候选校验和上传名派生。
+在任何任务或外部副作用前完成确定性命名候选校验，并冻结与具体 RAG Provider
+无关的命名事实。受理阶段尚不知道文档最终采用 Markdown 投影还是原始 PDF 降级表示，
+因此只派生并冻结两种允许表示各自的安全传输名；最终上传描述符由 P3 在表示确定后选择。
 
 #### 主要文件
 
@@ -444,10 +447,13 @@ AnythingLLM 调用之前。
    - `validate_rag_transport_name_candidate(value)`；
    - `derive_rag_transport_file_name(candidate, representation)`。
 2. Parser 按 params 顺序校验；第一个非法项返回稳定 index。
-3. 将 `display_title`、`transport_file_name`、命名来源和候选摘要冻结进 task input
-   snapshot，Worker 不重新读取原始 mutable payload。
-4. 不记录完整非法名称，只记录 index、原因码、长度和摘要。
-5. 同步修改接口文档，明确 HTTP `400`、整批零副作用和缺失/空值回退规则。
+3. 将 `display_title`、Markdown/PDF 两种候选传输名、命名来源和候选摘要冻结进
+   task input snapshot，Worker 不重新读取原始 mutable payload。
+4. P1 不提前声明唯一的 `transport_file_name`。P3 根据实际生成的表示类型，从冻结命名
+   快照中选择唯一传输名，并在第一次远端上传前连同 representation、media type、
+   Artifact identity 和 projection profile 一并写入最终上传描述符及资源事实。
+5. 不记录完整非法名称，只记录 index、原因码、长度和摘要。
+6. 同步修改接口文档，明确 HTTP `400`、整批零副作用和缺失/空值回退规则。
 
 #### 测试与验收
 
@@ -754,3 +760,41 @@ AnythingLLM 调用之前。
 11. 定向测试、安全全仓测试、并发/恢复故障矩阵和真实 AnythingLLM 1.15.0 受控验收均有可追溯
     证据；
 12. 接口文档、更新记录和实际代码一致，且未增删任何前后端接口参数。
+
+---
+
+## 12. 实施状态与关闭结论
+
+| 阶段 | 状态 | 实际结果 |
+| --- | --- | --- |
+| P0 | 已完成 | 冻结 AnythingLLM 1.15 响应/Chunk 最小夹具及 Analysis 公开合同黄金资产。 |
+| P1 | 已完成 | 在任务受理和外部副作用前完成业务名称校验；非法候选整批同步 HTTP 400，合法请求仍为 202 空体。 |
+| P2 | 已完成 | 新增流式、有界的 RAG-only Markdown 投影；canonical Artifact 不变，图片 Base64 payload 不进入投影。 |
+| P3 | 已完成 | Analysis 显式区分 canonical Artifact、RAG Artifact 与不可变上传描述符；PDF 明确降级仍上传真实 PDF。 |
+| P4 | 已完成 | AnythingLLM 读取路径、multipart filename 与 `metadata.title` 分离；Provider Transport 未获得业务状态机职责。 |
+| P5 | 已完成 | 永久知识、交互审计、资源恢复分别保留业务原名、实际传输名和精确 Provider 身份，清理不依赖标题。 |
+| P6 | 已完成 | 并发、故障、恢复和受控 AnythingLLM Desktop `1.15.0-r2` 验收通过。 |
+| P7 | 已完成 | 权威接口文档、重构索引、更新记录和测试说明完成收口；生产灰度与发布仍须走独立停服发布流程。 |
+
+受控真实 Provider 使用 `lancedb`、Ollama Embedder
+`qwen3-embedding:0.6b` 和临时 Workspace。实测验证：
+
+1. multipart filename 为 `<业务原名主干>.md`，`metadata.title`、处理后 JSON、
+   Chunk `title/sourceDocument` 和 AnythingLLM UI 来源标题均为带原后缀的业务原名；
+2. 投影、处理后 JSON 和向量缓存均不含测试图片 Base64 payload；
+3. 实际模型问答命中唯一测试标记，返回来源标题与业务原名完全一致；
+4. 本地 canonical Artifact 名称和摘要未因 HTTP 上传名变化；
+5. 按精确 thread、location 和 Workspace 完成清理，处理后文档与向量标记均无残留。
+
+自动化关闭证据：
+
+- P5 相关定向回归 170 项通过；
+- P6 投影/命名/上传链 31 项通过；
+- 架构修正后的相邻联合回归 279 项通过；
+- Stage 1H 消费者与架构窄域门禁 43 项通过；
+- 安全全仓动态发现 2,189 项，精确排除既有 13 项环境/资产测试，执行 2,176 项，
+  失败 0、错误 0、跳过 3。
+
+上述结果只证明当前 Windows 工作树、临时 SQLite/Fake 与受控 AnythingLLM 单实例配置。
+它不证明可靠任务队列、多实例数据库一致性、Exactly-once、生产容量、生产部署或未来
+AnythingLLM 版本兼容性。

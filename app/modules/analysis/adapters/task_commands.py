@@ -19,9 +19,10 @@ from app.modules.analysis.domain.callback_payloads import build_file_callback_pa
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
-    AnalysisTaskInputV2,
+    AnalysisTaskInputV3,
     FrozenJsonObject,
 )
 from app.modules.analysis.ports import (
@@ -171,7 +172,7 @@ class SQLiteAnalysisBatchCommandAdapter:
             if task_id in seen_task_ids:
                 raise AnalysisTaskCommandAdapterError("task_id_factory 返回了重复任务身份")
             seen_task_ids.add(task_id)
-            task_input = AnalysisTaskInputV2.from_submission(
+            task_input = AnalysisTaskInputV3.from_submission(
                 submission,
                 task_id=task_id.value,
                 batch_id=batch_id,
@@ -701,6 +702,7 @@ class SQLiteAnalysisBatchCommandAdapter:
             schema_version = raw.get("input_schema_version")
             if schema_version not in {
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
             }:
                 raise AnalysisTaskCommandAdapterError("Analysis execution输入Schema不受支持")
@@ -829,6 +831,7 @@ class SQLiteAnalysisBatchCommandAdapter:
                 and raw.get("input_schema_version")
                 not in {
                     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
+                    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
                     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
                 }
             ):

@@ -25,6 +25,7 @@ from app.modules.analysis.ports import (
     AnalysisRagCloseResult,
     AnalysisRagLifecycleEvent,
     AnalysisRagLifecycleOutcome,
+    AnalysisRagUploadDescriptor,
     AnalysisResourceCommand,
     AnalysisResourcePort,
     AnalysisResourceRecord,
@@ -40,7 +41,8 @@ from .workflow_models import _RagWorkflowState
 logger = logging.getLogger(__name__)
 
 _RESOURCE_SCHEMA_VERSION_V1 = 1
-_RESOURCE_SCHEMA_VERSION = 2
+_RESOURCE_SCHEMA_VERSION_V2 = 2
+_RESOURCE_SCHEMA_VERSION = 3
 _FINAL_CLEANUP_STATES = frozenset({"confirmed", "known_not_applied", "not_required"})
 _RECOVERABLE_CLOSE_STATES = frozenset({"confirmed", "known_not_applied"})
 
@@ -213,6 +215,7 @@ class AnalysisResourceLifecycle:
         source_path: str,
         upload_path: str,
         state: _RagWorkflowState,
+        upload_descriptor: AnalysisRagUploadDescriptor | None = None,
         processing_path: str | None = None,
     ) -> None:
         """在创建任何远端 RAG 资源前登记 ``tracking`` 记录。"""
@@ -230,6 +233,15 @@ class AnalysisResourceLifecycle:
                 raise ValueError(f"{name} 必须是非空 str")
         if not isinstance(state, _RagWorkflowState):
             raise TypeError("state 必须是 _RagWorkflowState")
+        if upload_descriptor is not None:
+            if not isinstance(upload_descriptor, AnalysisRagUploadDescriptor):
+                raise TypeError(
+                    "upload_descriptor 必须是 AnalysisRagUploadDescriptor 或 None"
+                )
+            if upload_descriptor.artifact.task_id != self._execution.task_id:
+                raise AnalysisResourceLifecycleError(
+                    "RAG 上传描述符不属于当前 execution"
+                )
 
         record = self._store.create(
             AnalysisResourceCommand(
@@ -243,6 +255,7 @@ class AnalysisResourceLifecycle:
                         source_path=source_path,
                         processing_path=resolved_processing_path,
                         upload_path=upload_path,
+                        upload_descriptor=upload_descriptor,
                         state=state,
                     ),
                     name="analysis_resource_initial",
@@ -256,6 +269,26 @@ class AnalysisResourceLifecycle:
             )
         self._record = record
 
+    def prepare_document_upload(self) -> None:
+        """在首次文档上传请求前以 CAS 持久化副作用意图。
+
+        CAS 失败时调用方必须停止，绝不能继续发起 HTTP。CAS 成功后若进程崩溃，恢复端
+        只能看到 ``started_unknown``，因此会保留现场而不会猜测文档未上传或自动重放。
+        """
+
+        record = self._require_tracking_record("prepare_document_upload")
+        payload = self._payload(record)
+        upload = self._mapping(payload.get("upload"), name="upload")
+        state = upload.get("delivery_state")
+        if state == "confirmed":
+            return
+        if state != "not_started":
+            raise AnalysisResourceLifecycleError(
+                "RAG 文档上传状态不是 not_started，禁止重复发起外部上传"
+            )
+        upload["delivery_state"] = "started_unknown"
+        self._advance(payload, AnalysisResourceState.TRACKING)
+
     def checkpoint_rag_state(self, state: _RagWorkflowState) -> None:
         """在每次取得 RAG Session 或生命周期事件后立即保存引用。"""
 
@@ -265,6 +298,34 @@ class AnalysisResourceLifecycle:
         payload = self._payload(record)
         payload["rag"] = self._rag_payload(state)
         payload["audit"] = self._audit_payload(state, previous=payload.get("audit"))
+        upload = payload.get("upload")
+        if isinstance(upload, Mapping) and state.session is not None:
+            upload = dict(upload)
+            payload["upload"] = upload
+            if state.session.document_bound:
+                artifact = self._mapping(
+                    upload.get("artifact"),
+                    name="upload.artifact",
+                )
+                expected_sha256 = str(artifact.get("sha256") or "").strip().lower()
+                expected_file_name = str(
+                    upload.get("transport_file_name") or ""
+                )
+                if (
+                    state.session.content_sha256 != expected_sha256
+                    or state.session.ingested_file_name != expected_file_name
+                ):
+                    state.preserve_scene = True
+                    self._set_diagnosis(
+                        payload,
+                        stage="document_upload",
+                        reason="uploaded_document_identity_mismatch",
+                    )
+                    self._advance(payload, AnalysisResourceState.QUARANTINED)
+                    raise AnalysisResourceLifecycleError(
+                        "RAG 已绑定文档身份与登记上传描述符不一致"
+                    )
+                upload["delivery_state"] = "confirmed"
 
         has_unknown = any(
             event.outcome is AnalysisRagLifecycleOutcome.OUTCOME_UNKNOWN
@@ -581,10 +642,15 @@ class AnalysisResourceLifecycle:
         source_path: str,
         processing_path: str,
         upload_path: str,
+        upload_descriptor: AnalysisRagUploadDescriptor | None,
         state: _RagWorkflowState,
     ) -> dict[str, object]:
-        return {
-            "schema_version": _RESOURCE_SCHEMA_VERSION,
+        payload: dict[str, object] = {
+            "schema_version": (
+                _RESOURCE_SCHEMA_VERSION
+                if upload_descriptor is not None
+                else _RESOURCE_SCHEMA_VERSION_V2
+            ),
             "local": {
                 "task_root": task_root,
                 "source_path": source_path,
@@ -608,6 +674,36 @@ class AnalysisResourceLifecycle:
                 "close_events": [],
             },
             "diagnosis": {"stage": "", "reason": ""},
+        }
+        if upload_descriptor is not None:
+            payload["upload"] = self._upload_payload(upload_descriptor)
+        return payload
+
+    @staticmethod
+    def _upload_payload(
+        descriptor: AnalysisRagUploadDescriptor,
+    ) -> dict[str, object]:
+        """保存可恢复的不可变上传身份，不保存宿主路径或 Provider 字段。"""
+
+        artifact = descriptor.artifact
+        return {
+            "delivery_state": "not_started",
+            "representation": descriptor.representation.value,
+            "media_type": descriptor.media_type,
+            "transport_file_name": descriptor.transport_file_name,
+            "display_title": descriptor.display_title,
+            "projection_profile_id": descriptor.projection_profile_id,
+            "naming_policy": descriptor.naming_policy,
+            "artifact": {
+                "artifact_id": artifact.artifact_id,
+                "step_key": artifact.step_key,
+                "kind": artifact.kind.value,
+                "representation": artifact.representation.value,
+                "media_type": artifact.metadata.media_type,
+                "size_bytes": artifact.metadata.size_bytes,
+                "sha256": artifact.metadata.sha256,
+                "ordinal": artifact.ordinal,
+            },
         }
 
     @staticmethod
@@ -691,6 +787,7 @@ class AnalysisResourceLifecycle:
         payload = record.record_payload.to_dict()
         if payload.get("schema_version") not in {
             _RESOURCE_SCHEMA_VERSION_V1,
+            _RESOURCE_SCHEMA_VERSION_V2,
             _RESOURCE_SCHEMA_VERSION,
         }:
             raise AnalysisResourceLifecycleError("资源记录 schema_version 不受当前用例支持")
@@ -698,6 +795,10 @@ class AnalysisResourceLifecycle:
             if not isinstance(payload.get(key), Mapping):
                 raise AnalysisResourceLifecycleError(f"资源记录缺少有效 {key} 对象")
             payload[key] = dict(payload[key])
+        if payload.get("schema_version") == _RESOURCE_SCHEMA_VERSION:
+            if not isinstance(payload.get("upload"), Mapping):
+                raise AnalysisResourceLifecycleError("资源记录缺少有效 upload 对象")
+            payload["upload"] = dict(payload["upload"])
         return payload
 
     @staticmethod
@@ -1126,6 +1227,7 @@ class RecoverAnalysisResources:
         payload = record.record_payload.to_dict()
         if payload.get("schema_version") not in {
             _RESOURCE_SCHEMA_VERSION_V1,
+            _RESOURCE_SCHEMA_VERSION_V2,
             _RESOURCE_SCHEMA_VERSION,
         }:
             raise ValueError("资源记录 schema_version 不受支持")

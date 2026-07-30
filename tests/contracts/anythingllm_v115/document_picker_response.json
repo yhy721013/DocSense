@@ -1,0 +1,30 @@
+{
+  "localFiles": {
+    "name": "documents",
+    "type": "folder",
+    "items": [
+      {
+        "name": "custom-documents",
+        "type": "folder",
+        "items": [
+          {
+            "name": "Nimitz-CVN-68-class.md-8bd127c1-bf39-43f5-be98-7013ec77c9dd.json",
+            "type": "file",
+            "title": "Nimitz (CVN 68) class.pdf",
+            "url": "file:///sanitized/hotdir/Nimitz-CVN-68-class.md",
+            "docSource": "docsense_ref:0123456789abcdef0123456789abcdef",
+            "chunkSource": "",
+            "published": "2026-07-30T00:00:00.000Z",
+            "wordCount": 128,
+            "token_count_estimate": 192,
+            "cached": true,
+            "pinnedWorkspaces": [
+              56
+            ],
+            "watched": false
+          }
+        ]
+      }
+    ]
+  }
+}

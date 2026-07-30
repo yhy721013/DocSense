@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,6 +187,7 @@ class AnythingLLMDocumentClient:
         *,
         user_id: int | None = None,
         metadata: Optional[Mapping[str, Any]] = None,
+        upload_file_name: str | None = None,
     ) -> AnythingLLMDocument:
         """上传本地文件及可选元数据，并返回真实 ID 和位置。
 
@@ -198,6 +198,8 @@ class AnythingLLMDocumentClient:
                 ``metadata`` 是 JSON 字符串；本方法在第一次请求前完成独立拷贝和序列化，
                 后续有限重试复用同一不可变字符串，避免调用方并发修改 Mapping 导致一次
                 逻辑上传在不同尝试中携带不同身份信息。
+            upload_file_name: 可选 multipart 文件名。文件字节仍从 ``file_path`` 读取，
+                用于把 Artifact 物理名与 Provider 处理器识别的传输名解耦。
 
         返回:
             由上传响应中真实 ``id/docId`` 和 ``location/docpath`` 构造的文档 DTO。
@@ -215,6 +217,10 @@ class AnythingLLMDocumentClient:
         path = Path(file_path)
         if not path.is_file():
             raise FileNotFoundError(f"待上传文件不存在或不是普通文件：{path}")
+        multipart_file_name = self._validate_upload_file_name(
+            upload_file_name,
+            fallback=path.name,
+        )
 
         serialized_metadata, metadata_keys = self._serialize_upload_metadata(metadata)
 
@@ -233,7 +239,7 @@ class AnythingLLMDocumentClient:
             try:
                 with path.open("rb") as file_object:
                     request_kwargs: dict[str, Any] = {
-                        "files": {"file": (os.path.basename(path), file_object)},
+                        "files": {"file": (multipart_file_name, file_object)},
                         "user_id": user_id,
                     }
                     if serialized_metadata is not None:
@@ -270,6 +276,24 @@ class AnythingLLMDocumentClient:
 
         # 循环的最后一次失败必定在 except 分支重新抛出，该分支仅用于类型检查完整性。
         raise AssertionError("上传重试循环异常结束")
+
+    @staticmethod
+    def _validate_upload_file_name(
+        value: str | None,
+        *,
+        fallback: str,
+    ) -> str:
+        """校验 multipart basename，禁止路径逃逸和 Header 控制字符。"""
+
+        candidate = fallback if value is None else value
+        if not isinstance(candidate, str) or not candidate.strip():
+            raise ValueError("upload_file_name 必须是非空 str 或 None")
+        basename = candidate.replace("\\", "/").rsplit("/", 1)[-1]
+        if basename != candidate or basename in {"", ".", ".."}:
+            raise ValueError("upload_file_name 必须是有效 basename")
+        if any(ord(character) < 32 or ord(character) == 127 for character in candidate):
+            raise ValueError("upload_file_name 不得包含控制字符")
+        return candidate
 
     @staticmethod
     def _serialize_upload_metadata(

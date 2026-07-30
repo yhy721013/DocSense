@@ -34,11 +34,13 @@ from .ranges import (
     build_effective_analysis_ranges,
     validate_analysis_architecture_ranges,
 )
+from .rag_naming import AnalysisRagNamingSnapshot
 
 
 ANALYSIS_BUSINESS_TYPE = "file"
 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1 = 1
-ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 2
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2 = 2
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 3
 ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1 = "legacy-office-v1"
 ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1 = "single-sheet-v1"
 ANALYSIS_LEGACY_OFFICE_DEFAULT_VERSION_SERIES = "26.2"
@@ -573,6 +575,36 @@ def _business_original_file_name(raw_params: FrozenJsonObject) -> tuple[bool, st
     return present, original_name if original_name.strip() else ""
 
 
+def _validate_effective_ranges_snapshot(
+    effective_ranges: FrozenJsonObject,
+) -> None:
+    """校验受理/持久化快照的固定范围 Schema。"""
+
+    actual_keys = tuple(key for key, _ in effective_ranges.items)
+    if frozenset(actual_keys) != frozenset(ANALYSIS_EFFECTIVE_RANGE_KEYS):
+        missing = sorted(set(ANALYSIS_EFFECTIVE_RANGE_KEYS) - set(actual_keys))
+        unknown = sorted(set(actual_keys) - set(ANALYSIS_EFFECTIVE_RANGE_KEYS))
+        raise AnalysisContractError(
+            f"effective_ranges 键集合不匹配: missing={missing} unknown={unknown}"
+        )
+    for key in ANALYSIS_EFFECTIVE_RANGE_KEYS:
+        value = effective_ranges.get(key)
+        if not isinstance(value, FrozenJsonArray):
+            raise AnalysisContractError(f"effective_ranges.{key} 必须是数组")
+        if key in _ANALYSIS_REQUIRED_EFFECTIVE_RANGE_KEYS and not value.values:
+            raise AnalysisContractError(f"effective_ranges.{key} 不能为空")
+        if any(
+            not isinstance(item, FrozenJsonObject) or not item.items
+            for item in value.values
+        ):
+            raise AnalysisContractError(f"effective_ranges.{key} 只能包含非空对象")
+    try:
+        validate_analysis_architecture_ranges(effective_ranges.to_dict())
+    except ArchitectureTreeValidationError as exc:
+        # 统一收口为领域合同错误；原始异常只作为 cause 保留，不进入公开响应。
+        raise AnalysisContractError("effective_ranges 领域树无效") from exc
+
+
 @dataclass(frozen=True)
 class AnalysisSubmissionSnapshot:
     """单个公开 ``params`` 项在受理前冻结的纯领域输入。"""
@@ -581,6 +613,7 @@ class AnalysisSubmissionSnapshot:
     effective_ranges: FrozenJsonObject
     policy_snapshot: AnalysisPolicySnapshot
     document_processing_policy: AnalysisDocumentProcessingPolicySnapshot
+    rag_naming: AnalysisRagNamingSnapshot
 
     def __post_init__(self) -> None:
         if not isinstance(self.raw_params, FrozenJsonObject):
@@ -596,40 +629,24 @@ class AnalysisSubmissionSnapshot:
             raise AnalysisContractError(
                 "document_processing_policy 必须是 AnalysisDocumentProcessingPolicySnapshot"
             )
+        if not isinstance(self.rag_naming, AnalysisRagNamingSnapshot):
+            raise AnalysisContractError("rag_naming 必须是 AnalysisRagNamingSnapshot")
         # 受理前的 Web Adapter 已校验公开字段；这里再次守住存储边界，避免未来调用方绕过
         # Parser 后写入无法重放的 execution 输入。
         _required_text(self.raw_params.get("fileName"), name="raw_params.fileName")
         _required_text(self.raw_params.get("filePath"), name="raw_params.filePath")
+        expected_rag_naming = AnalysisRagNamingSnapshot.from_public_names(
+            original_file_name=self.raw_params.get("originalFileName"),
+            file_name=self.raw_params.get("fileName"),
+        )
+        if self.rag_naming != expected_rag_naming:
+            raise AnalysisContractError("rag_naming 与 raw_params 命名字段不一致")
         self._validate_effective_ranges()
 
     def _validate_effective_ranges(self) -> None:
         """校验受理快照的固定范围 Schema，拒绝无法独立重放的毒记录。"""
 
-        actual_keys = tuple(key for key, _ in self.effective_ranges.items)
-        if frozenset(actual_keys) != frozenset(ANALYSIS_EFFECTIVE_RANGE_KEYS):
-            missing = sorted(set(ANALYSIS_EFFECTIVE_RANGE_KEYS) - set(actual_keys))
-            unknown = sorted(set(actual_keys) - set(ANALYSIS_EFFECTIVE_RANGE_KEYS))
-            raise AnalysisContractError(
-                f"effective_ranges 键集合不匹配: missing={missing} unknown={unknown}"
-            )
-        for key in ANALYSIS_EFFECTIVE_RANGE_KEYS:
-            value = self.effective_ranges.get(key)
-            if not isinstance(value, FrozenJsonArray):
-                raise AnalysisContractError(f"effective_ranges.{key} 必须是数组")
-            if key in _ANALYSIS_REQUIRED_EFFECTIVE_RANGE_KEYS and not value.values:
-                raise AnalysisContractError(f"effective_ranges.{key} 不能为空")
-            if any(
-                not isinstance(item, FrozenJsonObject) or not item.items
-                for item in value.values
-            ):
-                raise AnalysisContractError(
-                    f"effective_ranges.{key} 只能包含非空对象"
-                )
-        try:
-            validate_analysis_architecture_ranges(self.effective_ranges.to_dict())
-        except ArchitectureTreeValidationError as exc:
-            # 统一收口为领域合同错误；原始异常只作为 cause 保留，不进入公开响应。
-            raise AnalysisContractError("effective_ranges 领域树无效") from exc
+        _validate_effective_ranges_snapshot(self.effective_ranges)
 
     @classmethod
     def from_request_params(
@@ -681,6 +698,10 @@ class AnalysisSubmissionSnapshot:
             effective_ranges=effective_ranges,
             policy_snapshot=policy_snapshot,
             document_processing_policy=resolved_processing_policy,
+            rag_naming=AnalysisRagNamingSnapshot.from_public_names(
+                original_file_name=raw_params.get("originalFileName"),
+                file_name=raw_params.get("fileName"),
+            ),
         )
 
     @property
@@ -754,21 +775,9 @@ class AnalysisTaskInputV1:
             raise AnalysisContractError("effective_ranges 必须是 FrozenJsonObject")
         if not isinstance(self.policy_snapshot, AnalysisPolicySnapshot):
             raise AnalysisContractError("policy_snapshot 必须是 AnalysisPolicySnapshot")
-        # Worker 反序列化入口必须重放与受理快照完全相同的范围校验，不能只校验类型后
-        # 接受被篡改或旧进程写坏的 effective_ranges。
-        AnalysisSubmissionSnapshot(
-            raw_params=self.raw_params,
-            effective_ranges=self.effective_ranges,
-            policy_snapshot=self.policy_snapshot,
-            document_processing_policy=(
-                self.document_processing_policy
-                if isinstance(self, AnalysisTaskInputV2)
-                else AnalysisDocumentProcessingPolicySnapshot.for_source(
-                    self.file_path,
-                    business_file_name=self.file_name,
-                )
-            ),
-        )
+        # 历史 V1/V2 可能包含 P1 上线前曾被接受、但不符合新 multipart 命名规则的名称。
+        # 解码历史快照时只能复核既有范围合同，不能把新入站规则追溯施加到旧任务。
+        _validate_effective_ranges_snapshot(self.effective_ranges)
         file_name = _required_text(self.file_name, name="file_name")
         file_path = _required_text(self.file_path, name="file_path")
         raw_file_name = _required_text(
@@ -840,11 +849,11 @@ class AnalysisTaskInputV1:
 
 @dataclass(frozen=True)
 class AnalysisTaskInputV2(AnalysisTaskInputV1):
-    """当前 Worker 输入；在 V1 业务字段之上冻结文档处理策略。"""
+    """历史 V2 Worker 输入；在 V1 业务字段之上冻结文档处理策略。"""
 
     document_processing_policy: AnalysisDocumentProcessingPolicySnapshot
 
-    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -900,6 +909,59 @@ class AnalysisTaskInputV2(AnalysisTaskInputV1):
         )
 
 
+@dataclass(frozen=True)
+class AnalysisTaskInputV3(AnalysisTaskInputV2):
+    """当前 Worker 输入；增加可跨实例重放的 RAG 命名快照。"""
+
+    rag_naming: AnalysisRagNamingSnapshot
+
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.rag_naming, AnalysisRagNamingSnapshot):
+            raise AnalysisContractError("rag_naming 必须是 AnalysisRagNamingSnapshot")
+        expected = AnalysisRagNamingSnapshot.from_public_names(
+            original_file_name=self.raw_params.get("originalFileName"),
+            file_name=self.raw_params.get("fileName"),
+        )
+        if self.rag_naming != expected:
+            raise AnalysisContractError("rag_naming 与 raw_params 命名字段不一致")
+
+    @classmethod
+    def from_submission(
+        cls,
+        submission: AnalysisSubmissionSnapshot,
+        *,
+        task_id: str,
+        batch_id: str,
+        batch_sequence: int,
+        accepted_at: str,
+        trace_id: str,
+    ) -> "AnalysisTaskInputV3":
+        """把受理快照合成为包含处理策略和命名事实的当前 V3 输入。"""
+
+        if not isinstance(submission, AnalysisSubmissionSnapshot):
+            raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
+        return cls(
+            schema_version=cls.EXPECTED_SCHEMA_VERSION,
+            task_id=task_id,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
+            file_name=submission.file_name,
+            original_file_name=submission.original_file_name,
+            original_file_name_present=submission.original_file_name_present,
+            file_path=submission.file_path,
+            raw_params=submission.raw_params,
+            effective_ranges=submission.effective_ranges,
+            policy_snapshot=submission.policy_snapshot,
+            accepted_at=accepted_at,
+            trace_id=trace_id,
+            document_processing_policy=submission.document_processing_policy,
+            rag_naming=submission.rag_naming,
+        )
+
+
 __all__ = (
     "ANALYSIS_BUSINESS_TYPE",
     "ANALYSIS_EFFECTIVE_RANGE_KEYS",
@@ -907,12 +969,14 @@ __all__ = (
     "ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1",
+    "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2",
     "ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1",
     "AnalysisDocumentProcessingPolicySnapshot",
     "AnalysisPolicySnapshot",
     "AnalysisSubmissionSnapshot",
     "AnalysisTaskInputV1",
     "AnalysisTaskInputV2",
+    "AnalysisTaskInputV3",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",

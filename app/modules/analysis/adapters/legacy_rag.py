@@ -37,6 +37,7 @@ from app.ports import (
     DocumentRagFactory,
     DocumentRagPort,
     DocumentRagSession,
+    RagDocumentUploadOptions,
     RagOperationError,
     RagPromptKind,
 )
@@ -88,6 +89,7 @@ class LegacyAnalysisRagAdapter(AnalysisRagPort):
         self._native_session: DocumentRagSession | None = None
         self._session: AnalysisRagSessionRef | None = None
         self._upload_path = ""
+        self._upload_options: RagDocumentUploadOptions | None = None
         self._last_lifecycle_sequence = 0
         self._closed = False
         self._close_result: AnalysisRagCloseResult | None = None
@@ -106,6 +108,15 @@ class LegacyAnalysisRagAdapter(AnalysisRagPort):
         if self._closed:
             raise RuntimeError("已关闭的 Analysis RAG Adapter 不能再次打开")
         self._upload_path = request.upload_path
+        descriptor = request.upload_descriptor
+        self._upload_options = (
+            RagDocumentUploadOptions(
+                transport_file_name=descriptor.transport_file_name,
+                display_title=descriptor.display_title,
+            )
+            if descriptor is not None
+            else None
+        )
         try:
             self._lease = self._document_rag_factory.create()
             self._gateway = self._lease.__enter__()
@@ -197,14 +208,19 @@ class LegacyAnalysisRagAdapter(AnalysisRagPort):
             )
             prompt_kind = self._prompt_kind(request.operation)
             if not self._session or not self._session.document_bound:
+                analyse_kwargs = {
+                    "prompt_kind": prompt_kind,
+                    "require_sources": True,
+                    # 每个 Port execute 对应一个真实请求。JSON/领域 repair 由 Application
+                    # 显式编排，避免 Gateway 的隐式重试绕过审计和阶段预算。
+                    "max_attempts": 1,
+                }
+                if self._upload_options is not None:
+                    analyse_kwargs["document_upload"] = self._upload_options
                 native_result = native_session.analyse(
                     self._upload_path,
                     request.prompt,
-                    prompt_kind=prompt_kind,
-                    require_sources=True,
-                    # 每个 Port execute 对应一个真实请求。JSON/领域 repair 由 Application
-                    # 显式编排，避免 Gateway 的隐式重试绕过审计和阶段预算。
-                    max_attempts=1,
+                    **analyse_kwargs,
                 )
                 prepared = native_result.prepared_document
                 self._session = self._session.with_bound_document(
