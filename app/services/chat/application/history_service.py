@@ -91,11 +91,15 @@ class ChatHistoryService:
             "timestamp": _to_timestamp_ms(message.created_at),
         }
         if message.role == MESSAGE_ROLE_USER:
-            item["files"] = [
-                {"name": file.original_name or file.file_name}
-                for file in message.files
-                if file.original_name or file.file_name
-            ]
+            if message.architecture_id is not None:
+                # architecture 模式只公开不可变类别 ID，禁止把内部冻结成员展开回前端。
+                item["architectureId"] = message.architecture_id
+            else:
+                item["files"] = [
+                    {"name": file.original_name or file.file_name}
+                    for file in message.files
+                    if file.original_name or file.file_name
+                ]
         return item
 
 

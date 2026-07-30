@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import math
 import re
+import time
 import unicodedata
+from dataclasses import dataclass
 from datetime import date
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import fitz
 
@@ -28,948 +33,248 @@ from app.ports import (
     build_document_idempotency_key,
     normalize_rag_prompt,
 )
-from app.services.core.config import load_ocr_config
+from app.services.core.config import (
+    ANALYSIS_DATA_STANDARD_MODE_LEGACY,
+    ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    ANALYSIS_DATA_STANDARD_MODES,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY,
+    ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
+    ANALYSIS_FILENAME_CONSTRAINT_MODES,
+    ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+    ANALYSIS_IDENTITY_RESELECT_MODE_OFF,
+    ANALYSIS_IDENTITY_RESELECT_MODES,
+    load_ocr_config,
+)
+from app.services.core.architecture_tree import (
+    ArchitectureNodeProfile,
+    ArchitectureTreeIndex,
+    ArchitectureTreeIndexCache,
+    ArchitectureTreeValidationError,
+    build_architecture_tree_index,
+)
 from app.services.utils.ocr_preprocessor import prepare_analysis_file_for_upload
 
 from app.services.utils.callback_client import post_callback_payload
 from app.services.utils.file_downloader import download_to_temp_file
 from app.services.utils.mhtml_normalizer import extract_text_from_mhtml, is_mhtml_file, normalize_file_for_llm
+from app.services.utils.word_extractor import extract_text_from_word
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.core.prompts import (
+    ANALYSIS_ENUM_FIELD_MAX_ITEMS,
+    ANALYSIS_ENUM_ITEM_MAX_CHARS,
+    ANALYSIS_KEYWORD_MAX_COUNT,
+    ANALYSIS_KEYWORD_MAX_CHARS,
+    ANALYSIS_KEYWORD_MIN_COUNT,
+    ANALYSIS_SUMMARY_MAX_CHARS,
+    ANALYSIS_SUMMARY_TYPE_CHAR_RANGES,
+    UNKNOWN_SOURCE_VALUE,
+    build_architecture_classification_prompt,
     build_architecture_repair_prompt,
+    build_architecture_reselect_prompt,
+    build_data_standard_classification_prompt,
     build_file_analysis_prompt,
+    build_file_extraction_prompt,
     build_json_repair_prompt,
+    data_standard_candidate_remark,
 )
-from app.services.llm_service.task_service import LLMTaskService
+from app.services.llm_service.architecture_recall_service import (
+    ArchitecturePromptBudgetError,
+    ArchitectureRecallDecision,
+    ArchitectureRecallError,
+    DocumentArchitectureSignals,
+    build_document_architecture_signals,
+    recall_architecture_candidates,
+)
+from app.services.llm_service.task_service import (
+    LLMTaskService,
+    TaskExecutionConflictError,
+    TaskStateConflictError,
+)
 from app.services.llm_service.translation_service import get_translation_service
+
+# 阶段 1F-1 兼容层：纯 Domain 规则已迁移，旧 Service 仅继续承载文件、RAG、翻译、
+# 任务和回调等外部副作用。使用各模块显式导出的兼容面，确保现有内部调用与测试导入不变。
+from app.modules.analysis.domain.callback_payloads import *  # noqa: F401,F403
+from app.modules.analysis.domain.classification_rules import *  # noqa: F401,F403
+from app.modules.analysis.domain.errors import *  # noqa: F401,F403
+from app.modules.analysis.domain.models import *  # noqa: F401,F403
+from app.modules.analysis.domain.ranges import *  # noqa: F401,F403
+from app.modules.analysis.domain.result_mapping import (
+    _sanitize_related_technologies_with_diagnostics,
+)
+from app.modules.analysis.domain.result_mapping import *  # noqa: F401,F403
 
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COUNTRY_OPTIONS = [
-    {"key": "02", "value": "美国"},
-    {"key": "03", "value": "俄罗斯"},
-    {"key": "04", "value": "日本"},
-    {"key": "05", "value": "英国"},
-    {"key": "06", "value": "法国"},
-]
+# 结果映射已经迁入无副作用 Domain。旧执行链仍保留少量历史告警，便于运维人员观察
+# “过滤后继续成功”的 relatedTechnology 质量问题；告警适配不参与任何字段决策。
+_domain_map_analysis_result = map_analysis_result
 
-DEFAULT_FORMAT_OPTIONS = [
-    {"key": "01", "value": "音频类"},
-    {"key": "03", "value": "文档类"},
-    {"key": "04", "value": "图片类"},
-]
 
-DEFAULT_MATURITY_OPTIONS = [
-    {"key": "01", "value": "概念研究"},
-    {"key": "02", "value": "阶段成果"},
-    {"key": "03", "value": "定型成果"},
-]
-
-DEFAULT_SECURITY_OPTIONS = [
-    {"key": "02", "value": "公开"},
-]
-
-DEFAULT_ARCHITECTURE_OPTIONS = [
-    {"id": 101, "name": "军事基地", "parentId": None, "path": "101", "pathName": "军事基地", "remark": "军事设施、基地建设、基地布局、港口码头、机场跑道、后勤保障设施等。"},
-    {"id": 102, "name": "体系运用", "parentId": None, "path": "102", "pathName": "体系运用", "remark": "作战体系、系统集成、联合作战、协同配合、多域作战、体系对抗等。"},
-    {"id": 103, "name": "装备型号", "parentId": None, "path": "103", "pathName": "装备型号", "remark": "武器装备、装备参数、技术指标、装备性能及型号资料。"},
-    {"id": 10301, "name": "空中装备", "parentId": 103, "path": "103/10301", "pathName": "装备型号/空中装备", "remark": "飞机、无人机、航空平台及相关空中装备。"},
-    {"id": 10302, "name": "水面装备", "parentId": 103, "path": "103/10302", "pathName": "装备型号/水面装备", "remark": "水面舰艇、船舶平台及相关水面装备。"},
-    {"id": 10303, "name": "水下装备", "parentId": 103, "path": "103/10303", "pathName": "装备型号/水下装备", "remark": "潜艇、水下无人平台、鱼雷及相关水下装备。"},
-    {"id": 104, "name": "作战环境", "parentId": None, "path": "104", "pathName": "作战环境", "remark": "战场环境、地理条件、气象水文、电磁环境、海洋环境等。"},
-    {"id": 105, "name": "作战指挥", "parentId": None, "path": "105", "pathName": "作战指挥", "remark": "指挥控制、决策流程、作战计划、战术战法等。"},
-    {"id": 10501, "name": "条令条例", "parentId": 105, "path": "105/10501", "pathName": "作战指挥/条令条例", "remark": "发布机构、编号、版本、规范、条令、条例、制度等。"},
-    {"id": 10502, "name": "组织机构", "parentId": 105, "path": "105/10502", "pathName": "作战指挥/组织机构", "remark": "机构编制、隶属关系、职责分工、司令部、部门设置、岗位任命等。"},
-    {"id": 106, "name": "数据标准", "parentId": None, "path": "106", "pathName": "数据标准", "remark": "GJB、国军标、国家军用标准、技术标准、数据规范和标准化资料。"},
-]
-
-ARCHITECTURE_FALLBACK_ID = 1
-WEAPONRY_DETAIL_CATEGORY_SUFFIXES = frozenset({
-    "基础数据",
-    "战技指标",
-    "运用数据",
-    "效能数据",
-})
-SOURCE_SCORE_VALUES = {95, 85, 75, 65, 55}
-MAX_KEYWORD_COUNT = 10
-MAX_KEYWORD_LENGTH = 30
-DATA_STANDARD_FIELD_ALIASES = {
-    "militaryName": ("militaryName", "国军标名称", "标准名称"),
-    "num": ("num", "编号", "标准编号", "国军标编号", "fileNo", "文件编号"),
-    "startTime": ("startTime", "发布时间", "发布日期", "发布日"),
-    "implTime": ("implTime", "实施时间", "实施日期", "实施日"),
-    "approvalDept": ("approvalDept", "批准部门", "批准单位", "批准机关", "批准机构", "发布部门"),
-}
-
-
-def _normalize_range_list(value: Any, default: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return list(default)
-    items = [item for item in value if isinstance(item, dict) and item]
-    return items if items else list(default)
-
-
-def build_effective_analysis_ranges(request_params: Dict[str, Any]) -> Dict[str, list[dict[str, Any]]]:
-    return {
-        "country": _normalize_range_list(request_params.get("country"), DEFAULT_COUNTRY_OPTIONS),
-        # channel 必须完全由调用方提供，缺失或空范围不能回填服务端默认值。
-        "channel": _normalize_range_list(request_params.get("channel"), []),
-        "format": _normalize_range_list(request_params.get("format"), DEFAULT_FORMAT_OPTIONS),
-        "maturity": _normalize_range_list(request_params.get("maturity"), DEFAULT_MATURITY_OPTIONS),
-        "security": _normalize_range_list(request_params.get("security"), DEFAULT_SECURITY_OPTIONS),
-        "architectureList": _normalize_range_list(request_params.get("architectureList"), DEFAULT_ARCHITECTURE_OPTIONS),
-        "architectureStandardList": _normalize_range_list(request_params.get("architectureStandardList"), []),
-    }
-
-
-def _as_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return str(value)
-
-
-def _as_business_original_file_name(value: Any) -> str:
-    """读取业务原始文件名，并保留请求字符串的原始值。
-
-    ``originalFileName`` 是面向甲方回调展示的业务字段，不是文件系统路径或内部键。
-    因此只能用去首尾空白后的结果判断它是否为空，不能把 strip 后的文本回写为值；
-    否则会违反“回调 source 严格返回请求 originalFileName 原值”的约定。
-    """
-    if value is None:
-        return ""
-    original_name = value if isinstance(value, str) else str(value)
-    return original_name if original_name.strip() else ""
-
-
-def _coerce_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_match_text(value: Any) -> str:
-    text = _as_text(value)
-    if not text:
-        return ""
-    normalized = unicodedata.normalize("NFKC", text).casefold()
-    return re.sub(r"\s+", "", normalized)
-
-
-def _contains_gjb_standard_reference(*values: Any) -> bool:
-    text = "\n".join(_as_text(value) for value in values if value not in (None, "", [], {}))
-    if not text:
-        return False
-    normalized = unicodedata.normalize("NFKC", text)
-    lowered = normalized.casefold()
-    return (
-        "国军标" in normalized
-        or "国家军用标准" in normalized
-        or re.search(r"(?<![a-z0-9])gjb(?=\s|[-_/]|\d|$)", lowered) is not None
-    )
-
-
-def _is_data_standard_candidate(item: Dict[str, Any]) -> bool:
-    """判断候选节点是否属于数据标准分支。
-
-    现有接口以节点 ``name`` / ``pathName`` 中是否包含“数据标准”标识该分支。这里延续
-    既有口径，并在下游结合 ``parentId`` 扩展到名称中未重复写入“数据标准”的子孙节点。
-    """
-    names = (_as_text(item.get("name")), _as_text(item.get("pathName")))
-    return any("数据标准" in name for name in names)
-
-
-def _architecture_candidate_topology(
-        architecture_list: Iterable[Dict[str, Any]],
-) -> tuple[list[tuple[int, Dict[str, Any]]], set[int]]:
-    """构建请求候选的有限树拓扑，并保留前端传入顺序。
-
-    GJB 兜底的业务规则要求“按候选顺序”选择数据标准叶子，因此不能把节点先放入无序集合。
-    叶子关系仅根据本次请求中明确给出的 ``parentId`` 识别：若调用方没有提供某个子节点，
-    服务端不会猜测完整树结构，也不会因此提前拒绝该请求。
-    """
-    nodes: list[tuple[int, Dict[str, Any]]] = []
-    candidate_ids: set[int] = set()
-    for item in architecture_list:
-        if not isinstance(item, dict):
-            continue
-        item_id = _coerce_int(item.get("id"))
-        if item_id is None or item_id < 1:
-            continue
-        nodes.append((item_id, item))
-        candidate_ids.add(item_id)
-
-    parent_ids = {
-        parent_id
-        for _item_id, item in nodes
-        if (parent_id := _coerce_int(item.get("parentId"))) in candidate_ids
-    }
-    return nodes, parent_ids
-
-
-def _data_standard_candidate_ids(
-        nodes: Iterable[tuple[int, Dict[str, Any]]],
-) -> set[int]:
-    """返回数据标准节点及其在本次候选树中可追溯到的子孙节点 ID。"""
-    ordered_nodes = list(nodes)
-    standard_ids = {
-        item_id
-        for item_id, item in ordered_nodes
-        if _is_data_standard_candidate(item)
-    }
-
-    # 子节点可能只填写自身名称、未重复填写“数据标准”。通过 parentId 向下扩展可避免把
-    # 这类合法叶子遗漏；循环仅在集合新增节点时继续，能安全处理异常环状数据。
-    has_new_node = True
-    while has_new_node:
-        has_new_node = False
-        for item_id, item in ordered_nodes:
-            parent_id = _coerce_int(item.get("parentId"))
-            if item_id not in standard_ids and parent_id in standard_ids:
-                standard_ids.add(item_id)
-                has_new_node = True
-    return standard_ids
-
-
-def _ordered_data_standard_leaf_ids(
-        architecture_list: Iterable[Dict[str, Any]],
-) -> list[int]:
-    """按请求顺序返回数据标准分支中的叶子节点 ID。
-
-    普通领域仍允许返回父节点；此函数只服务于数据标准的特殊规则。若多个数据标准叶子
-    均可选或无法区分，调用方按列表顺序取第一个，而不在服务端引入证据唯一性判断。
-    """
-    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
-    standard_ids = _data_standard_candidate_ids(nodes)
-    leaf_ids: list[int] = []
-    seen_ids: set[int] = set()
-    for item_id, _item in nodes:
-        if (
-                item_id in standard_ids
-                and item_id not in parent_ids
-                and item_id not in seen_ids
-        ):
-            leaf_ids.append(item_id)
-            seen_ids.add(item_id)
-    return leaf_ids
-
-
-def _first_data_standard_leaf_id(
-        architecture_list: Iterable[Dict[str, Any]],
-) -> int | None:
-    """返回按请求顺序可命中的第一个数据标准叶子节点。"""
-    leaf_ids = _ordered_data_standard_leaf_ids(architecture_list)
-    return leaf_ids[0] if leaf_ids else None
-
-
-def _is_data_standard_parent_id(
-        architecture_id: int,
-        architecture_list: Iterable[Dict[str, Any]],
-) -> bool:
-    """判断指定候选是否为本次请求中数据标准分支的父节点。"""
-    nodes, parent_ids = _architecture_candidate_topology(architecture_list)
-    standard_ids = _data_standard_candidate_ids(nodes)
-    return architecture_id in standard_ids and architecture_id in parent_ids
-
-
-def _match_data_standard_architecture_id(
-        architecture_list: Iterable[Dict[str, Any]],
-        *context_values: Any,
-) -> int | None:
-    """命中 GJB 线索后，按候选顺序选择数据标准分支的第一个叶子节点。"""
-    if not _contains_gjb_standard_reference(*context_values):
-        return None
-    return _first_data_standard_leaf_id(architecture_list)
-
-
-def _architecture_id_set(items: Iterable[Dict[str, Any]]) -> set[int]:
-    ids = set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item_id = _coerce_int(item.get("id"))
-        if item_id is not None:
-            ids.add(item_id)
-    return ids
-
-
-def _path_ids(value: Any) -> set[int]:
-    text = _as_text(value)
-    if not text:
-        return set()
-    return {int(match) for match in re.findall(r"\d+", text)}
-
-
-def _architecture_ancestor_ids(architecture_id: int, architecture_list: Iterable[Dict[str, Any]]) -> set[int]:
-    items_by_id: dict[int, Dict[str, Any]] = {}
-    for item in architecture_list:
-        if not isinstance(item, dict):
-            continue
-        item_id = _coerce_int(item.get("id"))
-        if item_id is not None:
-            items_by_id[item_id] = item
-
-    ancestors = set()
-    current_id = architecture_id
-    visited = {architecture_id}
-    while True:
-        item = items_by_id.get(current_id)
-        if not item:
-            break
-        parent_id = _coerce_int(item.get("parentId"))
-        if parent_id is None or parent_id in visited:
-            break
-        ancestors.add(parent_id)
-        visited.add(parent_id)
-        current_id = parent_id
-    return ancestors
-
-
-def resolve_storage_architecture_id(
-        result_architecture_id: Any,
-        architecture_list: Iterable[Dict[str, Any]],
-) -> int | None:
-    """将装备明细子分类解析为用于知识库存储的装备级分类 ID。"""
-    resolved_id = _coerce_int(result_architecture_id)
-    if resolved_id is None:
-        return None
-
-    candidate_items = [item for item in architecture_list if isinstance(item, dict)]
-    items_by_id = {
-        item_id: item
-        for item in candidate_items
-        if (item_id := _coerce_int(item.get("id"))) is not None
-    }
-    result_item = items_by_id.get(resolved_id)
-    if not result_item:
-        return resolved_id
-
-    result_name = _as_text(result_item.get("name"))
-    weaponry_name, separator, suffix = result_name.rpartition("-")
-    weaponry_name = weaponry_name.strip()
-    suffix = suffix.strip()
-    if not separator or not weaponry_name or suffix not in WEAPONRY_DETAIL_CATEGORY_SUFFIXES:
-        return resolved_id
-
-    parent_id = _coerce_int(result_item.get("parentId"))
-    if parent_id is None:
-        logger.warning(
-            "装备明细分类缺少父节点，继续按原分类存储: architecture_id=%s architecture_name=%s",
-            resolved_id,
-            result_name,
-        )
-        return resolved_id
-
-    # architectureList 可能只传当前子分类。此时 parentId 是唯一可用的装备级标识。
-    if parent_id not in items_by_id:
-        return parent_id
-
-    current_id = parent_id
-    visited = {resolved_id}
-    while current_id not in visited:
-        visited.add(current_id)
-        current_item = items_by_id.get(current_id)
-        if not current_item:
-            break
-        if _as_text(current_item.get("name")) == weaponry_name:
-            return current_id
-        next_parent_id = _coerce_int(current_item.get("parentId"))
-        if next_parent_id is None:
-            break
-        current_id = next_parent_id
-
-    # 父链字段不完整时，使用 path 中明确列出的祖先节点做一次保守补充匹配。
-    path_ids = [_coerce_int(value) for value in re.findall(r"\d+", _as_text(result_item.get("path")))]
-    matched_path_ids = [
-        path_id
-        for path_id in path_ids
-        if path_id != resolved_id
-        and path_id in items_by_id
-        and _as_text(items_by_id[path_id].get("name")) == weaponry_name
-    ]
-    if len(matched_path_ids) == 1:
-        return matched_path_ids[0]
-
-    logger.warning(
-        "装备明细分类未找到匹配的装备级节点，继续按原分类存储: "
-        "architecture_id=%s architecture_name=%s expected_weaponry_name=%s parent_id=%s",
-        resolved_id,
-        result_name,
-        weaponry_name,
-        parent_id,
-    )
-    return resolved_id
-
-
-def _architecture_name_by_id(architecture_id: Any, architecture_list: Iterable[Dict[str, Any]]) -> str:
-    resolved_id = _coerce_int(architecture_id)
-    if resolved_id is None:
-        return ""
-    for item in architecture_list:
-        if isinstance(item, dict) and _coerce_int(item.get("id")) == resolved_id:
-            return _as_text(item.get("name"))
-    return ""
-
-
-def _is_architecture_in_standard_range(
-        architecture_id: Any,
-        architecture_list: Iterable[Dict[str, Any]],
-        architecture_standard_list: Iterable[Dict[str, Any]],
-) -> bool:
-    resolved_id = _coerce_int(architecture_id)
-    if resolved_id is None:
-        return False
-
-    standard_ids = _architecture_id_set(architecture_standard_list)
-    if not standard_ids:
-        return False
-    if resolved_id in standard_ids:
-        return True
-
-    candidate_items = [item for item in architecture_list if isinstance(item, dict)]
-    target_item = None
-    for item in candidate_items:
-        if _coerce_int(item.get("id")) == resolved_id:
-            target_item = item
-            break
-
-    if target_item:
-        if standard_ids.intersection(_path_ids(target_item.get("path"))):
-            return True
-        if standard_ids.intersection(_architecture_ancestor_ids(resolved_id, candidate_items)):
-            return True
-
-    return False
-
-
-def _normalize_source_score(value: Any) -> int:
-    try:
-        numeric_score = float(value)
-    except (TypeError, ValueError):
-        return 55
-    if not numeric_score.is_integer():
-        return 55
-    score = int(numeric_score)
-    if score not in SOURCE_SCORE_VALUES:
-        return 55
-    return score
-
-
-def _match_option_value(value: Any, options: Iterable[Dict[str, Any]]) -> str:
-    target = _scalar_text(value)
-    if not target:
-        return ""
-    normalized_target = _normalize_match_text(target)
-    for item in options:
-        if not isinstance(item, dict):
-            continue
-        value_text = _as_text(item.get("value"))
-        key_text = _as_text(item.get("key"))
-        if target in {value_text, key_text}:
-            return value_text
-        if normalized_target and normalized_target in {
-            _normalize_match_text(value_text),
-            _normalize_match_text(key_text),
-        }:
-            return value_text
-    return ""
-
-
-def _default_security_value(options: Iterable[Dict[str, Any]]) -> str:
-    matched = _match_option_value("公开", options)
-    if matched:
-        return matched
-    for item in options:
-        if not isinstance(item, dict):
-            continue
-        candidate = _as_text(item.get("value"))
-        if candidate:
-            return candidate
-    return "公开"
-
-
-def _match_architecture_id(parsed_result: Dict[str, Any], architecture_list: Iterable[Dict[str, Any]]) -> int:
-    def _fallback(reason: str, detail: Any = None) -> int:
-        logger.info(
-            "领域分类匹配失败，使用默认分类: reason=%s "
-            "fallback_architecture_id=%s has_detail=%s detail_type=%s",
-            reason,
-            ARCHITECTURE_FALLBACK_ID,
-            detail is not None,
-            type(detail).__name__ if detail is not None else "",
-        )
-        return ARCHITECTURE_FALLBACK_ID
-
-    candidate_items = [item for item in architecture_list if isinstance(item, dict)]
-    candidate_ids = set()
-    for item in candidate_items:
-        try:
-            raw_candidate_id = item.get("id")
-            if raw_candidate_id in (None, ""):
-                continue
-            candidate_ids.add(int(raw_candidate_id))
-        except (TypeError, ValueError):
-            continue
-
-    if len(candidate_ids) == 1:
-        return next(iter(candidate_ids))
-
-    raw_id = _first_non_empty_value(parsed_result, "architectureId", "领域体系 ID")
-    if raw_id is not None:
-        try:
-            matched_id = int(raw_id)
-            if matched_id in candidate_ids:
-                return matched_id
-            return _fallback(
-                "raw_id_out_of_range",
-                {"raw_id": matched_id, "candidate_count": len(candidate_ids)},
-            )
-        except (TypeError, ValueError):
-            return _fallback("raw_id_invalid", raw_id)
-
-    architecture_obj = _first_non_empty_value(parsed_result, "领域体系")
-    if isinstance(architecture_obj, dict):
-        raw_arch_id = architecture_obj.get("id")
-        if raw_arch_id is not None:
-            try:
-                matched_id = int(raw_arch_id)
-                if matched_id in candidate_ids:
-                    return matched_id
-                return _fallback(
-                    "nested_id_out_of_range",
-                    {"raw_id": matched_id, "candidate_count": len(candidate_ids)},
-                )
-            except (TypeError, ValueError):
-                return _fallback("nested_id_invalid", raw_arch_id)
-
-    name_candidates = []
-    for value in (
-            _first_non_empty_value(parsed_result, "architectureName", "architecture", "领域体系名称"),
-            architecture_obj,
-    ):
-        if value in (None, "", [], {}):
-            continue
-        if isinstance(value, dict):
-            for key in ("name", "pathName", "value", "text", "label", "content"):
-                candidate = _as_text(value.get(key))
-                if candidate:
-                    name_candidates.append(candidate)
-        else:
-            candidate = _scalar_text(value)
-            if candidate:
-                name_candidates.append(candidate)
-
-    if not name_candidates:
-        return _fallback("no_candidate_name")
-
-    for target_name in name_candidates:
-        normalized_targets = {target_name}
-        if "/" in target_name:
-            normalized_targets.add(target_name.split("/")[-1].strip())
-
-        for item in candidate_items:
-            item_name = _as_text(item.get("name"))
-            item_path_name = _as_text(item.get("pathName"))
-            item_path_tail = item_path_name.split("/")[-1].strip() if item_path_name and "/" in item_path_name else ""
-            if normalized_targets.intersection({item_name, item_path_name, item_path_tail}):
-                try:
-                    return int(item.get("id") or 0)
-                except (TypeError, ValueError):
-                    return _fallback("matched_item_id_invalid", item.get("id"))
-
-    return _fallback(
-        "name_not_matched",
-        {"input_candidates": name_candidates[:3], "candidate_count": len(candidate_items)},
-    )
-
-
-def _first_non_empty_value(container: Dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key not in container:
-            continue
-        value = container.get(key)
-        if value in (None, "", [], {}):
-            continue
-        return value
-    return None
-
-
-def _scalar_text(value: Any) -> str:
-    if isinstance(value, dict):
-        for key in ("value", "name", "text", "label", "content"):
-            candidate = _as_text(value.get(key))
-            if candidate:
-                return candidate
-        for candidate in value.values():
-            text = _as_text(candidate)
-            if text:
-                return text
-        return ""
-    return _as_text(value)
-
-
-def _resolve_field(parsed_result: Dict[str, Any], file_item: Dict[str, Any], *aliases: str) -> str:
-    nested = _first_non_empty_value(file_item, *aliases)
-    if nested not in (None, "", [], {}):
-        return _scalar_text(nested)
-    top_level = _first_non_empty_value(parsed_result, *aliases)
-    if top_level not in (None, "", [], {}):
-        return _scalar_text(top_level)
-    return ""
-
-
-def _sanitize_keywords(raw_value: Any) -> str:
-    """对 LLM 返回的 keyword 字段做后处理：拆分、截断单条过长关键词、限制总数量。
-
-    小模型（如 4B）有时不遵守 prompt 约束，可能返回极长的单个关键词或过多关键词，
-    此函数在输出前统一做校验与截断，确保 keyword 字段始终为不超过 MAX_KEYWORD_COUNT
-    个、每个不超过 MAX_KEYWORD_LENGTH 字符的短词，以英文逗号+空格分隔。
-    """
-    if raw_value in (None, "", [], {}):
-        return ""
-
-    # 模型可能返回列表形式的关键词
-    if isinstance(raw_value, list):
-        parts = [_as_text(item) for item in raw_value]
-    elif isinstance(raw_value, str):
-        text = raw_value.strip()
-        if not text:
-            return ""
-        # 按常见分隔符拆分（中英文逗号、顿号、分号、竖线、换行）
-        parts = re.split(r"[,，、;；|\n\r]+", text)
-    else:
-        parts = [str(raw_value)]
-
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        kw = part.strip().strip("\"'“”‘’").strip()
-        if not kw or kw in seen:
-            continue
-        seen.add(kw)
-        # 单个关键词过长时截断
-        if len(kw) > MAX_KEYWORD_LENGTH:
-            logger.warning(
-                "关键词长度超过上限，已截断: original_chars=%d limit=%d",
-                len(kw),
-                MAX_KEYWORD_LENGTH,
-            )
-            kw = kw[:MAX_KEYWORD_LENGTH]
-        cleaned.append(kw)
-        if len(cleaned) >= MAX_KEYWORD_COUNT:
-            break
-
-    return ", ".join(cleaned)
-
-
-def _extract_original_link(original_text: str) -> str:
-    match = re.search(r"https?://\S+", original_text)
-    return match.group(0) if match else ""
-
-
-def _extract_date(original_text: str) -> str:
-    match = re.search(r"(\d{4})年(\d{1,2})月(\d{1,2})日", original_text)
-    if match:
-        year, month, day = match.groups()
-        return f"{year}-{int(month):02d}-{int(day):02d}"
-
-    month_map = {
-        "january": 1,
-        "february": 2,
-        "march": 3,
-        "april": 4,
-        "may": 5,
-        "june": 6,
-        "july": 7,
-        "august": 8,
-        "september": 9,
-        "october": 10,
-        "november": 11,
-        "december": 12,
-    }
-    match = re.search(r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", original_text)
-    if not match:
-        return ""
-    day, month_name, year = match.groups()
-    month = month_map.get(month_name.lower())
-    if not month:
-        return ""
-    return f"{year}-{month:02d}-{int(day):02d}"
-
-
-def _format_iso_date(year: Any, month: Any, day: Any) -> str:
-    try:
-        return date(int(year), int(month), int(day)).isoformat()
-    except (TypeError, ValueError):
-        return ""
-
-
-def _normalize_date_field(value: Any) -> str:
-    text = _scalar_text(value)
-    if not text:
-        return ""
-
-    match = re.search(r"(\d{4})[-./年](\d{1,2})[-./月](\d{1,2})日?", text)
-    if match:
-        return _format_iso_date(*match.groups())
-
-    match = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", text)
-    if match:
-        return _format_iso_date(*match.groups())
-
-    return _extract_date(text)
-
-
-def _infer_language(original_text: str) -> str:
-    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", original_text))
-    has_latin = bool(re.search(r"[A-Za-z]", original_text))
-    if has_cjk and has_latin:
-        return "中英双语"
-    if has_cjk:
-        return "中文"
-    if has_latin:
-        return "英文"
-    return ""
-
-
-def _match_option_value_from_text(options: Iterable[Dict[str, Any]], original_text: str) -> str:
-    normalized_original_text = _normalize_match_text(original_text)
-    if not normalized_original_text:
-        return ""
-    for item in options:
-        if not isinstance(item, dict):
-            continue
-        candidate = _as_text(item.get("value"))
-        if candidate and _normalize_match_text(candidate) in normalized_original_text:
-            return _as_text(item.get("value"))
-    return ""
-
-
-def _opening_text(original_text: str, *, max_chars: int = 2000, max_lines: int = 80) -> str:
-    if not original_text:
-        return ""
-    collected: list[str] = []
-    total_chars = 0
-    for raw_line in original_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        collected.append(line)
-        total_chars += len(line)
-        if total_chars >= max_chars or len(collected) >= max_lines:
-            break
-    if collected:
-        return "\n".join(collected)[:max_chars]
-    return original_text[:max_chars]
-
-
-def _extract_security_from_opening_text(original_text: str, options: Iterable[Dict[str, Any]]) -> str:
-    opening = _opening_text(original_text)
-    if not opening:
-        return ""
-    lines = [line.strip() for line in opening.splitlines() if line.strip()]
-    security_label_pattern = re.compile(r"(密级|密别|秘密等级|保密级别|文件密级|资料密级|密级程度|保密期限)")
-    for line in lines:
-        if not security_label_pattern.search(line):
-            continue
-        matched = _match_option_value_from_text(options, line)
-        if matched:
-            return matched
-    for line in lines[:30]:
-        if len(line) > 40:
-            continue
-        matched = _match_option_value_from_text(options, line)
-        if matched:
-            return matched
-    return ""
-
-
-def _extract_title(original_text: str) -> str:
-    lines = [line.strip() for line in original_text.splitlines()]
-    for index, line in enumerate(lines):
-        if line == "标题":
-            for candidate in lines[index + 1:]:
-                if candidate:
-                    return candidate
-    for line in lines:
-        if line and line not in {"内容", "原文链接", "原文"} and not line.startswith("http"):
-            return line
-    return ""
-
-
-def _extract_source(original_text: str) -> str:
-    match = re.search(r"【([^】]+?)\d{4}年\d{1,2}月\d{1,2}日", original_text)
-    if match:
-        return match.group(1).strip()
-    return ""
-
-
-def _extract_labeled_value(original_text: str, labels: Iterable[str]) -> str:
-    if not original_text:
-        return ""
-    for label in labels:
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", label):
-            continue
-        match = re.search(rf"{re.escape(label)}\s*[:：]\s*([^\r\n]+)", original_text)
-        if match:
-            return match.group(1).strip(" \t;；。")
-    return ""
-
-
-def _extract_gjb_number(original_text: str) -> str:
-    match = re.search(r"\b(GJB\s*[0-9A-Za-z]+(?:[-—–][0-9A-Za-z]+)*)\b", original_text)
-    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
-
-
-def _extract_standard_name(original_text: str) -> str:
-    labeled = _extract_labeled_value(original_text, DATA_STANDARD_FIELD_ALIASES["militaryName"])
-    if labeled:
-        return labeled
-    for line in original_text.splitlines():
-        candidate = line.strip()
-        if candidate and _contains_gjb_standard_reference(candidate):
-            return candidate
-    return ""
-
-
-def _extract_data_standard_fields(
+def _log_related_technology_compatibility_warnings(
         parsed_result: Dict[str, Any],
-        file_item: Dict[str, Any],
+        *,
         original_text: str,
-) -> Dict[str, str]:
-    fields = {}
-    for field_name, aliases in DATA_STANDARD_FIELD_ALIASES.items():
-        value = _resolve_field(parsed_result, file_item, *aliases)
-        if field_name in {"startTime", "implTime"}:
-            value = _normalize_date_field(value) or _normalize_date_field(_extract_labeled_value(original_text, aliases))
-        elif not value and field_name == "militaryName":
-            value = _extract_standard_name(original_text)
-        elif not value and field_name == "num":
-            value = _extract_labeled_value(original_text, aliases) or _extract_gjb_number(original_text)
-        elif not value:
-            value = _extract_labeled_value(original_text, aliases)
-        fields[field_name] = value
-    return fields
+) -> None:
+    """在旧 Service 边界保留已冻结的所属技术质量告警。
+
+    Domain 只负责确定性规范化，不能自行写日志。此函数根据迁移前同一输入/输出语义记录
+    诊断信息，不修改结果、不抛出业务异常，也不触发外部 I/O。
+    """
+
+    parsed_file_item = parsed_result.get("fileDataItem")
+    if not isinstance(parsed_file_item, dict):
+        parsed_file_item = parsed_result.get("文件解析详细数据")
+    if not isinstance(parsed_file_item, dict):
+        parsed_file_item = {}
+    raw_related_technology = (
+        _first_non_empty_value(
+            parsed_file_item,
+            "relatedTechnology",
+            "所属技术",
+        )
+        or _first_non_empty_value(
+            parsed_result,
+            "relatedTechnology",
+            "所属技术",
+        )
+    )
+    raw_related_technology_evidence = (
+        _first_non_empty_value(
+            parsed_file_item,
+            "relatedTechnologyEvidence",
+            "所属技术证据",
+        )
+        or _first_non_empty_value(
+            parsed_result,
+            "relatedTechnologyEvidence",
+            "所属技术证据",
+        )
+    )
+    diagnostics = _sanitize_related_technologies_with_diagnostics(
+        raw_related_technology,
+        raw_evidence=raw_related_technology_evidence,
+        original_text=original_text,
+    )
+    if diagnostics.non_chinese_count:
+        logger.warning(
+            "文件分析所属技术不是中文名称，已丢弃并继续成功: rejected_count=%d",
+            diagnostics.non_chinese_count,
+        )
+    if not diagnostics.chinese_count:
+        return
+
+    if not diagnostics.evidence_text_present:
+        logger.warning(
+            "文件分析所属技术缺少可核验正文，已保留规范化结果并继续成功: "
+            "retained_count=%d",
+            diagnostics.chinese_count,
+        )
+        return
+
+    if diagnostics.missing_evidence_count:
+        logger.warning(
+            "文件分析所属技术缺少可核验原文术语映射，已丢弃并继续成功: "
+            "rejected_count=%d accepted_count=%d",
+            diagnostics.missing_evidence_count,
+            diagnostics.accepted_before_limit,
+        )
+    if diagnostics.overflow_count:
+        logger.warning(
+            "文件分析所属技术数量超过上限，已保留前序合格项并继续成功: "
+            "actual=%d maximum=%d",
+            diagnostics.accepted_before_limit,
+            ANALYSIS_ENUM_FIELD_MAX_ITEMS,
+        )
 
 
+@wraps(_domain_map_analysis_result)
 def map_analysis_result(
         parsed_result: Dict[str, Any],
         request_params: Dict[str, Any],
         original_text: str = "",
         resolved_architecture_id: Any = None,
 ) -> Dict[str, Any]:
-    file_name = _as_text(request_params.get("fileName"))
-    ranges = build_effective_analysis_ranges(request_params)
-    file_item = parsed_result.get("fileDataItem")
-    if not isinstance(file_item, dict):
-        file_item = parsed_result.get("文件解析详细数据")
-    if not isinstance(file_item, dict):
-        file_item = {}
+    """兼容旧导入路径，并把领域纯结果投影回旧 Service 的日志边界。"""
 
-    raw_country = _first_non_empty_value(parsed_result, "country", "国家")
-    raw_channel = _first_non_empty_value(parsed_result, "channel", "渠道")
-    raw_maturity = _first_non_empty_value(parsed_result, "maturity", "成熟度")
-    raw_security = _first_non_empty_value(parsed_result, "security", "密级", "密级程度")
-    if raw_security in (None, "", [], {}):
-        raw_security = _first_non_empty_value(file_item, "security", "密级", "密级程度")
-    raw_format = _first_non_empty_value(parsed_result, "format", "格式")
-    if raw_format in (None, "", [], {}):
-        raw_format = _first_non_empty_value(file_item, "dataFormat", "资料格式")
-
-    resolved_country = _match_option_value(raw_country, ranges["country"])
-    resolved_channel = _match_option_value(raw_channel, ranges["channel"])
-    resolved_maturity = _match_option_value(raw_maturity, ranges["maturity"])
-    resolved_security = _match_option_value(raw_security, ranges["security"])
-    resolved_format = _match_option_value(raw_format, ranges["format"])
-
-    for field_name, raw_value, resolved_value in (
-        ("country", raw_country, resolved_country),
-        ("channel", raw_channel, resolved_channel),
-        ("maturity", raw_maturity, resolved_maturity),
-        ("security", raw_security, resolved_security),
-        ("format", raw_format, resolved_format),
-    ):
-        if raw_value not in (None, "", [], {}) and not resolved_value:
-            logger.info(
-                "字段候选值未匹配到预设范围: field=%s raw_value_chars=%d",
-                field_name,
-                len(_scalar_text(raw_value)),
-            )
-
-    resolved_original_link = _resolve_field(parsed_result, file_item, "originalLink", "原文链接", "链接")
-    resolved_date = _resolve_field(parsed_result, file_item, "dataTime", "资料年代", "日期", "时间")
-    resolved_language = _resolve_field(parsed_result, file_item, "language", "语种")
-    raw_score = _first_non_empty_value(file_item, "score", "评分")
-    if raw_score is None:
-        raw_score = _first_non_empty_value(parsed_result, "score", "评分")
-    normalized_original_text = _as_text(
-        original_text or _resolve_field(parsed_result, file_item, "originalText", "文件原文", "原文"))
-    extracted_title = _extract_title(normalized_original_text)
-    resolved_keyword = _sanitize_keywords(
-        _first_non_empty_value(file_item, "keyword", "keywords", "关键词")
-        or _first_non_empty_value(parsed_result, "keyword", "keywords", "关键词")
+    mapped_result = _domain_map_analysis_result(
+        parsed_result,
+        request_params,
+        original_text=original_text,
+        resolved_architecture_id=resolved_architecture_id,
     )
-    architecture_id = _coerce_int(resolved_architecture_id)
-    if architecture_id is None:
-        architecture_id = (
-            _match_data_standard_architecture_id(
-                ranges["architectureList"],
-                normalized_original_text,
-                request_params.get("originalFileName"),
-                _resolve_field(parsed_result, file_item, "summary", "摘要"),
-                resolved_keyword,
-                _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
-            )
-            or _match_architecture_id(parsed_result, ranges["architectureList"])
+    _log_related_technology_compatibility_warnings(
+        parsed_result,
+        original_text=original_text,
+    )
+    return mapped_result
+
+
+
+
+def _log_analysis_content_warnings(
+        parsed_result: Dict[str, Any],
+        mapped_result: Dict[str, Any],
+        *,
+        file_name: str,
+) -> None:
+    """记录普通内容字段违约，但不改变文件任务的成功状态。"""
+    parsed_file_item = parsed_result.get("fileDataItem")
+    if not isinstance(parsed_file_item, dict):
+        parsed_file_item = parsed_result.get("文件解析详细数据")
+    if not isinstance(parsed_file_item, dict):
+        parsed_file_item = {}
+    mapped_file_item = mapped_result.get("fileDataItem")
+    if not isinstance(mapped_file_item, dict):
+        mapped_file_item = {}
+
+    model_summary = _resolve_field(
+        parsed_result,
+        parsed_file_item,
+        "summary",
+        "摘要",
+    )
+    summary = _as_text(mapped_file_item.get("summary"))
+    if not model_summary:
+        logger.warning(
+            "文件分析摘要未生成合格内容，已保留标题回退并继续成功: "
+            "file_name=%s fallback_chars=%d",
+            file_name,
+            len(summary),
         )
+    if len(summary) > ANALYSIS_SUMMARY_MAX_CHARS:
+        logger.warning(
+            "文件分析摘要超过通用长度上限，任务继续成功: "
+            "file_name=%s actual_chars=%d maximum=%d",
+            file_name,
+            len(summary),
+            ANALYSIS_SUMMARY_MAX_CHARS,
+        )
+    for prefix, (minimum, maximum) in ANALYSIS_SUMMARY_TYPE_CHAR_RANGES.items():
+        if not summary.startswith(prefix):
+            continue
+        if len(summary) < minimum or len(summary) > maximum:
+            logger.warning(
+                "文件分析摘要未满足材料类型长度范围，任务继续成功: "
+                "file_name=%s material_prefix=%s actual_chars=%d minimum=%d maximum=%d",
+                file_name,
+                prefix,
+                len(summary),
+                minimum,
+                maximum,
+            )
+        break
 
-    file_data_item = {
-        "fileName": file_name,
-        "dataTime": resolved_date or _extract_date(normalized_original_text),
-        "keyword": resolved_keyword,
-        "summary": _resolve_field(parsed_result, file_item, "summary", "摘要") or extracted_title,
-        "score": _normalize_source_score(raw_score),
-        "fileNo": _resolve_field(parsed_result, file_item, "fileNo", "文件编号", "编号"),
-        "source": _resolve_field(parsed_result, file_item, "source", "资料来源", "来源") or _extract_source(
-            normalized_original_text),
-        "originalLink": resolved_original_link or _extract_original_link(normalized_original_text),
-        "language": resolved_language or _infer_language(normalized_original_text),
-        "dataFormat": resolved_format,
-        "associatedEquipment": _resolve_field(parsed_result, file_item, "associatedEquipment", "所属装备"),
-        "relatedTechnology": _resolve_field(parsed_result, file_item, "relatedTechnology", "所属技术"),
-        "equipmentModel": _resolve_field(parsed_result, file_item, "equipmentModel", "装备型号"),
-        "documentOverview": _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述")
-                            or extracted_title,
-        "originalText": normalized_original_text,
-        "documentTranslationOne": "",
-        "documentTranslationTwo": "",
-    }
-
-    if _is_architecture_in_standard_range(
-            architecture_id,
-            ranges["architectureList"],
-            ranges["architectureStandardList"],
-    ):
-        file_data_item.update(_extract_data_standard_fields(parsed_result, file_item, normalized_original_text))
-
-    return {
-        "country": resolved_country or _match_option_value_from_text(ranges["country"], normalized_original_text),
-        "channel": resolved_channel,
-        "maturity": resolved_maturity,
-        "security": (
-            resolved_security
-            or _extract_security_from_opening_text(normalized_original_text, ranges["security"])
-            or _default_security_value(ranges["security"])
-        ),
-        "format": resolved_format,
-        "architectureId": architecture_id,
-        "fileDataItem": file_data_item,
-    }
+    keyword_count = len(_split_delimited_items(mapped_file_item.get("keyword")))
+    if keyword_count < MIN_KEYWORD_COUNT:
+        logger.warning(
+            "文件分析关键词数量不足，任务继续成功: "
+            "file_name=%s actual=%d minimum=%d",
+            file_name,
+            keyword_count,
+            MIN_KEYWORD_COUNT,
+        )
 
 
 def enrich_with_translations(
@@ -1003,18 +308,8 @@ def enrich_with_translations(
                 Path(file_path).name,
             )
 
-            # 【新增】定义进度回调函数，将翻译进度反馈到任务状态
-            def translation_progress_callback(progress: float, message: str):
-                # 计算总体进度（翻译占 0.35~0.95 区间，共 0.6 权重）
-                overall_progress = 0.35 + (progress * 0.6)
-                logger.debug(
-                    "全文翻译进度已更新: progress_percent=%d",
-                    round(overall_progress * 100),
-                )
-
-            # 设置进度回调
-            translation_service.set_progress_callback(translation_progress_callback)
-
+            # 翻译服务不再保存任务级可变回调；进度仍由调用本函数的 Worker 在翻译前后
+            # 按既有 0.65/0.95 节点发布，避免并发任务彼此覆盖回调归属。
             bilingual_html_content, monolingual_html_content = translation_service.translate_document(
                 file_path=file_path,
                 target_lang="Chinese",
@@ -1043,14 +338,6 @@ def enrich_with_translations(
         return mapped_result
 
 
-def build_file_callback_payload(file_name: str, mapped_result: Dict[str, Any], status: str) -> Dict[str, Any]:
-    data = {"fileName": file_name, "status": status}
-    data.update(mapped_result)
-    return {
-        "businessType": "file",
-        "data": data,
-        "msg": "解析成功" if status == "2" else "解析失败",
-    }
 
 
 def _publish_progress(progress_hub: LLMProgressHub, file_name: str, progress: float) -> None:
@@ -1069,6 +356,8 @@ def _read_original_text(file_path: str) -> str:
     if suffix == ".pdf":
         with fitz.open(path) as doc:
             return "\n".join(page.get_text() for page in doc)
+    if suffix == ".docx":
+        return extract_text_from_word(str(path))
     if is_mhtml_file(str(path)):
         return extract_text_from_mhtml(str(path))
     return ""
@@ -1092,151 +381,114 @@ def _prepare_analysis_upload_file(file_path: str) -> str:
     return str(upload_path_obj)
 
 
-class AnalysisContractError(ValueError):
-    """模型回答违反文件分析业务契约。"""
 
 
-class ArchitectureContractError(AnalysisContractError):
-    """architectureId 缺失、类型错误或超出请求候选范围。"""
-
-
-class DataStandardParentContractError(ArchitectureContractError):
-    """数据标准分支的父节点不能作为最终成功分类。"""
-
-
-def _reject_nonstandard_json_constant(value: str) -> None:
-    """拒绝 Python JSON 解码器默认接受的 NaN 与 Infinity 扩展值。"""
-    raise ValueError(f"非法 JSON 常量: {value}")
-
-
-def _parse_strict_json_object(raw_result: Any) -> Dict[str, Any] | None:
-    """只接受原生对象或严格 JSON 对象，不执行猜括号等有损修补。
-
-    旧实现会从任意文本中截取最外层花括号并反复补 ``}``。这种做法可能把截断回答误判
-    为有效业务数据。阶段 9 改为显式发起一次 ``JSON_REPAIR`` 模型调用，因此本地解析器
-    必须保持确定性：语法不合法就返回 ``None``，由编排层决定是否修复；合法的空对象
-    则继续进入宽松字段映射和独立的 architectureId 契约处理，不能伪装成语法问题。
-    """
-    if isinstance(raw_result, dict):
-        try:
-            serialized = json.dumps(
-                raw_result,
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-            parsed_object = json.loads(serialized)
-        except (TypeError, ValueError):
-            return None
-        return parsed_object if isinstance(parsed_object, dict) else None
-    if not isinstance(raw_result, str) or not raw_result.strip():
-        return None
-    try:
-        parsed = json.loads(
-            raw_result.strip(),
-            parse_constant=_reject_nonstandard_json_constant,
-        )
-    except (json.JSONDecodeError, TypeError, ValueError):
-        logger.warning(
-            "文件分析模型结果不是严格 JSON 对象: response_chars=%d",
-            len(raw_result),
-        )
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _architecture_candidates(
-        request_params: Dict[str, Any],
-) -> tuple[list[Dict[str, Any]], set[int]]:
-    """返回请求中的有效候选及其全部 ID。
-
-    当请求只携带一个节点时，无论它在完整体系中是否还有子节点，都按阶段 9 契约直接
-    使用该唯一 ID。多候选时允许模型选择请求中任意候选节点，不再由服务端强制要求叶子。
-    """
-    items: list[Dict[str, Any]] = []
-    ids: set[int] = set()
-    for item in build_effective_analysis_ranges(request_params)["architectureList"]:
-        if not isinstance(item, dict):
-            continue
-        item_id = _coerce_int(item.get("id"))
-        if item_id is None or item_id < 1:
-            continue
-        if item_id in ids:
-            raise AnalysisContractError(f"architectureList 包含重复 id: {item_id}")
-        ids.add(item_id)
-        items.append(item)
-    if not items:
-        raise AnalysisContractError("architectureList 不包含有效候选")
-    return items, ids
-
-
-def _validate_data_standard_leaf_requirement(
-        architecture_id: int,
-        candidates: Iterable[Dict[str, Any]],
+def _log_architecture_constraint_decision(
+    *,
+    execution_id: str,
+    file_name: str,
+    filename_constraint_mode: str,
+    profile: _JaneClassificationProfile,
+    decision: _ArchitectureConstraintDecision,
+    data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    data_standard_profile: _DataStandardClassificationProfile | None = None,
 ) -> None:
-    """阻止数据标准父节点进入成功回调与永久知识库。
-
-    普通分类父节点仍是合法业务结果，不能复用旧版“所有候选必须叶子”的全局校验。只有
-    数据标准分支中、且在本次候选树内明确拥有子节点的父节点会触发此特殊规则。
-    """
-    if _is_data_standard_parent_id(architecture_id, candidates):
-        raise DataStandardParentContractError(
-            "architectureId 是数据标准父节点，必须兜底到其下叶子节点"
-        )
-
-
-def _resolve_analysis_architecture_id(
-        parsed_result: Dict[str, Any],
-        request_params: Dict[str, Any],
-) -> int:
-    """按单候选直返、多候选显式 ID 的规则解析 architectureId。"""
-    candidates, allowed_ids = _architecture_candidates(request_params)
-    if len(allowed_ids) == 1:
-        architecture_id = next(iter(allowed_ids))
-    else:
-        if "architectureId" not in parsed_result or parsed_result.get("architectureId") in (None, ""):
-            raise ArchitectureContractError("architectureId 缺失")
-        raw_id = parsed_result.get("architectureId")
-        if isinstance(raw_id, bool) or not isinstance(raw_id, int):
-            raise ArchitectureContractError("architectureId 必须是数字 ID")
-        if raw_id not in allowed_ids:
-            raise ArchitectureContractError("architectureId 不属于请求 architectureList 候选")
-        architecture_id = raw_id
-
-    _validate_data_standard_leaf_requirement(architecture_id, candidates)
-    return architecture_id
-
-
-def _match_gjb_architecture_candidate(
-        parsed_result: Dict[str, Any],
-        request_params: Dict[str, Any],
-        original_text: str,
-        candidates: Iterable[Dict[str, Any]],
-) -> int | None:
-    """首次分类不合规时，按 GJB 线索匹配请求中的数据标准叶子节点。"""
-    file_item = parsed_result.get("fileDataItem")
-    if not isinstance(file_item, dict):
-        file_item = {}
-    return _match_data_standard_architecture_id(
-        candidates,
-        original_text,
-        request_params.get("originalFileName"),
-        _resolve_field(parsed_result, file_item, "summary", "摘要"),
-        _first_non_empty_value(file_item, "keyword", "keywords", "关键词"),
-        _resolve_field(parsed_result, file_item, "documentOverview", "文件概述", "概述"),
+    if not decision.reason_code:
+        return
+    standard_profile = (
+        data_standard_profile
+        or _DataStandardClassificationProfile()
+    )
+    payload = {
+        "executionId": execution_id,
+        "fileName": file_name,
+        "constraintMode": filename_constraint_mode,
+        "dataStandardMode": data_standard_mode,
+        "standardNumber": standard_profile.standard_number,
+        "standardTitle": standard_profile.title,
+        "standardDocumentKind": standard_profile.document_kind,
+        "standardIdentityConfirmed": standard_profile.identity_confirmed,
+        "standardIdentityConflict": standard_profile.identity_conflict,
+        "standardEvidenceSources": list(standard_profile.evidence_sources),
+        "scopeKind": profile.scope_kind,
+        "extractedTitle": profile.title,
+        "primaryIdentifier": profile.primary_identifier,
+        "filenameIdentityKind": profile.filename_identity_kind,
+        "filenameIdentifiers": list(profile.filename_identifiers),
+        "trustedFilenameIdentifiers": list(
+            profile.trusted_filename_identifiers
+        ),
+        "titleIdentifiers": list(profile.title_identifiers),
+        "recallIdentityEnabled": profile.recall_identity_enabled,
+        "identityConfirmed": profile.identity_confirmed,
+        "identityConflict": profile.identity_conflict,
+        "qualifier": profile.qualifier,
+        "matchedScopeParentId": decision.matched_scope_parent_id,
+        "preConstraintArchitectureId": decision.pre_architecture_id,
+        "postConstraintArchitectureId": decision.post_architecture_id,
+        "constraintReasonCode": decision.reason_code,
+        "treeGap": decision.tree_gap,
+    }
+    logger.info(
+        "analysis_architecture_constraint=%s",
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
     )
 
 
-def _validate_architecture_repair_result(
-        raw_result: Any,
-        request_params: Dict[str, Any],
-) -> int:
-    """要求分类修复只能返回一个 architectureId 键并再次执行候选校验。"""
-    repaired = _parse_strict_json_object(raw_result)
-    if repaired is None:
-        raise ArchitectureContractError("architecture 修复结果不是严格 JSON 对象")
-    if set(repaired) != {"architectureId"}:
-        raise ArchitectureContractError("architecture 修复结果只能包含 architectureId")
-    return _resolve_analysis_architecture_id(repaired, request_params)
+def _phase_attempt_count(session: DocumentRagSession, start_count: int) -> int:
+    return max(0, len(session.trace.attempts) - start_count)
+
+
+def _elapsed_ms(started_at: float, *, floor: int = 0) -> int:
+    return max(floor, int(math.ceil((time.perf_counter() - started_at) * 1000.0)))
+
+
+def _recall_audit_fields(
+        decision: ArchitectureRecallDecision,
+        *,
+        prompt_chars: int,
+) -> Dict[str, Any]:
+    return {
+        "tree_fingerprint": decision.tree_fingerprint,
+        "query_digest": decision.query_digest,
+        "base_top64": list(decision.base_leaf_ids),
+        "final_candidates": list(decision.prompt_candidates),
+        "channel_rankings": {
+            ranking.channel: list(ranking.node_ids)
+            for ranking in decision.channel_rankings
+        },
+        "rrf_scores": dict(decision.rrf_scores),
+        "protected_reasons": dict(decision.protected_reasons),
+        "prompt_chars": prompt_chars,
+        "recall_elapsed_ms": int(math.ceil(decision.elapsed_ms)),
+    }
+
+
+def _direct_recall_audit_fields(
+        *,
+        tree_index: ArchitectureTreeIndex,
+        signals: DocumentArchitectureSignals,
+        candidates: Iterable[ArchitectureNodeProfile],
+        prompt_chars: int,
+        recall_elapsed_ms: int,
+        channel_name: str,
+) -> Dict[str, Any]:
+    nodes = tuple(candidates)
+    return {
+        "tree_fingerprint": tree_index.fingerprint,
+        "query_digest": _architecture_signal_digest(signals),
+        "base_top64": [node.id for node in nodes if node.is_leaf][:64],
+        "final_candidates": [_node_prompt_projection(node) for node in nodes],
+        "channel_rankings": {channel_name: [node.id for node in nodes]},
+        "rrf_scores": {},
+        "protected_reasons": (
+            {nodes[0].id: ["single_candidate"]}
+            if len(nodes) == 1 and channel_name == "direct"
+            else {}
+        ),
+        "prompt_chars": prompt_chars,
+        "recall_elapsed_ms": recall_elapsed_ms,
+    }
 
 
 def _safe_task_error(error: BaseException, *, fallback: str) -> str:
@@ -1280,18 +532,29 @@ def _record_lease_resources(
 
 
 def _submit_callback(
-        *,
-        task_service: LLMTaskService,
-        file_name: str,
-        original_name: str,
-        callback_url: str,
-        callback_timeout: float,
-        callback_payload: Dict[str, Any],
+    *,
+    task_service: LLMTaskService,
+    file_name: str,
+    execution_id: str,
+    original_name: str,
+    callback_url: str,
+    callback_timeout: float,
+    callback_payload: Dict[str, Any],
 ) -> None:
     """在业务终态落库后执行可选回调，并精确推进回调状态机。"""
+    task_service.require_current_execution(
+        "file",
+        file_name,
+        execution_id,
+        allowed_statuses=("2", "3"),
+    )
     if not callback_url:
         try:
-            task_service.mark_callback_skipped("file", file_name)
+            task_service.mark_callback_skipped(
+                "file",
+                file_name,
+                execution_id=execution_id,
+            )
         except Exception:
             logger.critical(
                 "未配置回调地址，但无法将任务标记为无需回调: file_name=%s",
@@ -1299,6 +562,21 @@ def _submit_callback(
                 exc_info=True,
             )
         return
+    claim = task_service.claim_callback_delivery(
+        "file",
+        file_name,
+        timeout=callback_timeout,
+        execution_id=execution_id,
+    )
+    if claim is None:
+        logger.info(
+            "文件分析回调已有发送租约，当前 worker 不重复提交: "
+            "file_name=%s execution_id=%s",
+            file_name,
+            execution_id,
+        )
+        return
+    callback_claim_id, _ = claim
     callback_context = {
         "businessType": "file",
         "fileName": file_name,
@@ -1314,7 +592,13 @@ def _submit_callback(
     except Exception as exc:  # 回调异常不能改写已经确定的业务成功或失败结果。
         callback_error = _safe_task_error(exc, fallback="callback failed")
         try:
-            task_service.mark_callback_failed("file", file_name, callback_error)
+            task_service.mark_callback_failed(
+                "file",
+                file_name,
+                callback_error,
+                execution_id=execution_id,
+                claim_id=callback_claim_id,
+            )
         except Exception:
             logger.critical(
                 "文件分析回调发生异常后，无法将任务标记为回调失败: file_name=%s",
@@ -1329,10 +613,21 @@ def _submit_callback(
         return
     try:
         if succeeded:
-            task_service.mark_callback_success("file", file_name)
+            task_service.mark_callback_success(
+                "file",
+                file_name,
+                execution_id=execution_id,
+                claim_id=callback_claim_id,
+            )
             logger.info("文件分析回调提交成功: file_name=%s", file_name)
         else:
-            task_service.mark_callback_failed("file", file_name, "callback failed")
+            task_service.mark_callback_failed(
+                "file",
+                file_name,
+                "callback failed",
+                execution_id=execution_id,
+                claim_id=callback_claim_id,
+            )
             logger.warning("文件分析回调提交失败: file_name=%s", file_name)
     except Exception:
         logger.critical(
@@ -1344,15 +639,16 @@ def _submit_callback(
 
 
 def _finalize_file_failure(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        file_name: str,
-        original_name: str,
-        stage: str,
-        error_message: str,
-        callback_url: str,
-        callback_timeout: float,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    file_name: str,
+    execution_id: str,
+    original_name: str,
+    stage: str,
+    error_message: str,
+    callback_url: str,
+    callback_timeout: float,
 ) -> None:
     """以失败语义终结任务；任务库不可写时禁止绕过状态落库发送外部回调。"""
     callback_payload = build_file_callback_payload(file_name, {}, status="3")
@@ -1363,8 +659,18 @@ def _finalize_file_failure(
             callback_payload,
             status="3",
             message=f"解析失败（{stage}）：{error_message}",
+            execution_id=execution_id,
         )
         _publish_progress(progress_hub, file_name, 1.0)
+    except (TaskExecutionConflictError, TaskStateConflictError):
+        logger.warning(
+            "文件分析失败终结被CAS拒绝，停止进度与回调: "
+            "file_name=%s execution_id=%s stage=%s",
+            file_name,
+            execution_id,
+            stage,
+        )
+        return
     except Exception:  # SQLite 整体不可写时，回调也不能对外宣称已有可追踪的业务终态。
         logger.critical(
             "文件分析失败状态无法持久化，停止回调: file_name=%s stage=%s",
@@ -1377,6 +683,7 @@ def _finalize_file_failure(
         _submit_callback(
             task_service=task_service,
             file_name=file_name,
+            execution_id=execution_id,
             original_name=original_name,
             callback_url=callback_url,
             callback_timeout=callback_timeout,
@@ -1582,15 +889,22 @@ def _store_prepared_analysis_document(
 
 
 def _execute_file_analysis_task(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        request_payload: Dict[str, Any],
-        download_root: str,
-        callback_url: str,
-        callback_timeout: float,
-        document_rag_factory: DocumentRagFactory,
-        knowledge_index_factory: KnowledgeIndexFactory,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    request_payload: Dict[str, Any],
+    download_root: str,
+    callback_url: str,
+    callback_timeout: float,
+    document_rag_factory: DocumentRagFactory,
+    knowledge_index_factory: KnowledgeIndexFactory,
+    execution_id: str,
+    analysis_classification_mode: str = "topk_two_stage",
+    analysis_filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    ),
+    analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    analysis_identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
 ) -> None:
     """按审计硬前置契约执行单文件分析和永久知识库转交。
 
@@ -1602,6 +916,21 @@ def _execute_file_analysis_task(
         raise TypeError("document_rag_factory 必须实现 DocumentRagFactory")
     if not isinstance(knowledge_index_factory, KnowledgeIndexFactory):
         raise TypeError("knowledge_index_factory 必须实现 KnowledgeIndexFactory")
+    classification_mode = _normalize_analysis_classification_mode(
+        analysis_classification_mode
+    )
+    filename_constraint_mode = _normalize_analysis_filename_constraint_mode(
+        analysis_filename_constraint_mode
+    )
+    data_standard_mode = _normalize_analysis_data_standard_mode(
+        analysis_data_standard_mode
+    )
+    identity_reselect_mode = _normalize_analysis_identity_reselect_mode(
+        analysis_identity_reselect_mode
+    )
+    # 三种运行模式都必须先持久化模型可见候选，审计故障时禁止创建远端 Session。
+    # legacy 仍发送完整小树，但同样受全局 128 候选与 32K Prompt 硬门禁约束。
+    recall_audit_enabled = True
     params = request_payload["params"][0]
     file_name = _as_text(params.get("fileName"))
     requested_original_name = _as_business_original_file_name(
@@ -1616,11 +945,114 @@ def _execute_file_analysis_task(
             file_name,
         )
     file_path = _as_text(params.get("filePath"))
-    task = task_service.get_task("file", file_name)
-    if task is None:
-        raise ValueError(f"文件分析任务不存在: {file_name}")
-    execution_id = _as_text(task.get("execution_id"))
+    execution_id = _as_text(execution_id)
+    if not execution_id:
+        raise ValueError("execution_id不能为空")
+    task_service.require_current_execution(
+        "file",
+        file_name,
+        execution_id,
+        allowed_statuses=("0", "1"),
+    )
+    workflow_started_at = time.perf_counter()
     analysis_prompt = ""
+    original_text = ""
+    tree_index: ArchitectureTreeIndex | None = None
+    recall_decision: ArchitectureRecallDecision | None = None
+    recall_audit_fields: Dict[str, Any] | None = None
+    recall_audit_finalized = False
+    visible_candidates: tuple[Dict[str, Any], ...] = ()
+    visible_ids: set[int] = set()
+    resolved_direct_architecture_id: int | None = None
+    data_standard_profile = _DataStandardClassificationProfile()
+    data_standard_scope_guard_active = False
+    data_standard_scope_ids: tuple[int, ...] = ()
+    data_standard_remark_overrides: dict[int, str] = {}
+    jane_profile = _JaneClassificationProfile()
+    equipment_identity_profile = _EquipmentIdentityReselectProfile()
+    scope_resolution = _ArchitectureScopeResolution()
+    constraint_decision: _ArchitectureConstraintDecision | None = None
+    data_standard_general_fallback_applied = False
+
+    def persist_initial_recall_audit(fields: Dict[str, Any]) -> None:
+        task_service.upsert_architecture_recall_decision(
+            execution_id=execution_id,
+            **fields,
+        )
+
+    def fail_before_remote_session(
+            *,
+            stage: str,
+            error: BaseException,
+            fields: Dict[str, Any],
+    ) -> None:
+        nonlocal recall_audit_finalized
+        error_message = _safe_task_error(error, fallback="领域分类前置处理失败")
+        try:
+            persist_initial_recall_audit(fields)
+            task_service.finalize_architecture_recall_decision(
+                execution_id=execution_id,
+                returned_architecture_id=None,
+                returned_rank=None,
+                total_elapsed_ms=_elapsed_ms(
+                    workflow_started_at,
+                    floor=int(fields["recall_elapsed_ms"]),
+                ),
+                failure_stage=stage,
+                error_message=error_message,
+            )
+            recall_audit_finalized = True
+        except Exception as audit_exc:
+            error_message = _safe_task_error(
+                audit_exc,
+                fallback="领域召回审计失败",
+            )
+            logger.exception(
+                "领域召回审计失败，禁止创建远端 Session: "
+                "file_name=%s execution_id=%s stage=%s",
+                file_name,
+                execution_id,
+                stage,
+            )
+        _finalize_file_failure(
+            task_service=task_service,
+            progress_hub=progress_hub,
+            file_name=file_name,
+            execution_id=execution_id,
+            original_name=original_name,
+            stage=stage,
+            error_message=error_message,
+            callback_url=callback_url,
+            callback_timeout=callback_timeout,
+        )
+
+    architecture_index_started_at = time.perf_counter()
+    try:
+        ranges = build_effective_analysis_ranges(params)
+        tree_index = validate_analysis_architecture_ranges(params)
+    except ArchitectureTreeValidationError as exc:
+        fields = {
+            "tree_fingerprint": "",
+            "query_digest": hashlib.sha256(b"").hexdigest(),
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(
+                architecture_index_started_at
+            ),
+        }
+        fail_before_remote_session(
+            stage="architecture_index",
+            error=exc,
+            fields=fields,
+        )
+        return
+    architecture_index_elapsed_seconds = (
+        time.perf_counter() - architecture_index_started_at
+    )
 
     logger.info(
         "开始执行文件分析任务: file_name=%s execution_id=%s",
@@ -1629,7 +1061,12 @@ def _execute_file_analysis_task(
     )
     try:
         task_service.update_task_progress(
-            "file", file_name, progress=0.15, message="正在下载文件", status="1"
+            "file",
+            file_name,
+            progress=0.15,
+            message="正在下载文件",
+            status="1",
+            execution_id=execution_id,
         )
         _publish_progress(progress_hub, file_name, 0.15)
         downloaded_path = download_to_temp_file(
@@ -1639,7 +1076,11 @@ def _execute_file_analysis_task(
             timeout=60,
         )
         task_service.update_task_progress(
-            "file", file_name, progress=0.35, message="正在执行文档解析"
+            "file",
+            file_name,
+            progress=0.35,
+            message="正在执行文档解析",
+            execution_id=execution_id,
         )
         _publish_progress(progress_hub, file_name, 0.35)
 
@@ -1653,7 +1094,8 @@ def _execute_file_analysis_task(
                 type(exc).__name__,
             )
         llm_file_path = _prepare_analysis_upload_file(llm_file_path)
-        analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
+        # 正文只读取一次，并在任何 Factory/Session 创建前同时提供给召回和 mapper。
+        original_text = _read_original_text(llm_file_path)
     except Exception as exc:
         error_message = _safe_task_error(exc, fallback="文件预处理失败")
         logger.exception(
@@ -1665,6 +1107,7 @@ def _execute_file_analysis_task(
             task_service=task_service,
             progress_hub=progress_hub,
             file_name=file_name,
+            execution_id=execution_id,
             original_name=original_name,
             stage="preparation",
             error_message=error_message,
@@ -1673,6 +1116,438 @@ def _execute_file_analysis_task(
         )
         return
 
+    architecture_list = ranges["architectureList"]
+    data_standard_profile = _build_data_standard_classification_profile(
+        file_name=file_name,
+        original_name=original_name,
+        original_text=original_text,
+    )
+    data_standard_scope_guard_active = (
+        data_standard_mode == ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD
+        and classification_mode != "legacy"
+        and data_standard_profile.identity_confirmed
+        and data_standard_profile.document_kind == "standard_body"
+    )
+    jane_profile = _build_jane_classification_profile(
+        file_name=file_name,
+        original_name=original_name,
+        original_text=original_text,
+    )
+    scope_guard_active = (
+        filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        and jane_profile.active
+        and not data_standard_scope_guard_active
+    )
+    # 召回强证据收窄与 Jane 最终作用域约束是两个独立边界：普通非 Jane 文档在
+    # scope_guard 模式下也只能让原文件名/可信标题参与 exact 与装备 family 规则，
+    # 正文、章节和 Fleetlist 仍保留在 query_text 中参与 lexical/tree 召回；但这里
+    # 不会激活下游 Jane 硬约束，最终分类仍由模型在可见候选内决定。
+    recall_strong_evidence_only = (
+        filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        or data_standard_scope_guard_active
+    )
+    recall_file_name, recall_original_name = _jane_recall_filename_signals(
+        file_name=file_name,
+        original_name=original_name,
+        profile=jane_profile,
+        scope_guard_active=scope_guard_active,
+    )
+    signals = _build_analysis_architecture_signals(
+        file_name=recall_file_name,
+        original_name=recall_original_name,
+        original_text=original_text,
+        title_override=(
+            data_standard_profile.title
+            if data_standard_scope_guard_active
+            else jane_profile.title
+            if scope_guard_active
+            else ""
+        ),
+    )
+    signal_digest = _architecture_signal_digest(signals)
+    # 领域树已在下载前完成索引。将其实际耗时折入既有 recall_elapsed_ms，同时排除
+    # 中间的下载与正文读取耗时，保持审计指标原有语义。
+    index_started_at = (
+        time.perf_counter() - architecture_index_elapsed_seconds
+    )
+
+    if scope_guard_active:
+        scope_resolution = _resolve_jane_architecture_scope(
+            jane_profile,
+            original_text=original_text,
+            tree_index=tree_index,
+        )
+
+    try:
+        if data_standard_scope_guard_active:
+            (
+                data_standard_scope_ids,
+                data_standard_remark_overrides,
+            ) = _data_standard_candidate_scope(
+                tree_index=tree_index,
+                architecture_list=architecture_list,
+            )
+            if not data_standard_scope_ids:
+                raise ArchitectureRecallError(
+                    "已确认标准正文，但 architectureList 中没有可用的数据标准叶节点"
+                )
+        if classification_mode == "legacy":
+            analysis_prompt = normalize_rag_prompt(build_file_analysis_prompt(params))
+            if (
+                    len(tree_index.nodes) > 128
+                    or len(analysis_prompt) > MAX_ANALYSIS_PROMPT_CHARS
+            ):
+                raise ArchitecturePromptBudgetError(
+                    "legacy 完整领域树候选必须不超过 128 个且 Prompt "
+                    "必须不超过 32000 字符"
+                )
+            visible_candidates = tuple(
+                _node_prompt_projection(node) for node in tree_index.nodes
+            )
+            visible_ids = {node.id for node in tree_index.nodes}
+            recall_audit_fields = _direct_recall_audit_fields(
+                tree_index=tree_index,
+                signals=signals,
+                candidates=tree_index.nodes,
+                prompt_chars=len(analysis_prompt),
+                recall_elapsed_ms=_elapsed_ms(index_started_at),
+                channel_name="legacy",
+            )
+        else:
+            if len(tree_index.nodes) == 1:
+                direct_node = tree_index.nodes[0]
+                visible_candidates = (_node_prompt_projection(direct_node),)
+                visible_ids = {direct_node.id}
+                resolved_direct_architecture_id = direct_node.id
+                _validate_data_standard_leaf_requirement(
+                    direct_node.id,
+                    architecture_list,
+                )
+            else:
+                # 召回服务先以宽松估算上限返回实际候选；真实 Prompt 随后执行 32K 硬门禁。
+                recall_decision = recall_architecture_candidates(
+                    tree_index,
+                    signals,
+                    prompt_char_limit=2_000_000,
+                    prompt_overhead_chars=0,
+                    strong_evidence_only=recall_strong_evidence_only,
+                    strong_identity_enabled=(
+                        jane_profile.recall_identity_enabled
+                        if scope_guard_active
+                        else True
+                    ),
+                    # Jane 标题+正文类型别名是既有的双源特例，不能因普通非 Jane
+                    # 文档启用召回强证据收窄而被意外激活。
+                    jane_title_type_alias_enabled=scope_guard_active,
+                    preferred_parent_reasons=(
+                        scope_resolution.preferred_parent_reasons
+                        if scope_guard_active
+                        else None
+                    ),
+                    candidate_scope_ids=(
+                        data_standard_scope_ids
+                        if data_standard_scope_guard_active
+                        else None
+                    ),
+                    candidate_scope_reason=(
+                        "data-standard-scope"
+                        if data_standard_scope_guard_active
+                        else ""
+                    ),
+                    candidate_remark_overrides=(
+                        data_standard_remark_overrides
+                        if data_standard_scope_guard_active
+                        else None
+                    ),
+                )
+                visible_candidates = recall_decision.prompt_candidates
+                visible_ids = set(recall_decision.final_candidate_ids)
+                if len(visible_candidates) == 1:
+                    resolved_direct_architecture_id = _validate_topk_architecture_id(
+                        visible_candidates[0]["id"],
+                        visible_ids=visible_ids,
+                        tree_index=tree_index,
+                        architecture_list=architecture_list,
+                    )
+
+            if resolved_direct_architecture_id is not None:
+                direct_node = tree_index.require(resolved_direct_architecture_id)
+                include_standard_fields = _is_architecture_in_standard_range(
+                    resolved_direct_architecture_id,
+                    architecture_list,
+                    ranges["architectureStandardList"],
+                )
+                analysis_prompt = normalize_rag_prompt(
+                    build_file_extraction_prompt(
+                        params,
+                        resolved_architecture_id=resolved_direct_architecture_id,
+                        resolved_architecture_path_name=direct_node.semantic_path,
+                        resolved_architecture_path_node_names=(
+                            _architecture_path_keyword_names(
+                                tree_index,
+                                resolved_direct_architecture_id,
+                            )
+                        ),
+                        resolved_architecture_node_type=(
+                            "leaf" if direct_node.is_leaf else "parent"
+                        ),
+                        include_data_standard_fields=include_standard_fields,
+                    )
+                )
+            elif classification_mode == "topk_two_stage":
+                analysis_prompt = normalize_rag_prompt(
+                    (
+                        build_data_standard_classification_prompt(
+                            params,
+                            visible_candidates,
+                            standard_context=_data_standard_prompt_context(
+                                data_standard_profile
+                            ),
+                        )
+                        if data_standard_scope_guard_active
+                        else build_architecture_classification_prompt(
+                            params,
+                            visible_candidates,
+                            classification_context=(
+                                _jane_classification_prompt_context(
+                                    jane_profile,
+                                    scope_resolution,
+                                )
+                                if scope_guard_active
+                                else None
+                            ),
+                        )
+                    )
+                )
+            else:
+                limited_params = dict(params)
+                limited_params["architectureList"] = list(visible_candidates)
+                scope_contract = ""
+                if data_standard_scope_guard_active:
+                    scope_contract = (
+                        "\n【数据标准作用域分类补充规则】\n"
+                        "服务端已确认该文件是标准正文；只能在下方数据标准叶节点中分类。"
+                        "专业类别必须由标准标题或范围支持；普通目录中的“术语和定义”不能"
+                        "单独决定分类。不属于五个专业主题时选择“通用要求”。\n"
+                        "服务端标准画像："
+                        + json.dumps(
+                            _data_standard_prompt_context(
+                                data_standard_profile
+                            ),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                elif scope_guard_active:
+                    scope_contract = (
+                        "\n【简氏作用域分类补充规则】\n"
+                        "按全文主要对象和覆盖粒度分类；class 文档的首舰号只标识舰级，"
+                        "Fleetlist 成员不能单独决定最终分类；Flight、Block、批次限定词"
+                        "优先于基础型号；只有全文主要描述明细类别时才选择明细叶子。\n"
+                        "服务端首页画像："
+                        + json.dumps(
+                            _jane_classification_prompt_context(
+                                jane_profile,
+                                scope_resolution,
+                            ),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                analysis_prompt = normalize_rag_prompt(
+                    build_file_analysis_prompt(limited_params)
+                    + "\n【topk_single 受限候选补充合同】\n"
+                    + "下方 JSON 是本次完整且唯一可选的模型候选，nodeType 必须保留语义。"
+                    + "证据足以支持 leaf 时优先叶子；叶子证据不足但能可靠确定 parent 时，"
+                    + "允许返回候选中最深的 parent。此规则替代上文只允许叶子的旧规则。\n"
+                    + scope_contract
+                    + json.dumps(
+                        list(visible_candidates),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+
+            if len(visible_candidates) > 128:
+                raise ArchitecturePromptBudgetError("领域模型候选数量超过 128 个")
+            if len(analysis_prompt) > MAX_ANALYSIS_PROMPT_CHARS:
+                raise ArchitecturePromptBudgetError(
+                    f"模型 Prompt 共 {len(analysis_prompt)} 字符，超过 32000 字符上限"
+                )
+
+            if recall_decision is not None:
+                recall_audit_fields = _recall_audit_fields(
+                    recall_decision,
+                    prompt_chars=len(analysis_prompt),
+                )
+            else:
+                direct_nodes = tuple(
+                    tree_index.require(candidate["id"])
+                    for candidate in visible_candidates
+                )
+                recall_audit_fields = _direct_recall_audit_fields(
+                    tree_index=tree_index,
+                    signals=signals,
+                    candidates=direct_nodes,
+                    prompt_chars=len(analysis_prompt),
+                    recall_elapsed_ms=_elapsed_ms(index_started_at),
+                    channel_name="direct",
+                )
+    except ArchitectureTreeValidationError as exc:
+        fields = {
+            "tree_fingerprint": tree_index.fingerprint,
+            "query_digest": signal_digest,
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(index_started_at),
+        }
+        fail_before_remote_session(
+            stage="architecture_index",
+            error=exc,
+            fields=fields,
+        )
+        return
+    except ArchitecturePromptBudgetError as exc:
+        if recall_decision is not None:
+            fields = _recall_audit_fields(
+                recall_decision,
+                prompt_chars=len(analysis_prompt),
+            )
+        else:
+            auditable_nodes = tree_index.nodes if len(tree_index.nodes) <= 128 else ()
+            fields = _direct_recall_audit_fields(
+                tree_index=tree_index,
+                signals=signals,
+                candidates=auditable_nodes,
+                prompt_chars=len(analysis_prompt),
+                recall_elapsed_ms=_elapsed_ms(index_started_at),
+                channel_name="legacy" if classification_mode == "legacy" else "direct",
+            )
+        fail_before_remote_session(
+            stage="architecture_prompt_budget",
+            error=exc,
+            fields=fields,
+        )
+        return
+    except ArchitectureRecallError as exc:
+        fields = {
+            "tree_fingerprint": tree_index.fingerprint,
+            "query_digest": signal_digest,
+            "base_top64": [],
+            "final_candidates": [],
+            "channel_rankings": {},
+            "rrf_scores": {},
+            "protected_reasons": {},
+            "prompt_chars": 0,
+            "recall_elapsed_ms": _elapsed_ms(index_started_at),
+        }
+        fail_before_remote_session(
+            stage="architecture_recall",
+            error=exc,
+            fields=fields,
+        )
+        return
+    except ArchitectureContractError as exc:
+        direct_nodes = tuple(
+            tree_index.require(candidate["id"])
+            for candidate in visible_candidates
+        )
+        fields = _direct_recall_audit_fields(
+            tree_index=tree_index,
+            signals=signals,
+            candidates=direct_nodes,
+            prompt_chars=len(analysis_prompt),
+            recall_elapsed_ms=_elapsed_ms(index_started_at),
+            channel_name="direct",
+        )
+        fail_before_remote_session(
+            stage="architecture_contract",
+            error=exc,
+            fields=fields,
+        )
+        return
+
+    if (
+        identity_reselect_mode != ANALYSIS_IDENTITY_RESELECT_MODE_OFF
+        and classification_mode == "topk_two_stage"
+        and filename_constraint_mode
+        == ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD
+        and resolved_direct_architecture_id is None
+    ):
+        try:
+            equipment_identity_profile = (
+                _build_equipment_identity_reselect_profile(
+                    requested_original_name=requested_original_name,
+                    original_text=original_text,
+                    tree_index=tree_index,
+                    visible_ids=visible_ids,
+                    jane_active=jane_profile.active,
+                    data_standard_active=data_standard_scope_guard_active,
+                )
+            )
+        except Exception:
+            equipment_identity_profile = _EquipmentIdentityReselectProfile(
+                reason_code="identity_profile_error"
+            )
+            logger.exception(
+                "装备双证据身份画像失败，保留普通分类链路: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+    logger.info(
+        "装备身份受限重选门禁已评估: execution_id=%s mode=%s active=%s "
+        "reason=%s identifier=%s target_parent_id=%s candidate_count=%d",
+        execution_id,
+        identity_reselect_mode,
+        equipment_identity_profile.active,
+        equipment_identity_profile.reason_code,
+        equipment_identity_profile.identifier,
+        equipment_identity_profile.target_parent_id,
+        len(equipment_identity_profile.candidate_ids),
+    )
+
+    if recall_audit_enabled and recall_audit_fields is None:
+        raise RuntimeError("领域召回未生成可审计决策")
+    if recall_audit_enabled:
+        try:
+            # 该写入是远端 Session 创建的硬前置；失败时下面的 Factory 代码不会执行。
+            persist_initial_recall_audit(recall_audit_fields)
+        except Exception as exc:
+            error_message = _safe_task_error(exc, fallback="领域召回审计失败")
+            logger.exception(
+                "领域召回审计失败，禁止创建远端 Session: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+            _finalize_file_failure(
+                task_service=task_service,
+                progress_hub=progress_hub,
+                file_name=file_name,
+                execution_id=execution_id,
+                original_name=original_name,
+                stage="architecture_recall",
+                error_message=error_message,
+                callback_url=callback_url,
+                callback_timeout=callback_timeout,
+            )
+            return
+
+    task_service.require_current_execution(
+        "file",
+        file_name,
+        execution_id,
+        allowed_statuses=("0", "1"),
+    )
     with document_rag_factory.create() as document_rag:
         try:
             task_service.rag_resource_leases.begin(
@@ -1689,10 +1564,31 @@ def _execute_file_analysis_task(
                 file_name,
                 execution_id,
             )
+            if recall_audit_enabled:
+                try:
+                    task_service.finalize_architecture_recall_decision(
+                        execution_id=execution_id,
+                        returned_architecture_id=None,
+                        returned_rank=None,
+                        total_elapsed_ms=_elapsed_ms(
+                            workflow_started_at,
+                            floor=int(recall_audit_fields["recall_elapsed_ms"]),
+                        ),
+                        failure_stage="architecture_contract",
+                        error_message=lease_error,
+                    )
+                    recall_audit_finalized = True
+                except Exception:
+                    logger.critical(
+                        "资源租约失败后无法终结召回审计: execution_id=%s",
+                        execution_id,
+                        exc_info=True,
+                    )
             _finalize_file_failure(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="resource_lease",
                 error_message=lease_error,
@@ -1703,6 +1599,7 @@ def _execute_file_analysis_task(
         session: DocumentRagSession | None = None
         prepared_document: PreparedDocumentRef | None = None
         final_prompt = analysis_prompt
+        workflow_failure_stage = "architecture_contract"
         try:
             session = document_rag.open_isolated_session(
                 context_name=f"llm-file-{execution_id}",
@@ -1713,94 +1610,641 @@ def _execute_file_analysis_task(
                 execution_id,
                 session.trace,
             )
-            rag_result = session.analyse(
-                llm_file_path,
-                analysis_prompt,
-                require_sources=True,
-                max_attempts=2,
-            )
-            prepared_document = rag_result.prepared_document
-            _record_lease_resources(
-                task_service,
-                execution_id,
-                rag_result.trace,
-                prepared_document,
-            )
-
-            parsed_result = _parse_strict_json_object(rag_result.text)
-            if parsed_result is None:
-                final_prompt = normalize_rag_prompt(
-                    build_json_repair_prompt(rag_result.text)
-                )
-                repaired_result = session.ask(
-                    final_prompt,
-                    prompt_kind=RagPromptKind.JSON_REPAIR,
+            if (
+                    classification_mode == "topk_two_stage"
+                    and resolved_direct_architecture_id is None
+            ):
+                classification_started = len(session.trace.attempts)
+                rag_result = session.analyse(
+                    llm_file_path,
+                    analysis_prompt,
+                    prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
                     require_sources=True,
-                    max_attempts=1,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
                 )
-                parsed_result = _parse_strict_json_object(repaired_result.text)
-                if parsed_result is None:
-                    raise AnalysisContractError("JSON 修复后仍不是严格 JSON 对象")
-
-            original_text = _read_original_text(llm_file_path)
-            try:
-                architecture_id = _resolve_analysis_architecture_id(
-                    parsed_result,
-                    params,
+                prepared_document = rag_result.prepared_document
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    rag_result.trace,
+                    prepared_document,
                 )
-            except ArchitectureContractError as contract_error:
-                candidates, allowed_ids = _architecture_candidates(params)
-                if isinstance(contract_error, DataStandardParentContractError):
-                    # 模型已返回合法候选 ID，但该 ID 是数据标准父节点。该场景不依赖
-                    # GJB 关键词，按前端原始候选顺序直接兜底到数据标准叶子节点。
-                    architecture_id = _first_data_standard_leaf_id(candidates)
-                    fallback_reason = "data_standard_parent"
-                else:
-                    # 保留既有 GJB 兜底：首次结果缺失、类型错误或超出候选范围时，若正文
-                    # 存在 GJB 线索，则按候选顺序选择数据标准分支中的第一个叶子节点。
-                    architecture_id = _match_gjb_architecture_candidate(
-                        parsed_result,
-                        params,
-                        original_text,
-                        candidates,
-                    )
-                    fallback_reason = "gjb_reference"
-                if architecture_id is not None:
-                    logger.info(
-                        "文件分析分类已按候选顺序兜底到数据标准叶子: "
-                        "file_name=%s fallback_reason=%s architecture_id=%s",
-                        file_name,
-                        fallback_reason,
-                        architecture_id,
-                    )
-                else:
-                    final_prompt = normalize_rag_prompt(
-                        build_architecture_repair_prompt(
-                            parsed_result,
-                            [
-                                item
-                                for item in candidates
-                                if _coerce_int(item.get("id")) in allowed_ids
-                            ],
-                            str(contract_error),
+                parsed_classification = _parse_strict_json_object(rag_result.text)
+                architecture_id: int | None = None
+                try:
+                    parsed_classification, architecture_id = (
+                        _parse_topk_classification_result(
+                            rag_result.text,
+                            visible_ids=visible_ids,
+                            tree_index=tree_index,
+                            architecture_list=architecture_list,
                         )
+                    )
+                except ArchitectureContractError as contract_error:
+                    force_standard = isinstance(
+                        contract_error,
+                        DataStandardParentContractError,
+                    )
+                    architecture_id = (
+                        None
+                        if data_standard_scope_guard_active
+                        else _visible_data_standard_fallback_id(
+                            visible_ids=visible_ids,
+                            architecture_list=architecture_list,
+                            force=force_standard,
+                            context_values=(original_text, original_name),
+                        )
+                    )
+                    if architecture_id is None:
+                        attempts_used = _phase_attempt_count(
+                            session,
+                            classification_started,
+                        )
+                        if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                            if not data_standard_scope_guard_active:
+                                raise ArchitectureContractError(
+                                    "分类阶段实际模型调用预算已耗尽，无法 repair"
+                                ) from contract_error
+                            architecture_id = (
+                                _visible_data_standard_fallback_id(
+                                    visible_ids=visible_ids,
+                                    architecture_list=architecture_list,
+                                    force=True,
+                                    context_values=(
+                                        original_text,
+                                        original_name,
+                                    ),
+                                )
+                            )
+                            if architecture_id is None:
+                                raise ArchitectureContractError(
+                                    "标准正文分类预算耗尽，且候选中不存在通用要求叶节点"
+                                ) from contract_error
+                            data_standard_general_fallback_applied = True
+                        if architecture_id is None:
+                            final_prompt = _normalize_bounded_analysis_prompt(
+                                build_architecture_repair_prompt(
+                                    parsed_classification
+                                    or {"architectureId": None},
+                                    visible_candidates,
+                                    str(contract_error),
+                                )
+                            )
+                            repaired_result = session.ask(
+                                final_prompt,
+                                prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                                require_sources=True,
+                                max_attempts=(
+                                    MAX_ANALYSIS_PHASE_CALLS - attempts_used
+                                ),
+                            )
+                            try:
+                                _repaired, architecture_id = (
+                                    _parse_topk_classification_result(
+                                        repaired_result.text,
+                                        visible_ids=visible_ids,
+                                        tree_index=tree_index,
+                                        architecture_list=architecture_list,
+                                    )
+                                )
+                            except ArchitectureContractError as repair_error:
+                                architecture_id = (
+                                    _visible_data_standard_fallback_id(
+                                        visible_ids=visible_ids,
+                                        architecture_list=architecture_list,
+                                        force=True,
+                                        context_values=(
+                                            original_text,
+                                            original_name,
+                                        ),
+                                    )
+                                    if data_standard_scope_guard_active
+                                    else None
+                                )
+                                if architecture_id is None:
+                                    raise ArchitectureContractError(
+                                        "标准正文分类 repair 后仍无法确定类别，且候选中"
+                                        "不存在通用要求叶节点"
+                                    ) from repair_error
+                                data_standard_general_fallback_applied = True
+
+                if architecture_id is None:
+                    raise ArchitectureContractError("无法确定领域分类")
+                initial_architecture_id = architecture_id
+                identity_gate_decision = _decide_identity_reselect_gate(
+                    architecture_id,
+                    profile=equipment_identity_profile,
+                    tree_index=tree_index,
+                )
+                identity_reselect_architecture_id: int | None = None
+                identity_reselect_outcome = identity_gate_decision.reason_code
+                classification_attempts_used = _phase_attempt_count(
+                    session,
+                    classification_started,
+                )
+                if identity_gate_decision.should_reselect:
+                    if classification_attempts_used != 1:
+                        identity_reselect_outcome = "skip_call_budget"
+                    else:
+                        try:
+                            scoped_candidates = tuple(
+                                _node_prompt_projection(tree_index.require(node_id))
+                                for node_id in equipment_identity_profile.candidate_ids
+                            )
+                            reselect_prompt = _normalize_bounded_analysis_prompt(
+                                build_architecture_reselect_prompt(
+                                    {"architectureId": initial_architecture_id},
+                                    {
+                                        "identifier": (
+                                            equipment_identity_profile.identifier
+                                        ),
+                                        "matchedParentId": (
+                                            equipment_identity_profile.target_parent_id
+                                        ),
+                                        "matchedParentPath": (
+                                            equipment_identity_profile.target_parent_path
+                                        ),
+                                        "evidenceSources": list(
+                                            equipment_identity_profile.evidence_sources
+                                        ),
+                                    },
+                                    scoped_candidates,
+                                )
+                            )
+                        except Exception:
+                            identity_reselect_outcome = "prompt_build_failed"
+                            logger.exception(
+                                "装备身份受限重选 Prompt 构造失败，保留初次分类: "
+                                "file_name=%s execution_id=%s",
+                                file_name,
+                                execution_id,
+                            )
+                        else:
+                            reselect_conversation_ready = (
+                                session.start_fresh_conversation(
+                                    conversation_name=(
+                                        "analysis-identity-reselect-"
+                                        f"{Path(file_name).stem}"
+                                    ),
+                                    failure_is_fatal=False,
+                                )
+                            )
+                            _record_lease_resources(
+                                task_service,
+                                execution_id,
+                                session.trace,
+                                prepared_document,
+                            )
+                            if not reselect_conversation_ready:
+                                identity_reselect_outcome = (
+                                    "conversation_unavailable_keep_initial"
+                                )
+                            else:
+                                final_prompt = reselect_prompt
+                                reselect_result = session.ask_optional(
+                                    final_prompt,
+                                    prompt_kind=(
+                                        RagPromptKind.ARCHITECTURE_RESELECT
+                                    ),
+                                    require_sources=True,
+                                    max_attempts=1,
+                                )
+                                _record_lease_resources(
+                                    task_service,
+                                    execution_id,
+                                    session.trace,
+                                    prepared_document,
+                                )
+                                if reselect_result is None:
+                                    identity_reselect_outcome = (
+                                        "query_failed_keep_initial"
+                                    )
+                                else:
+                                    try:
+                                        identity_reselect_architecture_id = (
+                                            _parse_architecture_reselect_result(
+                                                reselect_result.text,
+                                                scoped_ids=set(
+                                                    equipment_identity_profile.candidate_ids
+                                                ),
+                                                tree_index=tree_index,
+                                                architecture_list=architecture_list,
+                                            )
+                                        )
+                                    except ArchitectureContractError:
+                                        identity_reselect_outcome = (
+                                            "invalid_result_keep_initial"
+                                        )
+                                        logger.warning(
+                                            "装备身份受限重选结果不合法，保留初次分类: "
+                                            "file_name=%s execution_id=%s",
+                                            file_name,
+                                            execution_id,
+                                        )
+                                    else:
+                                        if identity_reselect_architecture_id is None:
+                                            identity_reselect_outcome = (
+                                                "null_result_keep_initial"
+                                            )
+                                        elif (
+                                            identity_reselect_mode
+                                            == ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE
+                                        ):
+                                            architecture_id = (
+                                                identity_reselect_architecture_id
+                                            )
+                                            identity_reselect_outcome = (
+                                                "enforce_applied"
+                                            )
+                                        else:
+                                            identity_reselect_outcome = (
+                                                "shadow_kept_initial"
+                                            )
+                logger.info(
+                    "装备身份受限重选完成: execution_id=%s mode=%s relation=%s "
+                    "gate_reason=%s initial_architecture_id=%s "
+                    "reselect_architecture_id=%s pre_constraint_architecture_id=%s "
+                    "classification_attempts=%d outcome=%s",
+                    execution_id,
+                    identity_reselect_mode,
+                    identity_gate_decision.relation,
+                    identity_gate_decision.reason_code,
+                    initial_architecture_id,
+                    identity_reselect_architecture_id,
+                    architecture_id,
+                    classification_attempts_used,
+                    identity_reselect_outcome,
+                )
+                constraint_decision = (
+                    _decide_topk_deterministic_architecture_constraint(
+                        architecture_id,
+                        file_name=file_name,
+                        original_name=original_name,
+                        visible_ids=visible_ids,
+                        tree_index=tree_index,
+                        architecture_list=architecture_list,
+                        filename_constraint_mode=filename_constraint_mode,
+                        data_standard_mode=data_standard_mode,
+                        data_standard_profile=data_standard_profile,
+                        jane_profile=jane_profile,
+                        scope_resolution=scope_resolution,
+                    )
+                )
+                if data_standard_general_fallback_applied:
+                    constraint_decision = _ArchitectureConstraintDecision(
+                        pre_architecture_id=architecture_id,
+                        post_architecture_id=architecture_id,
+                        reason_code="data_standard_general_fallback",
+                        matched_scope_parent_id=None,
+                        tree_gap=False,
+                    )
+                architecture_id = constraint_decision.post_architecture_id
+                selected_node = tree_index.require(architecture_id)
+                include_standard_fields = _is_architecture_in_standard_range(
+                    architecture_id,
+                    architecture_list,
+                    ranges["architectureStandardList"],
+                )
+                extraction_prompt = _normalize_bounded_analysis_prompt(
+                    build_file_extraction_prompt(
+                        params,
+                        resolved_architecture_id=architecture_id,
+                        resolved_architecture_path_name=selected_node.semantic_path,
+                        resolved_architecture_path_node_names=(
+                            _architecture_path_keyword_names(
+                                tree_index,
+                                architecture_id,
+                            )
+                        ),
+                        resolved_architecture_node_type=(
+                            "leaf" if selected_node.is_leaf else "parent"
+                        ),
+                        include_data_standard_fields=include_standard_fields,
+                    )
+                )
+                workflow_failure_stage = "analysis_extraction"
+                session.start_fresh_conversation(
+                    conversation_name=(
+                        f"analysis-extraction-{Path(file_name).stem}"
+                    ),
+                )
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    session.trace,
+                    prepared_document,
+                )
+                # 只有第二线程已经创建成功，抽取 Prompt 才成为审计中的最后实际请求。
+                # 创建失败时 final_prompt 继续指向分类或分类 repair Prompt。
+                final_prompt = extraction_prompt
+                extraction_started = len(session.trace.attempts)
+                extraction_result = session.ask(
+                    final_prompt,
+                    prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+                    require_sources=True,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
+                )
+                parsed_result = _parse_strict_json_object(extraction_result.text)
+                if parsed_result is None:
+                    attempts_used = _phase_attempt_count(session, extraction_started)
+                    if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                        raise AnalysisContractError(
+                            "字段抽取阶段实际模型调用预算已耗尽，无法 JSON repair"
+                        )
+                    final_prompt = _normalize_bounded_analysis_prompt(
+                        build_json_repair_prompt(extraction_result.text)
                     )
                     repaired_result = session.ask(
                         final_prompt,
-                        prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                        prompt_kind=RagPromptKind.JSON_REPAIR,
                         require_sources=True,
-                        max_attempts=1,
+                        max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
                     )
-                    architecture_id = _validate_architecture_repair_result(
-                        repaired_result.text,
-                        params,
+                    parsed_result = _parse_strict_json_object(repaired_result.text)
+                    if parsed_result is None:
+                        raise AnalysisContractError(
+                            "JSON 修复后仍不是严格 JSON 对象"
+                        )
+            elif resolved_direct_architecture_id is not None:
+                architecture_id = resolved_direct_architecture_id
+                workflow_failure_stage = "analysis_extraction"
+                extraction_started = len(session.trace.attempts)
+                rag_result = session.analyse(
+                    llm_file_path,
+                    analysis_prompt,
+                    prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+                    require_sources=True,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
+                )
+                prepared_document = rag_result.prepared_document
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    rag_result.trace,
+                    prepared_document,
+                )
+                parsed_result = _parse_strict_json_object(rag_result.text)
+                if parsed_result is None:
+                    attempts_used = _phase_attempt_count(session, extraction_started)
+                    if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                        raise AnalysisContractError(
+                            "字段抽取阶段实际模型调用预算已耗尽，无法 JSON repair"
+                        )
+                    final_prompt = _normalize_bounded_analysis_prompt(
+                        build_json_repair_prompt(rag_result.text)
                     )
+                    repaired_result = session.ask(
+                        final_prompt,
+                        prompt_kind=RagPromptKind.JSON_REPAIR,
+                        require_sources=True,
+                        max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
+                    )
+                    parsed_result = _parse_strict_json_object(repaired_result.text)
+                    if parsed_result is None:
+                        raise AnalysisContractError(
+                            "JSON 修复后仍不是严格 JSON 对象"
+                        )
+            else:
+                workflow_failure_stage = "analysis_extraction"
+                combined_started = len(session.trace.attempts)
+                rag_result = session.analyse(
+                    llm_file_path,
+                    analysis_prompt,
+                    prompt_kind=RagPromptKind.ANALYSIS,
+                    require_sources=True,
+                    max_attempts=MAX_ANALYSIS_PHASE_CALLS,
+                )
+                prepared_document = rag_result.prepared_document
+                _record_lease_resources(
+                    task_service,
+                    execution_id,
+                    rag_result.trace,
+                    prepared_document,
+                )
+                parsed_result = _parse_strict_json_object(rag_result.text)
+                if parsed_result is None:
+                    attempts_used = _phase_attempt_count(session, combined_started)
+                    if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                        raise AnalysisContractError(
+                            "combined 阶段实际模型调用预算已耗尽，无法 JSON repair"
+                        )
+                    final_prompt = _normalize_bounded_analysis_prompt(
+                        build_json_repair_prompt(rag_result.text)
+                    )
+                    repaired_result = session.ask(
+                        final_prompt,
+                        prompt_kind=RagPromptKind.JSON_REPAIR,
+                        require_sources=True,
+                        max_attempts=MAX_ANALYSIS_PHASE_CALLS - attempts_used,
+                    )
+                    parsed_result = _parse_strict_json_object(repaired_result.text)
+                    if parsed_result is None:
+                        raise AnalysisContractError(
+                            "JSON 修复后仍不是严格 JSON 对象"
+                        )
+
+                workflow_failure_stage = "architecture_contract"
+                try:
+                    if classification_mode == "legacy":
+                        architecture_id = _resolve_analysis_architecture_id(
+                            parsed_result,
+                            params,
+                        )
+                        architecture_id = _validate_topk_architecture_id(
+                            architecture_id,
+                            visible_ids=visible_ids,
+                            tree_index=tree_index,
+                            architecture_list=architecture_list,
+                        )
+                    else:
+                        if "architectureId" not in parsed_result:
+                            raise ArchitectureContractError("architectureId 缺失")
+                        architecture_id = _validate_topk_architecture_id(
+                            parsed_result.get("architectureId"),
+                            visible_ids=visible_ids,
+                            tree_index=tree_index,
+                            architecture_list=architecture_list,
+                        )
+                except ArchitectureContractError as contract_error:
+                    force_standard = isinstance(
+                        contract_error,
+                        DataStandardParentContractError,
+                    )
+                    if classification_mode == "legacy":
+                        architecture_id = (
+                            _general_data_standard_leaf_id(architecture_list)
+                            if force_standard
+                            else _match_gjb_architecture_candidate(
+                                parsed_result,
+                                params,
+                                original_text,
+                                architecture_list,
+                            )
+                        )
+                    else:
+                        architecture_id = (
+                            None
+                            if data_standard_scope_guard_active
+                            else _visible_data_standard_fallback_id(
+                                visible_ids=visible_ids,
+                                architecture_list=architecture_list,
+                                force=force_standard,
+                                context_values=(
+                                    original_text,
+                                    original_name,
+                                ),
+                            )
+                        )
+                    if architecture_id is None:
+                        attempts_used = _phase_attempt_count(
+                            session,
+                            combined_started,
+                        )
+                        if attempts_used >= MAX_ANALYSIS_PHASE_CALLS:
+                            if not data_standard_scope_guard_active:
+                                raise ArchitectureContractError(
+                                    "combined 阶段实际模型调用预算已耗尽，无法 "
+                                    "architecture repair"
+                                ) from contract_error
+                            architecture_id = (
+                                _visible_data_standard_fallback_id(
+                                    visible_ids=visible_ids,
+                                    architecture_list=architecture_list,
+                                    force=True,
+                                    context_values=(
+                                        original_text,
+                                        original_name,
+                                    ),
+                                )
+                            )
+                            if architecture_id is None:
+                                raise ArchitectureContractError(
+                                    "标准正文分类预算耗尽，且候选中不存在通用要求叶节点"
+                                ) from contract_error
+                            data_standard_general_fallback_applied = True
+                        if architecture_id is None:
+                            final_prompt = _normalize_bounded_analysis_prompt(
+                                build_architecture_repair_prompt(
+                                    parsed_result,
+                                    visible_candidates,
+                                    str(contract_error),
+                                )
+                            )
+                            repaired_result = session.ask(
+                                final_prompt,
+                                prompt_kind=RagPromptKind.ARCHITECTURE_REPAIR,
+                                require_sources=True,
+                                max_attempts=(
+                                    MAX_ANALYSIS_PHASE_CALLS - attempts_used
+                                ),
+                            )
+                            if classification_mode == "legacy":
+                                architecture_id = (
+                                    _validate_architecture_repair_result(
+                                        repaired_result.text,
+                                        params,
+                                    )
+                                )
+                                architecture_id = _validate_topk_architecture_id(
+                                    architecture_id,
+                                    visible_ids=visible_ids,
+                                    tree_index=tree_index,
+                                    architecture_list=architecture_list,
+                                )
+                            else:
+                                try:
+                                    _repaired, architecture_id = (
+                                        _parse_topk_classification_result(
+                                            repaired_result.text,
+                                            visible_ids=visible_ids,
+                                            tree_index=tree_index,
+                                            architecture_list=architecture_list,
+                                        )
+                                    )
+                                except ArchitectureContractError as repair_error:
+                                    architecture_id = (
+                                        _visible_data_standard_fallback_id(
+                                            visible_ids=visible_ids,
+                                            architecture_list=architecture_list,
+                                            force=True,
+                                            context_values=(
+                                                original_text,
+                                                original_name,
+                                            ),
+                                        )
+                                        if data_standard_scope_guard_active
+                                        else None
+                                    )
+                                    if architecture_id is None:
+                                        raise ArchitectureContractError(
+                                            "标准正文分类 repair 后仍无法确定类别，且候选中"
+                                            "不存在通用要求叶节点"
+                                        ) from repair_error
+                                    data_standard_general_fallback_applied = True
+
+            if constraint_decision is None:
+                constraint_decision = (
+                    _decide_topk_deterministic_architecture_constraint(
+                        architecture_id,
+                        file_name=file_name,
+                        original_name=original_name,
+                        visible_ids=visible_ids,
+                        tree_index=tree_index,
+                        architecture_list=architecture_list,
+                        filename_constraint_mode=filename_constraint_mode,
+                        data_standard_mode=data_standard_mode,
+                        data_standard_profile=data_standard_profile,
+                        jane_profile=jane_profile,
+                        scope_resolution=scope_resolution,
+                    )
+                )
+            if data_standard_general_fallback_applied:
+                constraint_decision = _ArchitectureConstraintDecision(
+                    pre_architecture_id=architecture_id,
+                    post_architecture_id=architecture_id,
+                    reason_code="data_standard_general_fallback",
+                    matched_scope_parent_id=None,
+                    tree_gap=False,
+                )
+            architecture_id = constraint_decision.post_architecture_id
+            _log_architecture_constraint_decision(
+                execution_id=execution_id,
+                file_name=file_name,
+                filename_constraint_mode=filename_constraint_mode,
+                profile=jane_profile,
+                decision=constraint_decision,
+                data_standard_mode=data_standard_mode,
+                data_standard_profile=data_standard_profile,
+            )
+            if len(session.trace.attempts) > MAX_ANALYSIS_MODEL_CALLS:
+                raise AnalysisContractError("文件分析实际模型调用超过 4 次")
             mapped_result = map_analysis_result(
                 parsed_result,
                 params,
                 original_text=original_text,
                 resolved_architecture_id=architecture_id,
             )
+            _log_analysis_content_warnings(
+                parsed_result,
+                mapped_result,
+                file_name=file_name,
+            )
+            returned_rank = next(
+                index + 1
+                for index, candidate in enumerate(visible_candidates)
+                if candidate["id"] == architecture_id
+            )
+            if recall_audit_enabled:
+                task_service.finalize_architecture_recall_decision(
+                    execution_id=execution_id,
+                    returned_architecture_id=architecture_id,
+                    returned_rank=returned_rank,
+                    total_elapsed_ms=_elapsed_ms(
+                        workflow_started_at,
+                        floor=int(recall_audit_fields["recall_elapsed_ms"]),
+                    ),
+                )
+                recall_audit_finalized = True
         except Exception as exc:
             trace = exc.trace if isinstance(exc, RagOperationError) else (
                 session.trace if session is not None else None
@@ -1822,7 +2266,37 @@ def _execute_file_analysis_task(
                     exc_info=True,
                 )
             error_message = _safe_task_error(exc, fallback="RAG 或业务契约失败")
-            failure_stage = trace.failure_stage or "business_contract"
+            failure_stage = (
+                "architecture_prompt_budget"
+                if isinstance(exc, ArchitecturePromptBudgetError)
+                else workflow_failure_stage
+            )
+            if recall_audit_enabled and not recall_audit_finalized:
+                try:
+                    task_service.finalize_architecture_recall_decision(
+                        execution_id=execution_id,
+                        returned_architecture_id=None,
+                        returned_rank=None,
+                        total_elapsed_ms=_elapsed_ms(
+                            workflow_started_at,
+                            floor=int(recall_audit_fields["recall_elapsed_ms"]),
+                        ),
+                        failure_stage=failure_stage,
+                        error_message=error_message,
+                    )
+                    recall_audit_finalized = True
+                except Exception as recall_audit_exc:
+                    error_message = _safe_task_error(
+                        recall_audit_exc,
+                        fallback="领域召回终结审计失败",
+                    )
+                    logger.critical(
+                        "文件分析失败后无法终结领域召回审计: "
+                        "file_name=%s execution_id=%s",
+                        file_name,
+                        execution_id,
+                        exc_info=True,
+                    )
             try:
                 audit_result = task_service.create_llm_interaction_with_trace(
                     business_type="file",
@@ -1857,6 +2331,7 @@ def _execute_file_analysis_task(
                     task_service=task_service,
                     progress_hub=progress_hub,
                     file_name=file_name,
+                    execution_id=execution_id,
                     original_name=original_name,
                     stage="audit",
                     error_message=audit_error,
@@ -1885,6 +2360,7 @@ def _execute_file_analysis_task(
                     task_service=task_service,
                     progress_hub=progress_hub,
                     file_name=file_name,
+                    execution_id=execution_id,
                     original_name=original_name,
                     stage="resource_lease",
                     error_message=lease_error,
@@ -1905,6 +2381,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage=failure_stage,
                 error_message=error_message,
@@ -1976,6 +2453,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="audit",
                 error_message=audit_error,
@@ -1995,6 +2473,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="resource_lease",
                 error_message=lease_error,
@@ -2014,13 +2493,36 @@ def _execute_file_analysis_task(
         retain_document = False
         knowledge_store_succeeded = False
         try:
+            task_service.require_current_execution(
+                "file",
+                file_name,
+                execution_id,
+                allowed_statuses=("0", "1"),
+            )
+        except (TaskExecutionConflictError, TaskStateConflictError):
+            logger.warning(
+                "永久知识库写入前执行身份已失效，清理本次RAG资源: "
+                "file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+            _close_audited_session(
+                task_service=task_service,
+                session=session,
+                interaction_id=audit_result.interaction_id,
+                execution_id=execution_id,
+                audited_trace=successful_trace,
+                retain_document=False,
+            )
+            return
+        try:
             _store_prepared_analysis_document(
                 knowledge_index_factory=knowledge_index_factory,
                 execution_id=execution_id,
                 file_name=file_name,
                 original_name=original_name,
                 mapped_result=mapped_result,
-                architecture_list=build_effective_analysis_ranges(params)["architectureList"],
+                architecture_list=architecture_list,
                 prepared_document=prepared_document,
             )
             retain_document = True
@@ -2038,6 +2540,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="knowledge_index",
                 error_message=knowledge_error,
@@ -2056,6 +2559,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="knowledge_index_recovery",
                 error_message=knowledge_error,
@@ -2078,6 +2582,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="knowledge_index_unknown",
                 error_message=knowledge_error,
@@ -2097,7 +2602,12 @@ def _execute_file_analysis_task(
 
         try:
             task_service.update_task_progress(
-                "file", file_name, progress=0.65, message="正在翻译文档", status="1"
+                "file",
+                file_name,
+                progress=0.65,
+                message="正在翻译文档",
+                status="1",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 0.65)
             enriched_result = enrich_with_translations(
@@ -2106,7 +2616,12 @@ def _execute_file_analysis_task(
                 params.get("enableFullTranslation", True),
             )
             task_service.update_task_progress(
-                "file", file_name, progress=0.95, message="翻译完成，准备回调", status="1"
+                "file",
+                file_name,
+                progress=0.95,
+                message="翻译完成，准备回调",
+                status="1",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 0.95)
             callback_payload = build_file_callback_payload(
@@ -2120,11 +2635,13 @@ def _execute_file_analysis_task(
                 callback_payload,
                 status="2",
                 message="解析完成",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 1.0)
             _submit_callback(
                 task_service=task_service,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 callback_url=callback_url,
                 callback_timeout=callback_timeout,
@@ -2132,6 +2649,13 @@ def _execute_file_analysis_task(
             )
             logger.info(
                 "文件分析任务完成: file_name=%s execution_id=%s",
+                file_name,
+                execution_id,
+            )
+        except (TaskExecutionConflictError, TaskStateConflictError):
+            logger.warning(
+                "文件分析知识库转交后执行身份已失效，不覆盖当前任务或发送回调: "
+                "file_name=%s execution_id=%s",
                 file_name,
                 execution_id,
             )
@@ -2146,6 +2670,7 @@ def _execute_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
                 stage="post_transfer",
                 error_message=post_transfer_error,
@@ -2164,15 +2689,22 @@ def _execute_file_analysis_task(
 
 
 def run_file_analysis_task(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        request_payload: Dict[str, Any],
-        download_root: str,
-        callback_url: str,
-        callback_timeout: float,
-        document_rag_factory: DocumentRagFactory,
-        knowledge_index_factory: KnowledgeIndexFactory,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    request_payload: Dict[str, Any],
+    download_root: str,
+    callback_url: str,
+    callback_timeout: float,
+    document_rag_factory: DocumentRagFactory,
+    knowledge_index_factory: KnowledgeIndexFactory,
+    execution_id: str,
+    analysis_classification_mode: str = "topk_two_stage",
+    analysis_filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    ),
+    analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    analysis_identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
 ) -> None:
     """提供后台线程的最终异常边界，并委托阶段 9 单文件状态机。
 
@@ -2190,7 +2722,18 @@ def run_file_analysis_task(
             callback_timeout=callback_timeout,
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
+            execution_id=execution_id,
+            analysis_classification_mode=analysis_classification_mode,
+            analysis_filename_constraint_mode=analysis_filename_constraint_mode,
+            analysis_data_standard_mode=analysis_data_standard_mode,
+            analysis_identity_reselect_mode=analysis_identity_reselect_mode,
         )
+    except (TaskExecutionConflictError, TaskStateConflictError):
+        logger.warning(
+            "文件分析worker执行身份已失效，停止且不写入当前任务: execution_id=%s",
+            execution_id,
+        )
+        return
     except Exception as exc:
         params_list = request_payload.get("params", [])
         params = params_list[0] if params_list and isinstance(params_list[0], dict) else {}
@@ -2200,6 +2743,74 @@ def run_file_analysis_task(
             or file_name
         )
         error_message = _safe_task_error(exc, fallback="文件分析编排失败")
+        failure_stage = "orchestration"
+
+        # Factory create/__enter__ 和无法提供 trace 的 Session 打开异常发生在召回
+        # 决策已经写入之后。最终异常边界必须补齐该审计终态，不能把一条未终结决策
+        # 永久留在库中，也不能用笼统 orchestration 隐藏稳定领域阶段。
+        if file_name:
+            try:
+                task = task_service.require_current_execution(
+                    "file",
+                    file_name,
+                    execution_id,
+                )
+            except TaskExecutionConflictError:
+                logger.warning(
+                    "文件分析兜底检测到执行已被替换，停止终结新任务: "
+                    "file_name=%s execution_id=%s",
+                    file_name,
+                    execution_id,
+                )
+                return
+            if task and _as_text(task.get("status")) in {"2", "3"}:
+                # 正常/失败业务终态已经提交后，Factory 退出阶段仅可能剩下本地
+                # Transport 关闭等资源告警。不得覆盖终态或再发送一份相反 callback。
+                logger.critical(
+                    "文件分析 Factory 退出异常，但业务任务已有终态，保持原结果: "
+                    "file_name=%s status=%s error_type=%s",
+                    file_name,
+                    task.get("status"),
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                return
+            if execution_id:
+                try:
+                    recall_audit = task_service.get_architecture_recall_decision(
+                        execution_id
+                    )
+                except Exception:
+                    recall_audit = None
+                    logger.critical(
+                        "文件分析兜底无法读取领域召回审计: execution_id=%s",
+                        execution_id,
+                        exc_info=True,
+                    )
+                if recall_audit and not recall_audit.get("finalized_at"):
+                    failure_stage = "architecture_contract"
+                    try:
+                        task_service.finalize_architecture_recall_decision(
+                            execution_id=execution_id,
+                            returned_architecture_id=None,
+                            returned_rank=None,
+                            total_elapsed_ms=int(
+                                recall_audit.get("recall_elapsed_ms") or 0
+                            ),
+                            failure_stage=failure_stage,
+                            error_message=error_message,
+                        )
+                    except Exception as audit_exc:
+                        error_message = _safe_task_error(
+                            audit_exc,
+                            fallback="领域召回终结审计失败",
+                        )
+                        logger.critical(
+                            "文件分析兜底无法终结领域召回审计: "
+                            "execution_id=%s",
+                            execution_id,
+                            exc_info=True,
+                        )
         logger.exception(
             "文件分析后台线程未处理异常: file_name=%s error_type=%s",
             file_name,
@@ -2210,8 +2821,9 @@ def run_file_analysis_task(
                 task_service=task_service,
                 progress_hub=progress_hub,
                 file_name=file_name,
+                execution_id=execution_id,
                 original_name=original_name,
-                stage="orchestration",
+                stage=failure_stage,
                 error_message=error_message,
                 callback_url=callback_url,
                 callback_timeout=callback_timeout,
@@ -2219,24 +2831,39 @@ def run_file_analysis_task(
 
 
 def run_file_analysis_batch_task(
-        *,
-        task_service: LLMTaskService,
-        progress_hub: LLMProgressHub,
-        request_payload: Dict[str, Any],
-        download_root: str,
-        callback_url: str,
-        callback_timeout: float,
-        document_rag_factory: DocumentRagFactory,
-        knowledge_index_factory: KnowledgeIndexFactory,
+    *,
+    task_service: LLMTaskService,
+    progress_hub: LLMProgressHub,
+    request_payload: Dict[str, Any],
+    download_root: str,
+    callback_url: str,
+    callback_timeout: float,
+    document_rag_factory: DocumentRagFactory,
+    knowledge_index_factory: KnowledgeIndexFactory,
+    execution_ids: Mapping[str, str],
+    analysis_classification_mode: str = "topk_two_stage",
+    analysis_filename_constraint_mode: str = (
+        ANALYSIS_FILENAME_CONSTRAINT_MODE_LEGACY
+    ),
+    analysis_data_standard_mode: str = ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
+    analysis_identity_reselect_mode: str = ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
 ) -> None:
     """按请求顺序执行批量分析，并保证每个文件分别进入两类 Factory 租约。"""
     params_list = request_payload.get("params", [])
+    for params in params_list:
+        if not isinstance(params, dict):
+            continue
+        file_name = _as_text(params.get("fileName"))
+        if file_name and not _as_text(execution_ids.get(file_name)):
+            raise ValueError(f"批量文件任务缺少execution_id: {file_name}")
+
     for index, params in enumerate(params_list):
         if not isinstance(params, dict):
             continue
         file_name = _as_text(params.get("fileName"))
         if not file_name:
             continue
+        execution_id = _as_text(execution_ids[file_name])
         if index > 0:
             task_service.update_task_progress(
                 "file",
@@ -2244,6 +2871,7 @@ def run_file_analysis_batch_task(
                 progress=0.0,
                 message="准备开始解析",
                 status="1",
+                execution_id=execution_id,
             )
             _publish_progress(progress_hub, file_name, 0.0)
         run_file_analysis_task(
@@ -2255,4 +2883,9 @@ def run_file_analysis_batch_task(
             callback_timeout=callback_timeout,
             document_rag_factory=document_rag_factory,
             knowledge_index_factory=knowledge_index_factory,
+            execution_id=execution_id,
+            analysis_classification_mode=analysis_classification_mode,
+            analysis_filename_constraint_mode=analysis_filename_constraint_mode,
+            analysis_data_standard_mode=analysis_data_standard_mode,
+            analysis_identity_reselect_mode=analysis_identity_reselect_mode,
         )

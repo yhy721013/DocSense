@@ -25,8 +25,8 @@ _AUDIT_RETRY_BASE_DELAY_SECONDS = 0.05
 AUDIT_STATUS_SUCCEEDED = "succeeded"
 """只有完整审计事务提交后才能向调用方返回的成功门禁状态。"""
 
-AUDIT_SCHEMA_VERSION = 2
-"""带执行身份、完整 trace 明细和摘要校验的当前审计结构版本。"""
+AUDIT_SCHEMA_VERSION = 3
+"""带 trace/call 身份、完整明细和摘要校验的当前审计结构版本。"""
 
 MAX_AUDIT_PROMPT_CHARS = 256_000
 """单次审计允许保存的完整 Prompt 字符数硬上限。"""

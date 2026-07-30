@@ -13,7 +13,9 @@ Gateway 将其作为授权或成功判定依据。
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -33,6 +35,8 @@ _DOCSENSE_SOURCE_MARKER_PATTERN = re.compile(
 _DOCUMENT_UUID_SUFFIX_PATTERN = re.compile(
     r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.json$|$)"
 )
+_XLSX_FOLDER_PATTERN = re.compile(r"^.+\.xlsx-[0-9a-f]{4}$", re.IGNORECASE)
+_XLSX_SHEET_FILE_PATTERN = re.compile(r"^sheet-.+\.json$", re.IGNORECASE)
 """匹配 AnythingLLM 上传路径末尾的文档 UUID。
 
 真实上传位置通常形如 ``custom-documents/<文件名>-<uuid>.json``。该 UUID 与上传接口
@@ -149,6 +153,61 @@ def normalize_document_location_key(value: str) -> str:
     return normalized
 
 
+def parse_xlsx_sheet_location(value: str) -> tuple[str, str, str] | None:
+    """严格解析 AnythingLLM 1.15.0 的 XLSX Sheet 文档位置。
+
+    Collector 会把一次 XLSX 上传发布为顶层 ``<文件名>.xlsx-<4 hex>`` 目录，并为每个
+    Sheet 生成一个直接子文件 ``sheet-<slug>.json``。该结构同时承担稳定身份和文件夹级
+    清理边界，因此这里只接受相对、恰好两级且不含 URL、遍历或控制字符的位置。
+
+    返回 ``(规范化完整位置, 顶层目录, Sheet 文件名)``；非该结构返回 ``None``。
+    """
+    raw_value = unicodedata.normalize("NFKC", str(value or "").strip())
+    if (
+        not raw_value
+        or "%" in raw_value
+        or ".." in raw_value
+        or "\\" in raw_value
+        or any(
+            unicodedata.category(char).startswith("C")
+            or (
+                unicodedata.category(char).startswith("Z")
+                and char != " "
+            )
+            for char in raw_value
+        )
+    ):
+        return None
+    normalized = raw_value
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:/", normalized)
+        or "?" in normalized
+        or "#" in normalized
+    ):
+        return None
+    path_parts = tuple(normalized.split("/"))
+    if (
+        len(path_parts) != 2
+        or any(not part or part in {".", ".."} for part in path_parts)
+    ):
+        return None
+    folder_name, sheet_file_name = path_parts
+    if folder_name.casefold() == "custom-documents":
+        return None
+    if not _XLSX_FOLDER_PATTERN.fullmatch(folder_name):
+        return None
+    if not _XLSX_SHEET_FILE_PATTERN.fullmatch(sheet_file_name):
+        return None
+    normalized_location = f"{folder_name}/{sheet_file_name}"
+    return normalized_location, folder_name, sheet_file_name
+
+
 def _document_id_from_location(value: str) -> str:
     """从完整上传位置中提取 AnythingLLM 全局文档 UUID。
 
@@ -245,15 +304,31 @@ class AnythingLLMDocument:
         if not normalized_document_id:
             raise _protocol_error("AnythingLLM 文档 ID 无法生成稳定 document_ref")
         location_document_id = _document_id_from_location(normalized_location)
-        stable_document_id = location_document_id or normalized_document_id
+        xlsx_location = parse_xlsx_sheet_location(location)
+        location_digest_id = (
+            "location-sha256-"
+            + hashlib.sha256(xlsx_location[0].encode("utf-8")).hexdigest()
+            if xlsx_location is not None
+            else ""
+        )
+        stable_document_id = (
+            location_document_id or location_digest_id or normalized_document_id
+        )
         document_ref = f"document:{stable_document_id}"
+        identity_source = (
+            "location_uuid"
+            if location_document_id
+            else "location_sha256"
+            if location_digest_id
+            else "payload_id"
+        )
         return cls(
             id=stable_document_id,
             location=normalized_location,
             title=title,
             document_ref=document_ref,
             raw_document_id=document_id,
-            identity_source="location_uuid" if location_document_id else "payload_id",
+            identity_source=identity_source,
         )
 
 
@@ -323,6 +398,8 @@ class AnythingLLMSource:
     title: Optional[str] = None
     url: Optional[str] = None
     score: Optional[float] = None
+    score_present: bool = False
+    score_valid: bool = True
     distance: Optional[float] = None
     metadata: Optional[Mapping[str, Any]] = None
 
@@ -377,12 +454,44 @@ class AnythingLLMSource:
                 break
         text = first_text(payload, "text", "pageContent", "content", "chunk")
 
-        raw_score = payload.get("score", metadata.get("score"))
-        score: Optional[float]
-        try:
-            score = float(raw_score) if raw_score is not None else None
-        except (TypeError, ValueError):
-            score = None
+        # ``dict.get`` 无法区分“字段缺失”和“字段存在但类型非法”。武器谱 Schema v2
+        # 必须把这两种事实分开：只有确实缺失/为 null 的整批结果才能进入 rank-only；
+        # 非法字符串、NaN 或 Infinity 不能被悄悄转换成缺失分数。
+        # 顶层和 metadata 都是已知的供应商 score 位置。不能使用 ``dict.get`` 的默认值
+        # 语义，因为“顶层显式 null、metadata 有分数”和“两个位置给出冲突分数”都需要
+        # 确定处理：前者采用唯一非空值，后者标为非法协议，交由整批选择门禁失败关闭。
+        raw_score_values = tuple(
+            value
+            for container in (payload, metadata)
+            if "score" in container
+            for value in (container.get("score"),)
+            if value is not None
+        )
+        score_present = bool(raw_score_values)
+        parsed_score_values: list[float] = []
+        score_valid = True
+        for raw_score in raw_score_values:
+            if isinstance(raw_score, bool):
+                # JSON bool 在 Python 中是 int 子类；若直接 float(True)，会把协议错误
+                # 静默伪装成最高相关分 1.0。
+                score_valid = False
+                continue
+            try:
+                parsed_score = float(raw_score)
+            except (TypeError, ValueError):
+                score_valid = False
+                continue
+            if not math.isfinite(parsed_score):
+                score_valid = False
+                continue
+            parsed_score_values.append(parsed_score)
+        if len(set(parsed_score_values)) > 1:
+            score_valid = False
+        score: Optional[float] = (
+            parsed_score_values[0]
+            if score_valid and parsed_score_values
+            else None
+        )
 
         raw_distance = payload.get("distance", metadata.get("distance"))
         try:
@@ -398,6 +507,8 @@ class AnythingLLMSource:
             title=title,
             url=source_url,
             score=score,
+            score_present=score_present,
+            score_valid=score_valid,
             distance=distance,
             # 冻结 DTO 不能继续持有上游可变字典，浅拷贝后使用只读映射阻止意外改写。
             metadata=MappingProxyType(dict(metadata)) if metadata else None,

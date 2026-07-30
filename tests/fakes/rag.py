@@ -15,6 +15,7 @@ from typing import Any, Iterator, Optional, Sequence
 from app.ports import (
     CleanupResult,
     DocumentRagSession,
+    MAX_RAG_FRESH_CONVERSATION_SWITCHES,
     PreparedDocumentRef,
     RagAttempt,
     RagExecutionTrace,
@@ -60,8 +61,9 @@ class FakeRagOutcome:
 class FakeDocumentRagSession:
     """可编程、无外部副作用的文档 RAG 会话测试实现。
 
-    测试替身保留生产会话的关键不变量：analyse 只能调用一次、ask 必须发生在 analyse
-    成功之后、每次尝试进入 trace、关闭后禁止继续调用，并且 close 不重复执行清理。
+    测试替身保留生产会话的关键不变量：analyse 只能调用一次、阶段隔离线程最多创建两次、
+    ask 必须发生在 analyse 成功之后、每次尝试进入 trace、关闭后禁止继续调用，并且
+    close 不重复执行清理。
     """
 
     def __init__(
@@ -72,16 +74,19 @@ class FakeDocumentRagSession:
         conversation_ref: str,
         analyse_outcomes: Optional[Sequence[FakeRagOutcome]] = None,
         ask_outcomes: Optional[Sequence[FakeRagOutcome]] = None,
+        fresh_conversation_error_message: str = "",
+        fresh_conversation_error_messages: Optional[Sequence[str]] = None,
         cleanup_error_message: str = "",
         lifecycle_events: Optional[Sequence[RagLifecycleEvent]] = None,
     ) -> None:
         """创建测试会话，并复制全部预设结果队列和清理失败配置。"""
         self._context_name = self._required_text(context_name, name="context_name")
         self._context_ref = self._required_text(context_ref, name="context_ref")
-        self._conversation_ref = self._required_text(
+        self._primary_conversation_ref = self._required_text(
             conversation_ref,
             name="conversation_ref",
         )
+        self._active_conversation_ref = self._primary_conversation_ref
         default_outcome = FakeRagOutcome(
             text="模拟结果",
             sources=(RagSource(document_ref="document:fake", text="模拟证据"),),
@@ -93,10 +98,33 @@ class FakeDocumentRagSession:
             [default_outcome] if ask_outcomes is None else ask_outcomes
         )
         self._cleanup_error_message = str(cleanup_error_message or "")
+        normalized_fresh_error = str(
+            fresh_conversation_error_message or ""
+        ).strip()
+        if (
+            fresh_conversation_error_messages is not None
+            and normalized_fresh_error
+        ):
+            raise ValueError(
+                "fresh_conversation_error_message 与 "
+                "fresh_conversation_error_messages 不能同时配置"
+            )
+        self._fresh_conversation_error_messages = tuple(
+            str(message or "").strip()
+            for message in (
+                fresh_conversation_error_messages
+                if fresh_conversation_error_messages is not None
+                else ((normalized_fresh_error,) if normalized_fresh_error else ())
+            )
+        )
         self._attempts: list[RagAttempt] = []
+        self._attempt_conversation_refs: list[str] = []
         self._lifecycle_events = list(lifecycle_events or ())
         self._analyse_started = False
         self._analyse_succeeded = False
+        self._fresh_conversation_attempt_count = 0
+        self._fresh_conversation_names_attempted: set[str] = set()
+        self._force_document_cleanup = False
         self._closed = False
         self._retain_document_on_close: Optional[bool] = None
         self._first_cleanup_result: Optional[CleanupResult] = None
@@ -109,6 +137,7 @@ class FakeDocumentRagSession:
         file_path: str,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
     ) -> RagResult:
@@ -120,22 +149,117 @@ class FakeDocumentRagSession:
                 failure_stage="analyse_repeated",
             )
         normalized_file_path = self._required_text(file_path, name="file_path")
+        normalized_prompt = normalize_rag_prompt(prompt)
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
+        self._validate_max_attempts(max_attempts)
         self._content_sha256 = hashlib.sha256(
             normalized_file_path.encode("utf-8")
         ).hexdigest()
-        normalized_prompt = normalize_rag_prompt(prompt)
-        self._validate_max_attempts(max_attempts)
         self._analyse_started = True
         result = self._execute(
             prompt=normalized_prompt,
             operation="analyse",
-            prompt_kind=RagPromptKind.ANALYSIS,
+            prompt_kind=validated_prompt_kind,
             outcomes=self._analyse_outcomes,
             require_sources=require_sources,
             max_attempts=max_attempts,
         )
         self._analyse_succeeded = True
         return result
+
+    def start_fresh_conversation(
+        self,
+        *,
+        conversation_name: str,
+        failure_is_fatal: bool = True,
+    ) -> bool:
+        """模拟阶段隔离线程创建，并保持与生产状态机相同的两次门禁。"""
+        self._ensure_open()
+        normalized_name = self._required_text(
+            conversation_name,
+            name="conversation_name",
+        )
+        if not isinstance(failure_is_fatal, bool):
+            raise TypeError("failure_is_fatal 必须是 bool")
+        if not self._analyse_succeeded:
+            raise self._operation_error(
+                "新对话只能在 analyse 成功后创建",
+                failure_stage="session_not_prepared",
+            )
+        if (
+            self._fresh_conversation_attempt_count
+            >= MAX_RAG_FRESH_CONVERSATION_SWITCHES
+        ):
+            raise self._operation_error(
+                "每个 RAG Session 最多切换两次新对话",
+                failure_stage="conversation_switch_repeated",
+            )
+        if normalized_name in self._fresh_conversation_names_attempted:
+            raise self._operation_error(
+                "同名阶段隔离对话不得重复创建",
+                failure_stage="conversation_switch_repeated",
+            )
+        fresh_attempt_index = self._fresh_conversation_attempt_count
+        self._fresh_conversation_attempt_count += 1
+        self._fresh_conversation_names_attempted.add(normalized_name)
+        lifecycle_attempt = (
+            max(
+                (
+                    event.attempt
+                    for event in self._lifecycle_events
+                    if event.operation == "conversation_create"
+                ),
+                default=0,
+            )
+            + 1
+        )
+        error_message = (
+            self._fresh_conversation_error_messages[fresh_attempt_index]
+            if fresh_attempt_index < len(self._fresh_conversation_error_messages)
+            else ""
+        )
+        if error_message:
+            self._lifecycle_events.append(
+                RagLifecycleEvent(
+                    sequence_no=len(self._lifecycle_events) + 1,
+                    operation="conversation_create",
+                    attempt=lifecycle_attempt,
+                    success=False,
+                    external_ref=None,
+                    failure_stage="conversation_create",
+                    error_message=error_message,
+                )
+            )
+            if not failure_is_fatal:
+                return False
+            self._analyse_succeeded = False
+            self._force_document_cleanup = True
+            raise self._operation_error(
+                error_message,
+                failure_stage="conversation_create",
+            )
+
+        fresh_ref = (
+            f"{self._primary_conversation_ref}:fresh"
+            if self._fresh_conversation_attempt_count == 1
+            else (
+                f"{self._primary_conversation_ref}:fresh:"
+                f"{self._fresh_conversation_attempt_count}"
+            )
+        )
+        self._lifecycle_events.append(
+            RagLifecycleEvent(
+                sequence_no=len(self._lifecycle_events) + 1,
+                operation="conversation_create",
+                attempt=lifecycle_attempt,
+                success=True,
+                external_ref=fresh_ref,
+                failure_stage=None,
+                error_message=None,
+            )
+        )
+        self._active_conversation_ref = fresh_ref
+        return True
 
     def ask(
         self,
@@ -164,6 +288,44 @@ class FakeDocumentRagSession:
             max_attempts=max_attempts,
         )
 
+    def ask_optional(
+        self,
+        prompt: str,
+        *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
+        require_sources: bool = True,
+        max_attempts: int = 1,
+    ) -> Optional[RagResult]:
+        """模拟可失败开放查询；失败 attempt 保留，但总体成功态恢复。"""
+        self._ensure_open()
+        normalized_prompt = normalize_rag_prompt(prompt)
+        validated_prompt_kind = validate_rag_prompt_kind(prompt_kind)
+        self._validate_max_attempts(max_attempts)
+        if not self._analyse_succeeded:
+            raise self._operation_error(
+                "ask_optional 必须在 analyse 成功后调用",
+                failure_stage="session_not_prepared",
+            )
+
+        previous_failure_stage = self._failure_stage
+        previous_error_message = self._error_message
+        attempt_count_before = len(self._attempts)
+        try:
+            return self._execute(
+                prompt=normalized_prompt,
+                operation="ask",
+                prompt_kind=validated_prompt_kind,
+                outcomes=self._ask_outcomes,
+                require_sources=require_sources,
+                max_attempts=max_attempts,
+            )
+        except RagOperationError:
+            if len(self._attempts) == attempt_count_before:
+                raise
+            self._failure_stage = previous_failure_stage
+            self._error_message = previous_error_message
+            return None
+
     @property
     def trace(self) -> RagExecutionTrace:
         """返回不会随测试替身后续执行而变化的轨迹快照。"""
@@ -173,6 +335,11 @@ class FakeDocumentRagSession:
     def retain_document_on_close(self) -> Optional[bool]:
         """返回首次关闭时记录的文档处置选择；尚未关闭时返回 ``None``。"""
         return self._retain_document_on_close
+
+    @property
+    def attempt_conversation_refs(self) -> tuple[str, ...]:
+        """返回每次模拟模型调用实际使用的线程引用。"""
+        return tuple(self._attempt_conversation_refs)
 
     def close(self, *, retain_document: bool) -> CleanupResult:
         """记录清理选择和关闭事件，并保证后续调用保持幂等。
@@ -198,7 +365,9 @@ class FakeDocumentRagSession:
         self._closed = True
         self._retain_document_on_close = retain_document
         next_sequence = len(self._lifecycle_events) + 1
-        if self._analyse_started and not retain_document:
+        if self._analyse_started and (
+            self._force_document_cleanup or not retain_document
+        ):
             self._lifecycle_events.append(
                 RagLifecycleEvent(
                     sequence_no=next_sequence,
@@ -287,6 +456,9 @@ class FakeDocumentRagSession:
                     ),
                 )
             )
+            self._attempt_conversation_refs.append(
+                self._active_conversation_ref
+            )
             if failure_stage is None:
                 self._failure_stage = None
                 self._error_message = None
@@ -332,7 +504,7 @@ class FakeDocumentRagSession:
         return RagExecutionTrace(
             context_name=self._context_name,
             context_ref=self._context_ref,
-            conversation_ref=self._conversation_ref,
+            conversation_ref=self._primary_conversation_ref,
             attempts=tuple(self._attempts),
             failure_stage=self._failure_stage,
             error_message=self._error_message,
@@ -363,6 +535,8 @@ class FakeDocumentRagPort:
         ask_outcomes: Optional[Sequence[FakeRagOutcome]] = None,
         open_failure_stage: Optional[str] = None,
         rollback_error_message: str = "",
+        fresh_conversation_error_message: str = "",
+        fresh_conversation_error_messages: Optional[Sequence[str]] = None,
         cleanup_error_message: str = "",
     ) -> None:
         """配置后续测试会话及打开过程的失败场景。
@@ -378,6 +552,14 @@ class FakeDocumentRagPort:
         self._ask_outcomes = ask_outcomes
         self._open_failure_stage = open_failure_stage
         self._rollback_error_message = str(rollback_error_message or "")
+        self._fresh_conversation_error_message = str(
+            fresh_conversation_error_message or ""
+        )
+        self._fresh_conversation_error_messages = (
+            tuple(fresh_conversation_error_messages)
+            if fresh_conversation_error_messages is not None
+            else None
+        )
         self._cleanup_error_message = str(cleanup_error_message or "")
         self._open_count = 0
         self._sessions: list[FakeDocumentRagSession] = []
@@ -490,6 +672,10 @@ class FakeDocumentRagPort:
             conversation_ref=conversation_ref,
             analyse_outcomes=self._analyse_outcomes,
             ask_outcomes=self._ask_outcomes,
+            fresh_conversation_error_message=self._fresh_conversation_error_message,
+            fresh_conversation_error_messages=(
+                self._fresh_conversation_error_messages
+            ),
             cleanup_error_message=self._cleanup_error_message,
             lifecycle_events=lifecycle_events,
         )

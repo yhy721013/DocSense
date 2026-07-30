@@ -9,7 +9,7 @@ import json
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.services.chat.domain.models import (
     MESSAGE_COMMITTED,
@@ -32,8 +32,21 @@ from app.services.chat.domain.models import (
     SESSION_ERROR,
     ChatRun,
 )
+from app.services.chat.domain.document_candidates import (
+    ChatDocumentSelectionCandidates,
+)
+from app.services.chat.domain.document_scope import (
+    CHAT_SCOPE_MODE_ARCHITECTURE,
+    CHAT_SCOPE_MODE_FILES,
+    ChatScopeRevision,
+    ChatScopeSelector,
+    decide_chat_architecture_scope,
+    decide_chat_document_scope,
+    decide_chat_session_scope_binding,
+)
 from app.services.chat.domain.events import ChatStreamEvent
 from app.services.chat.locking.lease import (
+    ChatAdmissionLease,
     ChatRunLease,
     ChatRunLeaseCapabilities,
     ChatRunLeaseLostError,
@@ -42,15 +55,19 @@ from app.services.chat.locking.lease import (
 from app.services.chat.persistence.event_repository import ChatRunEventRepository
 from app.services.chat.persistence.repositories import (
     ChatRunRepository,
+    ChatScopeRepository,
+    ChatSessionScopeBindingRepository,
     _connection_scope,
     _optional_text,
     _required_text,
     _utc_now_iso,
+    chat_scope_revision_id_for_run,
     ensure_chat_schema,
 )
 
 
 DEFAULT_STALE_RUN_SECONDS = 6 * 60 * 60
+DEFAULT_CHAT_ADMISSION_SECONDS = 5 * 60
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +94,14 @@ class ChatRunBusyError(RuntimeError):
         super().__init__("current chat already has an active run")
         self.chat_id = chat_id
         self.active_run_id = active_run_id
+
+
+class ChatAdmissionBusyError(RuntimeError):
+    """同一 chatId 已有另一请求处于正式受理前的准入阶段。"""
+
+    def __init__(self, *, chat_id: str) -> None:
+        super().__init__("current chat already has an admission in progress")
+        self.chat_id = chat_id
 
 
 class ChatRunInactiveError(RuntimeError):
@@ -151,9 +176,46 @@ class ChatRunLockService:
         user_message: str | None = None,
         user_files: tuple[tuple[str, str], ...] = (),
         input_documents: tuple[tuple[str, str, str, str], ...] = (),
+        document_candidates: ChatDocumentSelectionCandidates | None = None,
+        scope_selector: ChatScopeSelector | None = None,
+        admission_lease: ChatAdmissionLease | None = None,
+        max_files_per_request: int | None = None,
     ) -> ChatRun:
         normalized_chat_id = _required_text(chat_id, name="chat_id")
         normalized_run_id = _optional_text(run_id) or uuid.uuid4().hex
+        if document_candidates is not None and not isinstance(
+            document_candidates,
+            ChatDocumentSelectionCandidates,
+        ):
+            raise TypeError(
+                "document_candidates must be ChatDocumentSelectionCandidates "
+                "or None"
+            )
+        if document_candidates is not None and (
+            user_files or input_documents
+        ):
+            raise ValueError(
+                "document_candidates cannot be combined with legacy "
+                "document tuples"
+            )
+        normalized_scope_selector = self._normalize_scope_selector(
+            scope_selector=scope_selector,
+            document_candidates=document_candidates,
+            user_files=user_files,
+            input_documents=input_documents,
+        )
+        if admission_lease is not None:
+            self._validate_admission_lease_shape(
+                lease=admission_lease,
+                chat_id=normalized_chat_id,
+                scope_selector=normalized_scope_selector,
+            )
+        if max_files_per_request is not None and (
+            isinstance(max_files_per_request, bool)
+            or not isinstance(max_files_per_request, int)
+            or max_files_per_request < 1
+        ):
+            raise ValueError("max_files_per_request must be a positive integer")
         now = _utc_now_iso()
         active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
 
@@ -162,13 +224,20 @@ class ChatRunLockService:
             # “插入新运行”处于同一个临界区。后续替换为 PostgreSQL 或 Redis 时，
             # 这里就是分布式互斥语义的边界。
             connection.execute("BEGIN IMMEDIATE")
+            if admission_lease is not None:
+                self._require_admission_in_transaction(
+                    connection,
+                    lease=admission_lease,
+                    scope_selector=normalized_scope_selector,
+                    now=now,
+                )
             logger.info(
                 "尝试获取文件对话运行锁: chat_id=%s run_id=%s has_owner_instance=%s",
                 normalized_chat_id,
                 normalized_run_id,
                 bool(self.owner_instance_id),
             )
-            connection.execute(
+            session_insert = connection.execute(
                 """
                 INSERT OR IGNORE INTO chat_sessions (
                     chat_id, workspace_ref, thread_ref, status,
@@ -177,6 +246,7 @@ class ChatRunLockService:
                 """,
                 (normalized_chat_id, now, now),
             )
+            session_created = session_insert.rowcount == 1
             session_row = connection.execute(
                 "SELECT status FROM chat_sessions WHERE chat_id = ?",
                 (normalized_chat_id,),
@@ -188,6 +258,41 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     status=session_row["status"],
                 )
+            existing_binding = (
+                ChatSessionScopeBindingRepository.get_in_transaction(
+                    connection,
+                    chat_id=normalized_chat_id,
+                )
+            )
+            if session_created and existing_binding is not None:
+                raise ValueError(
+                    "new chat session unexpectedly has scope binding"
+                )
+            if not session_created and existing_binding is None:
+                logger.error(
+                    "既有文件对话缺少不可变范围绑定，受理失败关闭: "
+                    "chat_id=%s run_id=%s",
+                    normalized_chat_id,
+                    normalized_run_id,
+                )
+                raise ValueError(
+                    "existing chat session is missing immutable scope binding"
+                )
+            scope_binding, creates_binding = (
+                decide_chat_session_scope_binding(
+                    chat_id=normalized_chat_id,
+                    selector=normalized_scope_selector,
+                    existing_binding=existing_binding,
+                    created_at=now,
+                )
+            )
+            if creates_binding:
+                ChatSessionScopeBindingRepository.create_in_transaction(
+                    connection,
+                    binding=scope_binding,
+                )
+            # 不可变模式和 architecture ID 必须在活跃运行检查前裁决；否则同一
+            # chatId 的错误模式请求会被不稳定地伪装成普通“流正在进行”。
             self._expire_stale_runs(
                 connection,
                 chat_id=normalized_chat_id,
@@ -214,6 +319,162 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     active_run_id=active_row["run_id"],
                 )
+
+            history_user_files = user_files
+            effective_input_documents = input_documents
+            explicit_candidate_count = len(input_documents)
+            default_candidate_count = 0
+            selection_mode = "legacy_input"
+            effective_scope_revision_id = ""
+            scope_decision = None
+            current_scope_head = None
+            if document_candidates is not None:
+                explicit_candidate_count = len(
+                    document_candidates.explicit_documents
+                )
+                default_candidate_count = len(
+                    document_candidates.new_session_default_documents
+                )
+                current_scope_head = (
+                    ChatScopeRepository.get_head_in_transaction(
+                        connection,
+                        chat_id=normalized_chat_id,
+                    )
+                )
+                if session_created:
+                    if current_scope_head is not None:
+                        raise ValueError(
+                            "new chat session unexpectedly has scope head"
+                        )
+                    current_scope_documents = None
+                else:
+                    if current_scope_head is None:
+                        logger.error(
+                            "既有文件对话缺少活动范围 Head，受理失败关闭: "
+                            "chat_id=%s run_id=%s",
+                            normalized_chat_id,
+                            normalized_run_id,
+                        )
+                        raise ValueError(
+                            "existing chat session is missing active scope"
+                        )
+                    current_scope_revision = (
+                        ChatScopeRepository.get_revision_in_transaction(
+                            connection,
+                            scope_revision_id=(
+                                current_scope_head.scope_revision_id
+                            ),
+                        )
+                    )
+                    if (
+                        current_scope_revision is None
+                        or current_scope_revision.chat_id
+                        != normalized_chat_id
+                    ):
+                        raise ValueError(
+                            "chat scope head points to invalid revision"
+                        )
+                    current_scope_documents = (
+                        current_scope_revision.members
+                    )
+                if scope_binding.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
+                    architecture_candidates = (
+                        document_candidates.architecture_candidates
+                    )
+                    if architecture_candidates is None:
+                        raise ValueError(
+                            "architecture selector requires architecture candidates"
+                        )
+                    scope_decision = decide_chat_architecture_scope(
+                        session_created=session_created,
+                        requested_architecture_id=(
+                            normalized_scope_selector.architecture_id
+                        ),
+                        bound_architecture_id=scope_binding.architecture_id,
+                        architecture_candidates=architecture_candidates,
+                        current_scope_documents=current_scope_documents,
+                    )
+                    if not session_created:
+                        if (
+                            current_scope_revision is None
+                            or current_scope_revision.source_architecture_id
+                            != scope_binding.architecture_id
+                        ):
+                            raise ValueError(
+                                "architecture scope revision does not match binding"
+                            )
+                else:
+                    scope_decision = decide_chat_document_scope(
+                        session_created=session_created,
+                        requested_documents=(
+                            document_candidates.explicit_documents
+                        ),
+                        automatic_initial_documents=(
+                            document_candidates.new_session_default_documents
+                        ),
+                        current_scope_documents=current_scope_documents,
+                    )
+                selection_mode = scope_decision.selection_mode
+                history_user_files = tuple(
+                    (
+                        requested.file_name,
+                        requested.original_name,
+                    )
+                    for requested in scope_decision.requested_files
+                )
+                effective_input_documents = tuple(
+                    document.to_input_tuple()
+                    for document in scope_decision.effective_documents
+                )
+            effective_count = len(effective_input_documents)
+            if (
+                max_files_per_request is not None
+                and effective_count > max_files_per_request
+            ):
+                logger.warning(
+                    "文件对话运行受理被拒绝：有效文件数量超过上限: "
+                    "chat_id=%s run_id=%s selection_mode=%s "
+                    "session_created=%s explicit_candidate_count=%d "
+                    "default_candidate_count=%d effective_file_count=%d limit=%d",
+                    normalized_chat_id,
+                    normalized_run_id,
+                    selection_mode,
+                    session_created,
+                    explicit_candidate_count,
+                    default_candidate_count,
+                    effective_count,
+                    max_files_per_request,
+                )
+                # 当前事务同时持有首次 session 插入；抛出异常会由连接上下文统一回滚，
+                # 不得留下只有 session 而没有 run/input/message 的半成品事实。
+                raise ValueError("fileNames超过文件对话数量上限")
+
+            logger.info(
+                "文件对话受理事务已选择有效文档: chat_id=%s run_id=%s "
+                "scope_mode=%s requested_architecture_id=%s "
+                "bound_architecture_id=%s architecture_candidate_outcome=%s "
+                "selection_mode=%s "
+                "session_created=%s explicit_candidate_count=%d "
+                "default_candidate_count=%d effective_file_count=%d",
+                normalized_chat_id,
+                normalized_run_id,
+                scope_binding.scope_mode,
+                normalized_scope_selector.architecture_id,
+                scope_binding.architecture_id,
+                (
+                    document_candidates.architecture_candidates.resolution_outcome
+                    if (
+                        document_candidates is not None
+                        and document_candidates.architecture_candidates is not None
+                    )
+                    else ""
+                ),
+                selection_mode,
+                session_created,
+                explicit_candidate_count,
+                default_candidate_count,
+                effective_count,
+            )
             connection.execute(
                 """
                 INSERT INTO chat_runs (
@@ -240,12 +501,61 @@ class ChatRunLockService:
             ).fetchone()
             if row is None:
                 raise ValueError("chat_run was not created")
+            if scope_decision is not None:
+                if scope_decision.creates_scope_revision:
+                    revision = ChatScopeRevision(
+                        scope_revision_id=chat_scope_revision_id_for_run(
+                            normalized_run_id
+                        ),
+                        chat_id=normalized_chat_id,
+                        source_mode=scope_decision.scope_source_mode,
+                        source_run_id=normalized_run_id,
+                        members=scope_decision.effective_documents,
+                        created_at=now,
+                        source_architecture_id=(
+                            scope_decision.source_architecture_id
+                        ),
+                    )
+                    ChatScopeRepository.append_and_set_head_in_transaction(
+                        connection,
+                        revision=revision,
+                        expected_current_revision_id=(
+                            None
+                            if current_scope_head is None
+                            else current_scope_head.scope_revision_id
+                        ),
+                    )
+                    effective_scope_revision_id = (
+                        revision.scope_revision_id
+                    )
+                else:
+                    if current_scope_head is None:
+                        raise ValueError(
+                            "active scope reuse requires current scope head"
+                        )
+                    effective_scope_revision_id = (
+                        current_scope_head.scope_revision_id
+                    )
             if user_message is not None:
                 self._append_run_input(
                     connection,
                     run_id=normalized_run_id,
                     message=user_message,
-                    documents=input_documents,
+                    documents=(
+                        ()
+                        if effective_scope_revision_id
+                        else effective_input_documents
+                    ),
+                    requested_files=history_user_files,
+                    effective_scope_revision_id=(
+                        effective_scope_revision_id
+                    ),
+                    selection_mode=selection_mode,
+                    requested_architecture_id=(
+                        scope_decision.requested_architecture_id
+                        if scope_decision is not None
+                        else None
+                    ),
                     created_at=now,
                 )
                 self._append_user_pending(
@@ -253,16 +563,304 @@ class ChatRunLockService:
                     chat_id=normalized_chat_id,
                     run_id=normalized_run_id,
                     message=user_message,
-                    files=user_files,
+                    files=history_user_files,
+                    architecture_id=scope_binding.architecture_id,
                     created_at=now,
                 )
+            if admission_lease is not None:
+                consumed = connection.execute(
+                    """
+                    DELETE FROM chat_admission_guards
+                    WHERE chat_id = ? AND admission_token = ?
+                    """,
+                    (
+                        admission_lease.chat_id,
+                        admission_lease.admission_token,
+                    ),
+                )
+                if consumed.rowcount != 1:
+                    raise ValueError(
+                        "chat admission guard was changed before acceptance"
+                    )
             logger.info(
-                "文件对话运行锁获取成功: chat_id=%s run_id=%s has_owner_instance=%s",
+                "文件对话运行锁获取成功: chat_id=%s run_id=%s "
+                "selection_mode=%s session_created=%s "
+                "requested_file_count=%d effective_file_count=%d "
+                "scope_revision_id=%s has_owner_instance=%s",
                 normalized_chat_id,
                 normalized_run_id,
+                selection_mode,
+                session_created,
+                len(history_user_files),
+                effective_count,
+                effective_scope_revision_id,
                 bool(self.owner_instance_id),
             )
             return self._row(row)
+
+    def reserve_chat_admission(
+        self,
+        *,
+        chat_id: str,
+        scope_selector: ChatScopeSelector,
+    ) -> ChatAdmissionLease:
+        """在不创建 Session/Scope/run 的前提下取得同一 chatId 的短期准入权。"""
+        normalized_chat_id = _required_text(chat_id, name="chat_id")
+        if not isinstance(scope_selector, ChatScopeSelector):
+            raise TypeError("scope_selector must be ChatScopeSelector")
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires_at = (
+            now_dt + timedelta(seconds=DEFAULT_CHAT_ADMISSION_SECONDS)
+        ).isoformat()
+        admission_token = uuid.uuid4().hex
+        active_statuses = tuple(sorted(RUN_ACTIVE_STATUSES))
+
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            # 崩溃遗留的 Guard 只是一条临时协调事实；按过期时间回收不会改变任何
+            # Session、Scope、run 或消息。
+            expired = connection.execute(
+                "DELETE FROM chat_admission_guards WHERE expires_at <= ?",
+                (now,),
+            )
+            if expired.rowcount:
+                logger.warning(
+                    "已回收过期文件对话准入 Guard: expired_count=%d",
+                    expired.rowcount,
+                )
+
+            session_row = connection.execute(
+                "SELECT status FROM chat_sessions WHERE chat_id = ?",
+                (normalized_chat_id,),
+            ).fetchone()
+            if session_row is not None:
+                if session_row["status"] != SESSION_ACTIVE:
+                    raise ChatSessionUnavailableError(
+                        chat_id=normalized_chat_id,
+                        status=session_row["status"],
+                    )
+                existing_binding = (
+                    ChatSessionScopeBindingRepository.get_in_transaction(
+                        connection,
+                        chat_id=normalized_chat_id,
+                    )
+                )
+                if existing_binding is None:
+                    raise ValueError(
+                        "existing chat session is missing immutable scope binding"
+                    )
+                # 这里只校验不可变模式和 ID，不创建新 Binding。
+                decide_chat_session_scope_binding(
+                    chat_id=normalized_chat_id,
+                    selector=scope_selector,
+                    existing_binding=existing_binding,
+                    created_at=now,
+                )
+
+            self._expire_stale_runs(
+                connection,
+                chat_id=normalized_chat_id,
+                now=now,
+                active_statuses=active_statuses,
+            )
+            active_row = connection.execute(
+                f"""
+                SELECT run_id
+                FROM chat_runs
+                WHERE chat_id = ?
+                  AND status IN ({",".join("?" for _ in active_statuses)})
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (normalized_chat_id, *active_statuses),
+            ).fetchone()
+            if active_row is not None:
+                raise ChatRunBusyError(
+                    chat_id=normalized_chat_id,
+                    active_run_id=active_row["run_id"],
+                )
+
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO chat_admission_guards (
+                        chat_id, admission_token, owner_instance_id,
+                        scope_mode, architecture_id, expires_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_chat_id,
+                        admission_token,
+                        self.owner_instance_id,
+                        scope_selector.scope_mode,
+                        scope_selector.architecture_id,
+                        expires_at,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                logger.info(
+                    "文件对话准入 Guard 竞争失败: chat_id=%s",
+                    normalized_chat_id,
+                )
+                raise ChatAdmissionBusyError(
+                    chat_id=normalized_chat_id
+                ) from exc
+
+        logger.info(
+            "文件对话准入 Guard 已创建: chat_id=%s scope_mode=%s "
+            "requested_architecture_id=%s expires_at=%s",
+            normalized_chat_id,
+            scope_selector.scope_mode,
+            scope_selector.architecture_id,
+            expires_at,
+        )
+        return ChatAdmissionLease(
+            chat_id=normalized_chat_id,
+            owner_instance_id=self.owner_instance_id,
+            admission_token=admission_token,
+            scope_mode=scope_selector.scope_mode,
+            architecture_id=scope_selector.architecture_id,
+            expires_at=expires_at,
+        )
+
+    def release_chat_admission(self, *, lease: ChatAdmissionLease) -> None:
+        """按 token 幂等释放 Guard，禁止旧请求删除后来创建的新 Guard。"""
+        if not isinstance(lease, ChatAdmissionLease):
+            raise TypeError("lease must be ChatAdmissionLease")
+        with _connection_scope(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            deleted = connection.execute(
+                """
+                DELETE FROM chat_admission_guards
+                WHERE chat_id = ? AND admission_token = ?
+                """,
+                (lease.chat_id, lease.admission_token),
+            )
+        if deleted.rowcount:
+            logger.info(
+                "文件对话准入 Guard 已释放: chat_id=%s",
+                lease.chat_id,
+            )
+
+    def _require_admission_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        lease: ChatAdmissionLease,
+        scope_selector: ChatScopeSelector,
+        now: str,
+    ) -> None:
+        """在最终受理事务内验证 Guard 仍归当前请求所有且尚未过期。"""
+        row = connection.execute(
+            """
+            SELECT *
+            FROM chat_admission_guards
+            WHERE chat_id = ? AND admission_token = ?
+            """,
+            (lease.chat_id, lease.admission_token),
+        ).fetchone()
+        if row is None:
+            raise ValueError("chat admission guard is missing")
+        if row["expires_at"] <= now:
+            raise ValueError("chat admission guard has expired")
+        if (
+            row["owner_instance_id"] != lease.owner_instance_id
+            or row["scope_mode"] != scope_selector.scope_mode
+            or row["architecture_id"] != scope_selector.architecture_id
+        ):
+            raise ValueError("chat admission guard identity is inconsistent")
+
+    @staticmethod
+    def _validate_admission_lease_shape(
+        *,
+        lease: ChatAdmissionLease,
+        chat_id: str,
+        scope_selector: ChatScopeSelector,
+    ) -> None:
+        if not isinstance(lease, ChatAdmissionLease):
+            raise TypeError("admission_lease must be ChatAdmissionLease or None")
+        if lease.chat_id != chat_id:
+            raise ValueError("admission_lease belongs to another chat_id")
+        if (
+            lease.scope_mode != scope_selector.scope_mode
+            or lease.architecture_id != scope_selector.architecture_id
+        ):
+            raise ValueError("admission_lease selector does not match request")
+
+    @staticmethod
+    def _normalize_scope_selector(
+        *,
+        scope_selector: ChatScopeSelector | None,
+        document_candidates: ChatDocumentSelectionCandidates | None,
+        user_files: tuple[tuple[str, str], ...],
+        input_documents: tuple[tuple[str, str, str, str], ...],
+    ) -> ChatScopeSelector:
+        """规范内部选择器，并为既有 file 调用构造等价 Binding 输入。
+
+        architecture 路径禁止推断 ID，必须由已经通过 Web 规范化的显式选择器提供；
+        兼容的 file 路径则可从现有不可变候选恢复文件名，从而不迫使旧内部调用方
+        一次性修改方法签名。
+        """
+        if scope_selector is not None and not isinstance(
+            scope_selector,
+            ChatScopeSelector,
+        ):
+            raise TypeError("scope_selector must be ChatScopeSelector or None")
+        architecture_candidates = (
+            None
+            if document_candidates is None
+            else document_candidates.architecture_candidates
+        )
+        if scope_selector is None:
+            if architecture_candidates is not None:
+                raise ValueError(
+                    "architecture candidates require an explicit scope selector"
+                )
+            if document_candidates is not None:
+                inferred_file_names = tuple(
+                    document.file_name
+                    for document in document_candidates.explicit_documents
+                )
+            elif input_documents:
+                inferred_file_names = tuple(
+                    file_name for file_name, _, _, _ in input_documents
+                )
+            else:
+                inferred_file_names = tuple(
+                    file_name for file_name, _ in user_files
+                )
+            return ChatScopeSelector.for_files(inferred_file_names)
+
+        if scope_selector.scope_mode == CHAT_SCOPE_MODE_ARCHITECTURE:
+            if architecture_candidates is None:
+                raise ValueError(
+                    "architecture selector requires architecture candidates"
+                )
+            if (
+                architecture_candidates.architecture_id
+                != scope_selector.architecture_id
+            ):
+                raise ValueError(
+                    "architecture selector and candidates ID do not match"
+                )
+            return scope_selector
+
+        if architecture_candidates is not None:
+            raise ValueError(
+                "file selector cannot contain architecture candidates"
+            )
+        if document_candidates is not None:
+            explicit_file_names = tuple(
+                document.file_name
+                for document in document_candidates.explicit_documents
+            )
+            if explicit_file_names != scope_selector.file_names:
+                raise ValueError(
+                    "file selector does not match explicit document candidates"
+                )
+        return scope_selector
 
     def begin_chat_deletion(self, *, chat_id: str) -> None:
         """原子阻止新运行，并在存在活动运行时拒绝删除。"""
@@ -897,6 +1495,10 @@ class ChatRunLockService:
         message: str,
         documents: tuple[tuple[str, str, str, str], ...],
         created_at: str,
+        requested_files: tuple[tuple[str, str], ...] = (),
+        effective_scope_revision_id: str = "",
+        selection_mode: str = "legacy_input",
+        requested_architecture_id: int | None = None,
     ) -> None:
         normalized_message = _required_text(message, name="user_message")
         normalized_documents = tuple(
@@ -918,10 +1520,38 @@ class ChatRunLockService:
             normalized_documents
         ):
             raise ValueError("input_documents contains duplicate file_name")
+        normalized_requested_files = tuple(
+            {
+                "file_name": _required_text(file_name, name="file_name"),
+                "original_name": _required_text(
+                    original_name,
+                    name="original_name",
+                ),
+            }
+            for file_name, original_name in requested_files
+        )
+        if len(
+            {item["file_name"] for item in normalized_requested_files}
+        ) != len(normalized_requested_files):
+            raise ValueError("requested_files contains duplicate file_name")
+        normalized_scope_revision_id = _optional_text(
+            effective_scope_revision_id
+        )
+        normalized_selection_mode = _required_text(
+            selection_mode,
+            name="selection_mode",
+        )
+        if normalized_scope_revision_id and normalized_documents:
+            raise ValueError(
+                "scope run input cannot duplicate effective documents"
+            )
         connection.execute(
             """
-            INSERT INTO chat_run_inputs (run_id, message, files_json, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO chat_run_inputs (
+                run_id, message, files_json, created_at,
+                requested_files_json, effective_scope_revision_id,
+                selection_mode, requested_architecture_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -932,6 +1562,14 @@ class ChatRunLockService:
                     separators=(",", ":"),
                 ),
                 created_at,
+                json.dumps(
+                    normalized_requested_files,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                normalized_scope_revision_id,
+                normalized_selection_mode,
+                requested_architecture_id,
             ),
         )
 
@@ -943,6 +1581,7 @@ class ChatRunLockService:
         run_id: str,
         message: str,
         files: tuple[tuple[str, str], ...],
+        architecture_id: int | None,
         created_at: str,
     ) -> None:
         normalized_message = _required_text(message, name="user_message")
@@ -964,8 +1603,8 @@ class ChatRunLockService:
             """
             INSERT INTO chat_messages (
                 message_id, chat_id, run_id, role, content,
-                status, sequence_no, created_at
-            ) VALUES (?, ?, ?, 'user', ?, ?, ?, ?)
+                status, sequence_no, created_at, architecture_id
+            ) VALUES (?, ?, ?, 'user', ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -975,6 +1614,7 @@ class ChatRunLockService:
                 MESSAGE_PENDING,
                 int(sequence_row["next_sequence"]),
                 created_at,
+                architecture_id,
             ),
         )
         for file_name, original_name in normalized_files:
@@ -1169,10 +1809,12 @@ class ChatRunLockService:
 
 
 __all__ = [
+    "ChatAdmissionBusyError",
     "ChatRunBusyError",
     "ChatRunInactiveError",
     "ChatRunLockService",
     "ChatSessionDeleteBusyError",
     "ChatSessionUnavailableError",
     "DEFAULT_STALE_RUN_SECONDS",
+    "DEFAULT_CHAT_ADMISSION_SECONDS",
 ]

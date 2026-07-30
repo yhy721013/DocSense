@@ -247,26 +247,34 @@ class AnythingLLMClient:
         user_id: Optional[int] = None,
         *,
         top_n: Optional[int] = None,
+        score_threshold: Optional[float] = None,
     ) -> list[dict[str, Any]]:
         """执行向量检索并返回兼容来源字典，失败时返回空列表。
 
-        ``top_n`` 是阶段 3 新增的公开参数，用于替代 weaponry 业务层自行拼接
-        ``/vector-search`` 请求。参数会原样委托给 Workspace Client，由适配层负责转换
-        为 AnythingLLM 的 ``topN`` 字段。
+        ``top_n`` 和 ``score_threshold`` 是 Python 内部适配参数，不属于 DocSense HTTP
+        接口。后者只供显式校准或未来冻结 profile 的 Adapter 使用；缺省时不会发送
+        ``scoreThreshold``，因此既有业务继续沿用 workspace 配置。
         """
         try:
+            keyword_arguments: dict[str, Any] = {
+                "top_n": top_n,
+                "user_id": user_id,
+            }
+            if score_threshold is not None:
+                keyword_arguments["score_threshold"] = score_threshold
             sources = self.workspaces.vector_search(
                 workspace_slug,
                 query,
-                top_n=top_n,
-                user_id=user_id,
+                **keyword_arguments,
             )
             return [self._source_dict(source) for source in sources]
         except Exception as exc:
             logger.error(
-                "AnythingLLM 向量检索失败: query_chars=%d top_n=%s error_type=%s",
+                "AnythingLLM 向量检索失败: query_chars=%d top_n=%s "
+                "has_score_threshold=%s error_type=%s",
                 len(query or ""),
                 top_n,
+                score_threshold is not None,
                 type(exc).__name__,
             )
             return []

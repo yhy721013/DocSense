@@ -8,13 +8,13 @@
 | --- | --- |
 | `__init__.py` | 既有 LLM 服务包标记。 |
 | `analysis_service.py` | 文档分析业务服务。 |
-| `interaction_audit_service.py` | 交互审计服务。 |
+| `interaction_audit_service.py` | 交互审计服务；阶段 1C-4 将内部审计 Schema 升级为 v3，无损保存 RAG `trace_id` 与每次 attempt 的 `call_id`。 |
 | `knowledge_index_operation_service.py` | 知识索引操作服务。 |
 | `rag_resource_lease_service.py` | 既有 RAG 资源租约服务。 |
-| `report_service.py` | 报告生成服务。 |
-| `task_service.py` | 任务编排服务。 |
+| `report_service.py` | 报告生成遗留兼容实现；当前公开路由和生产组合根均不再调用，仅为黄金样例、旧测试与安全回滚观察保留。 |
+| `task_service.py` | 既有任务投影/审计/回调服务；阶段 1C-3 增量提供 SQLite execution、原子受理/领取、expected TaskId 条件写及 Guard fencing；阶段 1C-4 以幂等补列兼容审计 Schema v3；阶段 1C-5 新增 Guard 人工解除追加审计、任务资源恢复记录、终态权威 Artifact 所有权及可恢复清理扫描。2026-07-29 又新增 `callback_delivery_attempt_events` 追加审计，将 file/report/weaponry 的初次发送、显式 check-task 授权、完成、过期冻结和不一致冻结与 Guard CAS 放在同一 SQLite 事务内；该能力仍仅是单实例兼容实现。 |
 | `translation_service.py` | 翻译业务服务。 |
-| `weaponry_service.py` | 装备相关业务服务。 |
+| `weaponry_service.py` | 武器谱遗留兼容实现；当前公开路由、生产组合根和新 Dispatcher 均不再调用，仅为旧黄金样例与兼容测试保留。 |
 
 ## 文件对话迁移说明
 
@@ -29,3 +29,11 @@
 
 - 不要重新创建 `chat_service.py`，也不要把 `/llm/chat*` 新需求写入本目录。
 - 若既有 LLM 服务需要与文件对话协作，应依赖 `services/chat` 的稳定应用服务或端口，而不是复制会话状态机。
+- `task_service.py` 的阶段 1C-3 方法是单实例 SQLite 过渡实现，不得描述为 MySQL、Outbox、
+  RabbitMQ、跨实例锁或可靠队列；业务模块应通过 tasks Port/Adapter 使用，不能继续把业务
+  DTO 和外部 I/O 塞入该服务。
+- 不得从生产路由、组合根或新业务代码重新导入 `report_service.run_report_task`。遗留文件
+  只有在运行路径、测试与配置三类引用都清零后，才能按阶段 1G 的静态证据流程删除。
+- 不得从生产路由、组合根或新业务代码重新导入 `weaponry_service.run_weaponry_task`。该遗留
+  文件仍包含旧父 Thread 回退和旧资源编排，只允许兼容测试直接使用；运行、测试和配置引用
+  清零前由阶段 1G 继续保留，不能作为新链的细粒度回退。

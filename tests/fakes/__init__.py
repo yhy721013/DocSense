@@ -5,6 +5,11 @@
 """
 
 from .chat import FakeChatConversationFactory, FakeChatConversationPort
+from .analysis import (
+    AnalysisFakeExpectation,
+    StrictAnalysisFakeScript,
+    StrictAnalysisPortFake,
+)
 from .knowledge_index import FakeKnowledgeIndexFactory, FakeKnowledgeIndexPort
 from .rag import (
     FakeDocumentRagFactory,
@@ -12,8 +17,53 @@ from .rag import (
     FakeDocumentRagSession,
     FakeRagOutcome,
 )
+from .reassign import (
+    FakeReassignmentKnowledgePort,
+    FakeReassignmentKnowledgePortFactory,
+    FakeReassignmentRepository,
+    FakeReassignmentUnitOfWork,
+    PostCommitFailureReassignmentRepository,
+)
+from .report import (
+    FakeProgressPublisherPort,
+    FakeReportArtifactPort,
+    FakeReportAuditPort,
+    FakeReportCallbackPort,
+    FakeReportDispatcherPort,
+    FakeReportFilePort,
+    FakeReportRagPort,
+    FakeReportResourceStorePort,
+    FakeReportTaskCommandPort,
+    InvocationRecorder,
+    sample_failed_report_trace,
+    sample_report_trace,
+)
+from .tasks import (
+    FakeCallbackRecoveryCommandPort,
+    FakeCallbackRecoveryPort,
+    FakeProgressSnapshotPort,
+    FakeProgressSubscriptionPort,
+    FakeTaskReadPort,
+)
+from .weaponry import (
+    FakeAuxiliaryGuidancePort,
+    FakeEvidenceExtractionPort,
+    FakeTargetEvidenceRetrievalPort,
+    FakeWeaponryCallbackPort,
+    FakeWeaponryDispatcherPort,
+    FakeWeaponryDocumentScopePort,
+    FakeWeaponryExternalResourceCleanupPort,
+    FakeWeaponryInteractionAuditPort,
+    FakeWeaponryProgressPublisherPort,
+    FakeWeaponryResourceStorePort,
+    FakeWeaponryTaskCommandPort,
+    FakeWeaponryTranslationPort,
+    WeaponryInvocation,
+    WeaponryInvocationRecorder,
+)
 
 __all__ = [
+    "AnalysisFakeExpectation",
     "FakeChatConversationFactory",
     "FakeChatConversationPort",
     "FakeDocumentRagFactory",
@@ -22,4 +72,42 @@ __all__ = [
     "FakeKnowledgeIndexFactory",
     "FakeKnowledgeIndexPort",
     "FakeRagOutcome",
+    "FakeReassignmentKnowledgePort",
+    "FakeReassignmentKnowledgePortFactory",
+    "FakeReassignmentRepository",
+    "FakeReassignmentUnitOfWork",
+    "PostCommitFailureReassignmentRepository",
+    "FakeProgressPublisherPort",
+    "FakeReportArtifactPort",
+    "FakeReportAuditPort",
+    "FakeReportCallbackPort",
+    "FakeReportDispatcherPort",
+    "FakeReportFilePort",
+    "FakeReportRagPort",
+    "FakeReportResourceStorePort",
+    "FakeReportTaskCommandPort",
+    "FakeCallbackRecoveryCommandPort",
+    "FakeCallbackRecoveryPort",
+    "FakeProgressSnapshotPort",
+    "FakeProgressSubscriptionPort",
+    "FakeTaskReadPort",
+    "FakeAuxiliaryGuidancePort",
+    "FakeEvidenceExtractionPort",
+    "FakeTargetEvidenceRetrievalPort",
+    "FakeWeaponryCallbackPort",
+    "FakeWeaponryDispatcherPort",
+    "FakeWeaponryDocumentScopePort",
+    "FakeWeaponryExternalResourceCleanupPort",
+    "FakeWeaponryInteractionAuditPort",
+    "FakeWeaponryProgressPublisherPort",
+    "FakeWeaponryResourceStorePort",
+    "FakeWeaponryTaskCommandPort",
+    "FakeWeaponryTranslationPort",
+    "InvocationRecorder",
+    "WeaponryInvocation",
+    "WeaponryInvocationRecorder",
+    "sample_failed_report_trace",
+    "sample_report_trace",
+    "StrictAnalysisFakeScript",
+    "StrictAnalysisPortFake",
 ]

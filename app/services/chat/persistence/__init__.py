@@ -5,7 +5,10 @@ from app.services.chat.persistence.repositories import (
     ChatDocumentBindingRepository,
     ChatMessageRepository,
     ChatRunRepository,
+    ChatScopeRepository,
+    ChatSessionScopeBindingRepository,
     ChatSessionRepository,
+    chat_scope_revision_id_for_run,
     ensure_chat_schema,
 )
 from app.services.chat.persistence.event_repository import (
@@ -41,9 +44,12 @@ __all__ = [
     "ChatRunEventRepository",
     "ChatRunEventStore",
     "ChatRunRepository",
+    "ChatScopeRepository",
+    "ChatSessionScopeBindingRepository",
     "ChatSessionRepository",
     "ChatStore",
     "DisabledChatOutbox",
     "SQLITE_SINGLE_INSTANCE_PERSISTENCE_CAPABILITIES",
+    "chat_scope_revision_id_for_run",
     "ensure_chat_schema",
 ]

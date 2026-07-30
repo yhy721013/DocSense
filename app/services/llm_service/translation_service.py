@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import logging
 import threading
+import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from app.services.translator import DocumentTranslator, HYMTTranslator
 
@@ -23,8 +24,10 @@ class LLMTranslationService:
         """初始化翻译服务"""
         self._translator: Optional[HYMTTranslator] = None
         self._document_translator: Optional[DocumentTranslator] = None
-        self._progress_callback: Optional[Callable[[float, str], None]] = None
         self._init_lock = threading.RLock()
+        # DocumentTranslator 会短暂修改 MinerU 的共享输出目录；当前实现尚不能证明
+        # 该对象可重入。因此在单进程内串行化真实翻译 I/O，不能只依赖初始化锁。
+        self._execution_lock = threading.RLock()
 
     def _ensure_translator(self) -> None:
         """确保基础翻译器已初始化（懒加载）"""
@@ -47,22 +50,6 @@ class LLMTranslationService:
                 self._translator = HYMTTranslator(model_name=model_name, check_ollama=False)
             if self._document_translator is None:
                 self._document_translator = DocumentTranslator(self._translator)
-
-    def set_progress_callback(self, callback: Callable[[float, str], None]) -> None:
-        """
-        设置进度回调函数
-
-        :param callback: 回调函数，接收 (progress: float, message: str)
-        """
-        self._progress_callback = callback
-
-    def _notify_progress(self, progress: float, message: str) -> None:
-        """内部进度通知方法"""
-        if self._progress_callback:
-            try:
-                self._progress_callback(progress, message)
-            except Exception as e:
-                logger.error("翻译进度回调执行失败: error_type=%s", type(e).__name__)
 
     def _default_fast_translate(self) -> bool:
         """
@@ -110,44 +97,50 @@ class LLMTranslationService:
         if not os.path.exists(file_path):
             return "", ""
 
+        wait_started_at = time.perf_counter()
         try:
-            # 生成输出路径
-            base_path = Path(file_path)
-            output_htmls = base_path.parent / f"{base_path.stem}"
-            output_monolingual_html = base_path.parent / f"{base_path.stem}" / "_monolingual_html"
+            with self._execution_lock:
+                logger.debug(
+                    "文档翻译进入共享执行区: file_name=%s wait_ms=%d",
+                    Path(file_path).name,
+                    round((time.perf_counter() - wait_started_at) * 1000),
+                )
+                # 生成输出路径。路径设置、MinerU 转换和 HTML 读取都必须在同一临界区，
+                # 否则另一任务可能在本任务读取前覆盖共享输出目录。
+                base_path = Path(file_path)
+                output_htmls = base_path.parent / f"{base_path.stem}"
 
-            # 翻译文档（生成双语和单语 HTML，只翻译一次）
-            document_translator = self._document_translator
-            if document_translator is None:
-                raise RuntimeError("文档翻译器未初始化")
+                # 翻译文档（生成双语和单语 HTML，只翻译一次）
+                document_translator = self._document_translator
+                if document_translator is None:
+                    raise RuntimeError("文档翻译器未初始化")
 
-            resolved_fast_translate = self._resolve_fast_translate(fast_translate)
-            bilingual_html_path, monolingual_html_path = document_translator.convert_to_html(
-                file_path=str(file_path),
-                output_dir=str(output_htmls),
-                target_lang=target_lang,
-                translate_all=translate_all,
-                fast_translate=resolved_fast_translate,
-            )
+                resolved_fast_translate = self._resolve_fast_translate(fast_translate)
+                bilingual_html_path, monolingual_html_path = document_translator.convert_to_html(
+                    file_path=str(file_path),
+                    output_dir=str(output_htmls),
+                    target_lang=target_lang,
+                    translate_all=translate_all,
+                    fast_translate=resolved_fast_translate,
+                )
 
-            # 读取双语 HTML 内容
-            bilingual_html_content = ""
-            if os.path.exists(bilingual_html_path):
-                bilingual_html_content = Path(bilingual_html_path).read_text(encoding="utf-8", errors="ignore")
+                # 读取双语 HTML 内容
+                bilingual_html_content = ""
+                if os.path.exists(bilingual_html_path):
+                    bilingual_html_content = Path(bilingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
-            # 读取单语 HTML 内容
-            monolingual_html_content = ""
-            if os.path.exists(monolingual_html_path):
-                monolingual_html_content = Path(monolingual_html_path).read_text(encoding="utf-8", errors="ignore")
+                # 读取单语 HTML 内容
+                monolingual_html_content = ""
+                if os.path.exists(monolingual_html_path):
+                    monolingual_html_content = Path(monolingual_html_path).read_text(encoding="utf-8", errors="ignore")
 
-            return bilingual_html_content, monolingual_html_content
+                return bilingual_html_content, monolingual_html_content
         except Exception as e:
             logger.exception(
                 "文档翻译失败: file_name=%s error_type=%s",
                 Path(file_path).name,
                 type(e).__name__,
             )
-            self._notify_progress(0.0, f"翻译失败：{e}")
             return "", ""
 
     def translate_text_only(
@@ -171,13 +164,27 @@ class LLMTranslationService:
         if not text.strip():
             return ""
 
+        wait_started_at = time.perf_counter()
         try:
-            resolved_fast_translate = self._resolve_fast_translate(fast_translate)
-            translated = self._translator.translate_text(text, target_lang, fast_translate=resolved_fast_translate)
-            if as_html:
-                # 返回HTML格式
-                return f'<div class="translated-text">{self._escape_html(translated)}</div>'
-            return translated
+            with self._execution_lock:
+                logger.debug(
+                    "文本翻译进入共享执行区: text_chars=%d wait_ms=%d",
+                    len(text),
+                    round((time.perf_counter() - wait_started_at) * 1000),
+                )
+                resolved_fast_translate = self._resolve_fast_translate(fast_translate)
+                translator = self._translator
+                if translator is None:
+                    raise RuntimeError("基础翻译器未初始化")
+                translated = translator.translate_text(
+                    text,
+                    target_lang,
+                    fast_translate=resolved_fast_translate,
+                )
+                if as_html:
+                    # 返回HTML格式
+                    return f'<div class="translated-text">{self._escape_html(translated)}</div>'
+                return translated
         except Exception as e:
             logger.error("文本翻译失败: error_type=%s", type(e).__name__)
             return ""

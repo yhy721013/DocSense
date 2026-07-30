@@ -20,6 +20,7 @@ from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
 from app.integrations.anythingllm.models import (
     DOCSENSE_SOURCE_MARKER_PREFIX,
     AnythingLLMDocument,
+    parse_xlsx_sheet_location,
 )
 from app.integrations.anythingllm.policies import DOCUMENT_RAG_WORKSPACE_POLICY_VERSION
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
@@ -324,16 +325,9 @@ class AnythingLLMKnowledgeGateway:
                 known_collection.ref,
                 normalized_key,
             )
-            # 如果已存在且状态为 committed，直接复用，避免 document_ref/location 冲突
-            if existing is not None and existing.status == STATUS_COMMITTED:
-                logger.info(
-                    "永久知识库文档已提交，直接复用既有结果: architecture_id=%s "
-                    "idempotency_key=%s",
-                    known_collection.architecture_id,
-                    normalized_key,
-                )
-                return self._indexed_result(existing, created=False)
-            
+            # 即使记录已经 committed，也必须再次经过 begin 的不可变身份比较。直接返回会
+            # 让“同一幂等键 + 不同 metadata/文档位置”的后到请求绕过冲突校验，并把旧结果
+            # 误报成安全复用；begin 已负责精确重放和 last_execution_id 更新。
             record = self._operation_service.begin(
                 collection_ref=known_collection.ref,
                 idempotency_key=normalized_key,
@@ -753,7 +747,7 @@ class AnythingLLMKnowledgeGateway:
         collection: CollectionRef,
         record: KnowledgeIndexOperationRecord,
     ) -> KnowledgeIndexOperationRecord:
-        """清理被替换旧版本并把协调记录推进到 committed。"""
+        """从当前集合解绑被替换旧版本，并把协调记录推进到 committed。"""
         if record.superseded_location:
             try:
                 # Workspace 删除绑定是幂等操作。若上一次请求成功但状态写入失败，重放同一
@@ -835,10 +829,16 @@ class AnythingLLMKnowledgeGateway:
 
             if record.source_kind == "upload":
                 try:
-                    self._document_client.delete_document(
-                        record.external_location,
-                        user_id=self._user_id,
-                    )
+                    if parse_xlsx_sheet_location(record.external_location) is not None:
+                        self._document_client.delete_document_artifact(
+                            record.external_location,
+                            user_id=self._user_id,
+                        )
+                    else:
+                        self._document_client.delete_document(
+                            record.external_location,
+                            user_id=self._user_id,
+                        )
                     # 全局删除会清除所有 Workspace 关联，因此即使前面的显式解绑失败，
                     # 文档清理仍已达到更强的最终状态，可以视为补偿成功。
                     errors.clear()
@@ -915,10 +915,16 @@ class AnythingLLMKnowledgeGateway:
         """协调状态写入失败时，使用内存中的真实位置立即删除刚上传文档。"""
         cleanup_error = ""
         try:
-            self._document_client.delete_document(
-                document.location,
-                user_id=self._user_id,
-            )
+            if parse_xlsx_sheet_location(document.location) is not None:
+                self._document_client.delete_document_artifact(
+                    document.location,
+                    user_id=self._user_id,
+                )
+            else:
+                self._document_client.delete_document(
+                    document.location,
+                    user_id=self._user_id,
+                )
         except Exception as exc:
             cleanup_error = self._safe_error(exc, fallback="删除未登记全局文档失败")
         target_status = (

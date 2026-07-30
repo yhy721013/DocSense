@@ -1,0 +1,1073 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-07-17",
+  "implementedAt": "2026-07-19",
+  "stage": "1D-6",
+  "authority": "docs/接口文档/知识谱系解析.md",
+  "productionCodeSwitch": "weaponry-application-route",
+  "interfaceParametersChanged": false,
+  "contractState": "approved-target-implemented-in-development-branch",
+  "publicSubmission": {
+    "method": "POST",
+    "path": "/llm/weaponry",
+    "current": {
+      "successStatus": 202,
+      "successBody": "",
+      "implementationStatus": "new-application-route-active-since-1D-6"
+    },
+    "target": {
+      "successStatus": 202,
+      "successBody": "",
+      "errorBodyShape": {
+        "requiredKeys": [
+          "error"
+        ],
+        "additionalKeys": false
+      },
+      "activeConflict": {
+        "status": 409,
+        "body": {
+          "error": "任务正在处理中"
+        }
+      },
+      "backlogPolicy": "persist-and-process-without-business-count-limit",
+      "implementationWave": "1D-6"
+    }
+  },
+  "approvedDecisions": [
+    {
+      "id": "1D-D01",
+      "decision": "freeze-category-document-scope-at-acceptance",
+      "emptyScopeAtAcceptance": "accept-202-then-existing-asynchronous-failure-callback"
+    },
+    {
+      "id": "1D-D02",
+      "decision": "normalize-architecture-id",
+      "acceptedJsonTypes": [
+        "integer",
+        "string"
+      ],
+      "stringFormat": "ascii-decimal-digits-only",
+      "range": {
+        "minimum": 1,
+        "maximum": 9223372036854775807
+      },
+      "leadingZeros": "accepted-and-removed",
+      "internalBusinessKey": "canonical-decimal-string",
+      "callbackType": "json-number"
+    },
+    {
+      "id": "1D-D03",
+      "decision": "status-is-optional-and-ignored-and-field-shapes-are-strict",
+      "unknownExtensionKeys": "deep-freeze-and-preserve",
+      "invalidShapeStatus": 400
+    },
+    {
+      "id": "1D-D04",
+      "decision": "mode-1-is-removed",
+      "onlyStrategy": "file-aggregate-v1",
+      "legacyModeOneConfiguration": "reject-explicitly-never-fallback"
+    },
+    {
+      "id": "1D-D05",
+      "decision": "callback-guard-busy-or-unknown-rejects-new-submission",
+      "staleCallback": "skip-network-send",
+      "explicitCallbackFailureAfterIdle": "new-submission-allowed"
+    }
+  ],
+  "architectureIdCases": [
+    {
+      "input": 1,
+      "valid": true,
+      "normalizedNumber": 1,
+      "businessKey": "1"
+    },
+    {
+      "input": "0001",
+      "valid": true,
+      "normalizedNumber": 1,
+      "businessKey": "1"
+    },
+    {
+      "input": 9223372036854775807,
+      "valid": true,
+      "normalizedNumber": 9223372036854775807,
+      "businessKey": "9223372036854775807"
+    },
+    {
+      "input": null,
+      "valid": false,
+      "error": "architectureId不能为空"
+    },
+    {
+      "input": true,
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": 0,
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": -1,
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": 1.5,
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": "1e3",
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": "+1",
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": " 1 ",
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "input": "9223372036854775808",
+      "valid": false,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    }
+  ],
+  "validationMatrix": [
+    {
+      "case": "request-body-not-object",
+      "status": 400,
+      "error": "请求体必须是JSON对象"
+    },
+    {
+      "case": "business-type-missing-or-wrong",
+      "status": 400,
+      "error": "businessType必须为weaponry"
+    },
+    {
+      "case": "params-missing-or-not-object",
+      "status": 400,
+      "error": "params不能为空"
+    },
+    {
+      "case": "architecture-id-missing",
+      "status": 400,
+      "error": "architectureId不能为空"
+    },
+    {
+      "case": "architecture-id-invalid",
+      "status": 400,
+      "error": "architectureId必须为1到9223372036854775807之间的正整数"
+    },
+    {
+      "case": "file-path-list-not-array",
+      "status": 400,
+      "error": "filePathList必须为数组"
+    },
+    {
+      "case": "file-path-item-invalid",
+      "status": 400,
+      "error": "filePathList中第{index}项不是有效字符串"
+    },
+    {
+      "case": "file-path-name-unavailable",
+      "status": 400,
+      "error": "filePathList中第{index}项无法提取文件名"
+    },
+    {
+      "case": "field-list-missing-not-array-or-empty",
+      "status": 400,
+      "error": "weaponryTemplateFieldList不能为空"
+    },
+    {
+      "case": "field-item-not-object",
+      "status": 400,
+      "error": "weaponryTemplateFieldList中第{index}项必须为对象"
+    },
+    {
+      "case": "top-level-template-classify-id-missing-or-not-integer",
+      "status": 400,
+      "error": "weaponryTemplateFieldList中第{index}项templateClassifyId必须为整数"
+    },
+    {
+      "case": "field-name-missing-or-blank",
+      "status": 400,
+      "error": "weaponryTemplateFieldList中第{index}项fieldName不能为空"
+    },
+    {
+      "case": "field-description-non-null-but-not-string",
+      "status": 400,
+      "error": "weaponryTemplateFieldList中第{index}项fieldDescription必须为字符串"
+    },
+    {
+      "case": "field-type-unknown",
+      "status": 400,
+      "error": "weaponryTemplateFieldList中第{index}项fieldType必须为INPUT或TABLE"
+    },
+    {
+      "case": "request-analysis-result-not-empty",
+      "status": 400,
+      "error": "analyseData和analyseDataSource必须清空"
+    },
+    {
+      "case": "table-field-list-missing-not-array-or-empty",
+      "status": 400,
+      "error": "weaponryTemplateFieldList中第{index}项tableFieldList必须为非空数组"
+    },
+    {
+      "case": "table-row-not-array-or-empty",
+      "status": 400,
+      "error": "tableFieldList中第{row}行必须为非空数组"
+    },
+    {
+      "case": "table-cell-not-object",
+      "status": 400,
+      "error": "tableFieldList中第{row}行第{column}项必须为对象"
+    },
+    {
+      "case": "table-cell-name-missing-or-blank",
+      "status": 400,
+      "error": "tableFieldList中第{row}行第{column}项fieldName不能为空"
+    },
+    {
+      "case": "table-cell-type-not-input",
+      "status": 400,
+      "error": "tableFieldList中第{row}行第{column}项fieldType必须为INPUT"
+    },
+    {
+      "case": "table-cell-description-non-null-but-not-string",
+      "status": 400,
+      "error": "tableFieldList中第{row}行第{column}项fieldDescription必须为字符串"
+    },
+    {
+      "case": "selected-file-not-found",
+      "status": 404,
+      "error": "文件 {fileName} 尚未解析，无法用于知识谱系解析"
+    },
+    {
+      "case": "selected-file-name-ambiguous",
+      "status": 400,
+      "error": "文件 {fileName} 在多个知识库分类中存在记录，无法唯一确定引用版本"
+    },
+    {
+      "case": "selected-files-share-external-document",
+      "status": 400,
+      "error": "选中文件指向同一知识库文档位置，无法唯一溯源"
+    },
+    {
+      "case": "selected-file-classification-invalid",
+      "status": 400,
+      "error": "文件 {fileName} 的知识库分类记录无效"
+    },
+    {
+      "case": "selected-file-document-location-missing",
+      "status": 400,
+      "error": "文件 {fileName} 缺少知识库文档位置"
+    },
+    {
+      "case": "active-task-or-callback-guard-busy",
+      "status": 409,
+      "error": "任务正在处理中"
+    }
+  ],
+  "requestValuePolicies": {
+    "status": {
+      "required": false,
+      "validation": "none",
+      "businessEffect": "none",
+      "preservation": "deep-frozen-original-json"
+    },
+    "analyseData": {
+      "acceptedEmptyValues": [
+        "missing",
+        null,
+        ""
+      ]
+    },
+    "analyseDataSource": {
+      "acceptedEmptyValues": [
+        "missing",
+        null,
+        []
+      ]
+    },
+    "unknownExtensionKeys": "preserve-recursively-with-original-order-and-json-types"
+  },
+  "documentScopeMatrix": [
+    {
+      "case": "explicit-cross-category",
+      "result": "accepted-and-frozen-in-request-order"
+    },
+    {
+      "case": "explicit-duplicate-url-and-name",
+      "result": "case-insensitive-first-occurrence-dedup"
+    },
+    {
+      "case": "explicit-missing-file",
+      "result": "http-404-without-task-side-effects"
+    },
+    {
+      "case": "same-file-name-multiple-records",
+      "result": "http-400-ambiguity-without-task-side-effects"
+    },
+    {
+      "case": "multiple-files-share-external-document-reference",
+      "result": "http-400-ambiguity-without-task-side-effects"
+    },
+    {
+      "case": "file-path-list-missing",
+      "result": "freeze-current-category-documents-at-acceptance"
+    },
+    {
+      "case": "file-path-list-empty",
+      "result": "freeze-current-category-documents-at-acceptance"
+    },
+    {
+      "case": "category-empty-at-acceptance",
+      "result": "http-202-then-failure-callback"
+    }
+  ],
+  "modePolicy": {
+    "supported": [
+      "file-aggregate-v1"
+    ],
+    "removed": [
+      "chunk-question-mode-1"
+    ],
+    "environmentSelectionDuringExecution": false,
+    "modeOneDeletionTest": "WEAPONRY_ANALYSE_MODE=1 must not select another callback shape"
+  },
+  "fieldDescriptionDualStage": {
+    "input": {
+      "fieldName": "舰级名称",
+      "fieldDescription": "提取装备所属舰级的正式名称，不要与单舰名称混淆",
+      "retrievalQuery": "字段：舰级名称\n语义说明：提取装备所属舰级的正式名称，不要与单舰名称混淆",
+      "retrievalQueryRequiredFragments": [
+        "舰级名称",
+        "装备所属舰级的正式名称",
+        "不要与单舰名称混淆"
+      ],
+      "retrievalQueryForbiddenFragments": [
+        "输出格式",
+        "示例",
+        "未找到",
+        "多个值",
+        "竖线"
+      ],
+      "extractionPromptRequiredFragments": [
+        "舰级名称",
+        "提取装备所属舰级的正式名称，不要与单舰名称混淆",
+        "装备所属舰级的正式名称",
+        "不要与单舰名称混淆",
+        "目标证据"
+      ]
+    },
+    "table": {
+      "fieldName": "雷达设备",
+      "fieldDescription": "按雷达型号逐行提取，不合并不同设备",
+      "columns": [
+        {
+          "fieldName": "型号",
+          "fieldDescription": "雷达的正式型号"
+        },
+        {
+          "fieldName": "用途",
+          "fieldDescription": "搜索、跟踪或火控用途"
+        }
+      ],
+      "retrievalQueryRequiredFragments": [
+        "雷达设备",
+        "按雷达型号逐行提取",
+        "型号",
+        "雷达的正式型号",
+        "用途",
+        "搜索、跟踪或火控用途"
+      ],
+      "extractionPromptRequiredFragments": [
+        "雷达设备",
+        "按雷达型号逐行提取",
+        "型号",
+        "雷达的正式型号",
+        "用途",
+        "搜索、跟踪或火控用途",
+        "目标证据"
+      ]
+    }
+  },
+  "goldenCallbacks": {
+    "inputSuccess": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "2",
+        "architectureId": 10502,
+        "weaponryTemplateFieldList": [
+          {
+            "templateClassifyId": 1772442376645740,
+            "fieldName": "舰级名称",
+            "fieldType": "INPUT",
+            "fieldDescription": "提取装备所属舰级的正式名称，不要与单舰名称混淆",
+            "analyseData": "甲级",
+            "analyseDataSource": [
+              {
+                "content": "该舰属于甲级",
+                "source": "甲舰资料.pdf",
+                "time": "",
+                "fileName": "a-hash.pdf",
+                "rows": [
+                  "甲舰是甲级首舰。",
+                  "甲级用于远洋任务。"
+                ],
+                "translate": ""
+              },
+              {
+                "content": "该舰属于乙级",
+                "source": "乙舰资料.pdf",
+                "time": "",
+                "fileName": "b-hash.pdf",
+                "rows": [
+                  "乙舰是乙级二号舰。"
+                ],
+                "translate": ""
+              }
+            ]
+          }
+        ]
+      },
+      "msg": "解析成功"
+    },
+    "tableSuccess": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "2",
+        "architectureId": 10502,
+        "weaponryTemplateFieldList": [
+          {
+            "templateClassifyId": 1772442376645741,
+            "fieldName": "雷达设备",
+            "fieldType": "TABLE",
+            "fieldDescription": "按雷达型号逐行提取，不合并不同设备",
+            "tableFieldList": [
+              [
+                {
+                  "fieldName": "型号",
+                  "fieldType": "INPUT",
+                  "fieldDescription": "雷达的正式型号",
+                  "analyseData": "AN/SPY-1",
+                  "analyseDataSource": [
+                    {
+                      "content": "型号为AN/SPY-1",
+                      "source": "雷达手册.pdf",
+                      "time": "",
+                      "fileName": "radar-hash.pdf",
+                      "rows": [
+                        "AN/SPY-1用于搜索与跟踪。"
+                      ],
+                      "translate": ""
+                    }
+                  ]
+                },
+                {
+                  "fieldName": "用途",
+                  "fieldType": "INPUT",
+                  "fieldDescription": "搜索、跟踪或火控用途",
+                  "analyseData": "搜索与跟踪",
+                  "analyseDataSource": [
+                    {
+                      "content": "用于搜索与跟踪",
+                      "source": "雷达手册.pdf",
+                      "time": "",
+                      "fileName": "radar-hash.pdf",
+                      "rows": [
+                        "AN/SPY-1用于搜索与跟踪。"
+                      ],
+                      "translate": ""
+                    }
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "msg": "解析成功"
+    },
+    "emptySource": {
+      "content": "",
+      "source": "",
+      "time": "",
+      "fileName": "",
+      "rows": [],
+      "translate": ""
+    },
+    "failure": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "3",
+        "architectureId": 10502
+      },
+      "msg": "解析失败"
+    },
+    "sourceOrdering": "selected-evidence-score-descending-then-document-sequence",
+    "sourceDeduplication": "one-source-entry-per-document-per-field",
+    "rowsMeaning": "exact-selected-evidence-actually-sent-to-extraction"
+  },
+  "auxiliaryGuidanceMatrix": [
+    {
+      "policy": "none",
+      "directoryScanCalls": 0,
+      "workspaceCalls": 0,
+      "uploadCalls": 0,
+      "embeddingCalls": 0,
+      "guidanceSearchCalls": 0,
+      "targetSearchCallsPerField": 1,
+      "promptGuidanceCount": 0
+    },
+    {
+      "policy": "terms-rules-column-compact-v2",
+      "directoryScanCalls": "startup-coordinator-only",
+      "workspaceCalls": "startup-coordinator-only",
+      "uploadCalls": "startup-coordinator-only-when-needed",
+      "embeddingCalls": "startup-coordinator-only-when-needed",
+      "guidanceSearchCallsPerInputField": 1,
+      "guidanceSearchCallsPerTableColumn": 1,
+      "guidanceSelection": "exact-standard-name-alias-or-description",
+      "contextBudget": "all-column-cores-first-then-fair-optional-allocation",
+      "targetSearchCallsPerField": 1,
+      "promptGuidanceCount": "zero-or-more-bounded-items"
+    }
+  ],
+  "misleadingGuidanceCase": {
+    "field": "最大航速",
+    "guidance": "示例值：最大航速通常写为35 节",
+    "targetEvidence": "该舰试航最大航速为31 节。",
+    "expectedContent": "31 节",
+    "forbiddenContent": "35 节",
+    "guidanceMayAppearInRows": false,
+    "targetEvidenceMustAppearInRows": true
+  },
+  "contextIsolationMatrix": [
+    {
+      "case": "evidence-equals-rows-item-by-item",
+      "answerAccepted": true
+    },
+    {
+      "case": "answer-context-has-extra-evidence",
+      "answerAccepted": false
+    },
+    {
+      "case": "answer-context-misses-evidence",
+      "answerAccepted": false
+    },
+    {
+      "case": "document-b-call-contains-document-a-evidence",
+      "answerAccepted": false
+    },
+    {
+      "case": "evidence-only-context-returns-unmapped-source",
+      "answerAccepted": false
+    },
+    {
+      "case": "provided-evidence-model-returns-no-supplier-sources",
+      "answerAccepted": true
+    },
+    {
+      "case": "two-documents-legitimately-return-same-content",
+      "answerAccepted": true,
+      "proof": "document-key-evidence-digest-and-call-trace-not-text-equality"
+    },
+    {
+      "case": "child-thread-create-returns-none",
+      "answerAccepted": false,
+      "parentThreadCalls": 0,
+      "result": "bounded-retry-then-current-source-empty"
+    },
+    {
+      "case": "child-thread-create-raises",
+      "answerAccepted": false,
+      "parentThreadCalls": 0,
+      "result": "bounded-retry-then-current-source-empty"
+    }
+  ],
+  "crossDocumentContaminationRegression": {
+    "documentA": {
+      "documentKey": "doc-a",
+      "evidence": [
+        "甲舰属于甲级，最大航速31节。"
+      ],
+      "expectedContent": "甲级"
+    },
+    "documentB": {
+      "documentKey": "doc-b",
+      "evidence": [
+        "乙舰属于乙级，最大航速27节。"
+      ],
+      "expectedContent": "乙级",
+      "forbiddenContent": "甲级"
+    },
+    "sameSessionAllowed": false,
+    "parentSessionFallbackAllowed": false,
+    "identityProofRequired": [
+      "documentKey",
+      "evidenceDigest",
+      "callId",
+      "sourceTrace"
+    ]
+  },
+  "providerCapabilityMatrix": [
+    {
+      "provider": "current-anythingllm-adapter",
+      "targetVectorSearch": "available",
+      "directNoDocumentInference": "not-exposed-by-current-adapter",
+      "emptyWorkspaceInference": "requires-1D-3B-lifecycle-contract-proof",
+      "evidenceOnlyContext": "requires-1D-3B-source-marker-contract-proof",
+      "targetWorkspaceSecondRagAllowed": false,
+      "parentThreadFallbackAllowed": false,
+      "eligibleExtractionStrategies": [],
+      "productionEligible": false
+    },
+    {
+      "provider": "fake-provided-evidence-model-v1",
+      "targetVectorSearch": "separate-fake-port",
+      "directNoDocumentInference": "contract-proven",
+      "evidencePassedVerbatim": true,
+      "supplierSourceCount": 0,
+      "targetWorkspaceSecondRagAllowed": false,
+      "parentThreadFallbackAllowed": false,
+      "eligibleExtractionStrategies": [
+        "provided-evidence-model-v1"
+      ],
+      "productionEligible": false
+    },
+    {
+      "provider": "fake-evidence-only-context-v1",
+      "targetVectorSearch": "separate-fake-port",
+      "directNoDocumentInference": false,
+      "contextContainsOnlySelectedRows": true,
+      "extraSupplierSourceRejectsAnswer": true,
+      "targetWorkspaceSecondRagAllowed": false,
+      "parentThreadFallbackAllowed": false,
+      "eligibleExtractionStrategies": [
+        "evidence-only-context-v1"
+      ],
+      "productionEligible": false
+    }
+  ],
+  "evidenceSelection": {
+    "selectionOrder": [
+      "allowed-document-and-profile",
+      "non-empty-text-and-finite-score",
+      "normalized-exact-dedup-within-document",
+      "score-desc-rank-asc-chunk-id-asc",
+      "minimum-score",
+      "preserve-all-qualified-evidence-without-truncation"
+    ],
+    "normalization": "crlf-and-cr-to-lf-then-trim-only",
+    "crossDocumentDeduplication": false,
+    "fuzzyDeduplication": false,
+    "mmr": false,
+    "crossEncoder": false,
+    "finalLimits": {
+      "selectedEvidence": "none-after-quality-and-dedup-gates",
+      "maxTableAnswerRows": 100
+    },
+    "fixtureOnlySelectionProfile": {
+      "profileId": "stage1d-selection-oracle-fixture-v1",
+      "providerFingerprint": "fixture-provider-v1",
+      "embeddingFingerprint": "fixture-embedding-v1",
+      "scoreSemantics": "higher-is-more-relevant-in-unit-interval",
+      "minimumScore": 0.82,
+      "productionEligible": false
+    },
+    "fixtureCandidates": [
+      {
+        "id": "strong-a",
+        "category": "strong-relevant",
+        "documentKey": "doc-a",
+        "text": "甲舰属于甲级。",
+        "rank": 1,
+        "normalizedScore": 0.93,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "selected"
+      },
+      {
+        "id": "near-synonym-wrong",
+        "category": "near-synonym-but-wrong",
+        "documentKey": "doc-a",
+        "text": "甲级公路的技术等级为一级。",
+        "rank": 2,
+        "normalizedScore": 0.81,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "below-threshold"
+      },
+      {
+        "id": "homonym-wrong",
+        "category": "same-word-different-meaning",
+        "documentKey": "doc-a",
+        "text": "该产品被评为甲级品。",
+        "rank": 3,
+        "normalizedScore": 0.79,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "below-threshold"
+      },
+      {
+        "id": "cross-document-a-in-b-call",
+        "category": "cross-document-mutual-exclusion",
+        "documentKey": "doc-a",
+        "text": "甲舰属于甲级。",
+        "rank": 1,
+        "normalizedScore": 0.99,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "allowedDocumentKeysOverride": [
+          "doc-b"
+        ],
+        "expected": "document-not-allowed"
+      },
+      {
+        "id": "unrelated",
+        "category": "completely-unrelated",
+        "documentKey": "doc-a",
+        "text": "水稻亩产量与灌溉方式有关。",
+        "rank": 4,
+        "normalizedScore": 0.4,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "below-threshold"
+      },
+      {
+        "id": "duplicate-a-lower",
+        "category": "duplicate-chunk",
+        "documentKey": "doc-a",
+        "text": "\r\n甲舰属于甲级。  \r\n",
+        "rank": 5,
+        "normalizedScore": 0.9,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "duplicate-within-document"
+      },
+      {
+        "id": "same-text-other-document",
+        "category": "same-text-cross-document",
+        "documentKey": "doc-b",
+        "text": "甲舰属于甲级。",
+        "rank": 1,
+        "normalizedScore": 0.89,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "selected"
+      },
+      {
+        "id": "blank",
+        "category": "blank-text",
+        "documentKey": "doc-a",
+        "text": "  \r\n  ",
+        "rank": 6,
+        "normalizedScore": 0.95,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "empty-text"
+      },
+      {
+        "id": "missing-score",
+        "category": "missing-score",
+        "documentKey": "doc-a",
+        "text": "缺少分数的候选。",
+        "rank": 7,
+        "normalizedScore": null,
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "missing-or-invalid-score"
+      },
+      {
+        "id": "invalid-score",
+        "category": "invalid-score",
+        "documentKey": "doc-a",
+        "text": "非法分数的候选。",
+        "rank": 8,
+        "normalizedScore": "NaN",
+        "profileId": "stage1d-selection-oracle-fixture-v1",
+        "expected": "missing-or-invalid-score"
+      },
+      {
+        "id": "profile-mismatch",
+        "category": "profile-mismatch",
+        "documentKey": "doc-a",
+        "text": "分数协议来自其他模型。",
+        "rank": 9,
+        "normalizedScore": 0.98,
+        "profileId": "other-profile",
+        "expected": "profile-mismatch"
+      }
+    ],
+    "allRejectedBehavior": {
+      "modelCalls": 0,
+      "result": "legal-empty-field-result",
+      "callbackStatus": "2"
+    },
+    "singleFileCandidateMonopolyCase": {
+      "retrievalCandidates": "doc-a-occupies-global-top-n",
+      "requiredTargetBehavior": "candidate-batch-is-not-a-selected-evidence-limit-and-doc-b-never-reuses-doc-a-evidence"
+    },
+    "determinismCases": {
+      "retryInputOrder": [
+        "same-text-other-document",
+        "strong-a",
+        "duplicate-a-lower",
+        "near-synonym-wrong",
+        "unrelated"
+      ],
+      "expectedSelectedIds": [
+        "strong-a",
+        "same-text-other-document"
+      ],
+      "fullTextPreservation": {
+        "documentKey": "doc-a",
+        "inputTextLengths": [
+          7000,
+          7000
+        ],
+        "expectedSelectedTextLengths": [
+          7000,
+          7000
+        ],
+        "expectedTotalCharacters": 14000
+      },
+      "selectedEvidenceLimitsDisabled": true
+    }
+  },
+  "liveCalibration": {
+    "performedAt": "2026-07-17",
+    "operation": "read-only-existing-workspace-vector-search",
+    "remoteMutation": false,
+    "secretsRecorded": false,
+    "fullBusinessChunksRecorded": false,
+    "workspaceCount": 1,
+    "documentCount": 1,
+    "providerFingerprint": {
+      "vectorDatabase": "lancedb",
+      "embeddingEngine": "native",
+      "embeddingModel": "MintplexLabs/multilingual-e5-small",
+      "embeddingOutputDimensions": null,
+      "anythingLlmVersion": "not-exposed-by-system-api",
+      "workspaceSimilarityThreshold": 0.25,
+      "workspaceTopN": 6,
+      "workspaceVectorSearchMode": "default",
+      "workspaceChatMode": "query"
+    },
+    "scoreProtocol": {
+      "rawRangeObserved": [
+        0.790847,
+        0.856424
+      ],
+      "distanceRangeObserved": [
+        0.143576,
+        0.209153
+      ],
+      "identity": "score-plus-distance-equals-one-within-float-tolerance",
+      "direction": "higher-score-is-returned-first",
+      "finiteUnitInterval": true
+    },
+    "queryLevelObservations": [
+      {
+        "id": "exact-title",
+        "label": "strong-relevant",
+        "topScore": 0.829718
+      },
+      {
+        "id": "class-name",
+        "label": "strong-relevant",
+        "topScore": 0.841926
+      },
+      {
+        "id": "service-country",
+        "label": "strong-relevant",
+        "topScore": 0.84224
+      },
+      {
+        "id": "descriptive-propulsion",
+        "label": "strong-relevant",
+        "topScore": 0.853682
+      },
+      {
+        "id": "radar",
+        "label": "strong-relevant",
+        "topScore": 0.851122
+      },
+      {
+        "id": "wrong-missile",
+        "label": "strong-relevant",
+        "groundTruthReauditedAt": "2026-07-18",
+        "topScore": 0.853542
+      },
+      {
+        "id": "wrong-agriculture",
+        "label": "natural-language-negative",
+        "topScore": 0.8505
+      },
+      {
+        "id": "random-sentinel",
+        "label": "synthetic-noise-negative",
+        "topScore": 0.79859
+      }
+    ],
+    "groundTruthReaudit": {
+      "performedAt": "2026-07-18",
+      "status": "one-negative-label-corrected",
+      "correctedQueryId": "wrong-missile",
+      "oldLabel": "natural-language-negative",
+      "newLabel": "positive-present-in-document",
+      "verifiedEvidenceTerms": [
+        "RIM-7",
+        "RIM-116",
+        "missile launcher"
+      ],
+      "supersededBy": "stage1d0r_retrieval_quality.json",
+      "originalRawScoreDecisionStillRejected": true,
+      "reason": "the verified agriculture negative still scores above some positive queries, while the live corpus remains one unique business document"
+    },
+    "candidateThresholdEvaluation": [
+      {
+        "minimumScore": 0.82,
+        "positiveQueryRecall": 1.0,
+        "negativeQueryRejectionRate": 0.5,
+        "naturalLanguageNegativeRejectionRate": 0.0,
+        "precisionAmongNonEmptyQueries": 0.857143
+      },
+      {
+        "minimumScore": 0.84,
+        "positiveQueryRecall": 0.833333,
+        "negativeQueryRejectionRate": 0.5,
+        "naturalLanguageNegativeRejectionRate": 0.0,
+        "precisionAmongNonEmptyQueries": 0.833333
+      },
+      {
+        "minimumScore": 0.85,
+        "positiveQueryRecall": 0.5,
+        "negativeQueryRejectionRate": 0.5,
+        "naturalLanguageNegativeRejectionRate": 0.0,
+        "precisionAmongNonEmptyQueries": 0.75
+      }
+    ],
+    "productionProfileDecision": {
+      "status": "rejected-for-direct-score-thresholding",
+      "minimumRelevanceScore": null,
+      "reason": "the verified agriculture negative scores above the exact-title positive, so no tested raw-score threshold separates all verified positives from verified negatives",
+      "rawProviderScoreAloneProvesFieldRelevance": false,
+      "knownFalsePositiveQueryIds": [
+        "wrong-agriculture"
+      ],
+      "requiredBeforeDirectScoreThresholdEligibility": [
+        "representative-multi-document-calibration-corpus",
+        "approved-additional-relevance-signal-or-ingestion-repair",
+        "new-versioned-profile-with-repeatable-metrics"
+      ],
+      "supersededBy": "approved-score-or-rank-selection-without-absolute-threshold",
+      "blocks": [],
+      "historicalBlocks": [
+        "1D-3B-production-retrieval-adapter-selection",
+        "1D-6-public-route-switch"
+      ]
+    }
+  },
+  "faultMatrix": [
+    {
+      "step": "document-scope-repository",
+      "fault": "read-failed",
+      "expected": "no-accepted-execution-and-no-202"
+    },
+    {
+      "step": "submission-repository",
+      "fault": "transaction-failed-or-outcome-unknown",
+      "expected": "no-fake-202-and-no-blind-resubmit"
+    },
+    {
+      "step": "workspace",
+      "fault": "create-failed",
+      "expected": "failed-terminal-callback-and-known-resource-cleanup"
+    },
+    {
+      "step": "document-binding",
+      "fault": "bind-failed-or-source-identity-mismatch",
+      "expected": "never-substitute-current-same-name-document"
+    },
+    {
+      "step": "thread",
+      "fault": "create-none-or-exception",
+      "expected": "bounded-retry-current-source-empty-no-parent-fallback"
+    },
+    {
+      "step": "retrieval",
+      "fault": "transport-failed-or-empty",
+      "expected": "field-level-empty-result-and-success-callback"
+    },
+    {
+      "step": "retrieval-score",
+      "fault": "missing-invalid-profile-mismatch-or-unusable-live-profile",
+      "expected": "reject-candidates-never-coerce-to-zero-and-never-relax-threshold"
+    },
+    {
+      "step": "model",
+      "fault": "empty-answer-extra-context-or-unmapped-source",
+      "expected": "discard-current-answer-and-continue-other-sources"
+    },
+    {
+      "step": "table-parser",
+      "fault": "invalid-json-or-over-100-rows",
+      "expected": "empty-or-truncated-by-frozen-table-rule-with-audit"
+    },
+    {
+      "step": "translation",
+      "fault": "failed",
+      "expected": "translate-empty-and-task-continues"
+    },
+    {
+      "step": "interaction-audit",
+      "fault": "commit-failed",
+      "expected": "success-terminal-state-and-callback-forbidden"
+    },
+    {
+      "step": "terminal-write",
+      "fault": "expected-task-id-stale",
+      "expected": "no-progress-no-callback-clean-old-owned-resources"
+    },
+    {
+      "step": "callback",
+      "fault": "http-3xx-4xx-5xx",
+      "expected": "failed"
+    },
+    {
+      "step": "callback",
+      "fault": "timeout-or-read-failed",
+      "expected": "outcome-unknown-and-freeze-new-submission"
+    },
+    {
+      "step": "cleanup",
+      "fault": "interrupted",
+      "expected": "cleanup-pending-and-bounded-checkpoint-recovery"
+    }
+  ],
+  "progressAndCheckTask": {
+    "progress": {
+      "status": "public-contract-active",
+      "newPublicFields": false
+    },
+    "checkTask": {
+      "status": "public-contract-active",
+      "synchronousCallbackRecoverySideEffect": "must-remain",
+      "explicitOutcomeUnknownRecovery": "new-request-at-least-once",
+      "sameRequestNormalizedArchitectureIdDeduplication": "first-occurrence-only",
+      "validationBeforeAnyCallbackSideEffect": true,
+      "receiverIdempotencyKey": "normalized-architectureId-and-business-result",
+      "automaticWorkerOrMaintenanceUnknownRetry": false,
+      "newPublicFields": false
+    }
+  },
+  "stageExit": {
+    "contractsGoldenFaultAndIsolationAssets": "complete",
+    "liveScoreSemantics": "verified",
+    "productionEvidenceSelectionProfile": "schema-v2-score-or-stable-rank-frozen",
+    "stageCanClose": false,
+    "reason": "schema v2 selection is frozen; real supplier protocol verification and stages 1D-4 through 1D-7 remain"
+  }
+}
