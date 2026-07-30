@@ -583,29 +583,34 @@ class MarkdownRagProjectionProcessorAdapter:
             and not self._materialization_root.is_dir()
         ):
             raise ValueError("RAG 投影 scratch root 必须是目录")
+        self._materialization_root.mkdir(parents=True, exist_ok=True)
         self._scanner = _MarkdownProjectionScanner()
 
     def process(self, request: DocumentProcessingRequest) -> ProcessorOutput:
         self._validate_request(request)
+        # 使用截断哈希避免 Windows MAX_PATH (260) 限制：
+        # materialization_root(~92) + 16 + 1 + 14 + 1 + filename(16+1+8+5=30) ≈ 154
         task_namespace = hashlib.sha256(
             request.task_id.value.encode("utf-8")
-        ).hexdigest()
+        ).hexdigest()[:16]
         scratch_directory = (
             self._materialization_root / task_namespace / "rag-projection"
         ).resolve()
         self._require_contained(scratch_directory, self._materialization_root)
         scratch_directory.mkdir(parents=True, exist_ok=True)
         output_path = (
-            scratch_directory / f"{request.step_key}.{uuid4().hex}.part"
+            scratch_directory
+            / f"{request.step_key[:16]}.{uuid4().hex[:8]}.part"
         ).resolve()
         self._require_contained(output_path, scratch_directory)
 
         try:
+            destination = output_path.open("xb")
             with (
                 self._source_store.open_reader(
                     request.source_artifact
                 ) as source,
-                output_path.open("xb") as destination,
+                destination,
             ):
                 stats = self._scanner.transform(source, destination)
                 destination.flush()
