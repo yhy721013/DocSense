@@ -22,6 +22,7 @@ from app.modules.analysis.domain.classification_rules import (
 from app.modules.analysis.domain.task_inputs import (
     AnalysisTaskInputV1,
     AnalysisTaskInputV3,
+    AnalysisTaskInputV4,
     FrozenJsonObject,
 )
 from app.modules.analysis.ports import (
@@ -104,22 +105,30 @@ def _build_rag_upload_descriptor(
     """结合冻结命名事实与实际 Artifact 形成最终上传描述符。
 
     该纯工厂只依赖 Analysis 自身快照和 Port DTO，不读取文件系统、环境或 Provider 响应。
-    V1/V2 存量任务继续沿用历史上传路径的 basename；V3 任务严格复用受理时冻结的业务
-    名称。未来可靠队列在其他实例重放时，可以据此得到相同的供应商无关描述符。
+    V1/V2 存量任务继续沿用历史上传路径的 basename；V3 严格复用业务原名传输快照；
+    V4 则复用全局唯一 ``fileName`` 派生的传输名。未来可靠队列在其他实例重放时，可以
+    据此得到相同的供应商无关描述符。
     """
 
     artifact = prepared.rag_upload_artifact
     if artifact is None:
         if isinstance(snapshot, AnalysisTaskInputV3):
             raise AnalysisApplicationContractError(
-                "V3 文件分析准备结果缺少 RAG 上传 Artifact"
+                "V3/V4 文件分析准备结果缺少 RAG 上传 Artifact"
             )
         return None
     representation = artifact.representation
     if representation.value not in {"markdown", "pdf"}:
         raise AnalysisApplicationContractError("RAG 上传 Artifact 表示不受支持")
 
-    if isinstance(snapshot, AnalysisTaskInputV3):
+    if isinstance(snapshot, AnalysisTaskInputV4):
+        naming = snapshot.rag_naming
+        transport_file_name = naming.transport_file_name_for(
+            representation.value
+        )
+        display_title = naming.display_title
+        naming_policy = "business_key_v2"
+    elif isinstance(snapshot, AnalysisTaskInputV3):
         naming = snapshot.rag_naming
         transport_file_name = naming.transport_file_name_for(
             representation.value

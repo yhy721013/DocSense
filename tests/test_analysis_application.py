@@ -16,6 +16,9 @@ from app.modules.analysis.application import RunAnalysisOutcome, RunAnalysisTask
 from app.modules.analysis.application import run_analysis as run_analysis_module
 from app.modules.analysis.application.model_workflow import _AnalysisModelWorkflow
 from app.modules.analysis.application.knowledge_handoff import _AnalysisKnowledgeHandoff
+from app.modules.analysis.application.workflow_models import (
+    _build_rag_upload_descriptor,
+)
 from app.modules.analysis.domain.architecture_recall import (
     ArchitecturePromptBudgetError,
     ArchitectureRecallCandidate,
@@ -27,6 +30,13 @@ from app.modules.analysis.domain.task_inputs import (
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV3,
+    AnalysisTaskInputV4,
+)
+from app.modules.document_processing.domain import (
+    ArtifactKind,
+    ArtifactMetadata,
+    ArtifactRef,
+    DocumentRepresentation,
 )
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
@@ -334,6 +344,65 @@ def _legacy_combined_fixture() -> tuple[
 
 class RunAnalysisTaskTests(unittest.TestCase):
     """每个测试都用严格 Script 证明未发生未配置的副作用。"""
+
+    def test_v4_upload_descriptor_uses_file_name_and_preserves_display_title(
+        self,
+    ) -> None:
+        """最终上传描述符必须消费冻结 V4 事实，不能重新回退到 originalFileName。"""
+
+        submission = AnalysisSubmissionSnapshot.from_request_params(
+            {
+                "fileName": "global-business-key.pdf",
+                "originalFileName": "资料.pdf",
+                "filePath": "https://example.invalid/global-business-key.pdf",
+            },
+            policy_snapshot=AnalysisPolicySnapshot.default(),
+        )
+        snapshot = AnalysisTaskInputV4.from_submission(
+            submission,
+            task_id="analysis-v4-upload-descriptor",
+            batch_id="8" * 32,
+            batch_sequence=1,
+            accepted_at="2026-07-30T13:00:00+08:00",
+            trace_id="analysis-v4-upload-descriptor-trace",
+        )
+        execution = AnalysisExecutionRef(
+            task_id=TaskId(snapshot.task_id),
+            file_name=snapshot.file_name,
+            batch_id=snapshot.batch_id,
+            batch_sequence=snapshot.batch_sequence,
+        )
+        artifact = ArtifactRef(
+            task_id=execution.task_id,
+            artifact_id="a" * 64,
+            step_key="b" * 64,
+            kind=ArtifactKind.RAG_PROJECTION,
+            representation=DocumentRepresentation.MARKDOWN,
+            metadata=ArtifactMetadata(
+                media_type="text/markdown; charset=utf-8",
+                size_bytes=16,
+                sha256="c" * 64,
+            ),
+        )
+        prepared = PreparedAnalysisDocument(
+            execution=execution,
+            source_path="C:/analysis/source.pdf",
+            upload_path="C:/analysis/internal-artifact",
+            original_text="正文",
+            rag_upload_artifact=artifact,
+            rag_projection_profile_id="d" * 64,
+        )
+
+        descriptor = _build_rag_upload_descriptor(
+            snapshot=snapshot,
+            prepared=prepared,
+        )
+
+        self.assertIsNotNone(descriptor)
+        assert descriptor is not None
+        self.assertEqual("global-business-key.md", descriptor.transport_file_name)
+        self.assertEqual("资料.pdf", descriptor.display_title)
+        self.assertEqual("business_key_v2", descriptor.naming_policy)
 
     def test_knowledge_title_uses_v3_frozen_name_and_keeps_v1_compatibility(
         self,

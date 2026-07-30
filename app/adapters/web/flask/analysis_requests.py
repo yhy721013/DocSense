@@ -234,13 +234,16 @@ def parse_analysis_payload(payload: object) -> ParsedAnalysisRequest:
         except RagNameValidationError as exc:
             original_value = params.get("originalFileName")
             rejected_field = (
-                "originalFileName"
-                if original_value is not None
-                and (
-                    not isinstance(original_value, str)
-                    or bool(original_value.strip())
+                exc.field_name
+                or (
+                    "originalFileName"
+                    if original_value is not None
+                    and (
+                        not isinstance(original_value, str)
+                        or bool(original_value.strip())
+                    )
+                    else "fileName"
                 )
-                else "fileName"
             )
             # 非法名称可能包含换行、控制字符或敏感业务文本。日志只保留稳定原因、长度和
             # 短摘要，既可跨实例聚合，也不会把原值注入日志。

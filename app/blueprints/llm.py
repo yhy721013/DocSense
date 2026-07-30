@@ -194,8 +194,8 @@ def _analysis_policy_snapshot(
 ) -> AnalysisPolicySnapshot:
     """在受理边界冻结本次 Analysis 的运行策略。
 
-    Worker 只读取持久化的 ``AnalysisTaskInputV3``（历史任务兼容 V1/V2），不得在后续执行时
-    重新读取环境变量。
+    Worker 只读取持久化的 ``AnalysisTaskInputV4``（历史任务兼容 V1/V2/V3），不得在后续
+    执行时重新读取环境变量。
     因此每次公开请求只从已验证的容器配置复制一次策略快照，并随同批量事务保存。
     """
 

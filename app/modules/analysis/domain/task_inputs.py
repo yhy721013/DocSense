@@ -34,13 +34,17 @@ from .ranges import (
     build_effective_analysis_ranges,
     validate_analysis_architecture_ranges,
 )
-from .rag_naming import AnalysisRagNamingSnapshot
+from .rag_naming import (
+    AnalysisRagNamingSnapshot,
+    AnalysisRagNamingSnapshotV3,
+)
 
 
 ANALYSIS_BUSINESS_TYPE = "file"
 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1 = 1
 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2 = 2
-ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 3
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3 = 3
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 4
 ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1 = "legacy-office-v1"
 ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1 = "single-sheet-v1"
 ANALYSIS_LEGACY_OFFICE_DEFAULT_VERSION_SERIES = "26.2"
@@ -911,17 +915,19 @@ class AnalysisTaskInputV2(AnalysisTaskInputV1):
 
 @dataclass(frozen=True)
 class AnalysisTaskInputV3(AnalysisTaskInputV2):
-    """当前 Worker 输入；增加可跨实例重放的 RAG 命名快照。"""
+    """历史 V3 Worker 输入；保留业务原名同时作为传输名的旧语义。"""
 
-    rag_naming: AnalysisRagNamingSnapshot
+    rag_naming: AnalysisRagNamingSnapshotV3
 
-    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.rag_naming, AnalysisRagNamingSnapshot):
-            raise AnalysisContractError("rag_naming 必须是 AnalysisRagNamingSnapshot")
-        expected = AnalysisRagNamingSnapshot.from_public_names(
+        if not isinstance(self.rag_naming, AnalysisRagNamingSnapshotV3):
+            raise AnalysisContractError(
+                "V3 rag_naming 必须是 AnalysisRagNamingSnapshotV3"
+            )
+        expected = AnalysisRagNamingSnapshotV3.from_public_names(
             original_file_name=self.raw_params.get("originalFileName"),
             file_name=self.raw_params.get("fileName"),
         )
@@ -939,7 +945,67 @@ class AnalysisTaskInputV3(AnalysisTaskInputV2):
         accepted_at: str,
         trace_id: str,
     ) -> "AnalysisTaskInputV3":
-        """把受理快照合成为包含处理策略和命名事实的当前 V3 输入。"""
+        """仅供兼容测试/迁移构造历史 V3 输入；新受理必须写入 V4。"""
+
+        if not isinstance(submission, AnalysisSubmissionSnapshot):
+            raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
+        return cls(
+            schema_version=cls.EXPECTED_SCHEMA_VERSION,
+            task_id=task_id,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
+            file_name=submission.file_name,
+            original_file_name=submission.original_file_name,
+            original_file_name_present=submission.original_file_name_present,
+            file_path=submission.file_path,
+            raw_params=submission.raw_params,
+            effective_ranges=submission.effective_ranges,
+            policy_snapshot=submission.policy_snapshot,
+            accepted_at=accepted_at,
+            trace_id=trace_id,
+            document_processing_policy=submission.document_processing_policy,
+            rag_naming=AnalysisRagNamingSnapshotV3.from_public_names(
+                original_file_name=submission.raw_params.get("originalFileName"),
+                file_name=submission.raw_params.get("fileName"),
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class AnalysisTaskInputV4(AnalysisTaskInputV3):
+    """当前 Worker 输入；传输名按全局唯一 ``fileName`` 派生。"""
+
+    rag_naming: AnalysisRagNamingSnapshot
+
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        # V3 的命名校验刻意保留旧语义；V4 直接复用 V2 的公共身份/处理策略校验，再按
+        # 当前规则核验新命名快照，避免把两个版本的传输命名混为一谈。
+        AnalysisTaskInputV2.__post_init__(self)
+        if not isinstance(self.rag_naming, AnalysisRagNamingSnapshot):
+            raise AnalysisContractError(
+                "V4 rag_naming 必须是 AnalysisRagNamingSnapshot"
+            )
+        expected = AnalysisRagNamingSnapshot.from_public_names(
+            original_file_name=self.raw_params.get("originalFileName"),
+            file_name=self.raw_params.get("fileName"),
+        )
+        if self.rag_naming != expected:
+            raise AnalysisContractError("V4 rag_naming 与 raw_params 命名字段不一致")
+
+    @classmethod
+    def from_submission(
+        cls,
+        submission: AnalysisSubmissionSnapshot,
+        *,
+        task_id: str,
+        batch_id: str,
+        batch_sequence: int,
+        accepted_at: str,
+        trace_id: str,
+    ) -> "AnalysisTaskInputV4":
+        """把受理快照合成为可跨重启、跨实例重放的当前 V4 输入。"""
 
         if not isinstance(submission, AnalysisSubmissionSnapshot):
             raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
@@ -970,6 +1036,7 @@ __all__ = (
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2",
+    "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3",
     "ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1",
     "AnalysisDocumentProcessingPolicySnapshot",
     "AnalysisPolicySnapshot",
@@ -977,6 +1044,7 @@ __all__ = (
     "AnalysisTaskInputV1",
     "AnalysisTaskInputV2",
     "AnalysisTaskInputV3",
+    "AnalysisTaskInputV4",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",

@@ -99,6 +99,20 @@ class AnalysisRequestParserTests(unittest.TestCase):
         self.assertEqual(self.contract["tooManyParams"]["status"], presented.status_code)
         self.assertEqual(self.contract["tooManyParams"]["body"], presented.body)
 
+    def test_invalid_transport_business_key_is_reported_as_file_name(self) -> None:
+        """展示原名合法时，非法上传业务键仍必须准确归因到 fileName。"""
+
+        payload = _valid_payload("unsafe?.pdf")
+        payload["params"][0]["originalFileName"] = "合法展示名.pdf"  # type: ignore[index]
+
+        with self.assertRaises(AnalysisRequestValidationError) as captured:
+            parse_analysis_payload(payload)
+
+        self.assertEqual(
+            "params[0].fileName不是合法文件名",
+            str(captured.exception),
+        )
+
     def test_strict_json_validation_and_frozen_snapshot_preserve_unknown_fields(self) -> None:
         invalid_json_value = _valid_payload()
         invalid_json_value["params"][0]["notFinite"] = float("nan")  # type: ignore[index]

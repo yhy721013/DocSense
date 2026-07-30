@@ -1,6 +1,6 @@
 """文件分析 Worker 输入的严格 JSON Codec。
 
-此 Codec 在持久化边界写入 ``AnalysisTaskInputV3``，并严格兼容读取历史 V1/V2；它不读取
+此 Codec 在持久化边界写入 ``AnalysisTaskInputV4``，并严格兼容读取历史 V1/V2/V3；它不读取
 数据库、不生成任务身份，也不尝试修复历史脏数据。未知 schema、缺少字段、额外字段以及
 任务身份不一致都必须失败关闭，避免错误 payload 被错误的 Worker 重放。
 """
@@ -18,14 +18,19 @@ from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
     AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV2,
     AnalysisTaskInputV3,
+    AnalysisTaskInputV4,
     FrozenJsonObject,
 )
-from app.modules.analysis.domain.rag_naming import AnalysisRagNamingSnapshot
+from app.modules.analysis.domain.rag_naming import (
+    AnalysisRagNamingSnapshot,
+    AnalysisRagNamingSnapshotV3,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +43,7 @@ class AnalysisTaskInputCodecError(ValueError):
 
 
 class AnalysisTaskInputCodec:
-    """严格编解码 V1/V2/V3 输入，保持公开 ``params`` 的未知字段和值语义。"""
+    """严格编解码 V1–V4 输入，保持公开 ``params`` 的未知字段和值语义。"""
 
     _V1_ENVELOPE_KEYS = (
         "schema_version",
@@ -57,7 +62,8 @@ class AnalysisTaskInputCodec:
     )
     _V2_ENVELOPE_KEYS = _V1_ENVELOPE_KEYS + ("document_processing_policy",)
     _V3_ENVELOPE_KEYS = _V2_ENVELOPE_KEYS + ("rag_naming",)
-    # 保留历史私有测试入口；当前合同使用显式 ``_V3_ENVELOPE_KEYS``。
+    _V4_ENVELOPE_KEYS = _V3_ENVELOPE_KEYS
+    # 保留历史私有测试入口；各版本合同使用上方显式 Envelope 字段集合。
     _ENVELOPE_KEYS = _V1_ENVELOPE_KEYS
 
     @classmethod
@@ -65,7 +71,7 @@ class AnalysisTaskInputCodec:
         """投影为可持久化字典，返回值不与领域快照共享可变引用。"""
 
         if not isinstance(task_input, AnalysisTaskInputV1):
-            raise TypeError("task_input 必须是 AnalysisTaskInputV1/V2/V3")
+            raise TypeError("task_input 必须是 AnalysisTaskInputV1/V2/V3/V4")
         effective_ranges = task_input.effective_ranges.to_dict()
         raw_params = task_input.raw_params.to_dict()
         compacted_range_count = 0
@@ -185,6 +191,7 @@ class AnalysisTaskInputCodec:
             not in {
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
             }
         ):
@@ -253,8 +260,26 @@ class AnalysisTaskInputCodec:
                         )
                     ),
                 )
-            else:
+            elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3:
                 task_input = AnalysisTaskInputV3(
+                    **common_fields,  # type: ignore[arg-type]
+                    document_processing_policy=(
+                        AnalysisDocumentProcessingPolicySnapshot.from_mapping(
+                            cls._require_mapping(
+                                payload["document_processing_policy"],
+                                "document_processing_policy",
+                            )
+                        )
+                    ),
+                    rag_naming=AnalysisRagNamingSnapshotV3.from_mapping(
+                        cls._require_mapping(
+                            payload["rag_naming"],
+                            "rag_naming",
+                        )
+                    ),
+                )
+            else:
+                task_input = AnalysisTaskInputV4(
                     **common_fields,  # type: ignore[arg-type]
                     document_processing_policy=(
                         AnalysisDocumentProcessingPolicySnapshot.from_mapping(
@@ -304,8 +329,10 @@ class AnalysisTaskInputCodec:
             version_keys = cls._V1_ENVELOPE_KEYS
         elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2:
             version_keys = cls._V2_ENVELOPE_KEYS
-        else:
+        elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3:
             version_keys = cls._V3_ENVELOPE_KEYS
+        else:
+            version_keys = cls._V4_ENVELOPE_KEYS
         expected_keys = frozenset(version_keys)
         if actual_keys == expected_keys:
             return

@@ -51,11 +51,23 @@ _REPRESENTATION_SUFFIXES = {
 
 
 class RagNameValidationError(ValueError):
-    """命名候选无法安全、无损地用于 multipart filename。"""
+    """命名候选无法安全、无损地用于 multipart filename。
 
-    def __init__(self, reason_code: str, value: object) -> None:
+    ``field_name`` 只保存公开字段名称，不保存原始文件名。Web Adapter 可以据此返回准确的
+    既有错误字段，同时日志仍只记录长度和摘要，避免把可能含敏感信息或控制字符的名称写入
+    日志。
+    """
+
+    def __init__(
+        self,
+        reason_code: str,
+        value: object,
+        *,
+        field_name: str = "",
+    ) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
+        self.field_name = field_name
         self.value_length = len(value) if isinstance(value, str) else 0
         digest_source = (
             value.encode("utf-8", errors="surrogatepass")
@@ -67,7 +79,7 @@ class RagNameValidationError(ValueError):
 
 @dataclass(frozen=True)
 class SelectedRagBusinessName:
-    """从公开字段中选出的、尚未校验的业务命名候选。"""
+    """从公开字段中选出的、尚未校验的 RAG 展示标题候选。"""
 
     value: str
     source: str
@@ -83,7 +95,7 @@ def select_rag_business_name(
     original_file_name: object,
     file_name: object,
 ) -> SelectedRagBusinessName:
-    """按冻结规则选择 display title 与传输名的共同候选。
+    """按冻结规则选择 display title 候选。
 
     ``originalFileName`` 缺失时调用方传入 ``None``。缺失、``null``、空字符串或仅空白
     都走兼容回退；其他非字符串值明确拒绝，避免把 JSON 数组/对象的 Python 字符串表示
@@ -94,7 +106,11 @@ def select_rag_business_name(
         isinstance(original_file_name, str) and not original_file_name.strip()
     ):
         if not isinstance(file_name, str) or not file_name.strip():
-            raise RagNameValidationError("fallback_file_name_not_string", file_name)
+            raise RagNameValidationError(
+                "fallback_file_name_not_string",
+                file_name,
+                field_name="fileName",
+            )
         return SelectedRagBusinessName(
             value=file_name,
             source=RAG_NAMING_SOURCE_FILE_NAME_FALLBACK,
@@ -103,6 +119,7 @@ def select_rag_business_name(
         raise RagNameValidationError(
             "original_file_name_not_string",
             original_file_name,
+            field_name="originalFileName",
         )
     return SelectedRagBusinessName(
         value=original_file_name,
@@ -110,7 +127,11 @@ def select_rag_business_name(
     )
 
 
-def validate_rag_transport_name_candidate(value: object) -> str:
+def validate_rag_transport_name_candidate(
+    value: object,
+    *,
+    field_name: str = "",
+) -> str:
     """校验候选可在 Windows、HTTP multipart 与离线迁移中无损使用。
 
     校验只作判断，不返回“安全化”后的另一个名称。任何需要替换、裁剪或 Unicode
@@ -118,33 +139,65 @@ def validate_rag_transport_name_candidate(value: object) -> str:
     """
 
     if not isinstance(value, str):
-        raise RagNameValidationError("candidate_not_string", value)
+        raise RagNameValidationError(
+            "candidate_not_string",
+            value,
+            field_name=field_name,
+        )
     if not value or not value.strip():
-        raise RagNameValidationError("candidate_empty", value)
+        raise RagNameValidationError("candidate_empty", value, field_name=field_name)
     if value in {".", ".."}:
-        raise RagNameValidationError("relative_path_name", value)
+        raise RagNameValidationError(
+            "relative_path_name",
+            value,
+            field_name=field_name,
+        )
     if any(character in _FORBIDDEN_FILE_NAME_CHARACTERS for character in value):
-        raise RagNameValidationError("forbidden_character", value)
+        raise RagNameValidationError(
+            "forbidden_character",
+            value,
+            field_name=field_name,
+        )
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise RagNameValidationError("control_character", value)
+        raise RagNameValidationError(
+            "control_character",
+            value,
+            field_name=field_name,
+        )
     if value.endswith((" ", ".")):
-        raise RagNameValidationError("trailing_space_or_dot", value)
+        raise RagNameValidationError(
+            "trailing_space_or_dot",
+            value,
+            field_name=field_name,
+        )
 
     stem = _remove_last_suffix(value)
     if not stem:
-        raise RagNameValidationError("empty_stem", value)
+        raise RagNameValidationError("empty_stem", value, field_name=field_name)
     windows_device_stem = value.split(".", 1)[0].casefold()
     if windows_device_stem in _WINDOWS_RESERVED_STEMS:
-        raise RagNameValidationError("windows_reserved_name", value)
+        raise RagNameValidationError(
+            "windows_reserved_name",
+            value,
+            field_name=field_name,
+        )
 
     for representation in _REPRESENTATION_SUFFIXES:
         derived = _derive_without_revalidation(value, representation)
         try:
             derived_bytes = derived.encode("utf-8")
         except UnicodeEncodeError as exc:
-            raise RagNameValidationError("invalid_unicode", value) from exc
+            raise RagNameValidationError(
+                "invalid_unicode",
+                value,
+                field_name=field_name,
+            ) from exc
         if len(derived_bytes) > RAG_TRANSPORT_NAME_MAX_UTF8_BYTES:
-            raise RagNameValidationError("derived_name_too_long", value)
+            raise RagNameValidationError(
+                "derived_name_too_long",
+                value,
+                field_name=field_name,
+            )
     return value
 
 
@@ -174,11 +227,12 @@ def _derive_without_revalidation(candidate: str, representation: str) -> str:
 
 
 @dataclass(frozen=True)
-class AnalysisRagNamingSnapshot:
-    """受理时冻结、与具体 RAG Provider 无关的命名事实。
+class AnalysisRagNamingSnapshotV3:
+    """历史 Analysis 输入 Schema v3 使用的业务原名上传快照。
 
-    P1 同时持久化 Markdown/PDF 两种允许表示的传输名；P3 只有在实际表示确定后才选择
-    唯一名称并写入最终上传描述符，避免受理层提前耦合 OCR/MinerU 的运行结果。
+    v3 把 ``originalFileName`` 同时用于展示标题和传输名；保留该类型只为严格解码已经
+    受理的旧 execution。新请求必须使用下方的 ``AnalysisRagNamingSnapshot``，不能继续
+    生成 v3 快照。
     """
 
     display_title: str
@@ -221,9 +275,16 @@ class AnalysisRagNamingSnapshot:
         *,
         original_file_name: object,
         file_name: object,
-    ) -> "AnalysisRagNamingSnapshot":
+    ) -> "AnalysisRagNamingSnapshotV3":
         selected = select_rag_business_name(original_file_name, file_name)
-        candidate = validate_rag_transport_name_candidate(selected.value)
+        candidate = validate_rag_transport_name_candidate(
+            selected.value,
+            field_name=(
+                "originalFileName"
+                if selected.source == RAG_NAMING_SOURCE_ORIGINAL_FILE_NAME
+                else "fileName"
+            ),
+        )
         return cls(
             display_title=candidate,
             naming_source=selected.source,
@@ -260,7 +321,7 @@ class AnalysisRagNamingSnapshot:
     def from_mapping(
         cls,
         value: Mapping[str, object],
-    ) -> "AnalysisRagNamingSnapshot":
+    ) -> "AnalysisRagNamingSnapshotV3":
         if not isinstance(value, Mapping):
             raise AnalysisContractError("rag_naming 必须是 Mapping")
         if any(not isinstance(key, str) for key in value):
@@ -283,8 +344,163 @@ class AnalysisRagNamingSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class AnalysisRagNamingSnapshot:
+    """当前 Analysis 输入冻结的展示标题与唯一传输命名事实。
+
+    ``display_title`` 继续严格保留 ``originalFileName`` 的既有业务语义；传输名则始终
+    从系统全局唯一的 ``fileName`` 派生。两者分离后，同主干或完全同名的业务原文件不会
+    再映射到相同的 AnythingLLM hotdir basename，武器谱仍可在供应商只返回结构化 URL
+    末段时完成唯一来源归属。
+    """
+
+    display_title: str
+    naming_source: str
+    candidate_sha256: str
+    transport_name_candidate: str
+    transport_candidate_sha256: str
+    markdown_transport_file_name: str
+    pdf_transport_file_name: str
+
+    EXPECTED_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "display_title",
+            "naming_source",
+            "candidate_sha256",
+            "transport_name_candidate",
+            "transport_candidate_sha256",
+            "markdown_transport_file_name",
+            "pdf_transport_file_name",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        display_title = validate_rag_transport_name_candidate(self.display_title)
+        if self.naming_source not in _ALLOWED_NAMING_SOURCES:
+            raise AnalysisContractError("rag_naming.naming_source 不受支持")
+        expected_display_digest = hashlib.sha256(
+            display_title.encode("utf-8")
+        ).hexdigest()
+        if self.candidate_sha256 != expected_display_digest:
+            raise AnalysisContractError("rag_naming.candidate_sha256 与标题不一致")
+
+        transport_candidate = validate_rag_transport_name_candidate(
+            self.transport_name_candidate
+        )
+        expected_transport_digest = hashlib.sha256(
+            transport_candidate.encode("utf-8")
+        ).hexdigest()
+        if self.transport_candidate_sha256 != expected_transport_digest:
+            raise AnalysisContractError(
+                "rag_naming.transport_candidate_sha256 与 fileName 候选不一致"
+            )
+        if self.markdown_transport_file_name != derive_rag_transport_file_name(
+            transport_candidate,
+            RAG_REPRESENTATION_MARKDOWN,
+        ):
+            raise AnalysisContractError("rag_naming Markdown 传输名不一致")
+        if self.pdf_transport_file_name != derive_rag_transport_file_name(
+            transport_candidate,
+            RAG_REPRESENTATION_PDF,
+        ):
+            raise AnalysisContractError("rag_naming PDF 传输名不一致")
+
+    @classmethod
+    def from_public_names(
+        cls,
+        *,
+        original_file_name: object,
+        file_name: object,
+    ) -> "AnalysisRagNamingSnapshot":
+        selected = select_rag_business_name(original_file_name, file_name)
+        display_title = validate_rag_transport_name_candidate(
+            selected.value,
+            field_name=(
+                "originalFileName"
+                if selected.source == RAG_NAMING_SOURCE_ORIGINAL_FILE_NAME
+                else "fileName"
+            ),
+        )
+        transport_candidate = validate_rag_transport_name_candidate(
+            file_name,
+            field_name="fileName",
+        )
+        return cls(
+            display_title=display_title,
+            naming_source=selected.source,
+            candidate_sha256=hashlib.sha256(
+                display_title.encode("utf-8")
+            ).hexdigest(),
+            transport_name_candidate=transport_candidate,
+            transport_candidate_sha256=hashlib.sha256(
+                transport_candidate.encode("utf-8")
+            ).hexdigest(),
+            markdown_transport_file_name=derive_rag_transport_file_name(
+                transport_candidate,
+                RAG_REPRESENTATION_MARKDOWN,
+            ),
+            pdf_transport_file_name=derive_rag_transport_file_name(
+                transport_candidate,
+                RAG_REPRESENTATION_PDF,
+            ),
+        )
+
+    def transport_file_name_for(self, representation: str) -> str:
+        """按实际 Artifact 表示返回受理时冻结的唯一传输名。"""
+
+        if representation == RAG_REPRESENTATION_MARKDOWN:
+            return self.markdown_transport_file_name
+        if representation == RAG_REPRESENTATION_PDF:
+            return self.pdf_transport_file_name
+        raise AnalysisContractError("RAG 上传表示类型不受支持")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "display_title": self.display_title,
+            "naming_source": self.naming_source,
+            "candidate_sha256": self.candidate_sha256,
+            "transport_name_candidate": self.transport_name_candidate,
+            "transport_candidate_sha256": self.transport_candidate_sha256,
+            "markdown_transport_file_name": self.markdown_transport_file_name,
+            "pdf_transport_file_name": self.pdf_transport_file_name,
+        }
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+    ) -> "AnalysisRagNamingSnapshot":
+        if not isinstance(value, Mapping):
+            raise AnalysisContractError("rag_naming 必须是 Mapping")
+        if any(not isinstance(key, str) for key in value):
+            raise AnalysisContractError("rag_naming 字段名必须是 str")
+        actual_keys = frozenset(value)
+        if actual_keys != cls.EXPECTED_KEYS:
+            missing = sorted(cls.EXPECTED_KEYS - actual_keys)
+            unknown = sorted(actual_keys - cls.EXPECTED_KEYS)
+            raise AnalysisContractError(
+                f"rag_naming 键集合不匹配: missing={missing} unknown={unknown}"
+            )
+        return cls(
+            display_title=value["display_title"],  # type: ignore[arg-type]
+            naming_source=value["naming_source"],  # type: ignore[arg-type]
+            candidate_sha256=value["candidate_sha256"],  # type: ignore[arg-type]
+            transport_name_candidate=value[  # type: ignore[arg-type]
+                "transport_name_candidate"
+            ],
+            transport_candidate_sha256=value[  # type: ignore[arg-type]
+                "transport_candidate_sha256"
+            ],
+            markdown_transport_file_name=value[  # type: ignore[arg-type]
+                "markdown_transport_file_name"
+            ],
+            pdf_transport_file_name=value["pdf_transport_file_name"],  # type: ignore[arg-type]
+        )
+
+
 __all__ = (
     "AnalysisRagNamingSnapshot",
+    "AnalysisRagNamingSnapshotV3",
     "RAG_NAMING_SOURCE_FILE_NAME_FALLBACK",
     "RAG_NAMING_SOURCE_ORIGINAL_FILE_NAME",
     "RAG_REPRESENTATION_MARKDOWN",

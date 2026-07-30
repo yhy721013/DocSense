@@ -14,12 +14,14 @@ from app.modules.analysis.adapters import (
 from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
     AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
     AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV2,
     AnalysisTaskInputV3,
+    AnalysisTaskInputV4,
 )
 
 
@@ -97,7 +99,7 @@ def _task_input_v3(
     *,
     suffix: str = "xls",
 ) -> AnalysisTaskInputV3:
-    """构造当前 V3 输入，冻结处理策略和供应商无关的 RAG 命名事实。"""
+    """构造历史 V3 输入，冻结业务原名传输语义。"""
 
     params = _params(extension_index=index)
     params["filePath"] = f"https://example.invalid/files/{index}.{suffix}"
@@ -118,6 +120,35 @@ def _task_input_v3(
         batch_sequence=1,
         accepted_at="2026-07-30T10:00:00+08:00",
         trace_id=f"trace-analysis-v3-{index}",
+    )
+
+
+def _task_input_v4(
+    index: int = 1,
+    *,
+    suffix: str = "xls",
+) -> AnalysisTaskInputV4:
+    """构造当前 V4 输入，冻结业务键传输名与原始展示标题。"""
+
+    params = _params(extension_index=index)
+    params["filePath"] = f"https://example.invalid/files/{index}.{suffix}"
+    submission = AnalysisSubmissionSnapshot.from_request_params(
+        params,
+        policy_snapshot=AnalysisPolicySnapshot.default(),
+        document_processing_policy=(
+            AnalysisDocumentProcessingPolicySnapshot.for_source(
+                str(params["filePath"]),
+                allowed_version_series="26.2",
+            )
+        ),
+    )
+    return AnalysisTaskInputV4.from_submission(
+        submission,
+        task_id=f"analysis-task-v4-{index}",
+        batch_id=f"{index:032x}",
+        batch_sequence=1,
+        accepted_at="2026-07-30T13:00:00+08:00",
+        trace_id=f"trace-analysis-v4-{index}",
     )
 
 
@@ -235,24 +266,39 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
         )
         self.assertEqual(task_input, restored)
 
-    def test_v3_round_trip_freezes_rag_naming_without_changing_public_names(self) -> None:
-        """当前 V3 必须把命名事实持久化，而非由 Worker 重读 raw params 临时推导。"""
+    def test_v3_remains_readable_and_v4_uses_business_key_transport_name(self) -> None:
+        """历史 V3 可恢复；当前 V4 按 fileName 派生且不改变公开原名。"""
 
-        task_input = _task_input_v3()
+        legacy_input = _task_input_v3()
+        legacy_payload = AnalysisTaskInputCodec.encode(legacy_input)
+        legacy_restored = AnalysisTaskInputCodec.decode(legacy_payload)
+        self.assertEqual(
+            ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
+            legacy_payload["schema_version"],
+        )
+        self.assertIsInstance(legacy_restored, AnalysisTaskInputV3)
+        self.assertNotIsInstance(legacy_restored, AnalysisTaskInputV4)
+        self.assertEqual(
+            "原始 demo.md",
+            legacy_restored.rag_naming.markdown_transport_file_name,
+        )
+
+        task_input = _task_input_v4()
         payload = AnalysisTaskInputCodec.encode(task_input)
         restored = AnalysisTaskInputCodec.decode(payload)
 
         self.assertEqual(ANALYSIS_TASK_INPUT_SCHEMA_VERSION, payload["schema_version"])
         self.assertEqual(
-            list(AnalysisTaskInputCodec._V3_ENVELOPE_KEYS),  # type: ignore[attr-defined]
+            list(AnalysisTaskInputCodec._V4_ENVELOPE_KEYS),  # type: ignore[attr-defined]
             list(payload),
         )
-        self.assertIsInstance(restored, AnalysisTaskInputV3)
-        assert isinstance(restored, AnalysisTaskInputV3)
+        self.assertIsInstance(restored, AnalysisTaskInputV4)
+        assert isinstance(restored, AnalysisTaskInputV4)
         self.assertEqual("原始 demo.txt", restored.original_file_name)
         self.assertEqual("原始 demo.txt", restored.rag_naming.display_title)
-        self.assertEqual("原始 demo.md", restored.rag_naming.markdown_transport_file_name)
-        self.assertEqual("原始 demo.pdf", restored.rag_naming.pdf_transport_file_name)
+        self.assertEqual(" demo.txt", restored.rag_naming.transport_name_candidate)
+        self.assertEqual(" demo.md", restored.rag_naming.markdown_transport_file_name)
+        self.assertEqual(" demo.pdf", restored.rag_naming.pdf_transport_file_name)
         self.assertEqual(
             _params()["originalFileName"],
             restored.raw_params.to_dict()["originalFileName"],
@@ -272,7 +318,7 @@ class AnalysisTaskInputCodecTests(unittest.TestCase):
         with self.assertRaises(AnalysisTaskInputCodecError):
             AnalysisTaskInputCodec.decode(current_payload)
 
-        naming_payload = AnalysisTaskInputCodec.encode(_task_input_v3())
+        naming_payload = AnalysisTaskInputCodec.encode(_task_input_v4())
         naming_payload["rag_naming"]["markdown_transport_file_name"] = "shadow.md"  # type: ignore[index]
         with self.assertRaises(AnalysisTaskInputCodecError):
             AnalysisTaskInputCodec.decode(naming_payload)

@@ -4,11 +4,12 @@
 
 - 文档日期：2026-07-30
 - 计划层级：L3 文件级专项实施计划
-- 当前状态：P0～P7 已实施并通过离线与受控真实 Provider 验收；尚未部署生产环境
+- 当前状态：P0～P7 已实施并通过既有验收；P8 全局唯一 `fileName` 传输命名已完成代码与
+  离线回归，尚待独立受控真实 Provider 复验；尚未部署生产环境
 - 适用范围：`POST /llm/analysis` 文件分析链路及其 AnythingLLM 临时/永久文档生命周期
 - 目标 Provider 基线：AnythingLLM Desktop `1.15.0`；实测版本为 `1.15.0-r2`
-- 公开契约变化：不增删任何请求、响应、Callback、Progress、SSE 或 WebSocket 字段；新增一种
-  `originalFileName` 非法时的同步 HTTP `400` 校验结果
+- 公开契约变化：不增删任何请求、响应、Callback、Progress、SSE 或 WebSocket 字段；展示
+  标题候选或实际上传所依据的 `fileName` 非法时同步返回对应字段的 HTTP `400`
 
 本文档同时回答 AnythingLLM 1.15.0 的标题、上传文件名、Workspace 展示名和 RAG Chunk
 来源字段之间的关系，并记录 P0～P7 的实际实施与验收结果。当前工作树已经完成代码和受控验收，
@@ -22,15 +23,15 @@
 | --- | --- |
 | D01 | 对可文本化的文档生成一份**仅供 RAG 使用的内部 Markdown 投影**；Callback、全文翻译、正文提取和本地原始/规范化 Artifact 不使用该投影替代。 |
 | D02 | RAG 投影不携带图片 Base64 正文；保留有界的图片替代说明、alt 文本和内容摘要，禁止把大段 Base64 切块并向量化。 |
-| D03 | Markdown 投影上传 AnythingLLM 时，HTTP multipart 文件名为 `<业务原名主干>.md`。只移除最后一个后缀，例如 `资料.v2.pdf` 得到 `资料.v2.md`。 |
-| D04 | `originalFileName` 缺失、为 `null`、空字符串或仅含空白时，使用 `fileName` 作为命名候选，再生成 `<主干>.md`。该兼容分支不新增公开字段。 |
-| D05 | 同一批次中 `资料.pdf` 与 `资料.docx` 的 multipart 文件名都可能映射为 `资料.md`，但 UI 分别显示各自 `originalFileName`。如果两个请求的业务原名本身相同，UI 仍可能同名；远端 UUID/location、DocSense `document_ref` 和任务身份负责区分，禁止把展示名或传输名当作所有权标识。 |
+| D03 | Markdown 投影上传 AnythingLLM 时，HTTP multipart 文件名为 `<全局唯一 fileName 主干>.md`。只移除 `fileName` 最后一个后缀，例如 `bded...pdf` 得到 `bded...md`。 |
+| D04 | `originalFileName` 缺失、为 `null`、空字符串或仅含空白时，仅展示标题回退使用 `fileName`；multipart 名称始终从 `fileName` 派生。该兼容分支不新增公开字段。 |
+| D05 | 前端保证 `fileName` 在整个系统中全局唯一。因此同主干或完全同名的业务原文件仍得到不同 multipart 名称；UI 继续分别显示各自 `originalFileName`。远端 UUID/location、DocSense `document_ref` 和任务身份仍负责所有权，传输名只作为供应商降级来源映射键。 |
 | D06 | 如果 OCR 与 MinerU 都已明确失败，现有策略允许把真实 PDF 作为 RAG 降级输入，则继续上传真实 PDF，不生成伪 Markdown，也不把 PDF 字节命名为 `.md`。 |
-| D07 | 业务原名不做替换、删字符、Unicode 归一化或截断等“安全化”。候选名称非法时，同步返回 HTTP `400`，整批不建任务、不下载文件、不调用 AnythingLLM。 |
-| D08 | HTTP multipart 文件名与 AnythingLLM `metadata.title` 明确分离：前者使用 `<业务原名主干>.md`（PDF 降级使用 `.pdf`）以控制 1.15.0 的文件类型处理器；后者使用 `originalFileName` 原值，使 UI、Chunk `sourceDocument` 和模型来源保留原文件名及原后缀。 |
-| D09 | 本地 Artifact 的物理存储名保持任务隔离、内容寻址和不透明，不要求改成业务原名；业务原名只进入上传描述符的展示标题及传输名派生，不承担本地或远端身份职责。 |
+| D07 | 展示标题和 `fileName` 上传候选均不做替换、删字符、Unicode 归一化或截断等“安全化”。任一实际候选非法时，同步返回对应字段的 HTTP `400`，整批不建任务、不下载文件、不调用 AnythingLLM。 |
+| D08 | HTTP multipart 文件名与 AnythingLLM `metadata.title` 明确分离：前者使用 `<fileName 主干>.md`（PDF 降级使用 `.pdf`）以控制 1.15.0 的文件类型处理器并提供唯一 hotdir basename；后者使用 `originalFileName` 原值，使 UI、Chunk `sourceDocument` 和模型来源保留原文件名及原后缀。 |
+| D09 | 本地 Artifact 的物理存储名保持任务隔离、内容寻址和不透明，不要求改成业务名；业务原名只进入上传描述符的展示标题，`fileName` 只用于业务主键和传输名派生，二者都不承担外部资源所有权职责。 |
 | D10 | 不执行 `run.py`。开发验证默认使用项目虚拟环境、严格 Fake、临时 SQLite 和受控 AnythingLLM 1.15.0 实例。 |
-| D11 | `originalFileName` 缺失、`null`、空字符串或仅含空白时，`metadata.title` 与 multipart 名称共同回退使用 `fileName`；不允许 title 与 transport name 分别采用不同的回退来源。 |
+| D11 | `originalFileName` 缺失、`null`、空字符串或仅含空白时，`metadata.title` 回退使用 `fileName`；multipart 名称始终使用 `fileName` 主干和实际表示后缀。 |
 
 ---
 
@@ -226,7 +227,7 @@ HTTP 上传名称回答的是：
 | 层次 | 示例 | 用途 | 能否作为所有权身份 |
 | --- | --- | --- | --- |
 | 业务原名/展示标题 | `Nimitz (CVN 68) class.pdf` | 请求语义、Callback source、metadata.title、UI、Chunk sourceDocument | 否 |
-| RAG 传输名 | `Nimitz (CVN 68) class.md` | multipart 文件名、Collector 处理器选择、实际载荷表示 | 否 |
+| RAG 传输名 | `bded228dc94440519d87f97cfb6b520b.md` | multipart 文件名、Collector 处理器选择、实际载荷表示、唯一 hotdir basename | 否 |
 | 本地 Artifact 身份 | `task_id/artifact_id` | 内容完整性、谱系、并发隔离、清理 | 是，仅限本地 Store |
 | AnythingLLM 身份 | `location + document_ref + docsense_ref` | 绑定、检索来源校验、Pin、删除、永久转交 | 是 |
 
@@ -258,8 +259,8 @@ flowchart LR
     E --> F{"RAG 表示"}
     F -->|Markdown/Text| G["生成 RAG-only Markdown 投影 Artifact"]
     F -->|OCR/MinerU 明确失败且允许 PDF 降级| H["保留真实 PDF Artifact"]
-    G --> I["multipart: <stem>.md"]
-    H --> J["multipart: <stem>.pdf"]
+    G --> I["multipart: <fileName stem>.md"]
+    H --> J["multipart: <fileName stem>.pdf"]
     I --> K["metadata.title: originalFileName"]
     J --> K
     K --> L["location/document_ref/docsense_ref 身份校验"]
@@ -272,22 +273,22 @@ flowchart LR
 
 ### 6.1 候选选择
 
-按以下稳定优先级选择命名候选：
+按以下稳定规则选择两个职责独立的命名候选：
 
-1. `originalFileName` 是非空字符串：使用其**原值**作为 `display_title` 和派生
-   `transport_file_name` 的共同候选；
-2. `originalFileName` 缺失、`null`、空字符串或仅含空白：使用 `fileName` 同时生成
-   `display_title` 和 `transport_file_name`；
-3. 不修改最终被选中的候选，不执行 trim 后回写、NFKC/NFC、字符替换、截断或 slugify。
+1. `originalFileName` 是非空字符串：使用其**原值**作为 `display_title`；
+2. `originalFileName` 缺失、`null`、空字符串或仅含空白：使用 `fileName` 生成
+   `display_title`；
+3. `transport_file_name` 始终从全局唯一的 `fileName` 派生；
+4. 不修改最终被选中的候选，不执行 trim 后回写、NFKC/NFC、字符替换、截断或 slugify。
 
 `originalFileName` 的 Callback 语义继续严格使用请求原值。本规则只生成内部上传描述符：
-`display_title` 保留候选的原文件名和原后缀，`transport_file_name` 则依据实际上传表示替换
-最后一个后缀。
+`display_title` 保留展示候选的原文件名和原后缀；`transport_file_name` 则依据实际上传
+表示替换 `fileName` 的最后一个后缀。
 
 ### 6.2 主干和扩展名
 
-- 只移除最后一个后缀：`资料.v2.pdf` → `资料.v2.md`；
-- 无后缀：`资料` → `资料.md`；
+- 只移除 `fileName` 最后一个后缀：`hash.v2.pdf` → `hash.v2.md`；
+- `fileName` 无后缀：`hash` → `hash.md`；
 - 大小写不影响格式判断；
 - Markdown/Text RAG 投影统一使用 `.md`；
 - 真实 PDF 降级统一使用 `.pdf`，不得让 PDF 字节携带 `.md`；
@@ -447,7 +448,8 @@ AnythingLLM 调用之前。
    - `validate_rag_transport_name_candidate(value)`；
    - `derive_rag_transport_file_name(candidate, representation)`。
 2. Parser 按 params 顺序校验；第一个非法项返回稳定 index。
-3. 将 `display_title`、Markdown/PDF 两种候选传输名、命名来源和候选摘要冻结进
+3. 将 `display_title`、`fileName` 传输候选、Markdown/PDF 两种传输名、命名来源和
+   两类候选摘要冻结进
    task input snapshot，Worker 不重新读取原始 mutable payload。
 4. P1 不提前声明唯一的 `transport_file_name`。P3 根据实际生成的表示类型，从冻结命名
    快照中选择唯一传输名，并在第一次远端上传前连同 representation、media type、
@@ -547,7 +549,7 @@ AnythingLLM 调用之前。
 #### 目标
 
 在不重命名、不复制本地 Artifact 的情况下，分别冻结 multipart filename 和
-`metadata.title`，并保证两者来自同一个已校验业务名称候选。
+`metadata.title`：前者来自全局唯一 `fileName`，后者来自业务原名展示候选。
 
 #### 主要文件
 
@@ -625,13 +627,13 @@ AnythingLLM 调用之前。
 
 | 场景 | 预期 |
 | --- | --- |
-| PDF → MinerU Markdown，含 Base64 图片 | multipart 为 `<原名主干>.md`；AnythingLLM UI、Chunk title/sourceDocument 为带 `.pdf` 的 `originalFileName`；Chunk 不含 Base64 payload |
+| PDF → MinerU Markdown，含 Base64 图片 | multipart 为 `<fileName 主干>.md`；AnythingLLM UI、Chunk title/sourceDocument 为带 `.pdf` 的 `originalFileName`；Chunk 不含 Base64 payload |
 | MHTML → Markdown | multipart 为 `.md`，metadata.title 与 Callback source 均为原 `originalFileName` |
 | DOC/DOCX → Markdown/Text | multipart 为 `.md`，UI/Chunk 保留 `.doc/.docx` 原名，本地 OOXML/Markdown Artifact 身份不变 |
 | OCR 与 MinerU 均明确失败 | 上传真实 PDF 和 `.pdf` 名称，不生成伪 Markdown |
-| `originalFileName` 缺失/空 | display title 回退为 `fileName`，multipart 使用其主干和实际表示后缀；请求仍可受理 |
+| `originalFileName` 缺失/空 | display title 回退为 `fileName`；multipart 始终使用 `fileName` 主干和实际表示后缀；请求仍可受理 |
 | 非法 `originalFileName` | HTTP 400；任务表、任务目录、下载器、AnythingLLM 均无新增事实 |
-| 两种后缀同一主干 | UI 按各自 `originalFileName` 展示，multipart 可同名 `.md`；location/document_ref 不同 |
+| 两种后缀同一主干或完全同名 | UI 按各自 `originalFileName` 展示；全局唯一 `fileName` 使 multipart 名称不同，武器谱可按 hotdir basename 唯一映射 |
 | 上传 ReadTimeout | 资源进入 `outcome_unknown`；不按标题自动重传 |
 | 50 个同名并发任务 | Artifact、资源、会话、回调和永久文档按 task 隔离 |
 | Worker crash/恢复 | 使用冻结描述符和精确外部身份，不依赖宿主路径或重新派生显示名 |
@@ -733,7 +735,7 @@ AnythingLLM 调用之前。
 | 文档与发布收口 | 0.5 |
 | **合计** | **5.25～8.75 人日** |
 
-其中“multipart 使用 `<业务原名主干>.md`、metadata.title 使用 `originalFileName`”本身约为
+其中“multipart 使用 `<fileName 主干>.md`、metadata.title 使用 `originalFileName`”本身约为
 0.75～1.25 人日；较原方案主要增加上传描述符、资源事实和断言中的 display title 字段，不
 需要复制或重命名 Artifact。主要工作量仍来自 Base64 投影的正确性、资源恢复事实和
 故障/并发验收。若选择物理重命名/复制 Artifact，
@@ -745,7 +747,7 @@ AnythingLLM 调用之前。
 
 只有同时满足以下条件，计划才能标记为完成：
 
-1. 合法 Markdown/Text 文档的 multipart filename 为 `<业务原名主干>.md`，Collector 按
+1. 合法 Markdown/Text 文档的 multipart filename 为 `<全局唯一 fileName 主干>.md`，Collector 按
    Markdown 处理；
 2. AnythingLLM UI、处理后 JSON、实际 Chunk 的 `metadata.title` 与 `sourceDocument`
    均为 `originalFileName` 原值；缺失/空值时均回退为 `fileName`；
@@ -753,8 +755,9 @@ AnythingLLM 调用之前。
 4. canonical prepared Artifact、正文解析、翻译和 Callback 内容不因 RAG 投影被替换；
 5. PDF 明确降级分支上传真实 PDF 和 `.pdf` 文件名；
 6. 非法名称同步 HTTP 400，且整批零本地/远端副作用；
-7. 缺失/空 `originalFileName` 使用 `fileName` 回退；
-8. 同名文档仍由 UUID/location/document_ref/docsense_ref 隔离；
+7. 缺失/空 `originalFileName` 的展示标题使用 `fileName` 回退；
+8. 同主干或完全同名业务文档由全局唯一 `fileName` 形成不同传输名，并继续由
+   UUID/location/document_ref/docsense_ref 隔离所有权；
 9. ReadTimeout/outcome_unknown 不会按标题自动重传或误删；
 10. 所有新增代码有清晰中文注释、必要脱敏日志和稳定错误分类；
 11. 定向测试、安全全仓测试、并发/恢复故障矩阵和真实 AnythingLLM 1.15.0 受控验收均有可追溯
@@ -775,16 +778,20 @@ AnythingLLM 调用之前。
 | P5 | 已完成 | 永久知识、交互审计、资源恢复分别保留业务原名、实际传输名和精确 Provider 身份，清理不依赖标题。 |
 | P6 | 已完成 | 并发、故障、恢复和受控 AnythingLLM Desktop `1.15.0-r2` 验收通过。 |
 | P7 | 已完成 | 权威接口文档、重构索引、更新记录和测试说明完成收口；生产灰度与发布仍须走独立停服发布流程。 |
+| P8 | 代码与离线回归完成 | Analysis 输入升级到 Schema v4，传输名改由全局唯一 `fileName` 派生；严格兼容读取 v1～v3，并新增同主干/完全同名到武器谱范围的跨模块回归。真实 Provider 复验与生产发布不在本次离线结论内。 |
 
-受控真实 Provider 使用 `lancedb`、Ollama Embedder
+P0～P7 的既有受控真实 Provider 使用 `lancedb`、Ollama Embedder
 `qwen3-embedding:0.6b` 和临时 Workspace。实测验证：
 
-1. multipart filename 为 `<业务原名主干>.md`，`metadata.title`、处理后 JSON、
+1. 当时版本的 multipart filename 为 `<业务原名主干>.md`，`metadata.title`、处理后 JSON、
    Chunk `title/sourceDocument` 和 AnythingLLM UI 来源标题均为带原后缀的业务原名；
 2. 投影、处理后 JSON 和向量缓存均不含测试图片 Base64 payload；
 3. 实际模型问答命中唯一测试标记，返回来源标题与业务原名完全一致；
 4. 本地 canonical Artifact 名称和摘要未因 HTTP 上传名变化；
 5. 按精确 thread、location 和 Workspace 完成清理，处理后文档与向量标记均无残留。
+
+上述证据不自动证明 P8 的 `<fileName 主干>.md` 已完成真实 Provider 复验；P8 当前只记录
+可复现的离线 Codec、上传描述符和武器谱来源边界证据。
 
 自动化关闭证据：
 

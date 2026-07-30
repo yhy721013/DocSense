@@ -5,9 +5,9 @@
   "publicContractChanged": true,
   "interfaceAuthority": {
     "path": "docs/接口文档/文件处理和报告生成.md",
-    "sha256": "1216CAD89100C50C8133261740C9A8568833CFE773E9387890A2D58C73D4CBE2",
+    "sha256": "6F8F333E346A44FF09411C7D63C0EADB365343181C956A1EDCB7455C11710955",
     "lastApprovedAt": "2026-07-30",
-    "approvedChange": "保留既有fileName/originalFileName字段和值语义；新增RAG命名候选整批同步HTTP 400和缺失空值回退规则；file/report/weaponry outcome_unknown仍可由check-task按at-least-once语义显式补发"
+    "approvedChange": "保留既有fileName/originalFileName字段和值语义；RAG展示标题继续使用originalFileName，multipart上传名改由全局唯一fileName派生；保留RAG命名候选整批同步HTTP 400和缺失空值回退规则；file/report/weaponry outcome_unknown仍可由check-task按at-least-once语义显式补发"
   },
   "analysisSubmission": {
     "method": "POST",
@@ -149,6 +149,23 @@
         "status": 400,
         "body": {
           "error": "params[0].originalFileName不是合法文件名"
+        }
+      },
+      {
+        "id": "invalidTransportFileNameWithValidDisplayTitle",
+        "payload": {
+          "businessType": "file",
+          "params": [
+            {
+              "fileName": "unsafe?.pdf",
+              "originalFileName": "合法展示名.pdf",
+              "filePath": "http://127.0.0.1:8000/valid.pdf"
+            }
+          ]
+        },
+        "status": 400,
+        "body": {
+          "error": "params[0].fileName不是合法文件名"
         }
       },
       {

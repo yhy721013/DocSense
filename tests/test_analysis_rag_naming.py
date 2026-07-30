@@ -92,8 +92,8 @@ class AnalysisRagNamingPolicyTests(unittest.TestCase):
     def test_accepts_exact_255_byte_longest_derived_name(self) -> None:
         candidate = f"{'a' * 251}.x"
         snapshot = AnalysisRagNamingSnapshot.from_public_names(
-            original_file_name=candidate,
-            file_name="fallback.pdf",
+            original_file_name="展示标题.pdf",
+            file_name=candidate,
         )
         self.assertEqual(
             254,
@@ -104,7 +104,7 @@ class AnalysisRagNamingPolicyTests(unittest.TestCase):
             len(snapshot.pdf_transport_file_name.encode("utf-8")),
         )
 
-    def test_unicode_is_not_normalized_and_same_stems_are_not_identities(self) -> None:
+    def test_business_keys_make_same_stem_and_same_title_uploads_unique(self) -> None:
         composed = AnalysisRagNamingSnapshot.from_public_names(
             original_file_name="é.pdf",
             file_name="one.pdf",
@@ -115,6 +115,10 @@ class AnalysisRagNamingPolicyTests(unittest.TestCase):
         )
         self.assertNotEqual(composed.display_title, decomposed.display_title)
         self.assertNotEqual(composed.candidate_sha256, decomposed.candidate_sha256)
+        self.assertNotEqual(
+            composed.markdown_transport_file_name,
+            decomposed.markdown_transport_file_name,
+        )
 
         pdf = AnalysisRagNamingSnapshot.from_public_names(
             original_file_name="资料.pdf",
@@ -124,11 +128,28 @@ class AnalysisRagNamingPolicyTests(unittest.TestCase):
             original_file_name="资料.docx",
             file_name="two.docx",
         )
-        self.assertEqual(
+        self.assertNotEqual(
             pdf.markdown_transport_file_name,
             docx.markdown_transport_file_name,
         )
         self.assertNotEqual(pdf.display_title, docx.display_title)
+
+        first_same_title = AnalysisRagNamingSnapshot.from_public_names(
+            original_file_name="完全同名.pdf",
+            file_name="global-key-a.pdf",
+        )
+        second_same_title = AnalysisRagNamingSnapshot.from_public_names(
+            original_file_name="完全同名.pdf",
+            file_name="global-key-b.pdf",
+        )
+        self.assertEqual(
+            first_same_title.display_title,
+            second_same_title.display_title,
+        )
+        self.assertNotEqual(
+            first_same_title.markdown_transport_file_name,
+            second_same_title.markdown_transport_file_name,
+        )
 
     def test_snapshot_mapping_rejects_tampered_derived_name(self) -> None:
         snapshot = AnalysisRagNamingSnapshot.from_public_names(

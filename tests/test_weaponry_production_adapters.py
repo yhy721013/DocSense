@@ -22,6 +22,7 @@ from app.integrations.anythingllm.models import (
     AnythingLLMWorkspace,
 )
 from app.integrations.anythingllm import AnythingLLMHTTPError, AnythingLLMTimeoutError
+from app.modules.analysis.domain.rag_naming import AnalysisRagNamingSnapshot
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.modules.weaponry.adapters import (
     AnythingLLMProvidedEvidenceExtractionAdapter,
@@ -962,6 +963,61 @@ class WeaponryAnythingLLMRetrievalAdapterTests(unittest.TestCase):
                         policy=_policy(),
                     )
                 )
+
+    def test_analysis_business_keys_prevent_same_stem_weaponry_collision(
+        self,
+    ) -> None:
+        """Analysis 同主干原名应形成唯一入库名，并可直接打开武器谱检索范围。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            task_id = TaskId("retrieval-analysis-business-key-names")
+            runtime = _FakeAnythingRuntime()
+            adapter, _ = self._adapter(
+                str(Path(directory) / "tasks.sqlite3"),
+                runtime,
+                task_id,
+            )
+            first_naming = AnalysisRagNamingSnapshot.from_public_names(
+                original_file_name="资料.pdf",
+                file_name="global-file-key-a.pdf",
+            )
+            second_naming = AnalysisRagNamingSnapshot.from_public_names(
+                original_file_name="资料.docx",
+                file_name="global-file-key-b.docx",
+            )
+            first = WeaponryDocumentSnapshot(
+                sequence_no=1,
+                document_key="doc-a",
+                file_name="global-file-key-a.pdf",
+                original_name="资料.pdf",
+                ingested_file_name=first_naming.markdown_transport_file_name,
+                source_architecture_id=7,
+                external_document_ref="custom-documents/a.json",
+                anything_document_id="provider-a",
+            )
+            second = WeaponryDocumentSnapshot(
+                sequence_no=2,
+                document_key="doc-b",
+                file_name="global-file-key-b.docx",
+                original_name="资料.docx",
+                ingested_file_name=second_naming.markdown_transport_file_name,
+                source_architecture_id=7,
+                external_document_ref="custom-documents/b.json",
+                anything_document_id="provider-b",
+            )
+
+            self.assertNotEqual(
+                first.ingested_file_name.casefold(),
+                second.ingested_file_name.casefold(),
+            )
+            scope = adapter.open_scope(
+                OpenTargetEvidenceScope(
+                    task_id=task_id,
+                    document_scope=_scope(first, second),
+                    policy=_policy(),
+                )
+            )
+            self.assertTrue(adapter.close_scope(scope).success)
 
     def test_retrieval_accepts_two_legacy_documents_with_unique_opaque_ingested_names(
         self,
