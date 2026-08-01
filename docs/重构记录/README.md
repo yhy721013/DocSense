@@ -20,8 +20,9 @@
 | `260727-武器谱术语目录自动同步实施设计.md` | L3 专项设计：以自动内容指纹、版本化 workspace、启动门禁、未知结果隔离和多代只读路由恢复本地术语卡上传，不把外部写入放回单任务请求链。 |
 | `260727-文件对话首次空文件自动全量范围实施计划.md` | L3 已完成专项计划：阶段 0～7 已完成契约黄金基线、全量目录快照、纯领域候选 DTO、受理事务原子选择、执行/绑定/历史等价、日志/调试一致性、离线全面回归及最终关闭验收；公开 `/llm/chat` 已启用首次空 `fileNames` 的全量不可变快照，参数与 SSE 契约不变。证据限定为 SQLite 单实例离线环境。 |
 | `260727-文件对话请求范围与活动范围分离实施计划.md` | L3 已确认、待实施的后续语义修正：分离前端 Requested Scope、持久 Active Scope、本轮 Effective Scope 与 Workspace 累计绑定；首次空数组冻结一次全量范围，任意非空数组整体替换活动范围，后续空数组保持最后显式范围，history 只展示前端本轮显式文件。公开字段结构不变，开发 Chat 数据在切换时停服清理。 |
-| `260728-知识谱系类别文件对话详细实施计划.md` | L3 已完成专项计划：阶段 0～7 后追加 2026-07-29 审查修复，当前包含 JavaScript 安全整数、Admission Guard、409 优先、Schema v6 对称约束、有界类别读取、远端绑定唯一确认和 `aborted` 合同补齐。 |
-| `260728-知识谱系类别文件对话详细集成计划.md` | L3 部分执行集成计划：开发实现、离线 I0～I4/I6 及 C7 审查修复已完成；未来发布改按 v1/v4/v5→v6、真实绑定回执、409/429 优先级和前端 `aborted` 演练，最新 main 漂移与主线合入仍待执行。 |
+| `260728-知识谱系类别文件对话详细实施计划.md` | L3 历史已完成计划：记录旧 `/llm/chat + chatId + architectureId` 模式的阶段 0～7、Schema v6 和离线证据；其公开接口方向已由 2026-08-01 独立接口计划取代，直接文件/首次冻结等内部规则仍可复用。 |
+| `260728-知识谱系类别文件对话详细集成计划.md` | L3 历史部分执行计划：记录旧模式开发和离线 I0～I4/I6/C7；原 I7/I8 发布方向不再继续，后续集成以 2026-08-01 独立接口和清库重建计划为准。 |
+| `260801-对话模块迁移与知识谱系独立接口详细实施计划.md` | L3 已全部确认、待实施的专项计划：将 Chat 从 `services/` 迁入 `modules/chat/`，以内部 conversationId 共用 Domain/Application/SQLite/AnythingLLM 核心，并通过独立 `/llm/weaponry-chat*`、复合业务身份、v1.15.0 常规 Finalization/Query 拒答双终态、无损 Chunk 映射、严格原文件名门禁、冻结 SSE Header、历史原子快照、Weaponry 身份释放与 File chatId 永久墓碑策略替代旧 architecture 公共合同；删除成功物理清除正文/Chunk，只留最小审计事实，不兼容旧接口和旧 Chat 数据。 |
 | `260725-main与refactor并发重构分支集成实施计划.md` | L3 分支集成计划：以最新 `main` 为第一父基线，将 `refactor/concurrency` 阶段 0～1E 成果集成进主线；逐文件规定 8 个冲突文件、24 个冲突块、Analysis 最新功能保留、SQLite Schema 并集、里程碑、测试、回滚和完成定义。该计划取代 `260722-refactor与analysis优化分支合并实施计划.md` 的旧执行方向。 |
 | `260728-main与file-analysis分支Legacy-Office集成实施计划.md` | L3 分支集成计划：把 `main` 的 Legacy Office、单 Sheet XLSX、Report 与离线交付能力集成到 Stage 1F 文件分析唯一生产链；冻结处理策略、失败关闭、共享转换容量、只读存储治理、逐阶段门禁和真实环境停止条件。 |
 | `260729-report与weaponry-check-task显式unknown重试实施计划.md` | L3 已完成并离线关闭专项计划：U0～U7 已完成 report/weaponry 显式 at-least-once unknown 补发、三类型请求预校验/规范化去重、Guard attempt CAS/追加审计、业务恢复接入、组合根、接口黄金资产、迁移演练及 2,042 项安全全仓回归；负责人确认本次不执行真实环境发布门禁，目标库统计、实例版本/旧 Worker 核对和 Production Attestation 留待未来实际发布前执行。 |
