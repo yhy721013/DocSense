@@ -21,7 +21,7 @@
 | `test_chat_delete_service.py` | 删除状态机、同步清理要求和失败保留。 |
 | `test_chat_stream_presenter.py` | 领域事件到冻结 SSE 文本的格式化与关闭回调。 |
 | `test_chat_infrastructure.py` | 当前持久化/调度/租约能力边界，防止 SQLite 被误用为可靠队列。 |
-| `test_chat_debug_preview.py`、`test_chat_debug_routes.py` | 本地调试 `fileNames` 对齐 Active Scope、Workspace bindings 独立脱敏计数、公开 history requested 语义和调试路由。 |
+| `test_debug_application.py`、`test_debug_adapters.py`、`test_debug_presenter.py`、`test_chat_debug_routes.py` | 本地调试 `fileNames` 对齐 Active Scope、Workspace bindings 独立脱敏计数、公开 history requested 语义，以及 Query/Adapter/Presenter/路由分层。 |
 | `test_dependency_container.py` | 容器装配、工厂隔离、传输惰性创建和能力校验。 |
 | `test_chat_scope_contract_assets.py` | Requested/Active/Effective Scope 分离的阶段 0 黄金资产；冻结最后显式范围、禁止自动吸收、history 仅展示显式请求及公开字段零增删。 |
 | `test_chat_document_scope.py` | Scope Revision/Head/Decision 不可变 DTO、严格内部 Schema、重复身份拒绝及 Requested→Active→Effective 纯状态机。 |
@@ -113,7 +113,6 @@ Task Service 和旧 Progress Hub 在阶段 1A 均未切换。
 | `test_report_request_adapter.py` | 无 Flask 的报告 HTTP 入站解析：顶层对象、严格 params、filePathList 元素索引错误、reportId 128 位边界、可选文本兼容转换、深复制隔离及既有 400 文本。 |
 | `test_report_contract.py` | 1C-6/1C-7 报告路由契约：202 严格空体、活动/回调 Guard 409、三类 400、单次持久化受理与唤醒、报告路由不再调用遗留 Worker，以及生产源码不得重新导入遗留报告执行链；旧覆盖缺陷只保留为隔离的兼容证据。 |
 | `test_report_domain.py` | 不受 32/64 位限制且最多 128 位的 `ReportId`、不可变 submission/input/result/callback DTO、输入顺序与重复语义、HTML/空 RAG 成功、稳定错误和执行级名称。 |
-| `test_report_service.py` | 遗留服务对新纯规则的兼容转发，以及 Progress、MHTML、Word、空 RAG 日志和成功/失败路径。 |
 | `test_report_ports.py` | Task Command/Progress 与 File/Artifact/RAG/Audit/Callback/Dispatcher Port DTO、运行期 Protocol、身份/Artifact 类别隔离和严格序列约束。 |
 | `test_report_application.py` | Submit/Run 无框架编排、全局调用顺序、失败注入、stale、审计硬门禁、任务事实写入结果不确定、回调故障不二次写终态、清理和非法端口返回值。 |
 | `test_report_task_adapter.py` | SQLite Schema、追加 execution、report Codec、原子受理/领取、expected TaskId 条件写、触发器回滚、旧写拒绝，以及 50 同键/领取/不同键 Barrier 并发。 |
@@ -156,7 +155,6 @@ Artifact 所有权和 cleanup/quarantine 持久恢复闭环。1C-6 又证明当�
 | `test_stage1d0r_isolated_reindex.py` | 隔离重建工具的随机资源所有权、成功清理、嵌入失败补偿、路径越界、既有位置碰撞和源文件只读测试。 |
 | `test_weaponry_domain.py` | ArchitectureId 纯规范化、深冻结字段/列/文档/结果 DTO、来源映射、Evidence 完整保留、仅 Selected Evidence Prompt、INPUT/TABLE 字段说明、TABLE 强行身份/合并/来源去重/组装及可变容器隔离。 |
 | `test_weaponry_contract.py` | INPUT/TABLE/失败 Callback 黄金投影、单一文件聚合策略、模式 1 删除及遗留服务/Prompt 源码静态删除证据。 |
-| `test_weaponry_service.py` | 遗留模式 2 对新 Domain 的兼容转发、专用 Retrieval Query、实际 Prompt rows、来源原名/哈希名、术语开关，以及显式模式 1 在检索/模型副作用前拒绝。 |
 | `test_weaponry_request_adapter.py` | 1D-2 框架无关请求 Parser：D01～D03 精确错误、64 位 architectureId、URL 文件名、字段/TABLE 严格结构、未知键保留、深冻结和非标准 JSON 拒绝。 |
 | `test_weaponry_submission_presenter.py` | 1D-2 Presenter：202 零字节成功，以及只含既有 `error` 字段的 400/404/409；内部 TaskId 和运行字段不泄露。 |
 | `test_weaponry_document_scope.py` | explicit/category 文档范围、跨分类请求顺序、稳定类别排序、完整位置规范化碰撞、空类别、404/歧义/完整性、单次只读查询、旧选文表零写入和严格 Fake。 |
@@ -505,6 +503,26 @@ Dispatcher、可靠队列或多实例运行时。
 占用不会被伪装成成功。保留存量库时才运行 `inspect_analysis_cutover.py` 并关闭全部五类阻断项。
 禁止启动 `run.py` 代替发布编排，禁止在线双跑。
 
+## 阶段 1G 结构关闭资产
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `contracts/stage1g_debug_contract.json`、`test_stage1g_contract_assets.py` | 冻结公开路由集合和四条 Debug 路由的内部响应、查询参数及页面依赖，不扩大接口参数。 |
+| `test_stage1g_bootstrap_boundaries.py`、`test_architecture_boundaries.py` | 禁止生产组合根依赖 Flask，并限制正式/Debug 蓝图只承担 Parser、Application 调用和 Presenter。 |
+| `test_stage1g_reference_inspector.py` | 验证遗留引用检查器的分类、动态引用识别、候选定义和负例能力。 |
+| `contracts/stage1g_legacy_test_migration.json`、`test_stage1g_legacy_test_migration.py` | 记录十个旧测试文件共 200 条断言的现行语义归属，并永久禁止旧模块重新进入测试执行路径。 |
+| `test_stage1g_closeout.py` | 1G-6 关闭资产门禁：全部静态数据库表均有所有权、八个现行模块均有说明、1G-5 已删除运行路径不得回流。 |
+| `docs/重构记录/阶段0资产/260801-阶段1关闭模块所有权与遗留适配矩阵.md` | 固化阶段 1 关闭时的模块/表所有权、依赖方向、保留适配、回滚点、阶段 2 输入和生产未验证边界。 |
+
+1G-4 删除的是已由现行分层测试承接的重复或实现耦合测试；1G-5 在负责人确认仓库外条件后才逐候选
+物理删除生产兼容源码。旧测试文件、断言数、目标测试和语义边界以迁移清单为准；Task Service 的
+历史投影造数已限制在 `task_service_fixtures.py`，并发受理和 Callback 恢复测试必须走现行
+Analysis Application/Adapter/Guard 链。
+
+1G-6 的矩阵测试只证明资产与当前源码一致，不证明 SQLite 之外的数据库迁移、多实例 lease/fencing、
+RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必须先明确所有者和迁移阶段，再更新
+矩阵；不得通过放宽扫描规则绕过所有权评审。
+
 ## 推荐验证流程
 
 1. 先运行文件对话范围测试：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_chat*.py" -q`。
@@ -515,11 +533,11 @@ Dispatcher、可靠队列或多实例运行时。
 6. 运行阶段 1A-3 内部契约测试：`venv\Scripts\python.exe -B -m unittest tests.test_task_check_application tests.test_task_progress_application tests.test_architecture_boundaries -q`。
 7. 运行阶段 1B-1 可靠命令与 Presenter 测试：`venv\Scripts\python.exe -B -m unittest tests.test_task_callback_recovery_application tests.test_task_status_presenter tests.test_architecture_boundaries -q`。
 8. 运行阶段 1B-2 Progress 迁移测试：`venv\Scripts\python.exe -B -m unittest tests.test_progress_request_adapter tests.test_task_progress_presenter tests.test_legacy_task_read_adapter tests.test_in_memory_progress_adapter tests.test_progress_connection_registry tests.test_stage1a1_progress_contract tests.test_progress_and_check_task tests.test_task_progress_application tests.test_dependency_container tests.test_architecture_boundaries -q`。
-9. 运行阶段 1C 报告测试：`venv\Scripts\python.exe -B -m unittest tests.test_report_task_adapter tests.test_report_ports tests.test_report_application tests.test_report_request_adapter tests.test_report_domain tests.test_report_contract tests.test_report_service tests.test_report_io_adapters tests.test_report_rag_adapter tests.test_report_interaction_audit_adapter tests.test_report_runtime_adapters tests.test_report_callback_guard tests.test_report_resource_recovery tests.test_report_dispatcher tests.test_report_submission_presenter tests.test_stage0_contract_assets tests.test_dependency_container tests.test_architecture_boundaries -q`。
+9. 运行阶段 1C 报告测试：`venv\Scripts\python.exe -B -m unittest tests.test_report_task_adapter tests.test_report_ports tests.test_report_application tests.test_report_request_adapter tests.test_report_domain tests.test_report_contract tests.test_report_io_adapters tests.test_report_rag_adapter tests.test_report_interaction_audit_adapter tests.test_report_runtime_adapters tests.test_report_callback_guard tests.test_report_resource_recovery tests.test_report_dispatcher tests.test_report_submission_presenter tests.test_stage0_contract_assets tests.test_dependency_container tests.test_architecture_boundaries -q`。
 10. 运行共享审计与 Knowledge Gateway 回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_anythingllm_knowledge_gateway -q`。
 11. 运行阶段 1D-0 契约资产：`venv\Scripts\python.exe -B -m unittest tests.test_stage1d_weaponry_contract_assets -q`。
-12. 运行阶段 1D-0R 检索质量资产：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_retrieval_quality tests.test_stage1d0r_retrieval_quality_assets tests.test_stage1d0r_isolated_reindex tests.test_mhtml_normalizer tests.test_anythingllm_workspaces tests.test_anythingllm_client tests.test_architecture_boundaries -q`。
-13. 运行阶段 1D-1 领域与兼容测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_domain tests.test_weaponry_contract tests.test_weaponry_retrieval_quality tests.test_stage1d0r_retrieval_quality_assets tests.test_weaponry_service tests.test_stage1d_weaponry_contract_assets tests.test_architecture_boundaries -q`。
+12. 运行阶段 1D-0R 检索质量资产：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_retrieval_quality tests.test_stage1d0r_retrieval_quality_assets tests.test_stage1d0r_isolated_reindex tests.test_document_processing_mhtml tests.test_anythingllm_workspaces tests.test_anythingllm_transport tests.test_anythingllm_documents tests.test_architecture_boundaries -q`。
+13. 运行阶段 1D-1 领域测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_domain tests.test_weaponry_contract tests.test_weaponry_retrieval_quality tests.test_stage1d0r_retrieval_quality_assets tests.test_weaponry_application tests.test_stage1d_weaponry_contract_assets tests.test_architecture_boundaries -q`。
 14. 运行阶段 1D-2 请求、文档范围与任务 Codec 测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_request_adapter tests.test_weaponry_submission_presenter tests.test_weaponry_document_scope tests.test_weaponry_task_adapter tests.test_architecture_boundaries -q`。
 15. 运行阶段 1D-3A Port 与严格 Fake：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_ports tests.test_weaponry_strict_fakes tests.test_architecture_boundaries -q`。
 16. 运行阶段 1D-3B Schema v2 与生产 Adapter 离线测试：`venv\Scripts\python.exe -B -m unittest tests.test_weaponry_retrieval_quality tests.test_weaponry_task_adapter tests.test_weaponry_production_adapters tests.test_anythingllm_workspaces tests.test_architecture_boundaries -q`。
@@ -590,6 +608,16 @@ Dispatcher、可靠队列或多实例运行时。
     执行 2,178 项，失败 0、错误 0、跳过 3。门禁必须覆盖终态 Callback 等待期间仍为
     `tracking` 的记录、`session_close=running`、close 后审计窗口、活跃 Worker 零版本
     写入，以及进程失活且保护期超时后只隔离不重放远端 close/delete。
+53. 运行阶段 1G-5 条件物理删除门禁：先执行各 A～E 小批次专项测试、
+    `tests.test_stage1g_reference_inspector` 和 `tests.test_architecture_boundaries`，再运行引用检查器；
+    2026-08-01 最终扫描 554 个 Python/313 个文本文件，11/11 候选删除就绪。安全全仓动态发现
+    2,115 项、精确排除既有 13 项、执行 2,102 项，失败 0、错误 0、跳过 3；未运行 `run.py`
+    或真实后台服务，且 `docs/接口文档/` 零修改。
+54. 运行阶段 1G-6 关闭验收：依次执行 Debug/Container/Route/Architecture、Analysis、
+    Report/Tasks/Callback、Weaponry、Reassign、Chat/Progress、DocumentProcessing/Translation、
+    AnythingLLM Integration 和安全全仓九组门禁。2026-08-01 安全全仓动态发现 2,118 项，
+    精确排除 13 项，执行 2,105 项，失败 0、错误 0、跳过 3；同时运行
+    `tests.test_stage1g_closeout` 固化数据库表与模块所有权、已删除路径不回流和阶段 2 交接边界。
 
 ## 执行限制
 

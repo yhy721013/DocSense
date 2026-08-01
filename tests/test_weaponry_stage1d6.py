@@ -38,6 +38,7 @@ from app.modules.weaponry.adapters import (
 )
 from app.modules.weaponry.application import (
     RecoverWeaponryCallbackSynchronously,
+    SubmitWeaponryRequest,
     WeaponryResourceRecoveryOutcome,
     WeaponryResourceRecoveryService,
 )
@@ -814,16 +815,15 @@ class WeaponryCallbackGuardIntegrationTests(unittest.TestCase):
             weaponry = services.weaponry_services
             assert weaponry is not None
             _finish_success(weaponry.task_commands, _submission(10508))
+            self.assertFalse(
+                hasattr(services.task_service, "replay_callback_if_needed")
+            )
             response_value = Mock(status_code=200)
             with patch(
                 "app.modules.weaponry.adapters.callback_guard.requests.post",
                 return_value=response_value,
             ) as callback_post, patch(
                 "app.modules.weaponry.adapters.callback_guard.save_callback_history_payload"
-            ), patch.object(
-                services.task_service,
-                "replay_callback_if_needed",
-                side_effect=AssertionError("weaponry 不得进入遗留直发入口"),
             ):
                 response = create_app(services=services).test_client().post(
                     "/llm/check-task",
@@ -1226,9 +1226,16 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
         self.assertIn("parse_weaponry_request", source)
-        self.assertIn("document_scope.resolve", source)
-        self.assertIn("submit.execute", source)
+        self.assertIn("submit_request.execute", source)
         self.assertIn("present_success", source)
+        # 文档范围解析与提交编排已经下沉到 Application；路由不得重新拆开用例。
+        self.assertNotIn("document_scope.resolve", source)
+
+        application_source = inspect.getsource(SubmitWeaponryRequest.execute)
+        self.assertIn("_document_scope.resolve", application_source)
+        self.assertIn("_submit.execute", application_source)
+        self.assertNotIn("flask", application_source)
+        self.assertNotIn("from flask import request", application_source)
 
     def test_production_factory_binds_one_real_chain_without_opening_network_session(
         self,

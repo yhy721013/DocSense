@@ -23,6 +23,6 @@ Analysis / Weaponry Adapter
 - Analysis 全文翻译消费与 RAG/正文读取相同的 prepared Artifact；摘要与 Weaponry 只调用
   `TranslationEnginePort`。
 
-旧 `LLMTranslationService`、`DocumentTranslator`、`MarkdownHandler` 和 `MHTMLHandler` 仍因
-兼容代码与测试引用保留，但不在当前生产组合根拥有文件处理执行权。只有生产、兼容代码、测试和
-配置引用均清零且回滚观察期结束后才允许物理删除。
+旧 Translation Service 已在阶段 1G-5A5 删除，旧 Translator 包与文件处理兼容 Facade 已在
+阶段 1G-5B 删除。翻译和格式处理的新能力只能分别进入 `app/modules/translation/` 与
+`app/modules/document_processing/`，禁止重新创建旧目录作为跨模块编排入口。

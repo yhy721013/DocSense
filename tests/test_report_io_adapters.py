@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import zipfile
 
 from app.modules.report.adapters.legacy_files import LegacyReportFileAdapter
 from app.modules.report.adapters.local_artifacts import LocalReportArtifactAdapter
@@ -19,10 +20,56 @@ from app.modules.report.ports import (
     ReportTemplateDownload,
 )
 from app.modules.tasks.domain import TaskId
+from app.services.utils.word_extractor import extract_text_from_word
 from tests import workspace_tempdir
 
 
 class ReportIoAdapterTests(unittest.TestCase):
+    @staticmethod
+    def _write_minimal_docx(path: Path, body_xml: str) -> None:
+        """生成仅含 document.xml 的受控 DOCX，避免依赖 Office 主进程。"""
+
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>""",
+            )
+            archive.writestr(
+                "word/document.xml",
+                f"""<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>{body_xml}</w:body>
+</w:document>""",
+            )
+
+    def test_word_template_extractor_reads_paragraphs_and_table_cells(self) -> None:
+        """Report 当前 Adapter 依赖的 Word 文本边界必须保留段落与表格单元格。"""
+
+        with workspace_tempdir() as tmp:
+            docx_path = Path(tmp) / "template.docx"
+            self._write_minimal_docx(
+                docx_path,
+                """
+  <w:p><w:r><w:t>报告标题</w:t></w:r></w:p>
+  <w:tbl>
+    <w:tr>
+      <w:tc><w:p><w:r><w:t>章节</w:t></w:r></w:p></w:tc>
+      <w:tc><w:p><w:r><w:t>要求</w:t></w:r></w:p></w:tc>
+    </w:tr>
+  </w:tbl>
+""",
+            )
+
+            text = extract_text_from_word(str(docx_path))
+
+        self.assertIn("报告标题", text)
+        self.assertIn("章节", text)
+        self.assertIn("要求", text)
+
     def test_begin_allocates_namespace_without_creating_task_directory(self) -> None:
         """资源 Store 登记成功前，分配 scope 不得制造无主 Artifact 目录。"""
 

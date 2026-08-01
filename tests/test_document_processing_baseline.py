@@ -20,8 +20,7 @@ from app.modules.analysis.adapters.legacy_files import (
 from app.modules.analysis.ports.common import AnalysisExecutionRef
 from app.modules.report.adapters.local_artifacts import LocalReportArtifactAdapter
 from app.modules.tasks.domain import TaskId
-from app.services.translator.document_handler import DocumentTranslator
-from app.services.utils.mhtml_normalizer import (
+from app.modules.document_processing.adapters.path_compat import (
     extract_retrieval_text_from_mhtml,
     extract_text_from_mhtml,
 )
@@ -75,40 +74,6 @@ def _import_targets(source: Path) -> set[str]:
         elif isinstance(node, ast.Import):
             targets.update(alias.name for alias in node.names)
     return targets
-
-
-class _ProgressTrackerFake:
-    """只记录重置次数，避免基线分派测试初始化真实翻译模型。"""
-
-    def __init__(self) -> None:
-        self.reset_count = 0
-
-    def reset(self) -> None:
-        self.reset_count += 1
-
-
-class _TranslatorFake:
-    def __init__(self) -> None:
-        self.tracker = _ProgressTrackerFake()
-
-    def get_progress_tracker(self) -> _ProgressTrackerFake:
-        return self.tracker
-
-
-class _HandlerFake:
-    """记录 DocumentTranslator 的格式分派，不执行 MinerU、浏览器或模型。"""
-
-    def __init__(self, name: str, calls: list[str]) -> None:
-        self._name = name
-        self._calls = calls
-
-    def convert_to_markdown(self, **_: object) -> str:
-        self._calls.append(f"{self._name}.convert_to_markdown")
-        return "prepared.md"
-
-    def process(self, **_: object) -> str:
-        self._calls.append(f"{self._name}.process")
-        return f"{self._name}-result"
 
 
 class Stage1HDocumentProcessingBaselineTests(unittest.TestCase):
@@ -173,45 +138,6 @@ class Stage1HDocumentProcessingBaselineTests(unittest.TestCase):
                     {},
                 ).items():
                     self.assertEqual(expected_count, text.count(value))
-
-    def test_document_translator_format_dispatch_matches_baseline(self) -> None:
-        """冻结当前格式选择，后续只改变所有权，不擅自改变支持格式。"""
-
-        for suffix, expected_handler in self.baseline[
-            "translationDispatch"
-        ].items():
-            with self.subTest(suffix=suffix):
-                calls: list[str] = []
-                translator = _TranslatorFake()
-                document_translator = DocumentTranslator.__new__(
-                    DocumentTranslator
-                )
-                document_translator.translator = translator
-                document_translator.txt_handler = _HandlerFake("txt", calls)
-                document_translator.markdown_handler = _HandlerFake(
-                    "markdown",
-                    calls,
-                )
-                document_translator.mhtml_handler = _HandlerFake(
-                    "mhtml",
-                    calls,
-                )
-
-                result = document_translator.process_file(
-                    f"baseline{suffix}",
-                    output_path="translated.txt",
-                )
-
-                self.assertEqual(1, translator.tracker.reset_count)
-                self.assertEqual(
-                    f"{expected_handler}-result",
-                    result,
-                )
-                self.assertEqual(
-                    f"{expected_handler}.process",
-                    calls[-1],
-                )
-                self.assertEqual(1, calls.count(f"{expected_handler}.process"))
 
     def test_fifty_task_namespaces_are_isolated_in_current_adapters(self) -> None:
         """固定 Analysis 目录与 Report Artifact 前缀已有的 50 任务隔离基础。"""

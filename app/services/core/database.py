@@ -719,42 +719,6 @@ class DatabaseService:
                 logger.exception("删除文档记录失败: file_name=%s", file_name)
                 raise
 
-    def update_document_architecture(
-        self,
-        file_name: str,
-        new_architecture_id: int,
-        *,
-        current_architecture_id: int | None = None,
-    ) -> None:
-        """更新文档分类；可通过当前 architecture 精确限定目标行。"""
-        with self._lock:
-            with self._connect() as conn:
-                if current_architecture_id is None:
-                    count = conn.execute(
-                        "SELECT COUNT(*) FROM documents WHERE file_name = ?",
-                        (file_name,),
-                    ).fetchone()[0]
-                    if count > 1:
-                        raise ValueError("存在跨 architecture 的同名文档，禁止模糊更新")
-                    parameters = (new_architecture_id, file_name)
-                    where_clause = "file_name = ?"
-                else:
-                    parameters = (
-                        new_architecture_id,
-                        file_name,
-                        current_architecture_id,
-                    )
-                    where_clause = "file_name = ? AND architecture_id = ?"
-                conn.execute(
-                    f"UPDATE documents SET architecture_id = ? WHERE {where_clause}",
-                    parameters,
-                )
-            logger.info(
-                "本地文档分类已更新: file_name=%s target_architecture_id=%s",
-                file_name,
-                new_architecture_id,
-            )
-
     def get_original_name(self, file_name: str) -> str:
         """根据哈希文件名查询原始文件名，若无记录则回退返回 file_name 本身"""
         with self._connect() as conn:

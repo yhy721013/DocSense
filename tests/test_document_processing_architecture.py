@@ -249,20 +249,16 @@ class Stage1HDocumentProcessingArchitectureTests(unittest.TestCase):
         )
 
     def test_mhtml_legacy_facades_never_import_translator_conversion(self) -> None:
+        """1G-5B 后旧 MHTML Facade 必须保持物理退出。"""
+
         sources = (
             _REPOSITORY_ROOT / "app" / "services" / "utils" / "mhtml_normalizer.py",
             _REPOSITORY_ROOT / "app" / "services" / "translator" / "mhtml_handler.py",
         )
-        violations = [
-            f"{source.relative_to(_REPOSITORY_ROOT).as_posix()} -> {imported}"
-            for source in sources
-            for imported in _imports(source)
-            if imported == "app.services.translator.mhtml2pdf"
-        ]
-        self.assertEqual([], violations)
+        self.assertTrue(all(not source.exists() for source in sources))
 
     def test_mineru_and_ocr_legacy_files_are_thin_facades(self) -> None:
-        """旧路径只允许兼容导出，禁止重新长出供应商或 OCR 实现。"""
+        """1G-5B 后旧 MinerU/OCR 路径必须保持物理退出。"""
 
         facades = (
             _REPOSITORY_ROOT
@@ -276,31 +272,9 @@ class Stage1HDocumentProcessingArchitectureTests(unittest.TestCase):
             / "utils"
             / "ocr_preprocessor.py",
         )
-        forbidden_imports = {
-            "asyncio",
-            "fitz",
-            "httpx",
-            "mineru.cli.api_client",
-            "subprocess",
-            "tempfile",
-        }
         for facade in facades:
             with self.subTest(facade=facade.name):
-                self.assertTrue(forbidden_imports.isdisjoint(_imports(facade)))
-                tree = ast.parse(facade.read_text(encoding="utf-8"))
-                self.assertFalse(
-                    any(
-                        isinstance(
-                            node,
-                            (
-                                ast.ClassDef,
-                                ast.FunctionDef,
-                                ast.AsyncFunctionDef,
-                            ),
-                        )
-                        for node in ast.walk(tree)
-                    )
-                )
+                self.assertFalse(facade.exists())
 
 
 if __name__ == "__main__":

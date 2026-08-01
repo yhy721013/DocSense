@@ -27,6 +27,7 @@ from app.modules.weaponry.domain import (
     WeaponryFieldSpecification,
     WeaponrySubmission,
 )
+from app.modules.weaponry.application import SubmitWeaponryRequestCommand
 
 
 _INVALID_PERCENT_ESCAPE_PATTERN = re.compile(r"%(?![0-9A-Fa-f]{2})")
@@ -73,6 +74,17 @@ class ParsedWeaponryRequest:
             evidence_selection_policy=evidence_selection_policy,
             execution_policy=execution_policy,
             auxiliary_guidance_policy=auxiliary_guidance_policy,
+            trace_id=trace_id,
+        )
+
+    def to_command(self, *, trace_id: str) -> SubmitWeaponryRequestCommand:
+        """转换为 Application 命令；路由不再自行解析文档或注入策略。"""
+
+        return SubmitWeaponryRequestCommand(
+            request_projection=self.request_payload,
+            architecture_id=self.architecture_id,
+            selected_file_names=self.selected_file_names,
+            fields=self.fields,
             trace_id=trace_id,
         )
 

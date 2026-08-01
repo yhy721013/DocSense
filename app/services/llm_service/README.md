@@ -1,20 +1,22 @@
-# 既有 LLM 服务目录说明
+# 共享兼容持久化目录说明
 
-本目录保存文件分析、报告、翻译、装备和任务等既有 LLM 业务服务。文件对话重构完成后，`/llm/chat*` 的实现已从此目录迁出，唯一正确位置是 `app/services/chat/`。
+本目录只保留阶段 1 尚在使用的共享 SQLite 事实服务：任务/执行/回调审计、知识索引操作和 RAG
+资源租约。Analysis、Report、Weaponry、Translation 的业务执行实现已经分别归入 `app/modules/`；
+文件对话的唯一正确位置是 `app/services/chat/`。本目录不得重新成为跨业务编排层。
 
 ## 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
 | `__init__.py` | 既有 LLM 服务包标记。 |
-| `analysis_service.py` | 文档分析业务服务。 |
+| `analysis_service.py` | 已于阶段 1G-5A1 删除；文档分析生产实现统一位于 `app/modules/analysis/`。历史更新记录中的旧路径名称继续保留。 |
 | `interaction_audit_service.py` | 交互审计服务；阶段 1C-4 将内部审计 Schema 升级为 v3，无损保存 RAG `trace_id` 与每次 attempt 的 `call_id`。 |
 | `knowledge_index_operation_service.py` | 知识索引操作服务。 |
 | `rag_resource_lease_service.py` | 既有 RAG 资源租约服务。 |
-| `report_service.py` | 报告生成遗留兼容实现；当前公开路由和生产组合根均不再调用，仅为黄金样例、旧测试与安全回滚观察保留。 |
+| `report_service.py` | 已于阶段 1G-5A3 删除；报告生产实现统一位于 `app/modules/report/`。历史更新记录中的旧路径名称继续保留。 |
 | `task_service.py` | 既有任务投影/审计/回调服务；阶段 1C-3 增量提供 SQLite execution、原子受理/领取、expected TaskId 条件写及 Guard fencing；阶段 1C-4 以幂等补列兼容审计 Schema v3；阶段 1C-5 新增 Guard 人工解除追加审计、任务资源恢复记录、终态权威 Artifact 所有权及可恢复清理扫描。2026-07-29 又新增 `callback_delivery_attempt_events` 追加审计，将 file/report/weaponry 的初次发送、显式 check-task 授权、完成、过期冻结和不一致冻结与 Guard CAS 放在同一 SQLite 事务内；该能力仍仅是单实例兼容实现。 |
-| `translation_service.py` | 翻译业务服务。 |
-| `weaponry_service.py` | 武器谱遗留兼容实现；当前公开路由、生产组合根和新 Dispatcher 均不再调用，仅为旧黄金样例与兼容测试保留。 |
+| `translation_service.py` | 已于阶段 1G-5A5 删除；翻译生产实现统一位于 `app/modules/translation/`。历史更新记录中的旧路径名称继续保留。 |
+| `weaponry_service.py` | 已于阶段 1G-5A4 删除；武器谱生产实现统一位于 `app/modules/weaponry/`。历史更新记录中的旧路径名称继续保留。 |
 
 ## 文件对话迁移说明
 
@@ -32,8 +34,4 @@
 - `task_service.py` 的阶段 1C-3 方法是单实例 SQLite 过渡实现，不得描述为 MySQL、Outbox、
   RabbitMQ、跨实例锁或可靠队列；业务模块应通过 tasks Port/Adapter 使用，不能继续把业务
   DTO 和外部 I/O 塞入该服务。
-- 不得从生产路由、组合根或新业务代码重新导入 `report_service.run_report_task`。遗留文件
-  只有在运行路径、测试与配置三类引用都清零后，才能按阶段 1G 的静态证据流程删除。
-- 不得从生产路由、组合根或新业务代码重新导入 `weaponry_service.run_weaponry_task`。该遗留
-  文件仍包含旧父 Thread 回退和旧资源编排，只允许兼容测试直接使用；运行、测试和配置引用
-  清零前由阶段 1G 继续保留，不能作为新链的细粒度回退。
+- 不得重新创建已经删除的旧报告或武器谱 Worker；阶段 1G 的永久静态门禁负责阻止旧路径回流。

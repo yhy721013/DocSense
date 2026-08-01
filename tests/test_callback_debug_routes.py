@@ -20,7 +20,7 @@ class CallbackDebugRouteTests(unittest.TestCase):
         self.client = self.app.test_client()
         self.history_dir = self.tmp / "callback"
         self.path_patcher = patch(
-            "app.services.utils.callback_preview.CALLBACK_HISTORY_DIR",
+            "app.modules.debug.adapters.callback_history.CALLBACK_HISTORY_DIR",
             self.history_dir,
         )
         self.path_patcher.start()

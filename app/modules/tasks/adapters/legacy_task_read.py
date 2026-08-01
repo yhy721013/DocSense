@@ -79,12 +79,14 @@ class LegacyTaskReadAdapter:
             callback_status=callback_status,
             created_at=created_at,
             updated_at=updated_at,
+            callback_attempts=raw.get("callback_attempts", 0),
         )
         logger.debug(
-            "已转换遗留任务只读快照: business_type=%s business_key=%s task_id=%s",
+            "已转换遗留任务只读快照: business_type=%s callback_status=%s "
+            "has_task_identity=%s",
             snapshot.business_ref.business_type,
-            snapshot.business_ref.business_key,
-            snapshot.task_id,
+            snapshot.callback_status,
+            bool(snapshot.task_id.value),
         )
         return snapshot
 

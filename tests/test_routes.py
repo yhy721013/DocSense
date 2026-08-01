@@ -33,6 +33,7 @@ from app.modules.weaponry.ports import (
     WeaponryDocumentScopeNotFoundError,
 )
 from tests import workspace_tempdir
+from tests.task_service_fixtures import seed_legacy_file_task
 from tests.fakes import FakeWeaponryDocumentScopePort
 from tests.fakes.reassign import (
     FakeReassignmentKnowledgePortFactory,
@@ -273,7 +274,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_analysis_rejects_when_task_is_already_in_progress(self):
-        self.task_service.create_file_task("busy.txt", {"businessType": "file"}, status="1")
+        seed_legacy_file_task(self.task_service,"busy.txt", {"businessType": "file"}, status="1")
         response = self.client.post(
             "/llm/analysis",
             json={
@@ -294,7 +295,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self,
         mock_thread,
     ):
-        previous = self.task_service.create_file_task(
+        previous = seed_legacy_file_task(self.task_service,
             "callback-window.txt",
             {"businessType": "file", "marker": "previous"},
         )
@@ -346,7 +347,7 @@ class LLMRouteValidationTests(unittest.TestCase):
         self,
         mock_thread,
     ):
-        previous = self.task_service.create_file_task(
+        previous = seed_legacy_file_task(self.task_service,
             "callback-replay.txt",
             {"businessType": "file", "marker": "previous"},
         )

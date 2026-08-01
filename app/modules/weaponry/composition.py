@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from typing import Callable
 
@@ -32,6 +32,7 @@ from app.modules.weaponry.application import (
     FreezeExpiredWeaponryCallbackGuards,
     RecoverWeaponryCallbackSynchronously,
     RunWeaponryTask,
+    SubmitWeaponryRequest,
     SubmitWeaponryTask,
     WeaponryFieldExecutor,
     WeaponryResourceRecoveryService,
@@ -79,6 +80,9 @@ class WeaponryApplicationServices:
     execution_limiter: TaskExecutionPermitPort
     policies: WeaponryRuntimePolicies
     config: WeaponryInfrastructureConfig
+    # 该用例完全由同一容器内的 Scope、策略和 Submit 派生，不允许调用方单独替换后
+    # 留下半新半旧的实例链。``dataclasses.replace`` 替换任一基础依赖时也会安全重建。
+    submit_request: SubmitWeaponryRequest = field(init=False)
 
     def __post_init__(self) -> None:
         """拒绝双 Repository、双 Callback 或绕过共享 limiter 的错误装配。"""
@@ -113,8 +117,24 @@ class WeaponryApplicationServices:
         if not isinstance(self.config, WeaponryInfrastructureConfig):
             raise TypeError("config 必须是 WeaponryInfrastructureConfig")
 
+        object.__setattr__(
+            self,
+            "submit_request",
+            SubmitWeaponryRequest(
+                document_scope=self.document_scope,
+                evidence_selection_policy=self.policies.evidence_selection,
+                execution_policy=self.policies.execution,
+                auxiliary_guidance_policy=self.policies.auxiliary_guidance,
+                submit=self.submit,
+            ),
+        )
+
         if self.submit.dispatcher is not self.dispatcher:
             raise ValueError("Weaponry Submit 与容器必须共享同一 Dispatcher")
+        if self.submit_request.submit is not self.submit:
+            raise ValueError("Weaponry Request 与容器必须共享同一 Submit 用例")
+        if self.submit_request.document_scope is not self.document_scope:
+            raise ValueError("Weaponry Request 与容器必须共享同一 Document Scope")
         if self.dispatcher.runner is not self.runner:
             raise ValueError("Weaponry Dispatcher 与容器必须共享同一 Runner")
         if not (

@@ -2,38 +2,37 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from uuid import uuid4
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
 from app.adapters.web import (
-    ArchitectureIdValidationError,
     ChatScopeSelectorValidationError,
-    ReportIdValidationError,
-    normalize_architecture_id,
-    normalize_report_id,
     parse_chat_scope_selector,
 )
 from app.adapters.web.flask import (
     AnalysisPresentedResponse,
     AnalysisRequestValidationError,
     AnalysisSubmissionResponsePresenter,
+    CheckTaskRequestValidationError,
     ReportRequestValidationError,
     ProgressConnectionRegistry,
     ProgressRequestValidationError,
     ReassignRequestValidationError,
     WeaponryRequestValidationError,
     parse_analysis_flask_request,
+    parse_check_task_request,
     parse_report_request,
     parse_progress_subscription,
     parse_reassign_request,
     parse_weaponry_request,
 )
-from app.container import ApplicationServices, get_application_services
+from app.container import ApplicationServices
+from app.blueprints.dependencies import get_application_services
 from app.modules.analysis.domain.task_inputs import AnalysisPolicySnapshot
-from app.modules.report.domain import ReportId, ReportTaskConflictError
+from app.modules.report.domain import ReportTaskConflictError
 from app.modules.tasks.application import ProgressSubscriptionRollbackError
 from app.modules.weaponry.application import WeaponryTaskConflictError
 from app.modules.weaponry.ports import (
@@ -45,6 +44,10 @@ from app.presenters.chat_stream import (
     finalize_chat_run_stream,
 )
 from app.presenters.task_progress import ProgressWebSocketPresenter
+from app.presenters.task_status import (
+    CheckTaskResponsePresenter,
+    TaskStatusHttpPresentation,
+)
 from app.presenters.report_submission import (
     ReportSubmissionHttpPresentation,
     ReportSubmissionResponsePresenter,
@@ -130,6 +133,24 @@ def _weaponry_http_response(
     )
     if presentation.content_type is None:
         # 已批准的成功响应必须严格为零字节，且不能暗示 JSON 实体。
+        response.headers.pop("Content-Type", None)
+    else:
+        response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _task_status_http_response(
+    presentation: TaskStatusHttpPresentation,
+) -> Response:
+    """把框架无关 check-task 展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, TaskStatusHttpPresentation):
+        raise TypeError("presentation 必须是 TaskStatusHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    if presentation.content_type is None:
         response.headers.pop("Content-Type", None)
     else:
         response.headers["Content-Type"] = presentation.content_type
@@ -260,30 +281,6 @@ def _read_query_chat_id(
         )
         raise
     return public_chat_id, chat_id_storage_key(public_chat_id)
-
-
-def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
-    """校验 check-task 的完整参数数组，禁止静默过滤非法元素。
-
-    已批准契约要求 ``params`` 中任一元素不是对象时拒绝整次请求。此前的过滤式
-    解析会让调用方误以为无效项已被检查，且与 Progress/Report 的原子校验不一致。
-    """
-
-    params = payload.get("params")
-    if not isinstance(params, list) or not params:
-        return []
-
-    validated_params: list[Dict[str, Any]] = []
-    for item in params:
-        if not isinstance(item, dict):
-            return []
-        validated_params.append(item)
-    return validated_params
-
-
-def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    params = _get_params(payload)
-    return params[0] if params else None
 
 
 @llm_bp.post("/llm/analysis")
@@ -426,245 +423,74 @@ def llm_weaponry():
         return _weaponry_http_response(presenter.present_bad_request(str(exc)))
 
     trace_id = uuid4().hex
+    command = parsed_request.to_command(trace_id=trace_id)
     try:
-        document_scope = weaponry_services.document_scope.resolve(
-            architecture_id=parsed_request.architecture_id,
-            requested_file_names=parsed_request.selected_file_names,
-        )
+        result = weaponry_services.submit_request.execute(command)
     except WeaponryDocumentScopeNotFoundError as exc:
         logger.warning(
-            "武器装备提取请求引用未解析文档: architecture_id=%s file_count=%d",
-            parsed_request.architecture_id,
+            "武器装备提取请求引用未解析文档: file_count=%d",
             len(parsed_request.selected_file_names),
         )
         return _weaponry_http_response(presenter.present_not_found(str(exc)))
     except (WeaponryDocumentScopeAmbiguityError, WeaponryDocumentScopeError) as exc:
         logger.warning(
-            "武器装备提取请求文档范围不确定: architecture_id=%s file_count=%d "
-            "error_type=%s",
-            parsed_request.architecture_id,
+            "武器装备提取请求文档范围不确定: file_count=%d error_type=%s",
             len(parsed_request.selected_file_names),
             type(exc).__name__,
         )
         return _weaponry_http_response(presenter.present_bad_request(str(exc)))
 
-    policies = weaponry_services.policies
-    submission = parsed_request.to_submission(
-        document_scope=document_scope,
-        evidence_selection_policy=policies.evidence_selection,
-        execution_policy=policies.execution,
-        auxiliary_guidance_policy=policies.auxiliary_guidance,
-        trace_id=trace_id,
-    )
-    try:
-        result = weaponry_services.submit.execute(submission)
     except WeaponryTaskConflictError:
         logger.info(
             "武器装备提取请求因活动任务或回调 Guard 被拒绝: "
-            "architecture_id=%s trace_id=%s",
-            parsed_request.architecture_id,
-            trace_id,
+            "file_count=%d has_request_trace=%s",
+            len(parsed_request.selected_file_names),
+            bool(trace_id),
         )
         return _weaponry_http_response(presenter.present_conflict())
     except Exception:
         logger.exception(
-            "武器装备提取受理失败: architecture_id=%s trace_id=%s",
-            parsed_request.architecture_id,
-            trace_id,
+            "武器装备提取受理失败: file_count=%d has_request_trace=%s",
+            len(parsed_request.selected_file_names),
+            bool(trace_id),
         )
         raise
 
     logger.info(
-        "武器装备提取请求已可靠受理: architecture_id=%s task_id=%s "
-        "document_count=%d field_count=%d trace_id=%s",
-        parsed_request.architecture_id,
-        result.task_id.value,
-        len(document_scope.documents),
-        len(parsed_request.fields),
-        trace_id,
+        "武器装备提取请求已可靠受理: document_count=%d field_count=%d "
+        "has_request_trace=%s",
+        result.document_count,
+        result.field_count,
+        bool(trace_id),
     )
     return _weaponry_http_response(presenter.present_success())
 
 
 @llm_bp.post("/llm/check-task")
 def llm_check_task():
+    """完成 Parser → Application → Presenter，同步恢复语义保持不变。"""
+
     services = _services()
-    task_service = services.task_service
+    presenter = CheckTaskResponsePresenter()
     trace_id = uuid4().hex
-    payload = request.get_json(silent=True) or {}
-    business_type = payload.get("businessType")
-    if business_type not in {"file", "report", "weaponry"}:
+    raw_payload = request.get_json(silent=True)
+    try:
+        parsed_request = parse_check_task_request(raw_payload)
+    except CheckTaskRequestValidationError as exc:
         logger.warning(
-            "任务查询请求被拒绝: businessType无效 businessType=%s",
-            business_type,
+            "任务查询请求被拒绝: validation_error=%s payload_type=%s",
+            str(exc),
+            type(raw_payload).__name__,
         )
-        return jsonify({"error": "businessType无效"}), 400
-
-    params_list = _get_params(payload)
-    if not params_list:
-        logger.warning(
-            "任务查询请求被拒绝: params为空或格式无效 businessType=%s",
-            business_type,
+        return _task_status_http_response(
+            presenter.present_bad_request(str(exc))
         )
-        return jsonify({"error": "params不能为空"}), 400
 
-    # check-task 会在当前 HTTP 请求线程内执行必要的 Callback 恢复，因此它不是纯查询。
-    # 必须先完整校验所有业务键，再进入任何任务读取或网络副作用；否则前面的合法项可能
-    # 已经发出回调，后面的非法项却让整次请求返回 400，形成难以解释的部分执行。
-    #
-    # 同一业务键允许存在多种公开表示，例如 report 的 132/"000132" 和 weaponry 的
-    # 10502/"00010502"。去重必须发生在规范化之后，并稳定保留首次出现顺序，确保一个
-    # HTTP 请求对同一逻辑任务至多授权一轮恢复。原始 params 数量仍用于既有单项 404/
-    # 批量 200 判定，不能因内部去重擅自改变公开状态码。
-    parsed_items: list[tuple[int, str, str | int]] = []
-    first_index_by_key: dict[str, int] = {}
-    duplicate_item_count = 0
-    for index, params in enumerate(params_list):
-        if business_type == "file":
-            business_key = params.get("fileName")
-            if not isinstance(business_key, str) or not business_key.strip():
-                logger.warning(
-                    "任务查询请求被拒绝: fileName为空 index=%s",
-                    index,
-                )
-                return jsonify({"error": "fileName不能为空"}), 400
-            normalized_key = business_key.strip()
-            normalized_value: str | int = normalized_key
-        elif business_type == "weaponry":
-            architecture_id = params.get("architectureId")
-            if architecture_id is None:
-                logger.warning(
-                    "任务查询请求被拒绝: architectureId为空 index=%s",
-                    index,
-                )
-                return jsonify({"error": "architectureId不能为空"}), 400
-            try:
-                normalized_architecture_id = normalize_architecture_id(
-                    architecture_id
-                )
-            except ArchitectureIdValidationError as exc:
-                logger.warning(
-                    "任务查询请求被拒绝: architectureId格式无效 index=%s "
-                    "architecture_id_type=%s",
-                    index,
-                    type(architecture_id).__name__,
-                )
-                return jsonify({"error": str(exc)}), 400
-            normalized_key = normalized_architecture_id.business_key
-            normalized_value = normalized_architecture_id.value
-        else:
-            report_id = params.get("reportId")
-            if report_id is None:
-                logger.warning(
-                    "任务查询请求被拒绝: reportId为空 index=%s",
-                    index,
-                )
-                return jsonify({"error": "reportId不能为空"}), 400
-            try:
-                normalized_report_id = normalize_report_id(report_id)
-            except ReportIdValidationError as exc:
-                logger.warning(
-                    "任务查询请求被拒绝: reportId格式无效 index=%s "
-                    "report_id_type=%s",
-                    index,
-                    type(report_id).__name__,
-                )
-                return jsonify({"error": str(exc)}), 400
-            normalized_key = normalized_report_id.business_key
-            normalized_value = normalized_report_id.value
-
-        first_index = first_index_by_key.get(normalized_key)
-        if first_index is not None:
-            duplicate_item_count += 1
-            logger.info(
-                "任务查询请求跳过规范化重复项: business_type=%s index=%d "
-                "first_index=%d trace_id=%s",
-                business_type,
-                index,
-                first_index,
-                trace_id,
-            )
-            continue
-        first_index_by_key[normalized_key] = index
-        parsed_items.append((index, normalized_key, normalized_value))
-
-    missing_count = 0
-    callback_replayed_count = 0
-    for original_index, normalized_key, normalized_value in parsed_items:
-
-        task = task_service.get_task(business_type, normalized_key)
-        if not task:
-            if len(params_list) == 1:
-                logger.warning(
-                    "任务查询请求未找到任务: businessType=%s businessKey=%s",
-                    business_type,
-                    normalized_key,
-                )
-                return jsonify({"error": "任务不存在"}), 404
-            logger.warning(
-                "批量任务查询项未找到任务: businessType=%s businessKey=%s index=%s",
-                business_type,
-                normalized_key,
-                original_index,
-            )
-            # 批量缺失项不终止其余项的回调恢复；成功体不再公开占位任务快照。
-            missing_count += 1
-            continue
-
-        if business_type == "report":
-            # 甲方规定 check-task 必须在本次请求内触发报告回调恢复。报告链路不能再走
-            # 遗留直发方法，而是与正常 Worker 共用 execution 级 latest-wins、Guard 和
-            # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
-            replayed = services.report_callback_recovery.execute(
-                ReportId.from_public_value(normalized_value),  # type: ignore[arg-type]
-                request_trace_id=trace_id,
-            )
-        elif business_type == "weaponry":
-            weaponry_services = services.weaponry_services
-            if weaponry_services is None:
-                raise RuntimeError("应用容器未装配武器谱运行链")
-            replayed = weaponry_services.callback_recovery.execute(
-                normalized_value,  # type: ignore[arg-type]
-                request_trace_id=trace_id,
-            )
-        else:
-            analysis_callback_recovery = services.analysis_callback_recovery
-            if analysis_callback_recovery is None:
-                # 生产切换前的只读预检会阻断旧 file 活跃任务和待恢复回调。运行时若仍
-                # 缺少新恢复链，必须显式失败，不能回退到旧 replay 以免形成第二个 owner。
-                logger.error("文件 check-task 缺少新回调恢复链，拒绝使用遗留恢复器")
-                raise RuntimeError("应用容器未装配文件分析回调恢复链")
-            replayed = analysis_callback_recovery.execute(
-                normalized_key,
-                request_trace_id=trace_id,
-            )
-        # 保持原有“恢复后重读”的一致性门禁，但不再把内部状态投影到 HTTP 响应。
-        refreshed_task = task_service.get_task(business_type, normalized_key)
-        if refreshed_task is None:
-            logger.error(
-                "任务回调恢复后重新读取失败: businessType=%s businessKey=%s index=%s",
-                business_type,
-                normalized_key,
-                original_index,
-            )
-            raise RuntimeError("任务回调恢复后不存在")
-        if replayed:
-            callback_replayed_count += 1
-
-    logger.info(
-        "任务检查与必要回调恢复已完成: businessType=%s requested_count=%d "
-        "unique_count=%d missing_count=%d duplicate_item_count=%d "
-        "callback_replayed_count=%d status_code=200 trace_id=%s",
-        business_type,
-        len(params_list),
-        len(parsed_items),
-        missing_count,
-        duplicate_item_count,
-        callback_replayed_count,
-        trace_id,
+    result = services.check_task.execute(
+        parsed_request.command,
+        trace_id=trace_id,
     )
-    # 公开接口只承诺检查已完成；任务状态、进度、Callback 细节继续留在内部存储。
-    return _empty_http_response(200)
+    return _task_status_http_response(presenter.present(result))
 
 
 @llm_bp.post("/llm/reassign")

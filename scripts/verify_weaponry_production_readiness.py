@@ -37,6 +37,8 @@ from app.integrations.anythingllm.policies import (  # noqa: E402
     document_rag_workspace_settings,
 )
 from app.modules.weaponry.adapters import (  # noqa: E402
+    AnythingLLMWeaponryClientFactory,
+    WeaponryAnythingLLMClients,
     build_weaponry_production_attestation,
     build_weaponry_runtime_policies,
     load_weaponry_infrastructure_config,
@@ -44,7 +46,6 @@ from app.modules.weaponry.adapters import (  # noqa: E402
     resolve_anythingllm_source_document_key,
 )
 from app.services.core.config import load_anythingllm_config  # noqa: E402
-from app.services.utils.anythingllm_client import AnythingLLMClient  # noqa: E402
 
 
 logger = logging.getLogger("scripts.verify_weaponry_production_readiness")
@@ -226,7 +227,7 @@ def _delete_owned_workspaces(
 
 
 def verify_and_build_attestation(
-    client: AnythingLLMClient,
+    client: WeaponryAnythingLLMClients,
     *,
     environment: str,
     user_id: int,
@@ -494,7 +495,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("valid-for-hours 必须大于 0 且不超过 168")
 
     identity_catalog = load_ingested_identity_catalog(args.knowledge_db_path)
-    with AnythingLLMClient(load_anythingllm_config()) as client:
+    factory = AnythingLLMWeaponryClientFactory(load_anythingllm_config())
+    with factory.create() as client:
         attestation = verify_and_build_attestation(
             client,
             environment=args.environment,

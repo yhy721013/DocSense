@@ -106,7 +106,7 @@ class ChatTitleResult:
 class ChatTitleService:
     """根据本地已提交的对话历史生成短标题。
 
-    本服务刻意依赖供应商无关的 Chat Port，而不是 `AnythingLLMClient`。它仅读取
+    本服务刻意依赖供应商无关的 Chat Port，而不是已删除的供应商聚合客户端。它仅读取
     本地已提交消息、构造长度受控的提示词，并让适配器在既有工作区创建独立回复，
     从而确保标题提示词不会被追加到主对话线程。
     """

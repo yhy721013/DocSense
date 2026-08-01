@@ -10,6 +10,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
 from pathlib import Path
+from unittest.mock import Mock
 
 from app.modules.document_processing.adapters import (
     BytesArtifactContent,
@@ -23,6 +24,7 @@ from app.modules.document_processing.ports import ArtifactPublication
 from app.modules.tasks.domain import TaskId
 from app.modules.translation.adapters import (
     HYMTTranslationEngineAdapter,
+    LazyHYMTTranslationEngineAdapter,
     SafeHTMLTranslationRendererAdapter,
 )
 from app.modules.translation.application import (
@@ -101,6 +103,61 @@ def _request(task_id, artifact, engine, renderer, **overrides):
 
 
 class TranslationModuleTests(unittest.TestCase):
+    def test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag(self) -> None:
+        """机器/LLM 选择由接受时冻结的 Mode 决定，不再从进程环境隐式读取。"""
+
+        runtime = Mock()
+        runtime.translate_text.side_effect = ("machine", "llm")
+        engine = HYMTTranslationEngineAdapter(
+            runtime,
+            engine_fingerprint="mode-mapping-v1",
+        )
+
+        self.assertEqual(
+            "machine",
+            engine.translate(
+                "hello",
+                target_language="Chinese",
+                mode=TranslationMode.MACHINE,
+            ),
+        )
+        self.assertEqual(
+            "llm",
+            engine.translate(
+                "hello",
+                target_language="Chinese",
+                mode=TranslationMode.LLM,
+            ),
+        )
+        self.assertEqual(
+            [True, False],
+            [call.kwargs["fast_translate"] for call in runtime.translate_text.call_args_list],
+        )
+
+    def test_lazy_hymt_adapter_initializes_runtime_once(self) -> None:
+        """半初始化兼容逻辑由线程安全 Lazy Adapter 替代，运行时工厂只允许成功一次。"""
+
+        runtime = Mock()
+        runtime.translate_text.return_value = "translated"
+        factory = Mock(return_value=runtime)
+        engine = LazyHYMTTranslationEngineAdapter(
+            factory,
+            engine_fingerprint="lazy-runtime-v1",
+        )
+
+        for text in ("first", "second"):
+            self.assertEqual(
+                "translated",
+                engine.translate(
+                    text,
+                    target_language="Chinese",
+                    mode=TranslationMode.MACHINE,
+                ),
+            )
+
+        factory.assert_called_once_with()
+        self.assertEqual(2, runtime.translate_text.call_count)
+
     def test_request_contract_has_no_document_conversion_switch(self) -> None:
         field_names = {field.name for field in fields(TranslationRequest)}
         self.assertEqual(
@@ -479,21 +536,16 @@ class TranslationModuleTests(unittest.TestCase):
         self.assertEqual(expected, actual)
 
     def test_old_engine_support_files_are_thin_facades(self) -> None:
+        """1G-5B 后旧翻译引擎支持文件必须保持物理退出。"""
+
         facades = (
             _REPOSITORY_ROOT / "app/services/translator/core.py",
             _REPOSITORY_ROOT / "app/services/translator/utils.py",
             _REPOSITORY_ROOT / "app/services/translator/chunk_processor.py",
         )
         for facade in facades:
-            tree = ast.parse(facade.read_text(encoding="utf-8"))
             self.assertFalse(
-                any(
-                    isinstance(
-                        node,
-                        (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
-                    )
-                    for node in ast.walk(tree)
-                ),
+                facade.exists(),
                 facade.name,
             )
 

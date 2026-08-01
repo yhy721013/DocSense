@@ -11,15 +11,7 @@
     "app.services.translator.MinerUConverter",
     "app.services.translator.mhtml2pdf"
   ],
-  "legacyFormatCompatibilityFiles": [
-    "app/services/translator/MarkdownHandler.py",
-    "app/services/translator/MinerUConverter.py",
-    "app/services/translator/mhtml2pdf.py",
-    "app/services/translator/mhtml_handler.py",
-    "app/services/utils/mhtml_normalizer.py",
-    "app/services/utils/ocr_preprocessor.py",
-    "app/services/utils/rag_pipeline.py"
-  ],
+  "legacyFormatCompatibilityFiles": [],
   "currentDocumentProcessingConsumers": [
     "app/container.py",
     "app/modules/analysis/adapters/legacy_files.py",
@@ -28,24 +20,15 @@
     "app/modules/analysis/ports/translation.py",
     "app/modules/report/adapters/legacy_files.py",
     "app/modules/report/adapters/local_artifacts.py",
+    "app/modules/report/adapters/upload_files.py",
     "app/services/core/config.py",
-    "app/services/translator/mhtml2pdf.py",
-    "app/services/translator/mhtml_handler.py",
-    "app/services/utils/mhtml_normalizer.py",
-    "app/services/translator/MinerUConverter.py",
-    "app/services/translator/MarkdownHandler.py",
-    "app/services/utils/ocr_preprocessor.py",
-    "app/services/utils/rag_pipeline.py",
     "app/modules/translation/domain/models.py",
     "app/modules/translation/ports/translation.py"
   ],
   "currentTranslationConsumers": [
     "app/container.py",
     "app/modules/analysis/adapters/translation.py",
-    "app/modules/weaponry/adapters/translation.py",
-    "app/services/translator/chunk_processor.py",
-    "app/services/translator/core.py",
-    "app/services/translator/utils.py"
+    "app/modules/weaponry/adapters/translation.py"
   ],
   "mhtmlCases": [
     {

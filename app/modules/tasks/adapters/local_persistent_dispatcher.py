@@ -822,14 +822,15 @@ class LocalPersistentTaskDispatcher:
             if snapshot.running_count:
                 now = self._monotonic()
                 if now >= self._next_running_warning_at:
-                    self._logger.debug(
+                    # running execution 可能意味着进程中断后遗留的未决执行，因此需要以
+                    # WARNING 暴露给运维；限频器保证同一实例不会随扫描周期持续刷屏。
+                    # TaskId 属于内部执行标识，日志只保留聚合数量与年龄，避免泄露。
+                    self._logger.warning(
                         "发现%s running execution，仅观察且禁止自动重置: count=%d "
-                        "oldest_running_age_seconds=%s task_ids=%s",
+                        "oldest_running_age_seconds=%s",
                         self._settings.business_label,
                         snapshot.running_count,
                         self._format_age(running_age),
-                        ",".join(item.value for item in snapshot.running_task_ids)
-                        or "-",
                     )
                     self._next_running_warning_at = (
                         now + self._settings.running_warning_interval_seconds

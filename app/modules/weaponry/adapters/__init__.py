@@ -66,7 +66,7 @@ from .terms_catalog import (
     workspace_name_for_fingerprint,
 )
 from .translation import (
-    LLMTranslationServiceWeaponryAdapter,
+    TextTranslatorWeaponryAdapter,
     TranslationEngineWeaponryAdapter,
     WeaponryTextTranslatorProtocol,
 )
@@ -99,7 +99,7 @@ __all__ = [
     "AnythingLLMWeaponryClientFactory",
     "WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE",
     "DatabaseServiceWeaponryDocumentScopeAdapter",
-    "LLMTranslationServiceWeaponryAdapter",
+    "TextTranslatorWeaponryAdapter",
     "TranslationEngineWeaponryAdapter",
     "LocalWeaponryDispatcherSnapshot",
     "LocalWeaponryTaskDispatcher",

@@ -8,13 +8,14 @@ from app.modules.tasks.adapters import LegacyTaskReadAdapter
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 class LegacyTaskReadAdapterTests(unittest.TestCase):
     def test_reads_latest_by_business_key_and_same_execution_by_id(self) -> None:
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            created = service.create_file_task(
+            created = seed_legacy_file_task(service,
                 "adapter.pdf",
                 {"businessType": "file"},
                 status="1",

@@ -31,6 +31,7 @@ from app.modules.analysis.adapters import (
     SerializedAnalysisTranslationAdapter,
 )
 from app.modules.analysis.composition import compose_analysis_application_services
+from app.modules.debug.composition import compose_debug_application_services
 from app.modules.analysis.ports import (
     AnalysisCallbackDelivery,
     AnalysisCallbackDeliveryOutcome,
@@ -425,6 +426,10 @@ def build_offline_application_services(
             storage_root=None,
         ),
         report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
+        debug_services=compose_debug_application_services(
+            chat_store=chat_store,
+            kb_service=knowledge_service,
+        ),
         analysis_submit=analysis_services.submit,
         analysis_callback_recovery=analysis_services.callback_recovery,
         analysis_dispatcher=analysis_services.dispatcher,

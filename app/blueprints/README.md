@@ -8,7 +8,8 @@
 | --- | --- |
 | `__init__.py` | 蓝图包标记。 |
 | `llm.py` | LLM 相关路由。文件对话的创建、历史、删除、标题和中断接口均在此接入；它只持有 `ApplicationServices`，不直接构造网关或数据库连接。 |
-| `debug.py` | 本地调试入口。文件对话调试数据由工具模块生成，避免调试页面直接依赖远端 AnythingLLM 状态。 |
+| `debug.py` | 本地调试薄入口。仅读取查询参数、调用容器中的 Debug Query、经 Presenter 返回冻结 JSON 或渲染静态模板；不直接访问文件、SQLite 或 AnythingLLM。 |
+| `dependencies.py` | Flask 容器访问 Adapter；唯一允许读取 `current_app.extensions` 的模块，缺失或错误类型明确失败。 |
 
 ## 文件对话请求流程
 
@@ -20,6 +21,6 @@
 
 ## 维护规则
 
-- 不得在此处导入 `AnythingLLMClient`、拼接供应商 API 路径，或写入 SQLite 表。
+- 不得在此处导入供应商 Client、拼接供应商 API 路径，或写入 SQLite 表。
 - SSE 格式只能通过 `app.presenters.chat_stream` 输出；不要在路由中复制事件序列化规则。
 - 新的异步队列或跨实例调度实现应替换容器注入的调度器，路由仍只提交持久化运行标识。

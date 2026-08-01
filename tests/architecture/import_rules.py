@@ -66,6 +66,81 @@ class ImportViolation:
         )
 
 
+@dataclass(frozen=True)
+class RouteOperationViolation:
+    """路由源码中一项不允许出现的基础设施构造或文件操作。"""
+
+    line: int
+    symbol: str
+    reason: str
+
+
+_FORBIDDEN_ROUTE_CALL_NAMES = frozenset(
+    {
+        "AnythingLLMClient",
+        "DatabaseService",
+        "LLMTaskService",
+        "Path",
+        "Thread",
+        "open",
+    }
+)
+_FORBIDDEN_ROUTE_CONSTRUCTOR_SUFFIXES = (
+    "CallbackGuard",
+    "Repository",
+    "ResourceRecoveryAdapter",
+)
+
+
+def collect_forbidden_web_route_operations(
+    source: str,
+) -> tuple[RouteOperationViolation, ...]:
+    """检查导入规则无法覆盖的调用、daemon 和基础设施构造。
+
+    参数是源码文本，函数只做 AST 解析，不导入被检查模块。它刻意只禁止确定的
+    基础设施操作，稳定的 SSE 生成器、WebSocket 闭包和 Presenter 构造不在此误报。
+    """
+
+    tree = ast.parse(source)
+    violations: list[RouteOperationViolation] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                called_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                called_name = node.func.attr
+            else:
+                called_name = ""
+            if called_name in _FORBIDDEN_ROUTE_CALL_NAMES or called_name.endswith(
+                _FORBIDDEN_ROUTE_CONSTRUCTOR_SUFFIXES
+            ) or called_name.startswith("compose_"):
+                violations.append(
+                    RouteOperationViolation(
+                        line=node.lineno,
+                        symbol=called_name,
+                        reason="Web 路由禁止直接执行文件操作或构造基础设施对象",
+                    )
+                )
+            for keyword in node.keywords:
+                if keyword.arg == "daemon":
+                    violations.append(
+                        RouteOperationViolation(
+                            line=keyword.value.lineno,
+                            symbol="daemon",
+                            reason="Web 路由禁止创建 daemon 后台线程",
+                        )
+                    )
+        elif isinstance(node, ast.Attribute) and node.attr == "daemon":
+            violations.append(
+                RouteOperationViolation(
+                    line=node.lineno,
+                    symbol="daemon",
+                    reason="Web 路由禁止设置线程 daemon 属性",
+                )
+            )
+    return tuple(sorted(violations, key=lambda item: (item.line, item.symbol)))
+
+
 _DYNAMIC_IMPORT_PREFIX = "<dynamic-import>"
 
 # 采用正向白名单：新增依赖必须明确进入对应集合，而不是等发现某个新客户端库后
@@ -136,6 +211,7 @@ _APPLICATION_STDLIB_ROOTS = frozenset(
         "logging",
         "threading",
         "time",
+        "types",
         "typing",
         "uuid",
     }
@@ -511,14 +587,72 @@ def _presenter_matcher(reference: ImportReference) -> RuleMatch | None:
     for target in reference.targets:
         parts = target.split(".")
         if len(parts) >= 4 and parts[:2] == ["app", "modules"]:
-            if parts[3] in {"domain", "application"}:
+            # Presenter 可投影 Application 结果中携带的稳定 Port DTO；Ports 只含
+            # 抽象协议/不可变值对象，仍不得接触 Adapter 或其他具体基础设施。
+            if parts[3] in {"domain", "ports", "application"}:
                 allowed_internal.append(".".join(parts[:4]))
     return _first_positive_allowlist_violation(
         reference,
         allowed_stdlib_roots=_PRESENTER_STDLIB_ROOTS,
         allowed_internal_prefixes=tuple(dict.fromkeys(allowed_internal)),
-        reason="Presenter 只能依赖批准的标准库、领域类型和应用结果，不得接触具体实现",
+        reason=(
+            "Presenter 只能依赖批准的标准库、领域/端口类型和应用结果，"
+            "不得接触具体实现"
+        ),
     )
+
+
+def _web_route_matcher(reference: ImportReference) -> RuleMatch | None:
+    """阻止 Flask 路由重新持有数据库、线程、文件或供应商实现。
+
+    路由仍可依赖 Parser、Presenter、Application 和组合根中已经构造的类型。这里采用
+    精确黑名单，是因为不同路由的协议依赖较多；业务分层内部继续使用更严格的正向白名单。
+    """
+
+    forbidden_prefixes = (
+        "httpx",
+        "os",
+        "pathlib",
+        "requests",
+        "sqlite3",
+        "subprocess",
+        "threading",
+        "app.integrations.anythingllm",
+        "app.services.chat.persistence",
+        "app.services.core.database",
+        "app.services.llm_service",
+        "app.services.utils.anythingllm_client",
+    )
+    for target in reference.targets:
+        if target.startswith(_DYNAMIC_IMPORT_PREFIX):
+            return RuleMatch(target, "Web 路由禁止动态导入，避免绕过基础设施边界")
+        if any(_matches_prefix(target, prefix) for prefix in forbidden_prefixes):
+            return RuleMatch(
+                target,
+                "Web 路由只能做协议解析、应用用例调用和响应呈现",
+            )
+        parts = target.split(".")
+        if len(parts) >= 4 and parts[:2] == ["app", "modules"]:
+            if parts[3] in {"adapters", "composition"}:
+                return RuleMatch(
+                    target,
+                    "Web 路由禁止直接依赖业务 Adapter 或业务组合根",
+                )
+    return None
+
+
+def _framework_free_container_matcher(
+    reference: ImportReference,
+) -> RuleMatch | None:
+    """阻止应用组合根重新依赖任一具体 Web 框架。"""
+
+    forbidden_prefixes = ("flask", "werkzeug", "fastapi", "starlette")
+    for target in reference.targets:
+        if target.startswith(_DYNAMIC_IMPORT_PREFIX):
+            return RuleMatch(target, "应用组合根禁止动态导入 Web 框架")
+        if any(_matches_prefix(target, prefix) for prefix in forbidden_prefixes):
+            return RuleMatch(target, "ApplicationServices 与生产装配必须保持框架无关")
+    return None
 
 
 DOMAIN_RULE = ArchitectureRule("module-domain-purity", _domain_matcher)
@@ -526,19 +660,28 @@ PORTS_RULE = ArchitectureRule("module-ports-abstraction", _ports_matcher)
 APPLICATION_RULE = ArchitectureRule("module-application-direction", _application_matcher)
 TASKS_MODULE_RULE = ArchitectureRule("tasks-module-isolation", _tasks_module_matcher)
 PRESENTER_RULE = ArchitectureRule("presenter-infrastructure-isolation", _presenter_matcher)
+WEB_ROUTE_RULE = ArchitectureRule("web-route-infrastructure-isolation", _web_route_matcher)
+FRAMEWORK_FREE_CONTAINER_RULE = ArchitectureRule(
+    "framework-free-application-container",
+    _framework_free_container_matcher,
+)
 
 
 __all__ = [
     "APPLICATION_RULE",
     "ArchitectureRule",
     "DOMAIN_RULE",
+    "FRAMEWORK_FREE_CONTAINER_RULE",
     "ImportReference",
     "ImportViolation",
     "PORTS_RULE",
     "PRESENTER_RULE",
     "RuleMatch",
+    "RouteOperationViolation",
     "TASKS_MODULE_RULE",
+    "WEB_ROUTE_RULE",
     "collect_violations",
+    "collect_forbidden_web_route_operations",
     "describe_violations",
     "parse_imports",
 ]

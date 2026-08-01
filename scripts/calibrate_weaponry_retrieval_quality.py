@@ -30,8 +30,10 @@ from app.modules.weaponry.domain import (  # noqa: E402
 from app.integrations.anythingllm.workspaces import (  # noqa: E402
     AnythingLLMWorkspaceClient,
 )
+from app.modules.weaponry.adapters import (  # noqa: E402
+    AnythingLLMWeaponryClientFactory,
+)
 from app.services.core.config import load_anythingllm_config  # noqa: E402
-from app.services.utils.anythingllm_client import AnythingLLMClient  # noqa: E402
 
 
 logger = logging.getLogger("scripts.calibrate_weaponry_retrieval_quality")
@@ -232,16 +234,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     query_results: list[dict[str, Any]] = []
     digest_frequency: Counter[str] = Counter()
     config = load_anythingllm_config()
-    with AnythingLLMClient(config) as client:
+    with AnythingLLMWeaponryClientFactory(config).create() as clients:
         # 与 vector-search 一样，文档清单也必须使用 fail-fast 的只读 Adapter。
         # “无法读取清单”与“清单为空”是两种不同事实，校准不得静默混淆。
-        documents = client.workspaces.list_documents(
+        documents = clients.workspaces.list_documents(
             workspace_slug,
             user_id=args.user_id,
         )
         for query in queries:
             result, digests = _query_result(
-                client.workspaces,
+                clients.workspaces,
                 workspace_slug=workspace_slug,
                 query=query,
                 top_n=args.top_n,

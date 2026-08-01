@@ -133,6 +133,14 @@ class LocalScriptTests(unittest.TestCase):
             check=False,
         )
 
+    def _require_fixture(self, relative_path: str) -> Path:
+        """本地联调请求受 .gitignore 排除；干净克隆缺失时应明确跳过。"""
+
+        fixture = ROOT_DIR / relative_path
+        if not fixture.is_file():
+            self.skipTest(f"本地联调夹具未提供: {relative_path}")
+        return fixture
+
     def _start_app_server(self, port: int) -> subprocess.Popen[str]:
         env = os.environ.copy()
         env.update(
@@ -316,8 +324,8 @@ class LocalScriptTests(unittest.TestCase):
         self.fail(f"静态文件服务未成功响应: {last_error!r}")
 
     def test_analysis_shell_script_posts_fixture_to_expected_path(self) -> None:
+        payload = self._require_fixture("tests/fixtures/llm/analysis_request.json")
         _, port = self._start_recording_server()
-        payload = ROOT_DIR / "tests/fixtures/llm/analysis_request.json"
 
         result = self._run_script(f"scripts/test_llm_analysis{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
@@ -330,8 +338,8 @@ class LocalScriptTests(unittest.TestCase):
         self.assertEqual(posted_body, expected_body)
 
     def test_report_shell_script_posts_fixture_to_expected_path(self) -> None:
+        payload = self._require_fixture("tests/fixtures/llm/report_request.json")
         _, port = self._start_recording_server()
-        payload = ROOT_DIR / "tests/fixtures/llm/report_request.json"
 
         result = self._run_script(f"scripts/test_llm_report{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
@@ -343,8 +351,8 @@ class LocalScriptTests(unittest.TestCase):
         self.assertEqual(posted_body, expected_body)
 
     def test_weaponry_shell_script_posts_fixture_to_expected_path(self) -> None:
+        payload = self._require_fixture("tests/fixtures/llm/weaponry_request.json")
         _, port = self._start_recording_server()
-        payload = ROOT_DIR / "tests/fixtures/llm/weaponry_request.json"
 
         result = self._run_script(f"scripts/test_llm_weaponry{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
@@ -377,10 +385,12 @@ class LocalScriptTests(unittest.TestCase):
             self.assertTrue(manifest["dry_run"])
             self.assertEqual(manifest["files"][0]["fileName"], "JFS_5701-JFS_-06-Mar-2024.pdf")
             self.assertEqual(manifest["files"][0]["architectureId"], 998570100)
-            self.assertEqual(
-                manifest["knowledge_base_db"],
-                str(weaponry_directory_runner.KB_DB),
-            )
+            # 未显式传入 DB 时，子进程会读取自己的 .env；父测试进程可能已在
+            # 更早的模块导入阶段冻结不同设置，因此这里只验证清单记录的是明确
+            # 绝对 SQLite 路径。显式路径保真由下一条独立测试负责。
+            knowledge_db = Path(manifest["knowledge_base_db"])
+            self.assertTrue(knowledge_db.is_absolute())
+            self.assertEqual(".sqlite3", knowledge_db.suffix)
             self.assertFalse(manifest["verify_forced_empty_contract"])
             self.assertEqual(manifest["field_count"], 75)
             self.assertEqual(manifest["extractable_field_count"], 70)
@@ -868,8 +878,10 @@ class LocalScriptTests(unittest.TestCase):
         )
 
     def test_check_task_shell_script_posts_fixture_to_expected_path(self) -> None:
+        payload = self._require_fixture(
+            "tests/fixtures/llm/check_task_file_request.json"
+        )
         _, port = self._start_recording_server()
-        payload = ROOT_DIR / "tests/fixtures/llm/check_task_file_request.json"
 
         result = self._run_script(f"scripts/test_llm_check_task{_script_ext()}", f"http://127.0.0.1:{port}", str(payload))
 
@@ -880,6 +892,10 @@ class LocalScriptTests(unittest.TestCase):
         expected_body = payload.read_text(encoding="utf-8").strip()
         self.assertEqual(posted_body, expected_body)
 
+    @unittest.skipUnless(
+        os.getenv("DOCSENSE_RUN_MAIN_PROCESS_TEST", "").strip() == "1",
+        "需要显式设置 DOCSENSE_RUN_MAIN_PROCESS_TEST=1 才允许测试启动 run.py",
+    )
     def test_progress_shell_script_reads_progress_snapshot_from_local_app(self) -> None:
         port = find_free_port()
         self._start_app_server(port)

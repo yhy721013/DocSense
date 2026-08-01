@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from app import create_app
 from app.container import ApplicationServices, UploadTaskLimiter
+from app.modules.debug.composition import compose_debug_application_services
 from app.modules.report.adapters import (
     ReportTaskCommandCodec,
     SQLiteReportCallbackAdapter,
@@ -180,6 +181,10 @@ def _build_test_services(
             storage_root=None,
         ),
         report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
+        debug_services=compose_debug_application_services(
+            chat_store=chat_store,
+            kb_service=kb_service,
+        ),
     )
 
 

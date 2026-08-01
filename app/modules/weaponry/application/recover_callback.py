@@ -6,6 +6,7 @@ import logging
 import threading
 from uuid import uuid4
 
+from app.modules.tasks.domain import TaskId
 from app.modules.weaponry.domain import normalize_architecture_id_value
 from app.modules.weaponry.ports import (
     AcquireWeaponryCallback,
@@ -51,12 +52,20 @@ class RecoverWeaponryCallbackSynchronously:
 
         return self._callbacks
 
-    def execute(self, architecture_id: int, *, request_trace_id: str = "") -> bool:
+    def execute(
+        self,
+        architecture_id: int,
+        *,
+        request_trace_id: str = "",
+        expected_task_id: TaskId | None = None,
+    ) -> bool:
         """同步尝试一次；只有本次 HTTP 收到严格 2xx 才返回 ``True``。"""
 
         normalized_id = normalize_architecture_id_value(architecture_id)
         if not isinstance(request_trace_id, str):
             raise TypeError("request_trace_id 必须是 str")
+        if expected_task_id is not None and not isinstance(expected_task_id, TaskId):
+            raise TypeError("expected_task_id 必须是 TaskId 或 None")
         normalized_trace_id = request_trace_id.strip()
         if len(normalized_trace_id) > 128:
             raise ValueError("request_trace_id 最多 128 个字符")
@@ -72,6 +81,7 @@ class RecoverWeaponryCallbackSynchronously:
             return self._execute_owned(
                 normalized_id,
                 request_trace_id=effective_trace_id,
+                expected_task_id=expected_task_id,
             )
         finally:
             self._leave_local_recovery(normalized_id)
@@ -92,6 +102,7 @@ class RecoverWeaponryCallbackSynchronously:
         architecture_id: int,
         *,
         request_trace_id: str,
+        expected_task_id: TaskId | None,
     ) -> bool:
         """由本进程 owner 使用首次候选快照尝试至多一次 Callback。"""
 
@@ -101,6 +112,12 @@ class RecoverWeaponryCallbackSynchronously:
             logger.debug(
                 "武器谱同步回调无需恢复: architecture_id=%s",
                 normalized_id,
+            )
+            return False
+        if expected_task_id is not None and candidate.task_id != expected_task_id:
+            logger.info(
+                "武器谱同步回调跳过已切换的 latest execution: "
+                "business_type=weaponry reason=expected_task_changed"
             )
             return False
         acquire = self._callbacks.acquire(

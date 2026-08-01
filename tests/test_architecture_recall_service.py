@@ -5,9 +5,9 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
-from app.services.core.architecture_tree import build_architecture_tree_index
-from app.services.llm_service import architecture_recall_service as recall_module
-from app.services.llm_service.architecture_recall_service import (
+from app.modules.analysis.domain.architecture_tree import build_architecture_tree_index
+from app.modules.analysis.domain import architecture_recall as recall_module
+from app.modules.analysis.domain.architecture_recall import (
     BM25_LIMIT,
     DATA_STANDARD_KINDS,
     DETAIL_KINDS,

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.services.core.config import OCRConfig
-from app.services.utils.ocr_preprocessor import (
+from app.modules.document_processing.adapters.builtin_ocr import (
     mineru_pdf_to_markdown,
     prepare_analysis_file_for_upload,
     prepare_file_for_upload,

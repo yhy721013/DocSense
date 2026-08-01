@@ -12,6 +12,11 @@ from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
+from tests.task_service_fixtures import (
+    build_analysis_callback_recovery,
+    create_terminal_analysis_task,
+    seed_legacy_file_task,
+)
 
 
 class LLMProgressAndCheckTaskTests(unittest.TestCase):
@@ -75,7 +80,7 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             services = build_offline_application_services(tmp)
             service = services.task_service
-            service.create_file_task(
+            seed_legacy_file_task(service,
                 "demo.pdf",
                 {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
                 status="1",
@@ -140,14 +145,24 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
 
         self.assertEqual(task["progress"], 0.28)
 
-    @patch("app.services.llm_service.task_service.post_callback_payload", return_value=True)
-    def test_check_task_replays_failed_callback(self, _mock_callback):
+    def test_check_task_replays_failed_callback(self):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("demo.pdf", {"businessType": "file"})
-            service.mark_business_completed("file", "demo.pdf", {"fileName": "demo.pdf"}, status="2")
-            service.mark_callback_failed("file", "demo.pdf", "timeout")
-            replayed = service.replay_callback_if_needed("file", "demo.pdf", callback_url="http://callback.test/llm/callback", timeout=5)
+            task = create_terminal_analysis_task(
+                service,
+                "demo.pdf",
+            )
+            service.mark_callback_failed(
+                "file",
+                "demo.pdf",
+                "timeout",
+                execution_id=task["execution_id"],
+            )
+            recovery = build_analysis_callback_recovery(
+                service,
+                callback_url="http://callback.test/llm/callback",
+            )
+            replayed = recovery.execute("demo.pdf")
             self.assertTrue(replayed)
 
     def test_batch_check_task_returns_empty_success_body(self):
@@ -155,8 +170,8 @@ class LLMProgressAndCheckTaskTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             services = build_offline_application_services(tmp)
             service = services.task_service
-            service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
-            service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
+            seed_legacy_file_task(service,"a.pdf", {"businessType": "file"}, status="1")
+            seed_legacy_file_task(service,"b.pdf", {"businessType": "file"}, status="0")
 
             app = create_app(services=services)
             client = app.test_client()

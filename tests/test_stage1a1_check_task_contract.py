@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +42,7 @@ from app.modules.tasks.domain import TaskBusinessRef
 from app.modules.tasks.ports import ExpectedTaskCompletion
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 _TARGET_CONTRACT_PATH = (
@@ -206,7 +208,7 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_mixed_params_rejects_entire_request(self) -> None:
         """任一非对象元素必须拒绝整次请求，不能只处理其中的合法项。"""
 
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "valid.pdf",
             {"businessType": "file"},
             status="1",
@@ -261,7 +263,7 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_success_is_empty_body_for_all_public_business_types(self) -> None:
         """三类业务键均可检查，但成功体不能泄露任务状态或内部身份。"""
 
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "demo.pdf",
             {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
             status="1",
@@ -390,12 +392,12 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_batch_all_existing_returns_empty_success(self) -> None:
         """批量检查存在项后只返回空成功体，不公开数据库顺序或状态。"""
 
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "a.pdf",
             {"businessType": "file"},
             status="1",
         )
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "b.pdf",
             {"businessType": "file"},
             status="0",
@@ -415,12 +417,12 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_batch_partial_missing_keeps_existing_item_processing(self) -> None:
         """批量缺失项不终止其余检查，最终仍返回空成功体。"""
 
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "first.pdf",
             {"businessType": "file"},
             status="1",
         )
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "last.pdf",
             {"businessType": "file"},
             status="0",
@@ -549,6 +551,42 @@ class CheckTaskRouteContractTests(unittest.TestCase):
                 )
                 self.assertEqual(200, response.status_code)
                 self.assertEqual(b"", response.data)
+
+    def test_active_sending_callback_remains_empty_200_instead_of_500(self) -> None:
+        """其他 owner 正在投递时，check-task 只能观察并保持既有空成功契约。
+
+        ``sending`` 是 Callback Guard 的合法瞬时状态，不是损坏数据。查询线程不得因
+        严格 DTO 漏列该状态而返回 500，也不得绕过租约再次发送 HTTP。
+        """
+
+        execution = self._complete_file_task("sending.pdf")
+        acquired_at = datetime.now(timezone.utc).isoformat()
+        acquired = self.task_service.acquire_callback_delivery_guard(
+            expected_execution_id=execution.task_id.value,
+            business_type="file",
+            business_key="sending.pdf",
+            lease_token="route-sending-owner-token",
+            lease_seconds=30.0,
+            acquired_at=acquired_at,
+            delivery_trigger="initial_delivery",
+            request_trace_id="route-sending-owner",
+        )
+        self.assertEqual("acquired", acquired["outcome"])
+
+        response = self.client.post(
+            "/llm/check-task",
+            json={
+                "businessType": "file",
+                "params": [{"fileName": "sending.pdf"}],
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(b"", response.data)
+        self.assertEqual(
+            "sending",
+            self.task_service.get_task("file", "sending.pdf")["callback_status"],
+        )
 
     def test_pending_callback_is_replayed_and_persisted_as_success(self) -> None:
         """终态 pending 回调在 check-task 中成功补发后必须持久化 success。"""
@@ -769,7 +807,7 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_legacy_terminal_callback_never_falls_back_to_old_recovery(self) -> None:
         """历史终态必须由发布前预检清零，切换后不能绕回旧恢复器。"""
 
-        legacy = self.task_service.create_file_task(
+        legacy = seed_legacy_file_task(self.task_service,
             "legacy-pending.pdf",
             {"businessType": "file", "params": [{"fileName": "legacy-pending.pdf"}]},
         )

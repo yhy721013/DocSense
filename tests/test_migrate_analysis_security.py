@@ -15,6 +15,7 @@ from app.services.llm_service.knowledge_index_operation_service import (
 from app.services.llm_service.task_service import LLMTaskService
 from scripts import migrate_analysis_security as migration
 from tests import workspace_tempdir
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 def _json_text(value):
@@ -116,6 +117,9 @@ class AnalysisSecurityMigrationTests(unittest.TestCase):
         fixed_time_ns = 1_700_000_000_123_456_789
         os.chmod(history_callback, 0o640)
         os.utime(history_callback, ns=(fixed_time_ns, fixed_time_ns))
+        # Windows/部分文件系统只保留 100ns 或更粗时间精度；迁移应保留文件系统
+        # 实际接受的时间戳，而不是测试请求但底层无法表达的纳秒尾数。
+        persisted_mtime_ns = history_callback.stat().st_mtime_ns
 
         return {
             "runtime": runtime_dir,
@@ -123,7 +127,7 @@ class AnalysisSecurityMigrationTests(unittest.TestCase):
             "knowledge_db": knowledge_db,
             "history_callback": history_callback,
             "legacy_callback": legacy_callback,
-            "history_mtime_ns": fixed_time_ns,
+            "history_mtime_ns": persisted_mtime_ns,
             "audit_values": audit_values,
         }
 
@@ -220,7 +224,10 @@ class AnalysisSecurityMigrationTests(unittest.TestCase):
                 self.assertEqual(mapping["security"], expected_security)
 
             callback_stat = paths["history_callback"].stat()
-            self.assertEqual(stat.S_IMODE(callback_stat.st_mode), 0o640)
+            # Windows 的 chmod 只映射只读位，无法表达 POSIX 0640；权限位精确保留
+            # 只在 POSIX 平台断言，Windows 继续验证内容与纳秒级 mtime 不变。
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(callback_stat.st_mode), 0o640)
             self.assertEqual(callback_stat.st_mtime_ns, paths["history_mtime_ns"])
             self.assertEqual(
                 self._audit_snapshot(paths["task_db"]),
@@ -399,13 +406,13 @@ class AnalysisSecurityMigrationTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "rolled_back")
             self.assertEqual(manifest["restoreErrors"], [])
 
-    def test_migrated_result_payload_is_used_by_callback_replay(self):
+    def test_migrated_result_payload_is_persisted_for_current_recovery_readers(self):
         with workspace_tempdir() as tmp:
             runtime = Path(tmp).resolve()
             task_db = runtime / "llm_tasks.sqlite3"
             knowledge_db = runtime / "knowledge_base.sqlite3"
             task_service = LLMTaskService(str(task_db))
-            task_service.create_file_task(
+            seed_legacy_file_task(task_service,
                 "replay.pdf",
                 {
                     "businessType": "file",
@@ -435,19 +442,13 @@ class AnalysisSecurityMigrationTests(unittest.TestCase):
             )
             migration.apply_migration(plan, timestamp="callback-replay")
 
-            with patch(
-                "app.services.llm_service.task_service.post_callback_payload",
-                return_value=True,
-            ) as callback_mock:
-                replayed = task_service.replay_callback_if_needed(
-                    "file",
-                    "replay.pdf",
-                    callback_url="http://callback.test/llm/callback",
-                    timeout=5,
-                )
-
-            self.assertTrue(replayed)
-            callback_payload = callback_mock.call_args.args[1]
+            # 1G-5 已删除仅处理旧投影的直发恢复入口。安全迁移的责任是原子改写
+            # 权威任务结果；当前 Analysis Recovery Source 会在具备 execution 的
+            # 新任务上读取同一字段，二者的行为分别由各自专项测试覆盖。
+            callback_payload = task_service.get_task(
+                "file",
+                "replay.pdf",
+            )["result_payload"]
             self.assertEqual(callback_payload["data"]["security"], "公开")
             self.assertNotIn("secrets", callback_payload["data"])
 

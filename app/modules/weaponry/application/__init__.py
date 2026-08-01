@@ -28,6 +28,11 @@ from .submit_weaponry import (
     WEAPONRY_PUBLIC_PROCESSING_STATUS,
     WEAPONRY_TASK_TYPE,
 )
+from .submit_weaponry_request import (
+    SubmitWeaponryRequest,
+    SubmitWeaponryRequestCommand,
+    SubmitWeaponryRequestResult,
+)
 
 __all__ = [
     "FreezeExpiredWeaponryCallbackGuards",
@@ -40,6 +45,9 @@ __all__ = [
     "RunWeaponryResult",
     "RunWeaponryTask",
     "SubmitWeaponryResult",
+    "SubmitWeaponryRequest",
+    "SubmitWeaponryRequestCommand",
+    "SubmitWeaponryRequestResult",
     "SubmitWeaponryTask",
     "WEAPONRY_PUBLIC_PROCESSING_STATUS",
     "WEAPONRY_TASK_TYPE",

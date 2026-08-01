@@ -4,8 +4,16 @@ import unittest
 
 
 class LLMTestAssetsTests(unittest.TestCase):
+    def _load_fixture(self, relative_path: str):
+        """联调夹具未纳入版本控制；缺失时跳过，避免把环境资产误报为代码错误。"""
+
+        path = pathlib.Path(relative_path)
+        if not path.is_file():
+            self.skipTest(f"本地联调夹具未提供: {relative_path}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def test_analysis_request_fixture_has_required_fields(self):
-        payload = json.loads(pathlib.Path("tests/fixtures/llm/analysis_request.json").read_text(encoding="utf-8"))
+        payload = self._load_fixture("tests/fixtures/llm/analysis_request.json")
         self.assertEqual(payload["businessType"], "file")
         self.assertGreaterEqual(len(payload["params"]), 2)
         self.assertIn("filePath", payload["params"][0])
@@ -16,20 +24,22 @@ class LLMTestAssetsTests(unittest.TestCase):
         self.assertNotIn("architectureList", payload["params"][0])
 
     def test_check_task_fixture_can_query_multiple_files(self):
-        payload = json.loads(pathlib.Path("tests/fixtures/llm/check_task_file_request.json").read_text(encoding="utf-8"))
+        payload = self._load_fixture(
+            "tests/fixtures/llm/check_task_file_request.json"
+        )
         self.assertEqual(payload["businessType"], "file")
         self.assertGreaterEqual(len(payload["params"]), 2)
         self.assertIn("fileName", payload["params"][0])
 
     def test_report_request_fixture_has_required_fields(self):
-        payload = json.loads(pathlib.Path("tests/fixtures/llm/report_request.json").read_text(encoding="utf-8"))
+        payload = self._load_fixture("tests/fixtures/llm/report_request.json")
         self.assertEqual(payload["businessType"], "report")
         self.assertIn("filePathList", payload["params"][0])
         self.assertIn("templateOutline", payload["params"][0])
         self.assertTrue(payload["params"][0]["templateOutline"].endswith(".docx"))
 
     def test_weaponry_request_fixture_uses_ship_fields(self):
-        payload = json.loads(pathlib.Path("tests/fixtures/llm/weaponry_request.json").read_text(encoding="utf-8"))
+        payload = self._load_fixture("tests/fixtures/llm/weaponry_request.json")
         self.assertEqual(payload["businessType"], "weaponry")
 
         params = payload["params"]
@@ -69,8 +79,12 @@ class LLMTestAssetsTests(unittest.TestCase):
             self.assertNotIn("analyseDataSource", field)
 
     def test_check_task_weaponry_fixture_matches_request_architecture_id(self):
-        request_payload = json.loads(pathlib.Path("tests/fixtures/llm/weaponry_request.json").read_text(encoding="utf-8"))
-        check_payload = json.loads(pathlib.Path("tests/fixtures/llm/check_task_weaponry_request.json").read_text(encoding="utf-8"))
+        request_payload = self._load_fixture(
+            "tests/fixtures/llm/weaponry_request.json"
+        )
+        check_payload = self._load_fixture(
+            "tests/fixtures/llm/check_task_weaponry_request.json"
+        )
 
         self.assertEqual(check_payload["businessType"], "weaponry")
         self.assertEqual(check_payload["params"][0]["architectureId"], request_payload["params"]["architectureId"])

@@ -34,10 +34,10 @@ from app.services.utils.file_downloader import download_to_temp_file
 from app.modules.document_processing.adapters.path_compat import (
     normalize_file_for_llm,
 )
-from app.services.utils.rag_pipeline import prepare_upload_files
 from app.services.utils.word_extractor import extract_text_from_word
 
 from .local_artifacts import LocalReportArtifactAdapter
+from .upload_files import prepare_report_upload_files
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ class LegacyReportFileAdapter:
         max_download_bytes: int = 512 * 1024 * 1024,
         downloader: Downloader = download_to_temp_file,
         normalizer: Normalizer = normalize_file_for_llm,
-        upload_preparer: UploadPreparer = prepare_upload_files,
+        upload_preparer: UploadPreparer = prepare_report_upload_files,
         word_extractor: WordExtractor = extract_text_from_word,
         legacy_office_preparer: LegacyOfficePreparer | None = None,
         document_preparer: LocalDocumentPreparationAdapter | None = None,

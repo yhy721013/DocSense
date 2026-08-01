@@ -24,8 +24,11 @@ from app.modules.weaponry.domain import (  # noqa: E402
     FORCED_EMPTY_FIELD_NAMES,
     is_forced_empty_field_name,
 )
+from app.integrations.anythingllm import (  # noqa: E402
+    AnythingLLMTransport,
+    AnythingLLMWorkspaceClient,
+)
 from app.services.core.config import load_anythingllm_config  # noqa: E402
-from app.services.utils.anythingllm_client import AnythingLLMClient  # noqa: E402
 
 
 RUNTIME_DIR = ROOT / ".runtime"
@@ -1177,10 +1180,14 @@ def ensure_doc_sense_reachable(base_url: str) -> None:
 
 def probe_anythingllm() -> None:
     config = load_anythingllm_config()
-    client = AnythingLLMClient(config)
-    response = client.session.get(f"{config.base_url}/workspaces", headers=client._json_headers(1), timeout=config.timeout)
-    if not response.ok:
-        raise RuntimeError(f"AnythingLLM 不可用或 API Key 无效: {response.status_code} {response.text}")
+    with AnythingLLMTransport(
+        base_url=config.base_url,
+        api_key=config.api_key,
+        timeout=config.timeout,
+    ) as transport:
+        # 使用原子 Workspace Client 完成协议级探测；失败只暴露稳定异常类型，
+        # 不再拼接可能包含供应商响应正文或凭据的底层 HTTP 文本。
+        AnythingLLMWorkspaceClient(transport).list_workspaces(user_id=1)
 
 
 def run_file(

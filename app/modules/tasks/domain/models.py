@@ -15,15 +15,19 @@ from typing import Generic, TypeVar
 
 
 CALLBACK_PENDING = "pending"
+CALLBACK_SENDING = "sending"
 CALLBACK_SUCCESS = "success"
 CALLBACK_FAILED = "failed"
 CALLBACK_SKIPPED = "skipped"
+CALLBACK_OUTCOME_UNKNOWN = "outcome_unknown"
 CALLBACK_STATUSES = frozenset(
     {
         CALLBACK_PENDING,
+        CALLBACK_SENDING,
         CALLBACK_SUCCESS,
         CALLBACK_FAILED,
         CALLBACK_SKIPPED,
+        CALLBACK_OUTCOME_UNKNOWN,
     }
 )
 
@@ -129,6 +133,7 @@ class TaskSnapshot:
     callback_status: str
     created_at: str
     updated_at: str
+    callback_attempts: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, TaskId):
@@ -177,6 +182,12 @@ class TaskSnapshot:
             "updated_at",
             _required_text(self.updated_at, name="updated_at"),
         )
+        if (
+            isinstance(self.callback_attempts, bool)
+            or not isinstance(self.callback_attempts, int)
+            or self.callback_attempts < 0
+        ):
+            raise ValueError("callback_attempts 必须是非负整数")
 
 
 @dataclass(frozen=True)
@@ -368,6 +379,8 @@ class ProgressSubscriptionRequest:
 __all__ = [
     "CALLBACK_FAILED",
     "CALLBACK_PENDING",
+    "CALLBACK_SENDING",
+    "CALLBACK_OUTCOME_UNKNOWN",
     "CALLBACK_SKIPPED",
     "CALLBACK_STATUSES",
     "CALLBACK_SUCCESS",

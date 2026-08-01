@@ -16,8 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.services.core.architecture_tree import build_architecture_tree_index  # noqa: E402
-from app.services.llm_service.architecture_recall_service import (  # noqa: E402
+from app.modules.analysis.domain.architecture_tree import (  # noqa: E402
+    build_architecture_tree_index,
+)
+from app.modules.analysis.domain.architecture_recall import (  # noqa: E402
     ArchitectureRecallDecision,
     build_document_architecture_signals,
     recall_architecture_candidates,

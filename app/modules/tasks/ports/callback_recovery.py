@@ -9,6 +9,7 @@ from app.modules.tasks.domain.models import (
     CALLBACK_STATUSES,
     CALLBACK_SUCCESS,
     TaskId,
+    TaskSnapshot,
 )
 
 
@@ -37,6 +38,7 @@ class CallbackRecoveryResult:
     replayed: bool
     final_status: str
     delivery_outcome: str = ""
+    current_snapshot: TaskSnapshot | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempted, bool):
@@ -50,6 +52,11 @@ class CallbackRecoveryResult:
             raise ValueError("replayed=True 时 final_status 必须为 success")
         if not isinstance(self.delivery_outcome, str):
             raise TypeError("delivery_outcome 必须是 str")
+        if self.current_snapshot is not None:
+            if not isinstance(self.current_snapshot, TaskSnapshot):
+                raise TypeError("current_snapshot 必须是 TaskSnapshot 或 None")
+            if self.current_snapshot.callback_status != final_status:
+                raise ValueError("current_snapshot 与 final_status 不一致")
         object.__setattr__(self, "final_status", final_status)
         object.__setattr__(self, "delivery_outcome", self.delivery_outcome.strip())
 

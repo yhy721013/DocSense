@@ -15,8 +15,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
 
-from flask import current_app
-
 from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
@@ -68,6 +66,10 @@ from app.modules.document_processing.composition import (
     build_local_project_document_for_rag,
     configure_document_processing_environment,
 )
+from app.modules.debug.composition import (
+    DebugApplicationServices,
+    compose_debug_application_services,
+)
 from app.modules.report.adapters import (
     AnythingLLMReportClientFactory,
     AnythingLLMReportRagAdapter,
@@ -88,6 +90,7 @@ from app.modules.report.application import (
     RunReportTask,
     SubmitReportTask,
 )
+from app.modules.report.domain import ReportId
 from app.modules.translation.adapters import (
     HYMTTranslator,
     LazyHYMTTranslationEngineAdapter,
@@ -116,10 +119,16 @@ from app.modules.tasks.adapters import (
     LegacyTaskCommandAdapter,
     LegacyTaskReadAdapter,
     LatestTaskProgressPublisherAdapter,
+    SynchronousCallbackRecoveryRouterAdapter,
     UploadTaskLimiter,
     required_http_lease_seconds,
 )
-from app.modules.tasks.application import ProgressSubscriptionService
+from app.modules.tasks.application import (
+    CheckTaskStatusService,
+    ExecuteCheckTask,
+    ProgressSubscriptionService,
+)
+from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.modules.weaponry.adapters import (
     AnythingLLMTermsCatalogCoordinator,
     AnythingLLMProvidedEvidenceExtractionAdapter,
@@ -262,7 +271,7 @@ class ApplicationReadinessSnapshot:
 
 @dataclass(frozen=True)
 class ApplicationServices:
-    """Flask 应用内可安全共享的依赖集合。
+    """可由 Web、离线执行器和未来 Worker 安全共享的应用依赖集合。
 
     阶段 8 起两个 AnythingLLM Factory 都是必需能力，但只保存配置和线程安全协调依赖，
     不持有网络 Session。该数据类冻结的是依赖引用，数据库服务和进度 Hub 自身仍按各自
@@ -292,6 +301,7 @@ class ApplicationServices:
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
     report_infrastructure_config: ReportInfrastructureConfig
+    debug_services: DebugApplicationServices
     legacy_office_preparer: LegacyOfficePreparer = field(
         default_factory=_disabled_legacy_office_preparer
     )
@@ -317,6 +327,9 @@ class ApplicationServices:
     # 1E-6 的同步 Saga 生产链。None 仅用于不覆盖 reassign 路由的旧测试夹具；公开路由
     # 必须 fail fast，绝不能回退到已删除的蓝图数据库/AnythingLLM 编排。
     reassign_services: ReassignApplicationServices | None = None
+    # 该入口由当前 Task Read 与三类同步恢复链派生。禁止外部单独注入半套实例，
+    # ``dataclasses.replace`` 替换任一恢复器时会随容器重新构造并保持引用一致。
+    check_task: ExecuteCheckTask = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """在应用启动时拒绝缺失关键依赖，避免请求到达后才出现空引用错误。"""
@@ -344,6 +357,7 @@ class ApplicationServices:
             "llm_config": self.llm_config,
             "anythingllm_config": self.anythingllm_config,
             "report_infrastructure_config": self.report_infrastructure_config,
+            "debug_services": self.debug_services,
             "legacy_office_preparer": self.legacy_office_preparer,
             "legacy_office_config": self.legacy_office_config,
             "analysis_classification_config": self.analysis_classification_config,
@@ -372,6 +386,8 @@ class ApplicationServices:
             raise TypeError("chat_commands must be ChatCommandService")
         if not isinstance(self.chat_run_executor, SynchronousChatRunExecutor):
             raise TypeError("chat_run_executor must be SynchronousChatRunExecutor")
+        if not isinstance(self.debug_services, DebugApplicationServices):
+            raise TypeError("debug_services 必须是 DebugApplicationServices")
         if not isinstance(self.chat_dispatcher, ChatRunDispatcher):
             raise TypeError("chat_dispatcher must implement ChatRunDispatcher")
         if not isinstance(self.chat_history, ChatHistoryService):
@@ -493,10 +509,74 @@ class ApplicationServices:
             raise TypeError(
                 "reassign_services 必须是 ReassignApplicationServices 或 None"
             )
+        task_reader = LegacyTaskReadAdapter(self.task_service)
+        callback_recovery = SynchronousCallbackRecoveryRouterAdapter(
+            task_reader=task_reader,
+            routes={
+                "file": self._recover_analysis_callback,
+                "report": self._recover_report_callback,
+                "weaponry": self._recover_weaponry_callback,
+            },
+        )
+        object.__setattr__(
+            self,
+            "check_task",
+            ExecuteCheckTask(
+                CheckTaskStatusService(
+                    task_reader=task_reader,
+                    callback_recovery=callback_recovery,
+                )
+            ),
+        )
         self._validate_chat_infrastructure_capabilities()
         self._validate_report_infrastructure_capabilities()
         self._validate_analysis_infrastructure_capabilities()
         self._validate_weaponry_infrastructure_capabilities()
+
+    def _recover_analysis_callback(
+        self,
+        task_id: TaskId,
+        business_ref: TaskBusinessRef,
+        trace_id: str,
+    ) -> bool:
+        recovery = self.analysis_callback_recovery
+        if recovery is None:
+            logger.error("文件 check-task 缺少新回调恢复链，拒绝使用遗留恢复器")
+            raise RuntimeError("应用容器未装配文件分析回调恢复链")
+        return recovery.execute(
+            business_ref.business_key,
+            request_trace_id=trace_id,
+            expected_task_id=task_id,
+        )
+
+    def _recover_report_callback(
+        self,
+        task_id: TaskId,
+        business_ref: TaskBusinessRef,
+        trace_id: str,
+    ) -> bool:
+        return self.report_callback_recovery.execute(
+            # TaskBusinessRef 统一保存文本键；Report 领域值仍要求 int。Python 整数
+            # 不受 64 位限制，因此此转换保持既有 128 位十进制输入兼容性。
+            ReportId.from_public_value(int(business_ref.business_key)),
+            request_trace_id=trace_id,
+            expected_task_id=task_id,
+        )
+
+    def _recover_weaponry_callback(
+        self,
+        task_id: TaskId,
+        business_ref: TaskBusinessRef,
+        trace_id: str,
+    ) -> bool:
+        weaponry = self.weaponry_services
+        if weaponry is None:
+            raise RuntimeError("应用容器未装配武器谱运行链")
+        return weaponry.callback_recovery.execute(
+            int(business_ref.business_key),
+            request_trace_id=trace_id,
+            expected_task_id=task_id,
+        )
 
     def _validate_chat_infrastructure_capabilities(self) -> None:
         """按部署模式验证已装配适配器的真实能力，禁止错误模式静默启动。
@@ -1476,6 +1556,10 @@ def create_application_services() -> ApplicationServices:
         llm_config=llm_config,
         anythingllm_config=anythingllm_config,
         report_infrastructure_config=report_infrastructure_config,
+        debug_services=compose_debug_application_services(
+            chat_store=chat_store,
+            kb_service=kb_service,
+        ),
         legacy_office_preparer=legacy_office_preparer,
         legacy_office_config=legacy_office_config,
         analysis_classification_config=analysis_classification_config,
@@ -1514,14 +1598,4 @@ def create_application_services() -> ApplicationServices:
         services.weaponry_services is not None,
         services.reassign_services is not None,
     )
-    return services
-
-
-def get_application_services() -> ApplicationServices:
-    """从当前 Flask 应用读取依赖容器，并对缺失或错误类型给出明确异常。"""
-    services = current_app.extensions.get(APPLICATION_SERVICES_EXTENSION)
-    if services is None:
-        raise RuntimeError("Flask 应用尚未安装 DocSense 依赖容器")
-    if not isinstance(services, ApplicationServices):
-        raise RuntimeError("Flask 应用中的 DocSense 依赖容器类型无效")
     return services

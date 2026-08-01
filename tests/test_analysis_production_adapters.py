@@ -15,6 +15,8 @@ from tempfile import TemporaryDirectory
 from typing import Iterator
 import unittest
 
+from tests.task_service_fixtures import seed_legacy_file_task
+
 from app.modules.analysis.adapters import (
     LegacyAnalysisAuditAdapter,
     LegacyAnalysisFilePreparationAdapter,
@@ -1028,7 +1030,7 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
         # 统一临时目录上下文，避免清理瞬态干扰审计事务本身的离线断言。
         with workspace_tempdir() as temporary_root:
             service = LLMTaskService(db_path=str(Path(temporary_root) / "tasks.sqlite3"))
-            task = service.create_file_task("adapter-audit.txt", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"adapter-audit.txt", {"businessType": "file"})
             execution = AnalysisExecutionRef(
                 task_id=TaskId(task["execution_id"]),
                 file_name="adapter-audit.txt",
@@ -1162,7 +1164,7 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
 
         with workspace_tempdir() as temporary_root:
             service = LLMTaskService(db_path=str(Path(temporary_root) / "tasks.sqlite3"))
-            task = service.create_file_task(
+            task = seed_legacy_file_task(service,
                 "partial-open.txt",
                 {"businessType": "file"},
             )

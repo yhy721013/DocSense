@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "authority": {
+    "publicContract": "docs/接口文档/",
+    "debugContract": "README.md#/debug/*",
+    "publicParametersMutable": false
+  },
+  "implementationBaseline": {
+    "branch": "feat/weaponry-chat",
+    "designCommit": "1d505db689bef025e687602ac32007045df08d11",
+    "stage1g0Commit": "808f3a109c1e56df32ac7abfde8ef625b846a2dd"
+  },
+  "routes": [
+    {"method": "GET", "path": "/debug/api/callback"},
+    {"method": "GET", "path": "/debug/api/chat/bootstrap"},
+    {"method": "GET", "path": "/debug/callback"},
+    {"method": "GET", "path": "/debug/chat"},
+    {"method": "POST", "path": "/llm/analysis"},
+    {"method": "POST", "path": "/llm/chat"},
+    {"method": "POST", "path": "/llm/chat/abort"},
+    {"method": "POST", "path": "/llm/chat/delete"},
+    {"method": "GET", "path": "/llm/chat/history"},
+    {"method": "POST", "path": "/llm/chat/title"},
+    {"method": "POST", "path": "/llm/check-task"},
+    {"method": "POST", "path": "/llm/generate-report"},
+    {"method": "GET", "path": "/llm/progress"},
+    {"method": "POST", "path": "/llm/reassign"},
+    {"method": "POST", "path": "/llm/weaponry"}
+  ],
+  "callbackDebug": {
+    "queryFields": ["record"],
+    "statusCode": 200,
+    "topLevelFields": [
+      "message",
+      "ok",
+      "payload",
+      "records",
+      "selectedRecord"
+    ],
+    "recordFields": [
+      "fileName",
+      "id",
+      "modifiedAt",
+      "sizeBytes"
+    ],
+    "recordLimit": 50,
+    "emptyMessage": "当前还没有新版回调历史文件",
+    "missingMessage": "指定的回调历史记录不存在",
+    "invalidJsonMessage": "回调文件不是合法 JSON",
+    "nonObjectMessage": "回调文件根节点必须为对象",
+    "readFailureMessage": "回调文件读取失败"
+  },
+  "chatDebug": {
+    "queryFields": [],
+    "statusCode": 200,
+    "topLevelFields": ["data", "message", "ok"],
+    "dataFields": ["availableFiles", "sessions"],
+    "sessionFields": ["chatId", "createdAt", "fileNames", "updatedAt"],
+    "availableFileFields": ["architectureId", "fileName"],
+    "fileNamesMeaning": "active_scope"
+  },
+  "pages": {
+    "/debug/callback": [
+      "回调结果调试页",
+      "/debug/api/callback"
+    ],
+    "/debug/chat": [
+      "文件对话调试页",
+      "/debug/api/chat/bootstrap",
+      "/llm/chat",
+      "/llm/chat/history",
+      "/llm/chat/delete"
+    ]
+  }
+}

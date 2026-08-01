@@ -108,9 +108,10 @@ class WeaponryStage1D7ClosureTests(unittest.TestCase):
         }
         self.assertEqual(set(), forbidden & (names | calls))
         self.assertIn("parse_weaponry_request", calls)
-        self.assertIn("resolve", calls)
         self.assertIn("execute", calls)
         self.assertIn("present_success", calls)
+        # 文档范围解析属于 Application 用例职责，蓝图只允许执行统一提交入口。
+        self.assertNotIn("resolve", calls)
 
     def test_mode_selector_has_no_active_deployment_assignment(self) -> None:
         """部署样例不得继续要求模式 2；Loader 兼容不等于仍提供运行时选择器。"""
@@ -238,7 +239,7 @@ class WeaponryStage1D7ClosureTests(unittest.TestCase):
         self.assertEqual([], document_ids.elts)  # type: ignore[union-attr]
 
     def test_only_compatibility_tests_call_legacy_worker(self) -> None:
-        """测试路径仍有兼容证据，但禁止新增第二套依赖旧 Worker 的测试入口。"""
+        """1G-4 后测试必须验证现行分层，不得再执行旧 Worker。"""
 
         callers = []
         for path in sorted((ROOT / "tests").glob("test_*.py")):
@@ -257,7 +258,7 @@ class WeaponryStage1D7ClosureTests(unittest.TestCase):
             )
             if imports_legacy_worker or calls_legacy_worker:
                 callers.append(path.name)
-        self.assertEqual(["test_weaponry_service.py"], callers)
+        self.assertEqual([], callers)
 
 
 if __name__ == "__main__":

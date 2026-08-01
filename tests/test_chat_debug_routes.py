@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+from unittest.mock import patch
 
 from app import create_app
 from tests.test_chat import _build_test_services
@@ -94,7 +95,7 @@ class ChatDebugRouteTests(unittest.TestCase):
         replace_response.get_data()
 
         with self.assertLogs(
-            "app.blueprints.debug",
+            "app.modules.debug.application.queries",
             level="INFO",
         ) as captured:
             bootstrap_response = self.client.get("/debug/api/chat/bootstrap")
@@ -117,7 +118,7 @@ class ChatDebugRouteTests(unittest.TestCase):
         response_log = next(
             message
             for message in captured.output
-            if "调试初始化数据响应已生成" in message
+            if "调试初始化数据读取完成" in message
         )
         self.assertIn("session_count=1", response_log)
         self.assertIn("active_scope_member_count=1", response_log)
@@ -192,3 +193,23 @@ class ChatDebugRouteTests(unittest.TestCase):
         self.assertIn("text-align: left;", html)
         self.assertIn("font: inherit;", html)
         self.assertIn("appearance: none;", html)
+
+    def test_chat_bootstrap_query_failure_keeps_http_200_and_stable_shape(self):
+        """内部只读查询失败不能改变既有 Debug HTTP 状态或字段集合。"""
+
+        snapshots = self.services.debug_services.chat_bootstrap._snapshots
+        with patch.object(
+            snapshots,
+            "read_snapshot",
+            side_effect=RuntimeError("boom"),
+        ):
+            response = self.client.get("/debug/api/chat/bootstrap")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertFalse(payload["ok"])
+        self.assertEqual(
+            {"sessions": [], "availableFiles": []},
+            payload["data"],
+        )
+        self.assertEqual("读取失败: boom", payload["message"])

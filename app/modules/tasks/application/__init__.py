@@ -18,6 +18,11 @@ from .request_callback_recovery import (
     RequestCallbackRecoveryResult,
     RequestCallbackRecoveryService,
 )
+from .execute_check_task import (
+    ExecuteCheckTask,
+    ExecuteCheckTaskCommand,
+    ExecuteCheckTaskResult,
+)
 from .progress import (
     CurrentProgressItem,
     ProgressPortContractError,
@@ -44,6 +49,9 @@ __all__ = [
     "CheckTaskStatusResult",
     "CheckTaskStatusService",
     "CurrentProgressItem",
+    "ExecuteCheckTask",
+    "ExecuteCheckTaskCommand",
+    "ExecuteCheckTaskResult",
     "ProgressDeliveryBuffer",
     "ProgressDeliveryClosedError",
     "ProgressInitialBatchStateError",

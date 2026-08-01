@@ -54,6 +54,7 @@ from app.modules.analysis.application import (
     RecoverAnalysisCallbackSynchronously,
     SubmitAnalysisBatch,
 )
+from app.modules.debug.composition import compose_debug_application_services
 from app.modules.report.adapters import (
     AnythingLLMReportClientFactory,
     ReportTaskCommandCodec,
@@ -667,6 +668,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             ),
             report_infrastructure_config=(
                 ReportInfrastructureConfig.single_instance()
+            ),
+            debug_services=compose_debug_application_services(
+                chat_store=chat_store,
+                kb_service=kb_service,
             ),
         )
 
