@@ -34,8 +34,6 @@ from app.modules.document_processing.ports import (
 )
 from mineru.cli import api_client as _api_client
 from mineru.cli.common import image_suffixes, office_suffixes, pdf_suffixes
-from mineru.model.pptx.main import convert_path as _pptx_convert_path
-from mineru.utils.enum_class import BlockType as _PptxBlockType
 from mineru.utils.guess_suffix_or_lang import guess_suffix_by_path
 
 
@@ -44,7 +42,8 @@ logger = logging.getLogger(__name__)
 SUPPORTED_INPUT_SUFFIXES = set(pdf_suffixes + image_suffixes + office_suffixes)
 _PPTX_SUFFIXES = frozenset({".pptx"})
 MINERU_PROCESSOR_ID = "mineru-to-markdown"
-MINERU_PROCESSOR_FINGERPRINT = "docsense-mineru-adapter-v2"
+# v3 修正 PPTX 列表渲染语义。更新指纹可阻止重试流程复用旧版本生成的缺项 Markdown。
+MINERU_PROCESSOR_FINGERPRINT = "docsense-mineru-adapter-v3"
 _MATERIALIZATION_MARKER = ".docsense-mineru-materialization"
 _MAX_EMBEDDED_IMAGE_BYTES = 32 * 1024 * 1024
 _MAX_EMBEDDED_IMAGES_TOTAL_BYTES = 128 * 1024 * 1024
@@ -69,6 +68,28 @@ _SAFE_EMBEDDED_IMAGE_MEDIA_TYPES = frozenset(
         "image/webp",
     }
 )
+
+# MinerU PPTX pages 是内部字典协议。这里使用稳定字符串隔离其 Enum 导入，避免某个
+# MinerU 版本缺少 PPTX 子模块时，PDF、图片等无关格式也在应用启动阶段导入失败。
+_PPTX_BLOCK_IMAGE = "image"
+_PPTX_BLOCK_LIST = "list"
+_PPTX_BLOCK_TABLE = "table"
+_PPTX_BLOCK_TEXT = "text"
+_PPTX_BLOCK_TITLE = "title"
+
+
+def _load_pptx_convert_path() -> Callable[[str], list]:
+    """按需加载 MinerU PPTX 转换入口，把版本兼容问题限制在 PPTX 请求内。"""
+
+    try:
+        from mineru.model.pptx.main import convert_path
+    except ImportError as exc:
+        logger.error(
+            "MinerU PPTX 直接转换器不可用: compatible=false error_type=%s",
+            type(exc).__name__,
+        )
+        raise RuntimeError("当前 MinerU 版本不支持 PPTX 直接转换") from exc
+    return convert_path
 
 
 @runtime_checkable
@@ -325,12 +346,13 @@ class MinerUConverter:
     ) -> str:
         """使用 mineru.model.pptx 原生转换器将 PPTX 直接转为 Markdown。"""
 
+        pptx_convert_path = _load_pptx_convert_path()
         md_paths: List[Path] = []
         for pptx_file in pptx_files:
             logger.info(
                 "PPTX 直接转换开始: file=%s", pptx_file.name,
             )
-            pages = _pptx_convert_path(str(pptx_file))
+            pages = pptx_convert_path(str(pptx_file))
             markdown_text = self._render_pptx_pages_to_markdown(
                 pages, extract_images=extract_images,
             )
@@ -347,48 +369,123 @@ class MinerUConverter:
             return str(output_dir)
         return str(md_paths[0])
 
-    @staticmethod
+    @classmethod
     def _render_pptx_pages_to_markdown(
+        cls,
         pages: list,
         *,
         extract_images: bool,
     ) -> str:
-        """将 PptxConverter 输出的 pages/blocks 渲染为 Markdown 文本。"""
+        """将 PptxConverter 输出的 pages/blocks 渲染为 Markdown 文本。
 
-        parts: List[str] = []
-        for page_idx, blocks in enumerate(pages):
-            if not blocks:
+        MinerU 3.x 把列表项保存在 ``content`` 中，并允许列表节点递归嵌套；早期
+        结构可能使用 ``list_items``。两种结构都在此边界归一化，避免供应商内部
+        DTO 的小版本差异扩散到文档处理 Application。
+        """
+
+        rendered_pages: List[str] = []
+        for blocks in pages:
+            if not isinstance(blocks, list) or not blocks:
                 continue
-            if page_idx > 0:
-                parts.append("\n---\n")
+
+            page_lines: List[str] = []
             for block in blocks:
+                if not isinstance(block, dict):
+                    continue
                 block_type = block.get("type")
                 content = block.get("content", "")
-                if block_type == _PptxBlockType.TITLE:
-                    parts.append(f"# {content}\n")
-                elif block_type == _PptxBlockType.TEXT:
-                    if content.strip():
-                        parts.append(f"{content}\n")
-                elif block_type == _PptxBlockType.LIST:
-                    attribute = block.get("attribute", "unordered")
-                    items = block.get("list_items", [])
-                    for idx, item in enumerate(items, start=1):
-                        item_text = item.get("content", "")
-                        if attribute == "ordered":
-                            parts.append(f"{idx}. {item_text}\n")
-                        else:
-                            parts.append(f"- {item_text}\n")
-                    parts.append("")  # 列表后空行
-                elif block_type == _PptxBlockType.TABLE:
-                    parts.append(f"{content}\n")
-                elif block_type == _PptxBlockType.IMAGE:
-                    if extract_images and content:
-                        parts.append(f"![image]({content})\n")
+                if block_type == _PPTX_BLOCK_TITLE:
+                    text = cls._pptx_text(content)
+                    if text:
+                        page_lines.append(f"# {text}")
+                elif block_type == _PPTX_BLOCK_TEXT:
+                    text = cls._pptx_text(content)
+                    if text:
+                        page_lines.append(text)
+                elif block_type == _PPTX_BLOCK_LIST:
+                    list_lines = cls._render_pptx_list_block(block, depth=0)
+                    if list_lines:
+                        page_lines.extend(list_lines)
+                        page_lines.append("")
+                elif block_type == _PPTX_BLOCK_TABLE:
+                    text = cls._pptx_text(content)
+                    if text:
+                        page_lines.append(text)
+                elif block_type == _PPTX_BLOCK_IMAGE:
+                    image_target = cls._pptx_text(content)
+                    if extract_images and image_target:
+                        page_lines.append(f"![image]({image_target})")
                 else:
-                    # 其他类型按纯文本输出
-                    if content and content.strip():
-                        parts.append(f"{content}\n")
-        return "\n".join(parts)
+                    # 图表、页脚等供应商扩展块仍按文本输出；复合结构不做 repr 泄露。
+                    if not isinstance(content, list):
+                        text = cls._pptx_text(content)
+                        if text:
+                            page_lines.append(text)
+
+            page_markdown = "\n".join(page_lines).rstrip()
+            if page_markdown:
+                rendered_pages.append(page_markdown)
+
+        if not rendered_pages:
+            return ""
+        return "\n\n---\n\n".join(rendered_pages) + "\n"
+
+    @classmethod
+    def _render_pptx_list_block(
+        cls,
+        block: dict,
+        *,
+        depth: int,
+    ) -> List[str]:
+        """递归渲染一个 MinerU 列表块，保留顺序、起始编号和嵌套层级。"""
+
+        current_items = block.get("content")
+        legacy_items = block.get("list_items")
+        if not isinstance(current_items, list) or (
+            not current_items and isinstance(legacy_items, list)
+        ):
+            current_items = legacy_items
+        if not isinstance(current_items, list):
+            return []
+
+        ordered = block.get("attribute") == "ordered"
+        try:
+            next_number = int(block.get("start", 1))
+        except (TypeError, ValueError):
+            next_number = 1
+        if next_number < 1:
+            next_number = 1
+
+        indent = "    " * depth
+        rendered: List[str] = []
+        for item in current_items:
+            if isinstance(item, dict) and item.get("type") == _PPTX_BLOCK_LIST:
+                rendered.extend(
+                    cls._render_pptx_list_block(item, depth=depth + 1)
+                )
+                continue
+
+            raw_text = (
+                item.get("content", "")
+                if isinstance(item, dict)
+                else item
+            )
+            text = cls._pptx_text(raw_text)
+            if not text:
+                continue
+            marker = f"{next_number}." if ordered else "-"
+            rendered.append(f"{indent}{marker} {text}")
+            if ordered:
+                next_number += 1
+        return rendered
+
+    @staticmethod
+    def _pptx_text(value: object) -> str:
+        """只把标量内容规范化为文本，避免将复合供应商对象意外写入 Markdown。"""
+
+        if value is None or isinstance(value, (list, dict)):
+            return ""
+        return str(value).strip()
 
     def _collect_input_files(self, input_path: Path) -> List[Path]:
         """收集输入文件"""
