@@ -7,6 +7,7 @@ import tracemalloc
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from app.modules.document_processing.adapters import (
     BytesArtifactContent,
@@ -22,8 +23,10 @@ from app.modules.document_processing.application import (
 )
 from app.modules.document_processing.domain import (
     ArtifactKind,
+    DocumentProcessingRequest,
     DocumentRepresentation,
     ProcessingOutcome,
+    RagProjectionError,
 )
 from app.modules.document_processing.ports import ArtifactPublication
 from app.modules.tasks.domain import TaskId
@@ -177,6 +180,83 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             self.assertEqual("rag_projection_utf8_invalid", result.error_code)
             self.assertIsNone(result.artifact)
             self.assertTrue(store.verify(source))
+
+    def test_source_open_failure_does_not_leave_part_file(self) -> None:
+        """源流尚未取得时不得提前占用目标句柄或遗留临时文件。"""
+
+        with workspace_tempdir() as temporary:
+            root = Path(temporary)
+            scratch_root = root / "scratch"
+            store = LocalArtifactStoreAdapter(root / "artifacts")
+            processor = MarkdownRagProjectionProcessorAdapter(
+                source_store=store,
+                materialization_root=scratch_root,
+            )
+            task_id = TaskId("rag-projection-source-open-failure")
+            source = _publish_source(store, task_id, b"# title\n")
+            request = DocumentProcessingRequest(
+                task_id=task_id,
+                step_id="rag-projection",
+                source_artifact=source,
+                profile=build_markdown_rag_projection_profile(),
+                trace_id="source-open-failure",
+            )
+
+            # 这里模拟 Artifact Store 在进入源读取上下文之前失败。Windows 下若目标文件
+            # 已提前打开，异常清理会因句柄仍被占用而留下 .part 文件。
+            with patch.object(
+                store,
+                "open_reader",
+                side_effect=OSError("source unavailable"),
+            ):
+                with self.assertRaises(RagProjectionError) as raised:
+                    processor.process(request)
+
+            self.assertEqual(
+                "rag_projection_unexpected_error",
+                raised.exception.code,
+            )
+            self.assertEqual([], list(scratch_root.rglob("*.part")))
+            self.assertEqual([], list(scratch_root.iterdir()))
+
+    def test_same_task_outputs_use_full_namespace_and_distinct_short_names(
+        self,
+    ) -> None:
+        """同任务并发候选必须隔离，且不能靠截断到 32 bit 的随机名碰运气。"""
+
+        with workspace_tempdir() as temporary:
+            root = Path(temporary)
+            store = LocalArtifactStoreAdapter(root / "artifacts")
+            processor = MarkdownRagProjectionProcessorAdapter(
+                source_store=store,
+                materialization_root=root / "scratch",
+            )
+            task_id = TaskId("rag-projection-same-task")
+            source = _publish_source(store, task_id, b"# title\n")
+            request = DocumentProcessingRequest(
+                task_id=task_id,
+                step_id="rag-projection",
+                source_artifact=source,
+                profile=build_markdown_rag_projection_profile(),
+                trace_id="same-task-output",
+            )
+
+            first = processor.process(request)
+            second = processor.process(request)
+            try:
+                with first.content.open_reader() as reader:
+                    first_path = Path(reader.name)
+                with second.content.open_reader() as reader:
+                    second_path = Path(reader.name)
+
+                self.assertNotEqual(first_path, second_path)
+                self.assertEqual(64, len(first_path.parents[1].name))
+                self.assertEqual(64, len(second_path.parents[1].name))
+                self.assertLessEqual(len(first_path.name), 32)
+                self.assertLessEqual(len(second_path.name), 32)
+            finally:
+                first.close()
+                second.close()
 
     def test_ten_mib_data_uri_uses_bounded_memory_and_linear_streaming(self) -> None:
         with workspace_tempdir() as temporary:

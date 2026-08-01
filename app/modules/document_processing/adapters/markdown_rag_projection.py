@@ -14,10 +14,10 @@ import hashlib
 import logging
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
-from uuid import uuid4
+from typing import BinaryIO, Iterator
 
 from app.modules.document_processing.adapters.content import FileArtifactContent
 from app.modules.document_processing.domain import (
@@ -588,30 +588,29 @@ class MarkdownRagProjectionProcessorAdapter:
 
     def process(self, request: DocumentProcessingRequest) -> ProcessorOutput:
         self._validate_request(request)
-        # 使用截断哈希避免 Windows MAX_PATH (260) 限制：
-        # materialization_root(~92) + 16 + 1 + 14 + 1 + filename(16+1+8+5=30) ≈ 154
+        # 任务目录保留完整 SHA-256，避免长期运行及多实例环境中出现命名空间碰撞。
+        # 输出文件不再重复携带 64 位 step_key，而由 tempfile 在目录内原子分配短名称；
+        # 按故障环境约 92 字符的 root 计算，总路径约 92+1+64+1+14+1+17=190，
+        # 既低于传统 Windows MAX_PATH，又不需要截断任务身份或随机数。
         task_namespace = hashlib.sha256(
             request.task_id.value.encode("utf-8")
-        ).hexdigest()[:16]
+        ).hexdigest()
         scratch_directory = (
             self._materialization_root / task_namespace / "rag-projection"
         ).resolve()
         self._require_contained(scratch_directory, self._materialization_root)
         scratch_directory.mkdir(parents=True, exist_ok=True)
-        output_path = (
-            scratch_directory
-            / f"{request.step_key[:16]}.{uuid4().hex[:8]}.part"
-        ).resolve()
-        self._require_contained(output_path, scratch_directory)
+        output_path: Path | None = None
 
         try:
-            destination = output_path.open("xb")
             with (
                 self._source_store.open_reader(
                     request.source_artifact
                 ) as source,
-                destination,
+                self._open_owned_output(scratch_directory) as owned_output,
             ):
+                output_path, destination = owned_output
+                self._require_contained(output_path, scratch_directory)
                 stats = self._scanner.transform(source, destination)
                 destination.flush()
                 os.fsync(destination.fileno())
@@ -637,6 +636,13 @@ class MarkdownRagProjectionProcessorAdapter:
                 if stats.removed_images
                 else ()
             )
+            # 正常退出两个上下文后文件句柄已经关闭，才能把候选文件交给后续
+            # Artifact 发布流程。显式校验可以在优化模式下继续守住该不变量。
+            if output_path is None:
+                raise RagProjectionError(
+                    "rag_projection_output_missing",
+                    "RAG 投影输出文件未创建",
+                )
             return ProcessorOutput.with_cleanup(
                 content=FileArtifactContent(output_path),
                 kind=ArtifactKind.RAG_PROJECTION,
@@ -663,6 +669,49 @@ class MarkdownRagProjectionProcessorAdapter:
                 "rag_projection_unexpected_error",
                 "无法生成 RAG Markdown 投影",
             ) from exc
+
+    @staticmethod
+    @contextmanager
+    def _open_owned_output(
+        scratch_directory: Path,
+    ) -> Iterator[tuple[Path, BinaryIO]]:
+        """原子创建并持有一个短名称输出文件。
+
+        ``mkstemp`` 使用独占创建并在名称冲突时由标准库重试，适用于同一任务被
+        多线程或多实例同时执行的情况。文件描述符从创建成功起就由本上下文持有，
+        任何异常都会先关闭句柄，再尝试删除仅属于本次调用的文件，绝不删除其他
+        执行已经存在的碰撞目标。
+        """
+
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix="rag-",
+            suffix=".part",
+            dir=scratch_directory,
+        )
+        output_path = Path(raw_path).resolve()
+        try:
+            destination = os.fdopen(descriptor, "wb")
+        except BaseException:
+            # fdopen 极少失败，但失败时裸文件描述符仍归当前调用所有，必须显式关闭。
+            os.close(descriptor)
+            output_path.unlink(missing_ok=True)
+            raise
+
+        completed = False
+        try:
+            with destination:
+                yield output_path, destination
+            completed = True
+        finally:
+            if not completed:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "RAG 投影异常候选清理失败: scratch_name=%s",
+                        output_path.name,
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _validate_request(request: DocumentProcessingRequest) -> None:
@@ -699,16 +748,21 @@ class MarkdownRagProjectionProcessorAdapter:
             ) from exc
 
     @staticmethod
-    def _cleanup_scratch(path: Path, scratch_directory: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning(
-                "RAG 投影 scratch 文件清理失败: scratch_name=%s",
-                path.name,
-                exc_info=True,
-            )
-            return
+    def _cleanup_scratch(
+        path: Path | None,
+        scratch_directory: Path,
+    ) -> None:
+        # 源 Artifact 可能在目标文件创建前就打开失败，此时只需回收空目录。
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "RAG 投影 scratch 文件清理失败: scratch_name=%s",
+                    path.name,
+                    exc_info=True,
+                )
+                return
         for directory in (scratch_directory, scratch_directory.parent):
             try:
                 directory.rmdir()
