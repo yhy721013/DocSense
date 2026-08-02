@@ -7,6 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
+
 from app.modules.analysis.adapters import (
     ArtifactAnalysisTranslationAdapter,
     LegacyAnalysisFilePreparationAdapter,
@@ -488,6 +490,73 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
                 missing_artifact.error_code,
             )
             self.assertEqual(1, len(engine.calls))
+
+    def test_analysis_translation_maps_validated_raw_table_to_both_outputs(
+        self,
+    ) -> None:
+        """Analysis 两个结果字段都应得到真实表格，Engine 只接收单元格文本。"""
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "table.md"
+            source.write_text(
+                "<table border=\"1\">\n"
+                "<tr><th>Name</th><th>Value</th></tr>\n"
+                "<tr><td>Speed</td><td>30 knots</td></tr>\n"
+                "</table>\n",
+                encoding="utf-8",
+            )
+            preparer = self._document_preparer(root / "document")
+            artifact = preparer.prepare(
+                LocalDocumentPreparationRequest(
+                    task_id=TaskId("stage1h-cutover-table-translation"),
+                    source_path=source,
+                    logical_step="input",
+                    trace_id="stage1h-cutover-table-translation-trace",
+                )
+            ).prepared_artifact
+            engine = _RecordingTranslationEngine()
+            renderer = SafeHTMLTranslationRendererAdapter()
+            application = TranslatePreparedDocument(
+                reader=preparer.artifact_store,
+                engine=engine,
+                renderer=renderer,
+            )
+            adapter = ArtifactAnalysisTranslationAdapter(
+                document_translation=application,
+                engine=engine,
+                renderer=renderer,
+                mode_resolver=lambda: TranslationMode.MACHINE,
+            )
+
+            document = adapter.translate(
+                AnalysisTranslationRequest(
+                    execution=_execution(
+                        "stage1h-cutover-table-translation",
+                        file_name="table.md",
+                    ),
+                    prepared_artifact=artifact,
+                )
+            )
+
+            self.assertIs(
+                AnalysisTranslationOutcome.SUCCEEDED,
+                document.outcome,
+            )
+            self.assertEqual(
+                ["Name", "Value", "Speed", "30 knots"],
+                [call[0] for call in engine.calls],
+            )
+            for output in (
+                document.document_translation_one,
+                document.document_translation_two,
+            ):
+                soup = BeautifulSoup(output, "html.parser")
+                table = soup.select_one(".document-container > table")
+                self.assertIsNotNone(table)
+                self.assertEqual(2, len(table.find_all("tr")))
+                self.assertNotIn("border", table.attrs)
+                self.assertNotIn("&lt;td", output)
 
 
 if __name__ == "__main__":

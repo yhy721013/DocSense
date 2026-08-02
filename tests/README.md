@@ -624,6 +624,13 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     2,158 项、排除 13 项、执行 2,145 项，失败 0、错误 0、跳过 3。该结果只证明临时 SQLite、
     Fake/Mock 和 Flask Test Client 的 Windows 单实例离线行为；没有运行 `run.py`、真实
     AnythingLLM、停服清库或前端联调。
+56. 运行 Translation 严格表格 HTML 恢复门禁：执行
+    `venv\Scripts\python.exe -B -m unittest tests.test_translation_module
+    tests.test_stage1h_consumer_cutover tests.test_document_processing_formats
+    tests.test_analysis_translation_isolation -q`，并补跑 `test_analysis*.py` 定向发现及
+    Architecture/DocumentProcessing Architecture 门禁。必须覆盖合法表格恢复、危险/畸形/资源
+    超限候选整段转义、属性白名单、Text 不恢复、MinerU PPTX 当前输出、Analysis 两个结果字段、
+    Engine 只接收文本节点和共享 Renderer 并发确定性；不得把纯文本 MHTML 降级解释为可恢复表格。
 
 ## 执行限制
 

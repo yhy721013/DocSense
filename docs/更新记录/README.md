@@ -7,6 +7,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `260802-Analysis摘要翻译兼容路径删除执行记录.md` | 删除未公开全文翻译开关及摘要翻译兼容分支，将 Analysis Translation Port、Adapter、脚本和测试收窄为 prepared Artifact 全文翻译；保留现有响应字段且接口文档零修改。 |
+| `260802-Translation严格表格HTML恢复执行记录.md` | 保留原始 HTML 默认转义，仅恢复完整通过标签/结构/闭合/计数/资源/属性白名单的 Markdown 表格；覆盖 MinerU PPTX 形态、Analysis 双输出和并发确定性，接口文档零修改。 |
 
 ## 对话模块迁移与知识谱系独立接口
 
