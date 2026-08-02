@@ -9,8 +9,9 @@ from app.modules.debug.ports.chat_snapshot import (
     ChatDebugSession,
     ChatDebugSnapshot,
 )
-from app.services.chat.domain.chat_id import chat_id_public_value
-from app.services.chat.persistence.store import ChatPersistenceStore
+from app.modules.chat.domain.chat_id import chat_id_public_value
+from app.modules.chat.domain.identity import IDENTITY_KIND_FILE
+from app.modules.chat.adapters.sqlite.store import ChatPersistenceStore
 from app.services.core.database import DatabaseService
 
 
@@ -37,14 +38,21 @@ class LocalChatDebugSnapshotReadAdapter:
         for item in self._chat_store.sessions.list_all():
             if item.status == "deleted":
                 continue
-            try:
-                public_chat_id = chat_id_public_value(item.chat_id)
-            except ValueError:
-                # 不把非规范内部 chatId 回显给浏览器；日志也不记录其原值。
-                logger.warning("调试快照跳过非规范 chatId 的存量会话")
+            resolution = self._chat_store.identities.get_by_conversation_id(
+                item.conversation_id
+            )
+            if (
+                resolution is None
+                or resolution.binding.identity_kind != IDENTITY_KIND_FILE
+            ):
+                # 既有 Debug 合同只展示文件对话，不能把 Weaponry 的可信业务
+                # userId/architectureId 塞进 chatId 字段或输出到日志。
                 continue
+            public_chat_id = chat_id_public_value(resolution.binding.chat_id)
 
-            current_scope = self._chat_store.scopes.get_current_revision(item.chat_id)
+            current_scope = self._chat_store.scopes.get_current_revision(
+                item.conversation_id
+            )
             active_file_names = (
                 ()
                 if current_scope is None
@@ -56,7 +64,9 @@ class LocalChatDebugSnapshotReadAdapter:
                     public_chat_id,
                 )
             binding_count = len(
-                self._chat_store.document_bindings.list_current_by_chat(item.chat_id)
+                self._chat_store.document_bindings.list_current_by_chat(
+                    item.conversation_id
+                )
             )
             active_scope_member_count += len(active_file_names)
             workspace_binding_count += binding_count

@@ -839,6 +839,7 @@ class AnalysisResourceLifecycle:
             "document_location": session.document_location if session is not None else "",
             "content_sha256": session.content_sha256 if session is not None else "",
             "ingested_file_name": session.ingested_file_name if session is not None else "",
+            "structured_source_key": session.structured_source_key if session is not None else "",
             "lifecycle_events": [_event_payload(event) for event in state.lifecycle_events],
         }
 

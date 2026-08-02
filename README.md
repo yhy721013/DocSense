@@ -7,7 +7,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 - 文件解析：`POST /llm/analysis`
 - 报告生成：`POST /llm/generate-report`
 - 武器装备知识谱系解析：`POST /llm/weaponry`
-- 文件内容与知识谱系类别对话：`POST /llm/chat`（附加标题生成 `POST /llm/chat/title`、历史查询 `GET /llm/chat/history`、生成中断 `POST /llm/chat/abort` 及删除 `POST /llm/chat/delete`）
+- 文件对话：`POST /llm/chat`（附加标题、历史、中断和删除接口）
+- 知识谱系对话：`POST /llm/weaponry-chat`（附加标题、历史、中断和删除接口）
 - 分类节点变更：`POST /llm/reassign`
 - 任务查询与回调补发：`POST /llm/check-task`
 - 任务进度推送：`WS /llm/progress`
@@ -24,9 +25,10 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 | 层级 | 目录 | 职责 | 代表文件 |
 | --- | --- | --- | --- |
 | 接口层 | `app/blueprints/`、`app/adapters/web/`、`app/presenters/` | HTTP/WS/SSE 入参解析、框架映射、协议流式与响应展示、本地调试入口 | `llm.py` `report_requests.py` `report_submission.py` |
-| 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库、文件对话及任务级 Factory 契约 | `rag.py` `knowledge_index.py` `chat.py` |
-| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；文件分析、报告、武器谱、共享文档处理、翻译和统一任务边界均已迁入 | `analysis/` `report/` `weaponry/` `document_processing/` `translation/` `tasks/` |
-| 兼容业务层 | `app/services/llm_service/`、`app/services/chat/` | 保留现役任务兼容存储和文件对话应用；旧 Analysis、Report、Weaponry、Translation 执行器已在 1G-5 删除 | `task_service.py` `chat/application/` |
+| 应用端口层 | `app/ports/` | 定义供应商无关的 RAG、长期知识库及任务级 Factory 契约；Chat 专属端口归属 Chat 模块 | `rag.py` `knowledge_index.py` |
+| 模块业务层 | `app/modules/` | 按业务聚合 Domain/Application/Ports/Adapters；Chat、文件分析、报告、武器谱、共享文档处理、翻译和统一任务边界均已迁入 | `chat/` `analysis/` `report/` `weaponry/` `document_processing/` `translation/` `tasks/` |
+| 兼容业务层 | `app/services/llm_service/` | 保留现役任务兼容存储；旧 Analysis、Report、Weaponry、Translation 执行器已在 1G-5 删除 | `task_service.py` |
+| Chat 业务模块 | `app/modules/chat/` | 文件对话与知识谱系对话共用的 Domain/Application/Ports/Adapters；当前 SQLite 与内联调度只支持单实例 | `composition.py` `application/` `adapters/` |
 | 应用装配层 | `app/container.py` | 组装应用服务、供应商 Factory、配置和上传并发限制器 | `ApplicationServices` `create_application_services()` |
 | 核心基础层 | `app/services/core/` | 配置、路径、日志、数据库、进度中枢和 Prompt 构建 | `config.py` `settings.py` `database.py` `progress_hub.py` `prompts.py` |
 | 外部集成层 | `app/integrations/anythingllm/` | AnythingLLM Transport、执行策略、原子 Client、纯方案 B Gateway 与任务级 Factory | `transport.py` `policies.py` `documents.py` `workspaces.py` `threads.py` `rag_gateway.py` `factory.py` |
@@ -36,7 +38,7 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 
 ### 2.2 主要调用方向
 
-1. `blueprints -> web adapter/application/presenter`：报告、武器谱、分类节点变更、文件分析和任务检查均已遵循 Parser → Application → Presenter；Chat SSE 与 Progress WebSocket 的协议桥接仍位于蓝图中，但不得在蓝图内构造数据库、供应商 Client 或后台线程。
+1. `blueprints -> web adapter/application/presenter`：报告、武器谱、分类节点变更、文件分析、任务检查和 Chat 均遵循 Parser → Application → Presenter；蓝图只保留 Flask/SSE/WebSocket 协议桥接，不得构造数据库、供应商 Client 或后台线程。
 2. `blueprints -> app.container`：从 Flask 应用扩展读取服务与无状态 Factory，不创建模块级服务单例。
 3. `modules -> ports <- adapters`：现行业务 Application 只依赖供应商无关 Port/Factory；`llm_service/task_service.py` 只作为兼容 SQLite 事实底座，由模块 Adapter 隔离，不再承载旧业务 Worker。
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
@@ -131,6 +133,7 @@ docs/接口文档/
   知识谱系解析.md
   文件对话.md
   文件对话新增接口.md
+  知识谱系类别文件对话.md
   分类节点变更.md
 scripts/                            # 本地联调脚本
 tests/                              # unittest 测试用例
@@ -188,11 +191,16 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 | POST | `/llm/weaponry` | 武器装备知识谱系字段提取 |
 | POST | `/llm/check-task` | 查询任务状态，必要时补发回调 |
 | WS | `/llm/progress` | 任务进度订阅（目标公开契约只保留无 action 格式） |
-| POST | `/llm/chat` | 基于 `fileNames` 或 `architectureId` 冻结范围发起对话请求（SSE 流式响应下发） |
+| POST | `/llm/chat` | 基于 `chatId + fileNames` 发起文件对话（SSE 流式响应下发） |
 | POST | `/llm/chat/title` | 根据指定会话的本地已提交消息生成标题 |
 | GET | `/llm/chat/history` | 查询指定会话在本地持久化的已提交消息 |
 | POST | `/llm/chat/abort` | 请求中断指定会话当前活跃的生成任务 |
 | POST | `/llm/chat/delete` | 清理远端资源，全部成功后将本地会话标记为 `deleted` |
+| POST | `/llm/weaponry-chat` | 基于 `userId + architectureId` 发起知识谱系对话（SSE 流式响应下发） |
+| POST | `/llm/weaponry-chat/title` | 为知识谱系对话生成标题 |
+| GET | `/llm/weaponry-chat/history` | 查询知识谱系对话的本地已提交消息及 assistant 来源 Chunk |
+| POST | `/llm/weaponry-chat/abort` | 请求中断知识谱系对话当前活跃的生成任务 |
+| POST | `/llm/weaponry-chat/delete` | 清理远端资源和正文/Chunk，并释放复合业务身份 |
 | POST | `/llm/reassign` | 调整文档分类节点并迁移其 RAG workspace 关联 |
 
 本地调试路由（非甲方协议接口）：
@@ -296,22 +304,29 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
-   - 当前支持互斥的 `fileNames` 和 `architectureId` 两种范围模式；同一请求不能同时出现二者，同一 `chatId` 首次成功受理后会永久绑定范围模式，不能在后续请求中切换。
-   - `fileNames` 模式中，该字段表示本轮前端显式文件范围，不再是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
+   - 公开文件对话只接受 `chatId + fileNames`；原来复用该路径的 `architectureId` 模式已经下线，知识谱系对话改用独立的 `/llm/weaponry-chat*`。
+   - `fileNames` 表示本轮前端显式文件范围，不是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
    - 首次创建 `chatId` 且显式传入 `fileNames=[]` 时，受理事务把当时全部可用已解析文件冻结为 `automatic_initial` Scope；空知识库会冻结空范围，后续知识库新增文件不自动吸收。首次自动范围和任意显式范围都受 `DOCSENSE_CHAT_MAX_FILES` 约束。
-   - `architectureId` 模式中，每轮都必须传入与会话绑定值相同的规范化 ID；Chat 专属范围为 `1..9007199254740991`，保证历史中的 JSON number 可被浏览器精确表示，不改变 Weaponry 等其他业务的 64 位 ID 合同。首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续只复用首次快照，不因类别新增、删除、重新解析或重新分类而动态刷新、追加或替换成员。
    - AnythingLLM Workspace 与本地 binding heads 继续累计历史绑定，但每轮模型只接收 Effective Scope 的文档引用；累计绑定不能替代或扩大 Active Scope。
-   - `/llm/chat/history` 在 `fileNames` 模式下只为 user 消息返回该轮前端显式文件，空请求固定为 `files: []`；在 `architectureId` 模式下，user 消息只返回规范化后的 JSON number `architectureId`，不返回 `files`；assistant 消息不返回任一范围字段。
-   - 不可变会话 Binding、Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，Worker 只凭 `run_id` 恢复冻结的 Effective Scope。当前持久化迁移已到 Schema v6：v5 增加 architecture 模式绑定、运行输入与历史字段互斥约束；v6 增加正式受理前的持久化 Admission Guard、Chat 安全整数兜底和 files/architecture Scope 与 Binding 的对称约束。同一 `chatId` 冲突先于全局容量检查，因此与容量满同时发生时返回 409；Guard 本身不提前创建业务事实。
-   - 类别候选查询在 SQL 层最多读取 `DOCSENSE_CHAT_MAX_FILES + 1` 条用于超限判定，不把异常大类别完整装入内存。远端绑定必须按冻结的 `external_location` 得到唯一回执，缺失或重复时整批失败且不写部分 Binding；唯一回执允许提供规范化 `document_ref`。
-   - Requested/Active/Effective Scope 阶段 0～7 已完成，architecture 类别文件对话阶段 0～7 也已完成并通过离线关闭验收。后者完成 248 项 Chat、85 项合同/网关/架构、142 项相邻模块回归；安全全仓发现 2,033 项、排除 13 项、执行 2,020 项，失败 0、错误 0、2 项既有平台条件跳过。证据仅限 Windows、SQLite 单实例与离线 Fake，不代表真实 AnythingLLM、跨实例安全或生产就绪，详见 `docs/重构记录/260727-文件对话请求范围与活动范围分离实施计划.md` 和 `docs/重构记录/260728-知识谱系类别文件对话详细实施计划.md`。
+   - `/llm/chat/history` 只为 user 消息返回该轮前端显式文件，空请求固定为 `files: []`；assistant 消息不返回范围或来源 Chunk 字段。
+   - 不可变会话 Binding、Scope Revision/Head、run input 与 pending message 在同一 SQLite 事务中提交，执行器只凭 `run_id` 恢复冻结的 Effective Scope。同一 `chatId` 冲突先于全局容量检查；File 身份删除后保留永久墓碑，不会把旧 `chatId` 误建成新会话。
    - 同一 `chatId` 同时只有一个活跃流；`abort` 只持久化中断请求，由流在事件边界收敛为 `aborted`。SSE 的 `done`、`aborted`、`error` 都会结束本轮，其中 `aborted` 表示回答不完整，不等同于成功完成。
    - 客户端关闭 SSE 后不继续后台生成：执行尚未开始时丢弃该轮 user；执行已开始时保留 user、不保存不完整 assistant，并以失败状态收敛。
    - `GET /llm/chat/history` 以本地对话库中状态为 `committed` 的消息为权威数据源，不从 AnythingLLM Thread 读取历史接口结果；默认数据库为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`，可由 `DOCSENSE_CHAT_DB` 覆盖。
    - `POST /llm/chat/title` 仅使用本地已提交消息生成标题；`POST /llm/chat/abort` 向当前活跃 run 写入持久化中断标志，执行器在后续事件边界观察到标志后发送 `aborted` 终态。没有活跃 run 时接口仍返回 HTTP 200，但 `aborted=false`。
    - `POST /llm/chat/delete` 先清理远端 Thread、Workspace 及相关资源租约，全部成功后再把本地会话标记为 `deleted`；清理失败时会保留 `cleanup_failed` 恢复记录，将会话置为 `error` 并返回错误。
 
-7. `/llm/reassign`（分类节点变更）
+7. `/llm/weaponry-chat`（知识谱系对话体系）
+   - 五个接口固定使用 `businessType="weaponryChat"`，由 DocSense 可信业务 `userId` 与 `architectureId` 共同标识对话；不接收、返回或向 AnythingLLM 传递公开 `chatId`/用户身份。
+   - 两个 ID 的公开安全范围均为 `1..9007199254740991`。POST 中 `userId` 必须是 JSON number；`architectureId` 兼容 JSON number 和十进制字符串。History Query 的两个 ID 都允许前导零，未知字段和重复 Query 参数均严格拒绝。
+   - 首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续不因类别新增、删除、重新解析或重新分类而刷新。任一候选缺少非空 `originalFileName` 时整次范围失败，不回退到 `fileName`。
+   - AnythingLLM v1.15.0 流必须越过最后一个 `textResponseChunk(close=true)` 继续读取最终来源事件；常规回答以唯一 Finalization 收敛，Query 明确拒答允许 `textResponse(close=true, sources=[])` 收敛。其他缺失、重复或冲突终态均失败关闭。
+   - 成功 SSE 在全部 `textChunk` 后恰好发送一次 `sourceChunks`，再发送 `done`；每项包含无损 `content`、`fileName` 和 `originalFileName`。非字符串正文、未知/歧义来源、缺失原文件名均失败，不保存不完整 assistant 或 Chunk。
+   - History 保持裸消息数组；assistant 的 `chunks` 与当轮 SSE `sourceChunks` 在内容和顺序上完全一致，user 消息不含 `chunks`。正文、全部 Chunk、成功事件和 Run 终态在同一 SQLite 事务提交。
+   - 同一复合身份只允许一条未删除对话。删除必须先确认远端资源清理成功，再物理清除消息和 Chunk，只保留不含正文的最小审计事实并释放 Weaponry 身份；随后再次进入会创建新会话和新文件快照。
+   - 当前不对 `sourceChunks` 数量、Chunk 原文长度或 History 响应大小设置独立业务上限；既有每轮文件数、消息/模型输出和进程内流并发限制仍有效。完整公开字段、状态码、Header 与事件顺序以 `docs/接口文档/知识谱系类别文件对话.md` 为准。
+
+8. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
    - 安全方面要求调用前必须传输且一致匹配底库中存证的 `oldArchitectureId`。
    - 2026-07-24 的 1E-6 已将公开执行链切换为 `Parser → DocumentReassignmentService → Presenter`。
@@ -539,6 +554,18 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
 
 为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
+
+知识谱系对话当前不对 `sourceChunks` 数量、Chunk 原文长度或 History 响应大小设置独立业务
+上限，也不分页、截断或改写来源；上述既有文件数和模型输出限制仍照常生效。部署前必须按实际
+数据规模执行容量验证，并完成以下日志安全检查：
+
+- Web Server、API Gateway、负载均衡和反向代理不得记录
+  `/llm/weaponry-chat/history` 的原始 Query String；若平台不能关闭 Query 记录，至少必须在写入
+  前删除或不可逆脱敏 `userId`，并验证错误日志和追踪系统没有保留原值；
+- 五个知识谱系对话接口均不得启用请求体、SSE 帧或响应体采集，避免消息、Chunk、`fileName`、
+  `originalFileName` 和内部来源信息进入访问日志、APM 或异常快照；
+- 应用层日志捕获测试只能证明 DocSense Python 日志的已覆盖路径，不代表上游网关、Web Server、
+  Sidecar 或日志采集器已经脱敏；发布验收必须逐层检查实际日志配置和脱敏样例。
 
 报告 Dispatcher 当前同样只允许 `single_instance`，但会额外取得
 `${DOCSENSE_RUNTIME_DIR}/locks/report-dispatcher.lock` 的操作系统文件锁；第二个进程在公开
@@ -795,6 +822,7 @@ POSIX 权限位断言没有等价表达。执行前应先核对 `tests/README.md
 - 知识谱系解析：`docs/接口文档/知识谱系解析.md`
 - 文件对话：`docs/接口文档/文件对话.md`
 - 文件对话新增接口：`docs/接口文档/文件对话新增接口.md`
+- 知识谱系对话：`docs/接口文档/知识谱系类别文件对话.md`
 - 节点分类与文档变更：`docs/接口文档/分类节点变更.md`
 
 ## 10. Git 规范

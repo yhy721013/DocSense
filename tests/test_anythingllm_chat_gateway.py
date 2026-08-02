@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
-from app.integrations.anythingllm.chat_gateway import AnythingLLMChatGateway
+from app.modules.chat.adapters.anythingllm_gateway import AnythingLLMChatGateway
 from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
@@ -13,16 +13,20 @@ from app.integrations.anythingllm.errors import (
 from app.integrations.anythingllm.models import (
     AnythingLLMAnswer,
     AnythingLLMDocument,
+    AnythingLLMFinalization,
+    AnythingLLMStreamSource,
     AnythingLLMThread,
+    AnythingLLMTextDelta,
     AnythingLLMWorkspace,
 )
-from app.ports import (
+from app.modules.chat.ports import (
     ChatConversationNotFoundError,
     ChatDocumentRef,
     ChatResourceError,
     ChatResponseError,
     ChatRole,
     ChatSessionRefs,
+    ChatSourceFinalization,
 )
 
 
@@ -108,6 +112,7 @@ class _FakeThreadClient:
         self.ask_calls: list[dict[str, Any]] = []
         self.history_items: list[Mapping[str, Any]] = []
         self.stream_chunks: list[str] = []
+        self.stream_events: list[Any] = []
         self.stream_closed = False
         self.answer = AnythingLLMAnswer(text="ok", raw_text="ok", sources=())
         self.create_error: Exception | None = None
@@ -145,7 +150,7 @@ class _FakeThreadClient:
         mode: str,
         user_id: int | None = None,
         document_ids: Optional[Sequence[str]] = None,
-    ) -> Iterator[str]:
+    ) -> Iterator[AnythingLLMTextDelta]:
         self.stream_calls.append(
             {
                 "workspace_slug": workspace_slug,
@@ -157,10 +162,14 @@ class _FakeThreadClient:
             }
         )
 
-        def _chunks() -> Iterator[str]:
+        def _chunks() -> Iterator[AnythingLLMTextDelta]:
             try:
+                if self.stream_events:
+                    yield from self.stream_events
+                    return
                 for chunk in self.stream_chunks:
-                    yield chunk
+                    if chunk:
+                        yield AnythingLLMTextDelta(chunk)
             finally:
                 self.stream_closed = True
 
@@ -349,6 +358,38 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
                 document_refs=["document:missing"],
             )
         self.assertEqual([], self.thread_client.stream_calls)
+
+    def test_stream_message_preserves_typed_sources_and_empty_finalization(self) -> None:
+        marker = "docsense_ref:0123456789abcdef0123456789abcdef"
+        original = "  Chunk\r\n原文 e\u0301  "
+        self.thread_client.stream_events = [
+            AnythingLLMTextDelta("回答"),
+            AnythingLLMFinalization((
+                AnythingLLMStreamSource(
+                    content=original,
+                    structured_source_key=marker,
+                ),
+            )),
+        ]
+        events = list(
+            self.gateway.stream_message(
+                ChatSessionRefs("workspace-a", "thread-a"),
+                "hi",
+            )
+        )
+        self.assertEqual("回答", events[0].content)
+        self.assertIsInstance(events[1], ChatSourceFinalization)
+        self.assertEqual(original, events[1].sources[0].content)
+        self.assertEqual(marker, events[1].sources[0].structured_source_key)
+
+        self.thread_client.stream_events = [AnythingLLMFinalization(())]
+        empty_terminal = list(
+            self.gateway.stream_message(
+                ChatSessionRefs("workspace-a", "thread-a"),
+                "hi",
+            )
+        )[0]
+        self.assertEqual((), empty_terminal.sources)
 
     def test_invalid_chat_mode_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

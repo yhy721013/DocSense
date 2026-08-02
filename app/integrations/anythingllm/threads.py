@@ -17,7 +17,11 @@ from urllib.parse import quote
 from app.integrations.anythingllm.errors import AnythingLLMProtocolError
 from app.integrations.anythingllm.models import (
     AnythingLLMAnswer,
+    AnythingLLMFinalization,
+    AnythingLLMQueryRejection,
     AnythingLLMSource,
+    AnythingLLMStreamSource,
+    AnythingLLMTextDelta,
     AnythingLLMThread,
     json_text,
     require_mapping,
@@ -128,7 +132,10 @@ class AnythingLLMThreadClient:
 
         chunks: list[str] = []
         final_payload: Mapping[str, Any] | None = None
-        # ask 在收到最终事件后会提前结束 SSE 消费；closing 确保此时立即释放响应。
+        final_text: str | None = None
+        finalization_count = 0
+        # 同步入口也不能把任意 close=true 当作完整终态；继续读到协议终态或 EOF，
+        # closing 仍保证异常、正常完成和调用方取消时释放响应。
         with closing(
             self._transport.stream_sse(
                 path,
@@ -141,22 +148,47 @@ class AnythingLLMThreadClient:
                 for decoded in self._decode_sse_events(event):
                     event_type = str(decoded.get("type") or event.event or "")
                     text_value = decoded.get("textResponse")
-                    if event_type == "textResponseChunk" and isinstance(text_value, str):
-                        chunks.append(text_value)
-                    if decoded.get("close") or event_type == "textResponse":
+                    if event_type == "textResponseChunk":
+                        if text_value is not None and not isinstance(text_value, str):
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 线程问答文本片段必须是字符串"
+                            )
+                        if isinstance(text_value, str) and text_value:
+                            chunks.append(text_value)
+                        continue
+                    if event_type == "textResponse":
+                        if not isinstance(text_value, str):
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 线程问答最终文本必须是字符串"
+                            )
+                        if "sources" not in decoded:
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 线程问答终态缺少 sources 字段"
+                            )
+                        final_text = text_value
                         final_payload = decoded
-                        break
-                if final_payload is not None:
-                    break
+                        continue
+                    if event_type == "finalizeResponseStream":
+                        finalization_count += 1
+                        if finalization_count > 1:
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 线程问答返回重复 Finalization"
+                            )
+                        if "sources" not in decoded:
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 线程问答 Finalization 缺少 sources 字段"
+                            )
+                        final_payload = decoded
 
         if final_payload is None:
-            if not chunks:
-                raise AnythingLLMProtocolError(
-                    "AnythingLLM 线程问答未返回最终事件或文本片段"
-                )
-            final_payload = {"textResponse": "".join(chunks), "sources": []}
+            raise AnythingLLMProtocolError(
+                "AnythingLLM 线程问答未返回合法最终事件"
+            )
 
-        raw_text = self._answer_text(final_payload.get("textResponse"), chunks=chunks)
+        raw_text = self._answer_text(
+            final_text if final_text is not None else final_payload.get("textResponse"),
+            chunks=chunks,
+        )
         cleaned_text = self.clean_answer(raw_text)
         if not cleaned_text:
             raise AnythingLLMProtocolError("AnythingLLM 线程问答返回空文本")
@@ -197,14 +229,18 @@ class AnythingLLMThreadClient:
         mode: str,
         user_id: int | None = None,
         document_ids: Optional[Sequence[str]] = None,
-    ) -> Iterator[str]:
-        """向线程发送流式消息并依次产出可显示的文本片段。
+    ) -> Iterator[
+        AnythingLLMTextDelta | AnythingLLMFinalization | AnythingLLMQueryRejection
+    ]:
+        """按供应商顺序产出文本增量与一个经过验证的合法终态。
 
         ``mode`` 与同步问答一致为必填关键字参数，确保流式和非流式接口不会产生不同的
         隐式默认行为。
 
-        本方法保持 AnythingLLM 的事件顺序，不拼接或清理文本。调用方提前结束消费时应
-        关闭生成器，关闭动作会继续传递到传输层并释放上游响应。
+        v1.15.0 会先发送 ``textResponseChunk(close=true)``，随后才发送包含完整
+        ``sources`` 的 ``finalizeResponseStream``。因此 close 只是文本阶段提示，不能
+        终止读取。唯一例外是 Query 无上下文时的 ``textResponse + sources=[]``，它被
+        建模为独立 ``AnythingLLMQueryRejection``，不会伪装成 Finalization。
         """
         # 同步与流式问答必须共享同一文本规范，避免同一业务 Prompt 仅因传输方式不同而
         # 产生不同摘要或跨平台换行。异常信息沿用公共契约的 prompt 命名。
@@ -218,6 +254,8 @@ class AnythingLLMThreadClient:
         path = f"{self._thread_path(workspace_slug, thread_slug)}/stream-chat"
         emitted_chunk_count = 0
         final_event_received = False
+        finalization: AnythingLLMFinalization | None = None
+        query_rejection: AnythingLLMQueryRejection | None = None
         logger.debug(
             "开始 AnythingLLM 流式会话问答: mode=%s message_chars=%d file_count=%d",
             payload["mode"],
@@ -236,16 +274,85 @@ class AnythingLLMThreadClient:
                 for event in events:
                     for decoded in self._decode_sse_events(event):
                         event_type = str(decoded.get("type") or event.event or "")
-                        text_value = decoded.get("textResponse")
-                        if decoded.get("close") or event_type == "textResponse":
-                            final_event_received = True
+                        if finalization is not None or query_rejection is not None:
+                            # Finalization/Query 拒答是唯一协议终态。除空心跳与 [DONE]
+                            # （已由解码器过滤）外，终态后的任何 JSON 事件都意味着上游
+                            # 顺序不可信，不能把后续文本静默重排到终态之前。
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 流式会话在终态后返回额外事件"
+                            )
+                        if event_type in {"error", "abort", "aborted"} or decoded.get("error"):
+                            raise AnythingLLMProtocolError(
+                                "AnythingLLM 流式会话返回错误终态"
+                            )
+                        if event_type == "textResponseChunk":
+                            text_value = decoded.get("textResponse")
+                            if text_value is not None and not isinstance(text_value, str):
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM textResponseChunk.textResponse 必须是字符串"
+                                )
                             if isinstance(text_value, str) and text_value:
                                 emitted_chunk_count += 1
-                                yield text_value
-                            return
-                        if event_type == "textResponseChunk" and isinstance(text_value, str):
-                            emitted_chunk_count += 1
-                            yield text_value
+                                yield AnythingLLMTextDelta(text_value)
+                            # close=true 只结束文本片段阶段；继续消费 Finalization。
+                            continue
+                        if event_type == "finalizeResponseStream":
+                            if finalization is not None or query_rejection is not None:
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM 流式会话返回重复终态"
+                                )
+                            if "sources" not in decoded:
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM Finalization 缺少 sources 字段"
+                                )
+                            sources_value = require_sequence(
+                                decoded.get("sources"),
+                                context="流式 Finalization sources 字段",
+                            )
+                            finalization = AnythingLLMFinalization(
+                                tuple(
+                                    AnythingLLMStreamSource.from_payload(item)
+                                    for item in sources_value
+                                )
+                            )
+                            continue
+                        if event_type == "textResponse":
+                            if payload["mode"] != "query":
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM 常规流式回答缺少 Finalization"
+                                )
+                            if finalization is not None or query_rejection is not None:
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM 流式会话返回重复终态"
+                                )
+                            text_value = decoded.get("textResponse")
+                            if not isinstance(text_value, str) or text_value == "":
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM Query 拒答缺少文本"
+                                )
+                            if "sources" not in decoded:
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM Query 拒答缺少 sources 字段"
+                                )
+                            sources_value = require_sequence(
+                                decoded.get("sources"),
+                                context="Query 拒答 sources 字段",
+                            )
+                            if len(sources_value) != 0 or not decoded.get("close"):
+                                raise AnythingLLMProtocolError(
+                                    "AnythingLLM Query textResponse 不是合法无上下文终态"
+                                )
+                            query_rejection = AnythingLLMQueryRejection(text_value)
+                if finalization is not None:
+                    final_event_received = True
+                    yield finalization
+                    return
+                if query_rejection is not None:
+                    yield query_rejection
+                    return
+                raise AnythingLLMProtocolError(
+                    "AnythingLLM 流式会话未返回合法终态"
+                )
         finally:
             logger.debug(
                 "结束 AnythingLLM 流式会话问答: emitted_chunk_count=%d "

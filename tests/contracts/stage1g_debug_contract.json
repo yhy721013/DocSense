@@ -25,6 +25,11 @@
     {"method": "POST", "path": "/llm/generate-report"},
     {"method": "GET", "path": "/llm/progress"},
     {"method": "POST", "path": "/llm/reassign"},
+    {"method": "POST", "path": "/llm/weaponry-chat"},
+    {"method": "POST", "path": "/llm/weaponry-chat/abort"},
+    {"method": "POST", "path": "/llm/weaponry-chat/delete"},
+    {"method": "GET", "path": "/llm/weaponry-chat/history"},
+    {"method": "POST", "path": "/llm/weaponry-chat/title"},
     {"method": "POST", "path": "/llm/weaponry"}
   ],
   "callbackDebug": {

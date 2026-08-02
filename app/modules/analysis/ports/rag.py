@@ -224,6 +224,7 @@ class AnalysisRagSessionRef:
     document_location: str = ""
     content_sha256: str = ""
     ingested_file_name: str = ""
+    structured_source_key: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -244,15 +245,19 @@ class AnalysisRagSessionRef:
             "document_location": self.document_location,
             "content_sha256": self.content_sha256,
             "ingested_file_name": self.ingested_file_name,
+            "structured_source_key": self.structured_source_key,
         }
         normalized = {
             name: str(value or "").strip()
             for name, value in document_values.items()
-            if name != "ingested_file_name"
+            if name not in {"ingested_file_name", "structured_source_key"}
         }
         normalized["ingested_file_name"] = str(
             document_values["ingested_file_name"] or ""
         )
+        normalized["structured_source_key"] = str(
+            document_values["structured_source_key"] or ""
+        ).strip()
         if any(normalized.values()) and not all(normalized.values()):
             raise ValueError("文档引用必须整体为空或整体完整")
         if any(normalized.values()):
@@ -288,6 +293,7 @@ class AnalysisRagSessionRef:
         document_location: str,
         content_sha256: str,
         ingested_file_name: str,
+        structured_source_key: str,
     ) -> "AnalysisRagSessionRef":
         """返回同一会话绑定真实上传文档后的不可变引用。"""
 
@@ -300,6 +306,7 @@ class AnalysisRagSessionRef:
             document_location=document_location,
             content_sha256=content_sha256,
             ingested_file_name=ingested_file_name,
+            structured_source_key=structured_source_key,
         )
 
     def with_conversation_ref(self, conversation_ref: str) -> "AnalysisRagSessionRef":

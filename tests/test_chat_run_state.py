@@ -6,17 +6,18 @@ from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import unittest
 import sqlite3
+import zlib
 from threading import Barrier
 from unittest.mock import patch
 
-from app.services.chat.domain import (
+from app.modules.chat.domain import (
     CHAT_ARCHITECTURE_CANDIDATE_INVALID,
     CHAT_ARCHITECTURE_CANDIDATE_NOT_FOUND,
     CHAT_ARCHITECTURE_CANDIDATE_RESOLVED,
     CHAT_ARCHITECTURE_ERROR_INVALID,
     CHAT_ARCHITECTURE_ERROR_NOT_FOUND,
 )
-from app.services.chat import (
+from app.modules.chat import (
     RUN_FAILED,
     RUN_ACCEPTED,
     RUN_RUNNING,
@@ -38,6 +39,22 @@ from app.services.chat import (
     MESSAGE_COMMITTED,
     MESSAGE_DISCARDED,
 )
+from app.modules.chat.domain.identity import FileChatIdentity, WeaponryChatIdentity
+
+
+def _identity(value: str | int) -> FileChatIdentity:
+    """把测试标签稳定映射为合法文件对话身份。"""
+    if isinstance(value, int) or str(value).isdigit():
+        return FileChatIdentity(chat_id=int(value))
+    return FileChatIdentity(chat_id=zlib.crc32(str(value).encode("utf-8")) + 1)
+
+
+def _weaponry_identity(value: str | int, architecture_id: int) -> WeaponryChatIdentity:
+    """用独立 DocSense userId 构造知识谱系复合身份。"""
+    return WeaponryChatIdentity(
+        user_id=_identity(value).chat_id,
+        architecture_id=architecture_id,
+    )
 
 
 def _document_candidate(file_name: str) -> ChatDocumentCandidate:
@@ -101,22 +118,32 @@ class ChatRunLockServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
+    def _conversation_id(
+        self,
+        identity: FileChatIdentity | WeaponryChatIdentity,
+    ) -> str:
+        """解析已受理身份的内部 UUID，避免测试继续把公开 ID 当主键。"""
+        resolution = self.store.identities.resolve_any(identity)
+        self.assertIsNotNone(resolution)
+        assert resolution is not None
+        return resolution.conversation_id
+
     def test_same_chat_is_exclusive_until_run_completes(self) -> None:
         first = self.locks.try_acquire_chat_run(
-            chat_id="chat-a",
+            identity=_identity("chat-a"),
             run_id="run-a",
         )
 
         with self.assertRaises(ChatRunBusyError) as error:
             self.locks.try_acquire_chat_run(
-                chat_id="chat-a",
+                identity=_identity("chat-a"),
                 run_id="run-b",
             )
 
         self.locks.issue_execution_lease(run_id="run-a")
         completed = self.locks.complete_run("run-a")
         second = self.locks.try_acquire_chat_run(
-            chat_id="chat-a",
+            identity=_identity("chat-a"),
             run_id="run-b",
         )
 
@@ -131,25 +158,23 @@ class ChatRunLockServiceTests(unittest.TestCase):
         """Guard 竞争只影响临时协调表，不得提前创建 Session、Scope 或 run。"""
         selector = ChatScopeSelector.for_files(())
         lease = self.locks.reserve_chat_admission(
-            chat_id="chat-admission",
+            identity=_identity("chat-admission"),
             scope_selector=selector,
         )
 
         with self.assertRaises(ChatAdmissionBusyError):
             self.locks.reserve_chat_admission(
-                chat_id="chat-admission",
+                identity=_identity("chat-admission"),
                 scope_selector=selector,
             )
 
-        self.assertIsNone(self.store.sessions.get("chat-admission"))
-        self.assertEqual((), self.store.runs.list_active("chat-admission"))
         self.assertIsNone(
-            self.store.scopes.get_current_revision("chat-admission")
+            self.store.identities.resolve_any(_identity("chat-admission"))
         )
         self.locks.release_chat_admission(lease=lease)
 
         retry = self.locks.reserve_chat_admission(
-            chat_id="chat-admission",
+            identity=_identity("chat-admission"),
             scope_selector=selector,
         )
         self.locks.release_chat_admission(lease=retry)
@@ -157,12 +182,13 @@ class ChatRunLockServiceTests(unittest.TestCase):
     def test_admission_guard_is_consumed_by_atomic_run_acceptance(self) -> None:
         """正式受理必须在同一事务中消费 Guard，且之后由活动 run 继续互斥。"""
         selector = ChatScopeSelector.for_architecture(7)
+        identity = _weaponry_identity("chat-admission-accept", 7)
         lease = self.locks.reserve_chat_admission(
-            chat_id="chat-admission-accept",
+            identity=identity,
             scope_selector=selector,
         )
         run = self.locks.try_acquire_chat_run(
-            chat_id="chat-admission-accept",
+            identity=identity,
             run_id="run-admission-accept",
             user_message="问题",
             document_candidates=_architecture_candidates(7, "alpha.pdf"),
@@ -173,7 +199,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual(RUN_ACCEPTED, run.status)
         with self.assertRaises(ChatRunBusyError):
             self.locks.reserve_chat_admission(
-                chat_id="chat-admission-accept",
+                identity=identity,
                 scope_selector=selector,
             )
         # 成功受理后的幂等释放不能影响已经提交的运行事实。
@@ -186,27 +212,29 @@ class ChatRunLockServiceTests(unittest.TestCase):
         """请求崩溃遗留的过期 Guard 可回收，且不会伪造 Session 或运行事实。"""
         selector = ChatScopeSelector.for_files(())
         self.locks.reserve_chat_admission(
-            chat_id="chat-admission-expired",
+            identity=_identity("chat-admission-expired"),
             scope_selector=selector,
         )
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
                 """
-                UPDATE chat_admission_guards
+                UPDATE conversation_admissions
                 SET expires_at = '2000-01-01T00:00:00+00:00'
-                WHERE chat_id = 'chat-admission-expired'
+                WHERE identity_key = ?
                 """
+                ,
+                (_identity("chat-admission-expired").identity_key,),
             )
 
         recovered = self.locks.reserve_chat_admission(
-            chat_id="chat-admission-expired",
+            identity=_identity("chat-admission-expired"),
             scope_selector=selector,
         )
 
-        self.assertIsNone(self.store.sessions.get("chat-admission-expired"))
-        self.assertEqual(
-            (),
-            self.store.runs.list_active("chat-admission-expired"),
+        self.assertIsNone(
+            self.store.identities.resolve_any(
+                _identity("chat-admission-expired")
+            )
         )
         self.locks.release_chat_admission(lease=recovered)
 
@@ -219,11 +247,11 @@ class ChatRunLockServiceTests(unittest.TestCase):
         )
 
         with self.assertLogs(
-            "app.services.chat.locking.lock_service",
+            "app.modules.chat.adapters.sqlite.locking.lock_service",
             level="INFO",
         ) as captured:
             run = self.locks.try_acquire_chat_run(
-                chat_id="chat-default",
+                identity=_identity("chat-default"),
                 run_id="run-default",
                 user_message="请总结",
                 document_candidates=candidates,
@@ -231,7 +259,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             )
 
         run_input = self.store.run_inputs.get(run.run_id)
-        messages = self.store.messages.list_by_chat("chat-default")
+        messages = self.store.messages.list_by_chat(run.conversation_id)
         self.assertIsNotNone(run_input)
         assert run_input is not None
         self.assertEqual(
@@ -242,7 +270,9 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual("automatic_initial", run_input.selection_mode)
         self.assertTrue(run_input.effective_scope_revision_id)
         self.assertEqual((), messages[0].files)
-        current_scope = self.store.scopes.get_current_revision("chat-default")
+        current_scope = self.store.scopes.get_current_revision(
+            run.conversation_id
+        )
         self.assertIsNotNone(current_scope)
         assert current_scope is not None
         self.assertEqual(
@@ -266,7 +296,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
     def test_architecture_initial_admission_persists_one_frozen_scope(self) -> None:
         """首轮必须原子提交 Binding、Revision、run input 与消息选择器。"""
         run = self.locks.try_acquire_chat_run(
-            chat_id="chat-architecture-initial",
+            identity=_weaponry_identity("chat-architecture-initial", 7),
             run_id="run-architecture-initial",
             user_message="请总结类别",
             document_candidates=_architecture_candidates(
@@ -278,10 +308,10 @@ class ChatRunLockServiceTests(unittest.TestCase):
             max_files_per_request=2,
         )
 
-        binding = self.store.session_scope_bindings.get(run.chat_id)
+        binding = self.store.session_scope_bindings.get(run.conversation_id)
         run_input = self.store.run_inputs.get(run.run_id)
-        revision = self.store.scopes.get_current_revision(run.chat_id)
-        messages = self.store.messages.list_by_chat(run.chat_id)
+        revision = self.store.scopes.get_current_revision(run.conversation_id)
+        messages = self.store.messages.list_by_chat(run.conversation_id)
         self.assertIsNotNone(binding)
         self.assertIsNotNone(run_input)
         self.assertIsNotNone(revision)
@@ -304,8 +334,9 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
     def test_architecture_reuse_ignores_current_not_found_candidates(self) -> None:
         """已有同 ID 会话只复用旧快照，不受当前目录空结果影响。"""
+        identity = _weaponry_identity("chat-architecture-reuse", 11)
         initial = self.locks.try_acquire_chat_run(
-            chat_id="chat-architecture-reuse",
+            identity=identity,
             run_id="run-architecture-first",
             user_message="首轮",
             document_candidates=_architecture_candidates(11, "frozen.pdf"),
@@ -316,7 +347,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.locks.complete_run(initial.run_id)
 
         reused = self.locks.try_acquire_chat_run(
-            chat_id=initial.chat_id,
+            identity=identity,
             run_id="run-architecture-reuse",
             user_message="后续",
             document_candidates=_failed_architecture_candidates(11),
@@ -335,13 +366,14 @@ class ChatRunLockServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             1,
-            len(self.store.scopes.list_revisions_by_chat(initial.chat_id)),
+            len(self.store.scopes.list_revisions_by_chat(initial.conversation_id)),
         )
 
     def test_architecture_conflicts_are_reported_before_active_run(self) -> None:
         """模式和 ID 冲突优先于同 chat 的 active run 冲突。"""
+        identity = _weaponry_identity("chat-architecture-conflict", 21)
         self.locks.try_acquire_chat_run(
-            chat_id="chat-architecture-conflict",
+            identity=identity,
             run_id="run-architecture-active",
             user_message="首轮",
             document_candidates=_architecture_candidates(21, "frozen.pdf"),
@@ -351,7 +383,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         with self.assertRaises(ChatArchitectureIdConflictError):
             self.locks.try_acquire_chat_run(
-                chat_id="chat-architecture-conflict",
+                identity=identity,
                 run_id="run-wrong-id",
                 user_message="错误 ID",
                 document_candidates=_architecture_candidates(22, "other.pdf"),
@@ -360,7 +392,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             )
         with self.assertRaises(ChatScopeModeConflictError):
             self.locks.try_acquire_chat_run(
-                chat_id="chat-architecture-conflict",
+                identity=identity,
                 run_id="run-wrong-mode",
                 user_message="错误模式",
                 document_candidates=ChatDocumentSelectionCandidates(
@@ -397,11 +429,11 @@ class ChatRunLockServiceTests(unittest.TestCase):
         )
         for suffix, candidates, expected_error, limit in cases:
             with self.subTest(suffix=suffix):
-                chat_id = f"chat-architecture-{suffix}"
                 architecture_id = candidates.architecture_candidates.architecture_id
+                identity = _weaponry_identity(suffix, architecture_id)
                 with self.assertRaises(expected_error):
                     self.locks.try_acquire_chat_run(
-                        chat_id=chat_id,
+                        identity=identity,
                         run_id=f"run-{suffix}",
                         user_message="问题",
                         document_candidates=candidates,
@@ -410,13 +442,8 @@ class ChatRunLockServiceTests(unittest.TestCase):
                         ),
                         max_files_per_request=limit,
                     )
-                self.assertIsNone(self.store.sessions.get(chat_id))
-                self.assertIsNone(
-                    self.store.session_scope_bindings.get(chat_id)
-                )
+                self.assertIsNone(self.store.identities.resolve_any(identity))
                 self.assertIsNone(self.store.runs.get(f"run-{suffix}"))
-                self.assertIsNone(self.store.scopes.get_head(chat_id))
-                self.assertEqual((), self.store.messages.list_by_chat(chat_id))
 
     def test_fifty_concurrent_architecture_admissions_freeze_once(self) -> None:
         """50 个同 ID 首轮竞争只能产生一个 run、Binding 和 Revision。"""
@@ -424,12 +451,13 @@ class ChatRunLockServiceTests(unittest.TestCase):
         barrier = Barrier(worker_count)
         candidates = _architecture_candidates(41, "frozen.pdf")
         selector = ChatScopeSelector.for_architecture(41)
+        identity = _weaponry_identity("chat-architecture-concurrent", 41)
 
         def attempt(index: int) -> str:
             barrier.wait()
             try:
                 self.locks.try_acquire_chat_run(
-                    chat_id="chat-architecture-concurrent",
+                    identity=identity,
                     run_id=f"run-architecture-{index}",
                     user_message=f"question-{index}",
                     document_candidates=candidates,
@@ -445,16 +473,15 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         self.assertEqual(1, outcomes.count("accepted"))
         self.assertEqual(49, outcomes.count("busy"))
-        binding = self.store.session_scope_bindings.get(
-            "chat-architecture-concurrent"
-        )
+        conversation_id = self._conversation_id(identity)
+        binding = self.store.session_scope_bindings.get(conversation_id)
         self.assertIsNotNone(binding)
         assert binding is not None
         self.assertEqual(41, binding.architecture_id)
         self.assertEqual(
             1,
             len(self.store.scopes.list_revisions_by_chat(
-                "chat-architecture-concurrent"
+                conversation_id
             )),
         )
 
@@ -469,7 +496,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             barrier.wait()
             try:
                 self.locks.try_acquire_chat_run(
-                    chat_id="chat-architecture-mixed-ids",
+                    identity=_identity("chat-architecture-mixed-ids"),
                     run_id=f"run-architecture-mixed-id-{index}",
                     user_message=f"question-{index}",
                     document_candidates=_architecture_candidates(
@@ -493,22 +520,22 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual(1, outcomes.count("accepted"))
         self.assertEqual(24, outcomes.count("busy"))
         self.assertEqual(25, outcomes.count("architecture_id_conflict"))
-        binding = self.store.session_scope_bindings.get(
-            "chat-architecture-mixed-ids"
-        )
+        identity = _identity("chat-architecture-mixed-ids")
+        conversation_id = self._conversation_id(identity)
+        binding = self.store.session_scope_bindings.get(conversation_id)
         self.assertIsNotNone(binding)
         assert binding is not None
         self.assertIn(binding.architecture_id, (51, 52))
         self.assertEqual(
             1,
             len(self.store.scopes.list_revisions_by_chat(
-                "chat-architecture-mixed-ids"
+                conversation_id
             )),
         )
         self.assertEqual(
             1,
             len(self.store.messages.list_by_chat(
-                "chat-architecture-mixed-ids"
+                conversation_id
             )),
         )
 
@@ -536,7 +563,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
                     )
                     selector = ChatScopeSelector.for_files(("explicit.pdf",))
                 self.locks.try_acquire_chat_run(
-                    chat_id="chat-mixed-scope-modes",
+                    identity=_identity("chat-mixed-scope-modes"),
                     run_id=f"run-mixed-scope-mode-{index}",
                     user_message=f"question-{index}",
                     document_candidates=candidates,
@@ -555,27 +582,27 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.assertEqual(1, outcomes.count("accepted"))
         self.assertEqual(24, outcomes.count("busy"))
         self.assertEqual(25, outcomes.count("scope_mode_conflict"))
-        binding = self.store.session_scope_bindings.get(
-            "chat-mixed-scope-modes"
-        )
+        identity = _identity("chat-mixed-scope-modes")
+        conversation_id = self._conversation_id(identity)
+        binding = self.store.session_scope_bindings.get(conversation_id)
         self.assertIsNotNone(binding)
         assert binding is not None
         self.assertIn(binding.scope_mode, ("files", "architecture"))
         self.assertEqual(
             1,
             len(self.store.scopes.list_revisions_by_chat(
-                "chat-mixed-scope-modes"
+                conversation_id
             )),
         )
         self.assertEqual(
             1,
             len(self.store.messages.list_by_chat(
-                "chat-mixed-scope-modes"
+                conversation_id
             )),
         )
 
-    def test_fifty_different_chats_can_freeze_same_architecture(self) -> None:
-        """不同 chatId 共享类别 ID 时应相互隔离，且均可独立冻结快照。"""
+    def test_fifty_different_identities_can_freeze_same_architecture(self) -> None:
+        """不同复合身份共享 architectureId 时相互隔离，并可独立冻结快照。"""
 
         worker_count = 50
         barrier = Barrier(worker_count)
@@ -584,37 +611,43 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         def attempt(index: int) -> str:
             barrier.wait()
-            chat_id = f"chat-shared-architecture-{index}"
-            self.locks.try_acquire_chat_run(
-                chat_id=chat_id,
+            identity = _weaponry_identity(index + 1, 61)
+            run = self.locks.try_acquire_chat_run(
+                identity=identity,
                 run_id=f"run-shared-architecture-{index}",
                 user_message=f"question-{index}",
                 document_candidates=candidates,
                 scope_selector=selector,
                 max_files_per_request=1,
             )
-            return chat_id
+            return run.conversation_id
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            chat_ids = tuple(executor.map(attempt, range(worker_count)))
+            conversation_ids = tuple(executor.map(attempt, range(worker_count)))
 
-        self.assertEqual(worker_count, len(chat_ids))
-        for chat_id in chat_ids:
-            binding = self.store.session_scope_bindings.get(chat_id)
+        self.assertEqual(worker_count, len(conversation_ids))
+        for conversation_id in conversation_ids:
+            binding = self.store.session_scope_bindings.get(conversation_id)
             self.assertIsNotNone(binding)
             assert binding is not None
             self.assertEqual("architecture", binding.scope_mode)
             self.assertEqual(61, binding.architecture_id)
             self.assertEqual(
                 1,
-                len(self.store.scopes.list_revisions_by_chat(chat_id)),
+                len(self.store.scopes.list_revisions_by_chat(conversation_id)),
             )
-            self.assertEqual(1, len(self.store.messages.list_by_chat(chat_id)))
+            self.assertEqual(
+                1,
+                len(self.store.messages.list_by_chat(conversation_id)),
+            )
 
     def test_existing_session_without_binding_fails_closed(self) -> None:
-        """Schema v5 既有会话缺失不可变 Binding 时必须优先失败关闭。"""
+        """人工构造的既有会话缺失不可变 Binding 时必须优先失败关闭。"""
 
-        self.store.sessions.create_or_get(chat_id="chat-existing")
+        identity = _identity("chat-existing")
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         candidates = ChatDocumentSelectionCandidates(
             new_session_default_documents=(
                 _document_candidate("default.pdf"),
@@ -626,7 +659,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             "^existing chat session is missing immutable scope binding$",
         ):
             self.locks.try_acquire_chat_run(
-                chat_id="chat-existing",
+                identity=identity,
                 run_id="run-existing",
                 user_message="继续",
                 document_candidates=candidates,
@@ -635,7 +668,10 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         self.assertIsNone(self.store.runs.get("run-existing"))
         self.assertIsNone(self.store.run_inputs.get("run-existing"))
-        self.assertEqual((), self.store.messages.list_by_chat("chat-existing"))
+        self.assertEqual(
+            (),
+            self.store.messages.list_by_chat(conversation_id),
+        )
 
     def test_new_session_explicit_selection_has_distinct_safe_log(self) -> None:
         """显式选择应使用独立模式，并且日志只记录计数而不泄漏文件身份。"""
@@ -647,11 +683,11 @@ class ChatRunLockServiceTests(unittest.TestCase):
         )
 
         with self.assertLogs(
-            "app.services.chat.locking.lock_service",
+            "app.modules.chat.adapters.sqlite.locking.lock_service",
             level="INFO",
         ) as captured:
             self.locks.try_acquire_chat_run(
-                chat_id="chat-explicit",
+                identity=_identity("chat-explicit"),
                 run_id="run-explicit",
                 user_message="请总结",
                 document_candidates=candidates,
@@ -685,20 +721,18 @@ class ChatRunLockServiceTests(unittest.TestCase):
             "^fileNames超过文件对话数量上限$",
         ):
             self.locks.try_acquire_chat_run(
-                chat_id="chat-over-limit",
+                identity=_identity("chat-over-limit"),
                 run_id="run-over-limit",
                 user_message="请总结",
                 document_candidates=candidates,
                 max_files_per_request=1,
             )
 
-        self.assertIsNone(self.store.sessions.get("chat-over-limit"))
+        self.assertIsNone(
+            self.store.identities.resolve_any(_identity("chat-over-limit"))
+        )
         self.assertIsNone(self.store.runs.get("run-over-limit"))
         self.assertIsNone(self.store.run_inputs.get("run-over-limit"))
-        self.assertEqual(
-            (),
-            self.store.messages.list_by_chat("chat-over-limit"),
-        )
 
     def test_pending_user_failure_rolls_back_session_run_and_input(self) -> None:
         """写入待处理消息失败时，应回滚同一事务内创建的全部会话与运行事实。"""
@@ -719,26 +753,100 @@ class ChatRunLockServiceTests(unittest.TestCase):
                 "^injected pending message failure$",
             ):
                 self.locks.try_acquire_chat_run(
-                    chat_id="chat-write-failure",
+                    identity=_identity("chat-write-failure"),
                     run_id="run-write-failure",
                     user_message="请总结",
                     document_candidates=candidates,
                     max_files_per_request=5,
                 )
 
-        self.assertIsNone(self.store.sessions.get("chat-write-failure"))
         self.assertIsNone(
-            self.store.session_scope_bindings.get("chat-write-failure")
+            self.store.identities.resolve_any(_identity("chat-write-failure"))
         )
         self.assertIsNone(self.store.runs.get("run-write-failure"))
         self.assertIsNone(self.store.run_inputs.get("run-write-failure"))
-        self.assertIsNone(
-            self.store.scopes.get_current_revision("chat-write-failure")
+
+    def test_initial_admission_rolls_back_at_every_business_insert(self) -> None:
+        """首次受理任一业务写点失败时，都不得留下半条会话、范围、运行或消息。"""
+
+        # 这些表覆盖首次知识谱系对话同一事务中的完整写入顺序。使用 SQLite
+        # BEFORE INSERT 故障触发器可以在不修改生产代码的前提下逐点证明回滚，
+        # 同时避免 Mock 掉 Repository 后遗漏真实外键和触发器行为。
+        admission_tables = (
+            "conversations",
+            "conversation_identities",
+            "chat_session_scope_bindings",
+            "chat_scope_revisions",
+            "chat_scope_members",
+            "chat_scope_heads",
+            "chat_runs",
+            "chat_run_inputs",
+            "chat_messages",
+            "chat_message_files",
         )
-        self.assertEqual(
-            (),
-            self.store.messages.list_by_chat("chat-write-failure"),
-        )
+        for table_name in admission_tables:
+            with self.subTest(table_name=table_name):
+                with tempfile.TemporaryDirectory(
+                    ignore_cleanup_errors=True
+                ) as temporary_dir:
+                    db_path = f"{temporary_dir}/chat.sqlite3"
+                    ChatStore(db_path)
+                    with sqlite3.connect(db_path) as connection:
+                        connection.execute(
+                            f"""
+                            CREATE TRIGGER phase8_fail_insert
+                            BEFORE INSERT ON {table_name}
+                            BEGIN
+                                SELECT RAISE(ABORT, 'phase8 injected write failure');
+                            END
+                            """
+                        )
+                        connection.commit()
+
+                    locks = ChatRunLockService(db_path)
+                    if table_name == "chat_message_files":
+                        identity = FileChatIdentity(chat_id=801)
+                        document_candidates = ChatDocumentSelectionCandidates(
+                            explicit_documents=(
+                                _document_candidate("phase8.pdf"),
+                            )
+                        )
+                        scope_selector = ChatScopeSelector.for_files(
+                            ("phase8.pdf",)
+                        )
+                    else:
+                        identity = WeaponryChatIdentity(
+                            user_id=801,
+                            architecture_id=802,
+                        )
+                        document_candidates = _architecture_candidates(
+                            802,
+                            "phase8.pdf",
+                        )
+                        scope_selector = ChatScopeSelector.for_architecture(802)
+                    with self.assertRaises(sqlite3.DatabaseError):
+                        locks.try_acquire_chat_run(
+                            identity=identity,
+                            run_id="phase8-failed-admission",
+                            user_message="受理故障注入",
+                            document_candidates=document_candidates,
+                            scope_selector=scope_selector,
+                            max_files_per_request=1,
+                        )
+
+                    with sqlite3.connect(db_path) as connection:
+                        for business_table in admission_tables:
+                            row_count = connection.execute(
+                                f"SELECT COUNT(*) FROM {business_table}"
+                            ).fetchone()[0]
+                            self.assertEqual(
+                                0,
+                                row_count,
+                                msg=(
+                                    f"{table_name} 写入失败后仍残留 "
+                                    f"{business_table} 事实"
+                                ),
+                            )
 
     def test_fifty_concurrent_first_admissions_accept_only_one_run(self) -> None:
         worker_count = 50
@@ -748,12 +856,13 @@ class ChatRunLockServiceTests(unittest.TestCase):
                 _document_candidate("all.pdf"),
             )
         )
+        identity = _identity("chat-concurrent-default")
 
         def attempt(index: int) -> str:
             barrier.wait()
             try:
                 self.locks.try_acquire_chat_run(
-                    chat_id="chat-concurrent-default",
+                    identity=identity,
                     run_id=f"run-concurrent-{index}",
                     user_message=f"question-{index}",
                     document_candidates=candidates,
@@ -768,9 +877,8 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         self.assertEqual(1, outcomes.count("accepted"))
         self.assertEqual(worker_count - 1, outcomes.count("busy"))
-        active_runs = self.store.runs.list_active(
-            "chat-concurrent-default"
-        )
+        conversation_id = self._conversation_id(identity)
+        active_runs = self.store.runs.list_active(conversation_id)
         self.assertEqual(1, len(active_runs))
         run_input = self.store.run_inputs.get(active_runs[0].run_id)
         self.assertIsNotNone(run_input)
@@ -780,9 +888,9 @@ class ChatRunLockServiceTests(unittest.TestCase):
             tuple(item.file_name for item in run_input.files),
         )
         revisions = self.store.scopes.list_revisions_by_chat(
-            "chat-concurrent-default"
+            conversation_id
         )
-        head = self.store.scopes.get_head("chat-concurrent-default")
+        head = self.store.scopes.get_head(conversation_id)
         self.assertEqual(1, len(revisions))
         self.assertIsNotNone(head)
         assert head is not None
@@ -796,7 +904,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
         """同一会话并发替换范围时，只允许 accepted 运行推进一次 Head。"""
 
         initial = self.locks.try_acquire_chat_run(
-            chat_id="chat-concurrent-explicit",
+            identity=_identity("chat-concurrent-explicit"),
             run_id="run-initial",
             user_message="initial",
             document_candidates=ChatDocumentSelectionCandidates(
@@ -817,7 +925,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             barrier.wait()
             try:
                 self.locks.try_acquire_chat_run(
-                    chat_id="chat-concurrent-explicit",
+                    identity=_identity("chat-concurrent-explicit"),
                     run_id=run_id,
                     user_message=f"question-{index}",
                     document_candidates=ChatDocumentSelectionCandidates(
@@ -842,9 +950,9 @@ class ChatRunLockServiceTests(unittest.TestCase):
             status == "busy" for status, _ in outcomes
         ))
         revisions = self.store.scopes.list_revisions_by_chat(
-            "chat-concurrent-explicit"
+            initial.conversation_id
         )
-        head = self.store.scopes.get_head("chat-concurrent-explicit")
+        head = self.store.scopes.get_head(initial.conversation_id)
         self.assertEqual(2, len(revisions))
         self.assertIsNotNone(head)
         assert head is not None
@@ -863,7 +971,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
         """既有会话显式范围超限时，Head、Revision 和运行事实必须全量回滚。"""
 
         initial = self.locks.try_acquire_chat_run(
-            chat_id="chat-explicit-over-limit",
+            identity=_identity("chat-explicit-over-limit"),
             run_id="run-initial",
             user_message="initial",
             document_candidates=ChatDocumentSelectionCandidates(
@@ -876,7 +984,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
         self.locks.issue_execution_lease(run_id=initial.run_id)
         self.locks.complete_run(initial.run_id)
         previous_head = self.store.scopes.get_head(
-            "chat-explicit-over-limit"
+            initial.conversation_id
         )
         self.assertIsNotNone(previous_head)
 
@@ -885,7 +993,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             "^fileNames超过文件对话数量上限$",
         ):
             self.locks.try_acquire_chat_run(
-                chat_id="chat-explicit-over-limit",
+                identity=_identity("chat-explicit-over-limit"),
                 run_id="run-over-limit",
                 user_message="replace",
                 document_candidates=ChatDocumentSelectionCandidates(
@@ -899,12 +1007,12 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
         self.assertEqual(
             previous_head,
-            self.store.scopes.get_head("chat-explicit-over-limit"),
+            self.store.scopes.get_head(initial.conversation_id),
         )
         self.assertEqual(
             1,
             len(self.store.scopes.list_revisions_by_chat(
-                "chat-explicit-over-limit"
+                initial.conversation_id
             )),
         )
         self.assertIsNone(self.store.runs.get("run-over-limit"))
@@ -922,7 +1030,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             )
         )
         run = self.locks.try_acquire_chat_run(
-            chat_id="40001",
+            identity=_identity("40001"),
             run_id="run-thousand-effective",
             user_message="请总结",
             document_candidates=candidates,
@@ -940,20 +1048,20 @@ class ChatRunLockServiceTests(unittest.TestCase):
             status=MESSAGE_COMMITTED,
         )
 
-        history = ChatHistoryService(self.store).list_history("40001")
+        history = ChatHistoryService(self.store).list_history(_identity(40001))
 
         self.assertEqual(1, len(history))
         self.assertEqual([], history[0]["files"])
 
     def test_failed_run_releases_chat_for_next_attempt(self) -> None:
         self.locks.try_acquire_chat_run(
-            chat_id="chat-fail",
+            identity=_identity("chat-fail"),
             run_id="run-fail",
         )
         self.locks.issue_execution_lease(run_id="run-fail")
         failed = self.locks.fail_run("run-fail", error_message="stream failed")
         retry = self.locks.try_acquire_chat_run(
-            chat_id="chat-fail",
+            identity=_identity("chat-fail"),
             run_id="run-retry",
         )
 
@@ -962,11 +1070,11 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
     def test_different_chats_do_not_block_each_other(self) -> None:
         first = self.locks.try_acquire_chat_run(
-            chat_id="chat-one",
+            identity=_identity("chat-one"),
             run_id="run-one",
         )
         second = self.locks.try_acquire_chat_run(
-            chat_id="chat-two",
+            identity=_identity("chat-two"),
             run_id="run-two",
         )
 
@@ -975,7 +1083,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
     def test_request_abort_sets_flag_on_active_run(self) -> None:
         self.locks.try_acquire_chat_run(
-            chat_id="chat-abort",
+            identity=_identity("chat-abort"),
             run_id="run-abort",
         )
 
@@ -986,7 +1094,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
     def test_discard_unstarted_run_hides_the_accepted_user_message(self) -> None:
         """已受理状态从未领取执行权时，断开连接不应产生历史轮次。"""
         run = self.locks.try_acquire_chat_run(
-            chat_id="chat-discard",
+            identity=_identity("chat-discard"),
             run_id="run-discard",
             user_message="尚未执行",
         )
@@ -996,14 +1104,14 @@ class ChatRunLockServiceTests(unittest.TestCase):
             error_message="response closed before execution",
         )
 
-        message = self.store.messages.list_by_chat("chat-discard")[0]
+        message = self.store.messages.list_by_chat(run.conversation_id)[0]
         self.assertEqual(RUN_FAILED, discarded.status)
         self.assertEqual(MESSAGE_DISCARDED, message.status)
-        self.assertEqual((), self.store.runs.list_active("chat-discard"))
+        self.assertEqual((), self.store.runs.list_active(run.conversation_id))
 
     def test_heartbeat_updates_active_run(self) -> None:
         started = self.locks.try_acquire_chat_run(
-            chat_id="chat-heartbeat",
+            identity=_identity("chat-heartbeat"),
             run_id="run-heartbeat",
         )
         self.locks.issue_execution_lease(run_id="run-heartbeat")
@@ -1034,7 +1142,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             stale_after_seconds=1,
         )
         locks.try_acquire_chat_run(
-            chat_id="chat-stale",
+            identity=_identity("chat-stale"),
             run_id="run-stale",
         )
         with sqlite3.connect(self.db_path) as connection:
@@ -1052,7 +1160,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             )
 
         retry = locks.try_acquire_chat_run(
-            chat_id="chat-stale",
+            identity=_identity("chat-stale"),
             run_id="run-after-stale",
         )
         stale = self.store.runs.get("run-stale")
@@ -1070,7 +1178,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
             stale_after_seconds=1,
         )
         locks.try_acquire_chat_run(
-            chat_id="chat-stale-explicit",
+            identity=_identity("chat-stale-explicit"),
             run_id="run-stale-explicit",
         )
         with sqlite3.connect(self.db_path) as connection:
@@ -1087,8 +1195,13 @@ class ChatRunLockServiceTests(unittest.TestCase):
                 ),
             )
 
-        expired = locks.expire_stale_runs_for_chat(chat_id="chat-stale-explicit")
-        active = self.store.runs.list_active("chat-stale-explicit")
+        conversation_id = self._conversation_id(
+            _identity("chat-stale-explicit")
+        )
+        expired = locks.expire_stale_runs_for_chat(
+            conversation_id=conversation_id
+        )
+        active = self.store.runs.list_active(conversation_id)
 
         self.assertEqual(["run-stale-explicit"], [run.run_id for run in expired])
         self.assertEqual(RUN_FAILED, expired[0].status)
@@ -1097,7 +1210,7 @@ class ChatRunLockServiceTests(unittest.TestCase):
 
     def test_terminal_run_rejects_illegal_follow_up_state_changes(self) -> None:
         self.locks.try_acquire_chat_run(
-            chat_id="chat-terminal",
+            identity=_identity("chat-terminal"),
             run_id="run-terminal",
         )
         self.locks.issue_execution_lease(run_id="run-terminal")

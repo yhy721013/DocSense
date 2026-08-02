@@ -253,6 +253,10 @@ def _case(index: int) -> _ParallelAnalysisCase:
         document_location=f"location:{task_id.value}",
         content_sha256=hashlib.sha256(task_id.value.encode("utf-8")).hexdigest(),
         ingested_file_name=f"{task_id.value}.txt",
+        structured_source_key=(
+            "docsense_ref:"
+            + hashlib.sha256(task_id.value.encode("utf-8")).hexdigest()[:32]
+        ),
     )
     return _ParallelAnalysisCase(
         index=index,

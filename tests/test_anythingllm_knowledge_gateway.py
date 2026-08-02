@@ -119,6 +119,7 @@ class _KnowledgeGatewayHarness:
             external_location=document.location,
             content_sha256=content_sha256,
             ingested_file_name="hash.pdf",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
 
     def _upload(self, _file_path: str, **_kwargs) -> AnythingLLMDocument:
@@ -251,7 +252,11 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
             self.assertEqual(record["ingested_file_name"], "hash.pdf")
             self.assertEqual(
                 record["metadata"],
-                {"country": "中国", "channel": "陆基"},
+                {
+                    "country": "中国",
+                    "channel": "陆基",
+                    "docSource": prepared.structured_source_key,
+                },
             )
             operation = harness.task_service.knowledge_index_operations.get(
                 harness.collection.ref,
@@ -274,6 +279,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 external_location=location,
                 content_sha256="b" * 64,
                 ingested_file_name="prepared-hash.xlsx",
+                structured_source_key="docsense_ref:" + "b" * 32,
             )
 
             def find_with_workspace_id(
@@ -417,6 +423,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 external_location=old_location,
                 content_sha256="a" * 64,
                 ingested_file_name="prepared-old.xlsx",
+                structured_source_key="docsense_ref:" + "a" * 32,
             )
             harness.gateway.store_prepared_document(
                 harness.collection,
@@ -435,6 +442,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 external_location=new_location,
                 content_sha256="b" * 64,
                 ingested_file_name="prepared-new.xlsx",
+                structured_source_key="docsense_ref:" + "b" * 32,
             )
             harness.document_client.delete_document_artifact.side_effect = (
                 AssertionError("替换旧 XLSX 不应删除全局目录")

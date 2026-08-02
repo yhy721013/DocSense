@@ -1,0 +1,421 @@
+"""供应商与存储产品无关的文件对话运行租约契约。
+
+这里定义的是应用层对“谁有权继续执行某次运行”的表达，而不是某一种数据库锁、
+消息队列或分布式锁的实现。当前 SQLite 适配器只能提供单应用实例内的运行权校验，
+因此不会伪造租约令牌或围栏令牌；未来共享持久化工作进程适配器必须在本模块的
+契约下提供真实的条件领取、续租和围栏能力。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from app.modules.chat.domain.events import ChatStreamEvent
+from app.modules.chat.domain.identity import ConversationIdentity
+from app.modules.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
+from app.modules.chat.domain.models import ChatMessageSourceChunk, ChatRun
+
+if TYPE_CHECKING:
+    from app.modules.chat.domain.document_candidates import (
+        ChatDocumentSelectionCandidates,
+    )
+    from app.modules.chat.domain.document_scope import ChatScopeSelector
+
+
+def _required_text(value: str, *, name: str) -> str:
+    """规范化并校验租约内部使用的必填标识，避免空值进入协调逻辑。"""
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{name} cannot be empty")
+    return normalized
+
+
+@dataclass(frozen=True)
+class ChatRunLeaseCapabilities:
+    """一个运行协调适配器真实具备的租约能力。
+
+    能力对象用于启动装配和测试门禁，而不是业务分支的替代品。特别是，单实例支持
+    与共享实例支持两个字段分别表达适配器已验证的部署能力；未来能力更强的适配器
+    无需因为否定式字段而被拒绝。
+    """
+
+    supports_single_instance: bool
+    supports_shared_instances: bool
+    supports_conditional_claim: bool
+    supports_lease_renewal: bool
+    supports_fencing: bool
+    requires_execution_lease_for_mutations: bool
+
+
+SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES = ChatRunLeaseCapabilities(
+    supports_single_instance=True,
+    supports_shared_instances=False,
+    supports_conditional_claim=True,
+    supports_lease_renewal=True,
+    supports_fencing=False,
+    requires_execution_lease_for_mutations=False,
+)
+
+
+@dataclass(frozen=True)
+class ChatRunLease:
+    """仅在服务端内部流转的一次运行执行所有权证明。
+
+    租约令牌和围栏令牌字段预留给未来共享持久化与工作进程。当前单实例实现会同时
+    留空两者，并通过能力对象明确声明其不具备跨实例围栏保障。二者必须同时存在，
+    防止调用方误把不完整租约当成可用的分布式锁。
+    """
+
+    run_id: str
+    conversation_id: str
+    owner_instance_id: str
+    lease_token: str = ""
+    fencing_token: int | None = None
+    expires_at: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", _required_text(self.run_id, name="run_id"))
+        object.__setattr__(self, "conversation_id", _required_text(self.conversation_id, name="conversation_id"))
+        object.__setattr__(
+            self,
+            "owner_instance_id",
+            _required_text(self.owner_instance_id, name="owner_instance_id"),
+        )
+        token = str(self.lease_token or "").strip()
+        expires_at = str(self.expires_at or "").strip()
+        fencing_token = self.fencing_token
+        if isinstance(fencing_token, bool):
+            raise TypeError("fencing_token must be int or None")
+        if fencing_token is not None and (
+            not isinstance(fencing_token, int) or fencing_token < 1
+        ):
+            raise ValueError("fencing_token must be a positive integer or None")
+        if bool(token) != (fencing_token is not None):
+            raise ValueError(
+                "lease_token and fencing_token must either both be present or both be absent"
+            )
+        if expires_at and not token:
+            raise ValueError("expires_at requires a lease_token")
+        object.__setattr__(self, "lease_token", token)
+        object.__setattr__(self, "expires_at", expires_at)
+
+    @property
+    def has_fencing(self) -> bool:
+        """返回该租约是否可用于跨实例的令牌与围栏条件写入。"""
+        return bool(self.lease_token and self.fencing_token is not None)
+
+
+@dataclass(frozen=True)
+class ChatAdmissionLease:
+    """一次 ``chatId`` 请求在正式受理前持有的短期准入证明。
+
+    该证明不属于公开接口，也不表示 Session、Scope 或 run 已经创建。它只负责让同一
+    ``chatId`` 的并发请求先得到稳定 409，再由持有者申请全局流容量。未来共享数据库
+    实现应把 token 与过期时间作为条件删除/消费的一部分。
+    """
+
+    identity: ConversationIdentity
+    conversation_id: str
+    owner_instance_id: str
+    admission_token: str
+    scope_mode: str
+    architecture_id: int | None
+    expires_at: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ConversationIdentity):
+            raise TypeError("identity must implement ConversationIdentity")
+        object.__setattr__(
+            self,
+            "conversation_id",
+            str(self.conversation_id or "").strip(),
+        )
+        object.__setattr__(
+            self,
+            "owner_instance_id",
+            _required_text(self.owner_instance_id, name="owner_instance_id"),
+        )
+        object.__setattr__(
+            self,
+            "admission_token",
+            _required_text(self.admission_token, name="admission_token"),
+        )
+        object.__setattr__(
+            self,
+            "scope_mode",
+            _required_text(self.scope_mode, name="scope_mode"),
+        )
+        object.__setattr__(
+            self,
+            "expires_at",
+            _required_text(self.expires_at, name="expires_at"),
+        )
+        if self.scope_mode not in {"files", "architecture"}:
+            raise ValueError("scope_mode must be files or architecture")
+        architecture_id = self.architecture_id
+        if isinstance(architecture_id, bool) or (
+            architecture_id is not None
+            and (
+                not isinstance(architecture_id, int)
+                or architecture_id < 1
+                or architecture_id > MAX_CHAT_ARCHITECTURE_ID
+            )
+        ):
+            raise ValueError(
+                "architecture_id must be a JavaScript-safe positive integer "
+                "or None"
+            )
+        if self.scope_mode == "files" and architecture_id is not None:
+            raise ValueError("files admission lease cannot bind architecture_id")
+        if self.scope_mode == "architecture" and architecture_id is None:
+            raise ValueError(
+                "architecture admission lease requires architecture_id"
+            )
+
+
+class ChatRunLeaseLostError(RuntimeError):
+    """执行者提交心跳或终态时已不再拥有对应运行的运行权。"""
+
+    def __init__(self, *, run_id: str, reason: str) -> None:
+        self.run_id = _required_text(run_id, name="run_id")
+        self.reason = _required_text(reason, name="reason")
+        super().__init__(f"chat run execution lease is no longer valid: {self.reason}")
+
+
+class ChatRunBusyError(RuntimeError):
+    """同一对话已存在活动运行。"""
+
+    def __init__(self, *, conversation_id: str, active_run_id: str) -> None:
+        super().__init__("current chat already has an active run")
+        self.conversation_id = conversation_id
+        self.active_run_id = active_run_id
+
+
+class ChatAdmissionBusyError(RuntimeError):
+    """同一公开身份已有请求处于正式受理前的准入阶段。"""
+
+    def __init__(
+        self,
+        *,
+        identity_kind: str = "",
+        conversation_id: str = "",
+    ) -> None:
+        super().__init__("current chat already has an admission in progress")
+        self.identity_kind = str(identity_kind or "").strip()
+        self.conversation_id = str(conversation_id or "").strip()
+
+
+class ChatRunInactiveError(RuntimeError):
+    """中断请求与已经进入终态的运行发生竞争。"""
+
+    def __init__(self, *, run_id: str, status: str) -> None:
+        super().__init__("chat run is no longer active")
+        self.run_id = run_id
+        self.status = status
+
+
+class ChatSessionUnavailableError(RuntimeError):
+    """会话当前状态不允许受理新运行。"""
+
+    def __init__(self, *, conversation_id: str, status: str) -> None:
+        super().__init__("chat session is not active")
+        self.conversation_id = conversation_id
+        self.status = status
+
+
+class ChatSessionDeleteBusyError(RuntimeError):
+    """删除与活动运行或另一删除操作发生竞争。"""
+
+    def __init__(self, *, conversation_id: str, reason: str) -> None:
+        super().__init__(reason)
+        self.conversation_id = conversation_id
+        self.reason = reason
+
+
+@runtime_checkable
+class ChatRunCoordinator(Protocol):
+    """协调运行生命周期及内部执行租约的产品无关边界。
+
+    未来工作进程只能经由携带 ``ChatRunLease`` 的续租和终态提交接口更新运行；
+    具体实现必须将租约和围栏令牌作为条件更新的一部分。当前 SQLite 单实例实现
+    保留相同签名，但其能力对象会明确标记不具备围栏能力。
+    """
+
+    @property
+    def lease_capabilities(self) -> ChatRunLeaseCapabilities:
+        """返回此协调器实际可提供的租约能力。"""
+        ...
+
+    def try_acquire_chat_run(
+        self,
+        *,
+        identity: ConversationIdentity,
+        run_id: str | None = None,
+        user_message: str | None = None,
+        user_files: tuple[tuple[str, str], ...] = (),
+        input_documents: tuple[tuple[str, str, str, str, str], ...] = (),
+        document_candidates: "ChatDocumentSelectionCandidates | None" = None,
+        scope_selector: "ChatScopeSelector | None" = None,
+        admission_lease: ChatAdmissionLease | None = None,
+        max_files_per_request: int | None = None,
+    ) -> ChatRun:
+        """原子选择文档、受理运行，并保持同一会话的活动运行互斥。"""
+        ...
+
+    def reserve_chat_admission(
+        self,
+        *,
+        identity: ConversationIdentity,
+        scope_selector: "ChatScopeSelector",
+    ) -> ChatAdmissionLease:
+        """在不创建业务事实的前提下取得同一 chatId 的独占准入证明。"""
+        ...
+
+    def release_chat_admission(self, *, lease: ChatAdmissionLease) -> None:
+        """按 token 幂等释放尚未被正式受理事务消费的准入证明。"""
+        ...
+
+    def begin_chat_deletion(self, *, conversation_id: str) -> None:
+        """原子切换会话到删除中的准入状态。"""
+        ...
+
+    def issue_execution_lease(self, *, run_id: str) -> ChatRunLease:
+        """为已受理的运行生成内部执行所有权证明。"""
+        ...
+
+    def validate_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
+        """校验执行者仍可继续推进该运行。"""
+        ...
+
+    def heartbeat_execution_lease(self, *, lease: ChatRunLease) -> ChatRun:
+        """使用执行租约续期；未来实现必须执行令牌与围栏条件更新。"""
+        ...
+
+    def complete_run_with_execution_lease(
+        self,
+        *,
+        lease: ChatRunLease,
+        user_message_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+        source_chunks: tuple[ChatMessageSourceChunk, ...] = (),
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """使用执行租约原子提交成功终态及本地消息。"""
+        ...
+
+    def fail_run_with_execution_lease(
+        self,
+        *,
+        lease: ChatRunLease,
+        user_message_id: str,
+        error_message: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """使用执行租约原子提交失败终态及本地用户消息。"""
+        ...
+
+    def abort_run_with_execution_lease(
+        self,
+        *,
+        lease: ChatRunLease,
+        user_message_id: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """使用执行租约原子提交中断终态及本地用户消息。"""
+        ...
+
+    def complete_run(self, run_id: str) -> ChatRun:
+        """收敛未进入执行器的成功运行，供兼容恢复路径使用。"""
+        ...
+
+    def fail_run(self, run_id: str, *, error_message: str) -> ChatRun:
+        """收敛未进入执行器的失败运行，供受理失败路径使用。"""
+        ...
+
+    def discard_unstarted_run(
+        self,
+        *,
+        run_id: str,
+        error_message: str,
+    ) -> ChatRun:
+        """收敛从未领取执行权的已受理运行，并丢弃待处理用户消息。"""
+        ...
+
+    def abort_run(self, run_id: str) -> ChatRun:
+        """收敛未进入执行器的中断运行。"""
+        ...
+
+    def request_abort(self, run_id: str) -> ChatRun:
+        """持久化取消请求；通知只用于降低延迟，不能替代此事实来源。"""
+        ...
+
+    def expire_stale_runs_for_chat(self, *, conversation_id: str) -> tuple[ChatRun, ...]:
+        """释放超时的单实例运行，避免旧执行者永久占用会话。"""
+        ...
+
+    def heartbeat_run(self, run_id: str) -> ChatRun:
+        """兼容的无租约心跳入口，仅限当前单实例适配器。"""
+        ...
+
+    def complete_run_with_messages(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """兼容的无租约成功提交入口，仅限当前单实例适配器。"""
+        ...
+
+    def complete_run_with_reply(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+        source_chunks: tuple[ChatMessageSourceChunk, ...] = (),
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """原子提交 assistant、来源 Chunk、事件和成功终态。"""
+        ...
+
+    def fail_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        error_message: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """兼容的无租约失败提交入口，仅限当前单实例适配器。"""
+        ...
+
+    def abort_run_with_user(
+        self,
+        *,
+        run_id: str,
+        user_message_id: str,
+        terminal_event: ChatStreamEvent | None = None,
+    ) -> ChatRun:
+        """兼容的无租约中断提交入口，仅限当前单实例适配器。"""
+        ...
+
+
+__all__ = [
+    "ChatAdmissionLease",
+    "ChatAdmissionBusyError",
+    "ChatRunCoordinator",
+    "ChatRunBusyError",
+    "ChatRunInactiveError",
+    "ChatRunLease",
+    "ChatRunLeaseCapabilities",
+    "ChatRunLeaseLostError",
+    "ChatSessionDeleteBusyError",
+    "ChatSessionUnavailableError",
+    "SINGLE_INSTANCE_CHAT_RUN_LEASE_CAPABILITIES",
+]

@@ -157,6 +157,7 @@ class AnalysisPortsTests(unittest.TestCase):
             document_location="location:ports-demo",
             content_sha256="a" * 64,
             ingested_file_name="ports-demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         open_request = AnalysisRagSessionOpenRequest(
             execution=execution,
@@ -483,6 +484,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         request = AnalysisRagRequest(
             execution,
@@ -500,6 +502,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:2",
             "b" * 64,
             "other.txt",
+            structured_source_key="docsense_ref:" + "b" * 32,
         )
         wrong_result = AnalysisRagResult(
             execution=other_execution,
@@ -556,6 +559,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         request = AnalysisRagRequest(
             execution,
@@ -603,6 +607,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         request = AnalysisRagRequest(
             execution,
@@ -635,6 +640,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         rag_request = AnalysisRagRequest(
             execution,

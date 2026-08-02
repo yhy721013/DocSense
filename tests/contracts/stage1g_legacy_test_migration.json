@@ -1880,9 +1880,9 @@
           "sourceTest": "tests/test_chat_debug_preview.py::ChatDebugPreviewTests.test_legacy_string_chat_id_is_not_returned_to_debug_page",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_debug_adapters.py::DebugAdapterTests.test_chat_adapter_hides_noncanonical_legacy_chat_id"
+            "tests/test_debug_adapters.py::DebugAdapterTests.test_chat_adapter_hides_weaponry_identity_from_file_debug"
           ],
-          "semanticReason": "Chat Debug 的快照读取、错误收敛和 HTTP 投影已按 Adapter/Application/Route 分层。"
+          "semanticReason": "旧字符串 chatId 已按无需兼容决策退出；现行等价隔离门禁确保文件 Debug 不展示知识谱系复合身份。"
         },
         {
           "sourceTest": "tests/test_chat_debug_preview.py::ChatDebugPreviewTests.test_query_failure_returns_stable_empty_error_payload",

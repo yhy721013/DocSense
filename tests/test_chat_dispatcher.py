@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.chat import (
+from app.modules.chat import (
     ChatRunDispatcher,
     ChatStreamEvent,
     InlineChatRunDispatcher,

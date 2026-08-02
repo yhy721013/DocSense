@@ -644,6 +644,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
             document_location="location:application",
             content_sha256="a" * 64,
             ingested_file_name="rag-input.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         opened = AnalysisRagSessionOpenResult(
             session=pending,

@@ -53,6 +53,7 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
             external_location=document.document_location,
             content_sha256=document.content_sha256,
             ingested_file_name=document.ingested_file_name,
+            structured_source_key=document.structured_source_key,
         )
         metadata = KnowledgeDocumentMetadata(
             file_name=request.metadata.file_name,

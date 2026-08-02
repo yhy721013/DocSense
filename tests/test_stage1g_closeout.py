@@ -63,6 +63,7 @@ class Stage1GCloseoutAssetTests(unittest.TestCase):
 
         module_names = (
             "analysis",
+            "chat",
             "debug",
             "document_processing",
             "reassign",

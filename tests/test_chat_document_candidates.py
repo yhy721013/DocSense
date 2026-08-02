@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import FrozenInstanceError
 
-from app.services.chat import (
+from app.modules.chat import (
     ChatArchitectureCandidates,
     ChatDocumentCandidate,
     ChatDocumentSelectionCandidates,
@@ -44,7 +44,7 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
                 new_session_default_documents=(_document("default.pdf"),),
             )
 
-    def test_payload_round_trip_uses_only_primitive_schema_v2_values(self) -> None:
+    def test_payload_round_trip_uses_only_primitive_schema_v3_values(self) -> None:
         candidates = ChatDocumentSelectionCandidates(
             new_session_default_documents=(
                 _document("alpha.pdf"),
@@ -55,7 +55,7 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
         payload = candidates.to_payload()
         restored = ChatDocumentSelectionCandidates.from_payload(payload)
 
-        self.assertEqual(2, payload["schema_version"])
+        self.assertEqual(3, payload["schema_version"])
         self.assertIsInstance(payload["new_session_default_documents"], list)
         self.assertEqual(candidates, restored)
         payload["new_session_default_documents"][0]["file_name"] = "changed.pdf"
@@ -89,7 +89,7 @@ class ChatDocumentSelectionCandidatesTests(unittest.TestCase):
         ).to_payload()
 
         invalid_version = dict(valid)
-        invalid_version["schema_version"] = 3
+        invalid_version["schema_version"] = 4
         with self.assertRaisesRegex(ValueError, "schema_version"):
             ChatDocumentSelectionCandidates.from_payload(invalid_version)
 

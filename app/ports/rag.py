@@ -377,6 +377,7 @@ class PreparedDocumentRef:
     external_location: str
     content_sha256: str
     ingested_file_name: str
+    structured_source_key: str
 
     def __post_init__(self) -> None:
         """拒绝无法被可靠审计或转交长期知识库的空引用。"""
@@ -384,6 +385,9 @@ class PreparedDocumentRef:
             raise ValueError("PreparedDocumentRef.document_ref 不能为空")
         if not str(self.external_location or "").strip():
             raise ValueError("PreparedDocumentRef.external_location 不能为空")
+        normalized_source_key = str(self.structured_source_key or "").strip()
+        if not normalized_source_key:
+            raise ValueError("PreparedDocumentRef.structured_source_key 不能为空")
         normalized_digest = str(self.content_sha256 or "").strip().casefold()
         if (
             len(normalized_digest) != 64
@@ -406,6 +410,7 @@ class PreparedDocumentRef:
             "ingested_file_name",
             normalized_ingested_file_name,
         )
+        object.__setattr__(self, "structured_source_key", normalized_source_key)
 
 
 @dataclass(frozen=True)

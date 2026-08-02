@@ -12,8 +12,9 @@ from app.modules.debug.adapters import (
     FileCallbackHistoryReadAdapter,
     LocalChatDebugSnapshotReadAdapter,
 )
-from app.services.chat import ChatRunLockService, ChatStore
-from app.services.chat.domain import ChatDocumentCandidate, ChatDocumentSelectionCandidates
+from app.modules.chat import ChatRunLockService, ChatStore
+from app.modules.chat.domain import ChatDocumentCandidate, ChatDocumentSelectionCandidates
+from app.modules.chat.domain.identity import FileChatIdentity, WeaponryChatIdentity
 from app.services.core.database import DatabaseService
 
 
@@ -120,8 +121,8 @@ class DebugAdapterTests(unittest.TestCase):
         chat_path = str(self.root / "chat.sqlite3")
         chat_store = ChatStore(db_path=chat_path)
         kb_service = DatabaseService(db_path=str(self.root / "knowledge.sqlite3"))
-        ChatRunLockService(chat_path).try_acquire_chat_run(
-            chat_id="10001",
+        run = ChatRunLockService(chat_path).try_acquire_chat_run(
+            identity=FileChatIdentity(chat_id=10001),
             run_id="debug-adapter-run",
             user_message="question",
             document_candidates=ChatDocumentSelectionCandidates(
@@ -137,7 +138,7 @@ class DebugAdapterTests(unittest.TestCase):
             max_files_per_request=5,
         )
         chat_store.document_bindings.add(
-            chat_id="10001",
+            conversation_id=run.conversation_id,
             file_name="alpha.pdf",
             original_name="Alpha.pdf",
             document_ref="document:alpha",
@@ -167,9 +168,17 @@ class DebugAdapterTests(unittest.TestCase):
 
         chat_path = str(self.root / "chat-deleted.sqlite3")
         chat_store = ChatStore(db_path=chat_path)
-        chat_store.sessions.create_or_get(chat_id="10002")
-        chat_store.sessions.set_status(chat_id="10002", status="deleting")
-        chat_store.sessions.set_status(chat_id="10002", status="deleted")
+        resolution = chat_store.identities.create_conversation(
+            FileChatIdentity(chat_id=10002)
+        )
+        chat_store.sessions.set_status(
+            conversation_id=resolution.conversation_id,
+            status="deleting",
+        )
+        chat_store.sessions.set_status(
+            conversation_id=resolution.conversation_id,
+            status="deleted",
+        )
 
         snapshot = LocalChatDebugSnapshotReadAdapter(
             chat_store=chat_store,
@@ -180,12 +189,14 @@ class DebugAdapterTests(unittest.TestCase):
 
         self.assertEqual((), snapshot.sessions)
 
-    def test_chat_adapter_hides_noncanonical_legacy_chat_id(self) -> None:
-        """非公开整数 chatId 只能留在本地存量数据中，不能泄露给 Debug 页面。"""
+    def test_chat_adapter_hides_weaponry_identity_from_file_debug(self) -> None:
+        """File Debug 只投影文件对话，不暴露 Weaponry 复合身份。"""
 
         chat_path = str(self.root / "chat-legacy-id.sqlite3")
         chat_store = ChatStore(db_path=chat_path)
-        chat_store.sessions.create_or_get(chat_id="legacy-chat")
+        chat_store.identities.create_conversation(
+            WeaponryChatIdentity(user_id=7, architecture_id=9)
+        )
 
         snapshot = LocalChatDebugSnapshotReadAdapter(
             chat_store=chat_store,

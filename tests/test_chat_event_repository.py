@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from app.services.chat import (
+from app.modules.chat import (
     ChatRunEventRepository,
     ChatStore,
     ChatStreamEvent,
@@ -17,8 +17,8 @@ class ChatRunEventRepositoryTests(unittest.TestCase):
         self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
         self.store = ChatStore(f"{self.tmp}/chat.sqlite3")
-        self.store.sessions.create_or_get(chat_id="chat-events")
-        self.store.runs.create(run_id="run-events", chat_id="chat-events")
+        self.store.sessions.create_or_get(conversation_id="chat-events")
+        self.store.runs.create(run_id="run-events", conversation_id="chat-events")
         self.store.runs.mark_running("run-events")
 
     def tearDown(self) -> None:

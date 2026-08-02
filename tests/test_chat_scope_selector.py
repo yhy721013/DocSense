@@ -10,61 +10,29 @@ from app.adapters.web import (
     ChatScopeSelectorValidationError,
     parse_chat_scope_selector,
 )
-from app.services.chat.domain.document_scope import (
-    CHAT_SCOPE_MODE_ARCHITECTURE,
+from app.modules.chat.domain.document_scope import (
     CHAT_SCOPE_MODE_FILES,
 )
-from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
 
 
 _ROOT = Path(__file__).resolve().parents[1]
 
 
 class ChatScopeSelectorWebTests(unittest.TestCase):
-    """验证字段存在性、ID 规范化和既有 fileNames 行为。"""
+    """验证旧 architecture 模式下线和既有 fileNames 行为。"""
 
-    def test_architecture_and_file_names_are_mutually_exclusive_by_presence(self) -> None:
-        for file_names in ([], ["a.pdf"], None):
-            with self.subTest(file_names=file_names):
+    def test_architecture_id_is_never_recognized_on_file_route(self) -> None:
+        for params in (
+            {"architectureId": 7},
+            {"architectureId": "0007"},
+            {"architectureId": 7, "fileNames": []},
+        ):
+            with self.subTest(params=params):
                 with self.assertRaisesRegex(
                     ChatScopeSelectorValidationError,
                     "architectureId与fileNames不能同时传入",
                 ):
-                    parse_chat_scope_selector(
-                        {"architectureId": 7, "fileNames": file_names}
-                    )
-
-    def test_architecture_id_is_normalized_to_domain_integer(self) -> None:
-        for raw_value in (1, "1", "0001", MAX_CHAT_ARCHITECTURE_ID):
-            with self.subTest(raw_value=raw_value):
-                selector = parse_chat_scope_selector(
-                    {"architectureId": raw_value}
-                )
-                self.assertEqual(CHAT_SCOPE_MODE_ARCHITECTURE, selector.scope_mode)
-                self.assertIsInstance(selector.architecture_id, int)
-                self.assertEqual(int(raw_value), selector.architecture_id)
-                self.assertEqual((), selector.file_names)
-
-    def test_architecture_id_rejects_null_bool_and_non_decimal_values(self) -> None:
-        cases = (
-            (None, "architectureId不能为空"),
-            (True, "architectureId必须为1到9007199254740991之间的正整数"),
-            (1.0, "architectureId必须为1到9007199254740991之间的正整数"),
-            ("1e3", "architectureId必须为1到9007199254740991之间的正整数"),
-            ("１", "architectureId必须为1到9007199254740991之间的正整数"),
-            (
-                MAX_CHAT_ARCHITECTURE_ID + 1,
-                "architectureId必须为1到9007199254740991之间的正整数",
-            ),
-            ("9" * 10000, "architectureId必须为1到9007199254740991之间的正整数"),
-        )
-        for raw_value, expected_error in cases:
-            with self.subTest(raw_type=type(raw_value).__name__):
-                with self.assertRaisesRegex(
-                    ChatScopeSelectorValidationError,
-                    expected_error,
-                ):
-                    parse_chat_scope_selector({"architectureId": raw_value})
+                    parse_chat_scope_selector(params)
 
     def test_missing_both_selectors_preserves_existing_file_error(self) -> None:
         with self.assertRaisesRegex(
@@ -96,8 +64,8 @@ class ChatScopeDomainBoundaryTests(unittest.TestCase):
             "app.integrations",
         )
         for relative_path in (
-            "app/services/chat/domain/document_candidates.py",
-            "app/services/chat/domain/document_scope.py",
+            "app/modules/chat/domain/document_candidates.py",
+            "app/modules/chat/domain/document_scope.py",
         ):
             source = (_ROOT / relative_path).read_text(encoding="utf-8")
             tree = ast.parse(source)

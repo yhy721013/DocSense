@@ -65,7 +65,7 @@ from app.modules.weaponry.adapters import (
     WeaponryTaskCommandCodec,
 )
 from app.modules.weaponry.composition import compose_weaponry_application_services
-from app.services.chat import (
+from app.modules.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
     ChatCommandService,

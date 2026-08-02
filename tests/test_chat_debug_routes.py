@@ -3,6 +3,7 @@ import tempfile
 from unittest.mock import patch
 
 from app import create_app
+from app.modules.chat.domain.identity import FileChatIdentity
 from tests.test_chat import _build_test_services
 
 
@@ -20,13 +21,16 @@ class ChatDebugRouteTests(unittest.TestCase):
         self._tempdir.__exit__(None, None, None)
 
     def test_chat_bootstrap_api_returns_local_sessions_and_files(self):
-        self.chat_store.sessions.create_or_get(
-            chat_id="10001",
+        resolution = self.chat_store.identities.create_conversation(
+            FileChatIdentity(chat_id=10001)
+        )
+        self.chat_store.sessions.update_refs(
+            conversation_id=resolution.conversation_id,
             workspace_ref="ws-1",
             thread_ref="th-1",
         )
         self.chat_store.document_bindings.add(
-            chat_id="10001",
+            conversation_id=resolution.conversation_id,
             file_name="alpha.pdf",
             original_name="alpha.pdf",
             document_ref="document:doc-alpha",

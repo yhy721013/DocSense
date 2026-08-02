@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 1,
+  "implementationGate": "implemented",
+  "identity": {
+    "kind": "weaponry",
+    "fields": [
+      "userId",
+      "architectureId"
+    ],
+    "userIdMinimum": 1,
+    "userIdMaximum": 9007199254740991,
+    "architectureIdMinimum": 1,
+    "architectureIdMaximum": 9007199254740991,
+    "getAllowsLeadingZero": true,
+    "responseJsonType": "number",
+    "anythingllmUserContext": "existing_configured_user"
+  },
+  "routes": [
+    {
+      "id": "send",
+      "method": "POST",
+      "path": "/llm/weaponry-chat",
+      "topLevelFields": [
+        "businessType",
+        "params"
+      ],
+      "paramsFields": [
+        "userId",
+        "architectureId",
+        "message"
+      ]
+    },
+    {
+      "id": "title",
+      "method": "POST",
+      "path": "/llm/weaponry-chat/title",
+      "topLevelFields": [
+        "businessType",
+        "params"
+      ],
+      "paramsFields": [
+        "userId",
+        "architectureId"
+      ]
+    },
+    {
+      "id": "history",
+      "method": "GET",
+      "path": "/llm/weaponry-chat/history",
+      "queryFields": [
+        "userId",
+        "architectureId"
+      ],
+      "rejectDuplicateQueryFields": true
+    },
+    {
+      "id": "abort",
+      "method": "POST",
+      "path": "/llm/weaponry-chat/abort",
+      "topLevelFields": [
+        "businessType",
+        "params"
+      ],
+      "paramsFields": [
+        "userId",
+        "architectureId"
+      ]
+    },
+    {
+      "id": "delete",
+      "method": "POST",
+      "path": "/llm/weaponry-chat/delete",
+      "topLevelFields": [
+        "businessType",
+        "params"
+      ],
+      "paramsFields": [
+        "userId",
+        "architectureId"
+      ]
+    }
+  ],
+  "businessType": "weaponryChat",
+  "strictRequestFields": true,
+  "successSseHeaders": {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no"
+  },
+  "sse": {
+    "successOrder": [
+      "chatInfo",
+      "textChunk*",
+      "sourceChunks",
+      "done"
+    ],
+    "terminalEvents": [
+      "done",
+      "aborted",
+      "error"
+    ],
+    "sourceChunksOnSuccessCount": 1,
+    "sourceChunksOnFailureCount": 0,
+    "chatInfoFields": [
+      "userId",
+      "architectureId",
+      "isNewChat"
+    ],
+    "sourceChunksFields": [
+      "userId",
+      "architectureId",
+      "chunks"
+    ],
+    "doneFields": [
+      "userId",
+      "architectureId"
+    ]
+  },
+  "sourceChunk": {
+    "fields": [
+      "content",
+      "fileName",
+      "originalFileName"
+    ],
+    "contentRequiresJsonString": true,
+    "contentPreservesExactStringValue": true,
+    "preservesUpstreamOrder": true,
+    "deduplicates": false,
+    "emptySourcesAllowed": true,
+    "originalFileNameMissingPolicy": "reject_entire_scope",
+    "originalFileNameFallback": false,
+    "sseAndHistoryMustMatchExactly": true,
+    "resourceLimit": null
+  },
+  "history": {
+    "envelope": "bare_array",
+    "userFields": [
+      "role",
+      "content",
+      "timestamp"
+    ],
+    "assistantFields": [
+      "role",
+      "content",
+      "timestamp",
+      "chunks"
+    ],
+    "returnsCommittedMessagesOnly": true,
+    "pagination": false,
+    "resourceLimit": null
+  },
+  "scope": {
+    "directFilesOnly": true,
+    "includeDescendants": false,
+    "freezeOnFirstAcceptedSend": true,
+    "refreshAfterCreation": false,
+    "recreateAfterCompletedDelete": true,
+    "invalidMemberFailsEntireScope": true
+  },
+  "lifecycleStates": [
+    "missing_or_deleted",
+    "active_without_history",
+    "active_idle",
+    "run_active",
+    "title_active",
+    "deleting",
+    "cleanup_failed"
+  ],
+  "completion": {
+    "linearizationPoint": "local_success_transaction_commit",
+    "sourceChunksAfterCommit": true,
+    "doneAfterCommit": true,
+    "abortWinsBeforeCommit": true,
+    "historyRecoversCommittedReplyAfterDisconnect": true
+  },
+  "deletion": {
+    "physicalMessageDelete": true,
+    "physicalSourceChunkDelete": true,
+    "retainsBody": false,
+    "retainsMinimalAuditOnly": true,
+    "releasesWeaponryIdentityAfterCleanup": true,
+    "releasesFileChatIdentity": false,
+    "repeatAfterSuccessStatus": 404
+  },
+  "errors": [
+    {
+      "id": "unknown_field",
+      "status": 400,
+      "text": "请求包含未知字段"
+    },
+    {
+      "id": "duplicate_query",
+      "status": 400,
+      "text": "Query参数不能重复"
+    },
+    {
+      "id": "invalid_scope",
+      "status": 400,
+      "text": "architectureId对应类别文件无法形成有效对话范围"
+    },
+    {
+      "id": "active_stream",
+      "status": 409,
+      "text": "当前对话已有进行中的流式响应"
+    },
+    {
+      "id": "unavailable",
+      "status": 409,
+      "text": "当前对话暂不可用"
+    }
+  ],
+  "forbiddenPublicFields": [
+    "chatId",
+    "conversationId",
+    "runId",
+    "docSource",
+    "workspaceId",
+    "threadId"
+  ]
+}

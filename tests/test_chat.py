@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import tempfile
 import unittest
 from threading import Barrier
@@ -27,8 +28,7 @@ from app.modules.tasks.adapters import (
     LatestTaskProgressPublisherAdapter,
 )
 from app.modules.tasks.application import ProgressSubscriptionService
-from app.services.chat import (
-    ChatArchitectureCandidates,
+from app.modules.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
     ChatCommandService,
@@ -45,10 +45,8 @@ from app.services.chat import (
     MESSAGE_COMMITTED,
     RUN_FAILED,
 )
-from app.services.chat.domain import (
-    CHAT_ARCHITECTURE_CANDIDATE_INVALID,
-    CHAT_ARCHITECTURE_ERROR_INVALID,
-)
+from app.modules.chat.domain.identity import FileChatIdentity
+from app.modules.chat.ports import ChatSourceEvidence
 from app.services.core.config import (
     AnythingLLMConfig,
     LLMIntegrationConfig,
@@ -67,10 +65,21 @@ from tests.fakes import (
 )
 
 
+def _resolved_conversation_id(store: ChatStore, chat_id: int | str) -> str | None:
+    """把公开 file chatId 解析为测试断言使用的内部聚合键。"""
+
+    resolution = store.identities.resolve_any(
+        FileChatIdentity(chat_id=int(chat_id))
+    )
+    return None if resolution is None else resolution.conversation_id
+
+
 def _build_test_services(
     tmp: str,
     *,
     max_concurrent_streams: int | None = None,
+    max_files_per_request: int | None = None,
+    stream_sources: tuple[ChatSourceEvidence, ...] = (),
 ) -> ApplicationServices:
     """创建文件对话路径不依赖网络的隔离容器。"""
     chat_db_path = f"{tmp}/chat.sqlite3"
@@ -78,17 +87,27 @@ def _build_test_services(
     chat_commands = ChatCommandService(ChatRunLockService(chat_db_path))
     chat_history = ChatHistoryService(chat_store)
     chat_conversation_factory = FakeChatConversationFactory(
-        stream_contents=("第一段", "第二段")
+        stream_contents=("第一段", "第二段"),
+        stream_sources=stream_sources,
     )
     kb_service = DatabaseService(db_path=f"{tmp}/knowledge.sqlite3")
     executor_options = {}
     if max_concurrent_streams is not None:
         executor_options["max_concurrent_streams"] = max_concurrent_streams
+    if max_files_per_request is not None:
+        executor_options["max_files_per_request"] = max_files_per_request
     chat_run_executor = SynchronousChatRunExecutor(
         store=chat_store,
         chat_commands=chat_commands,
         conversation_factory=chat_conversation_factory,
-        document_resolver=DatabaseChatDocumentResolver(kb_service),
+        document_resolver=DatabaseChatDocumentResolver(
+            kb_service,
+            architecture_candidate_limit=(
+                max_files_per_request
+                if max_files_per_request is not None
+                else CHAT_MAX_FILES_PER_REQUEST
+            ),
+        ),
         **executor_options,
     )
     chat_cleanup_executor = ChatCleanupJobExecutor(
@@ -214,7 +233,22 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             f"custom-documents/{document_id}.json",
             original_name=original_name,
             ingested_file_name=file_name,
+            metadata={
+                "docSource": (
+                    "docsense_ref:"
+                    + hashlib.sha256(document_id.encode()).hexdigest()[:32]
+                )
+            },
         )
+
+    def _conversation_id(self, chat_id: int | str) -> str:
+        conversation_id = _resolved_conversation_id(
+            self.services.chat_store,
+            chat_id,
+        )
+        self.assertIsNotNone(conversation_id)
+        assert conversation_id is not None
+        return conversation_id
 
     def _chat(self, *, chat_id: int, file_names: list[str], message: str):
         return self.client.post(
@@ -229,26 +263,6 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             },
         )
 
-    def _architecture_chat(
-        self,
-        *,
-        chat_id: int,
-        architecture_id,
-        message: str,
-    ):
-        """以获批的 architectureId-only 合同发送离线 SSE 请求。"""
-        return self.client.post(
-            "/llm/chat",
-            json={
-                "businessType": "chat",
-                "params": {
-                    "chatId": chat_id,
-                    "architectureId": architecture_id,
-                    "message": message,
-                },
-            },
-        )
-
     def test_rejects_protocol_invalid_request_before_run_acceptance(self) -> None:
         response = self.client.post(
             "/llm/chat",
@@ -256,223 +270,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         )
 
         self.assertEqual(400, response.status_code)
-        self.assertEqual((), self.services.chat_store.runs.list_active("1000"))
-
-    def test_architecture_chat_freezes_direct_files_and_projects_history(self) -> None:
-        self._save_document()
-
-        response = self._architecture_chat(
-            chat_id=1101,
-            architecture_id="0001",
-            message=" 请总结类别 ",
-        )
-
-        self.assertEqual(200, response.status_code)
-        body = response.get_data(as_text=True)
-        self.assertIn(
-            'event: chatInfo\ndata: {"chatId": 1101, "isNewChat": true}',
-            body,
-        )
-        binding = self.services.chat_store.session_scope_bindings.get("1101")
-        revisions = self.services.chat_store.scopes.list_revisions_by_chat(
-            "1101"
-        )
-        messages = self.services.chat_store.messages.list_by_chat("1101")
-        self.assertIsNotNone(binding)
-        assert binding is not None
-        self.assertEqual("architecture", binding.scope_mode)
-        self.assertEqual(1, binding.architecture_id)
-        self.assertEqual(1, len(revisions))
-        self.assertEqual(1, revisions[0].source_architecture_id)
-        self.assertEqual(("hash-alpha.pdf",), tuple(
-            item.file_name for item in revisions[0].members
-        ))
-        self.assertEqual(1, messages[0].architecture_id)
-        self.assertEqual((), messages[0].files)
-
-        history = self.client.get(
-            "/llm/chat/history",
-            query_string={"chatId": "1101"},
-        ).get_json()
-        self.assertEqual(
-            {"role", "content", "timestamp", "architectureId"},
-            set(history[0]),
-        )
-        self.assertEqual(1, history[0]["architectureId"])
-        self.assertEqual(
-            {"role", "content", "timestamp"},
-            set(history[1]),
-        )
-
-    def test_architecture_follow_up_never_requeries_or_expands_snapshot(self) -> None:
-        self._save_document()
-        first = self._architecture_chat(
-            chat_id=1102,
-            architecture_id=1,
-            message="首轮",
-        )
-        first.get_data()
-        self._save_document(
-            file_name="hash-beta.pdf",
-            original_name="Beta 原名.pdf",
-            document_id="doc-beta",
-        )
-
-        # 后续轮次即使当前目录读取不可用也必须只复用旧 Head；该补丁同时证明不会
-        # 因类别新增 beta.pdf 而动态扩大实际模型范围。
-        with patch.object(
-            self.kb_service,
-            "list_document_records_by_architecture_id",
-            side_effect=AssertionError("existing architecture must not requery"),
-        ):
-            second = self._architecture_chat(
-                chat_id=1102,
-                architecture_id="0001",
-                message="继续",
-            )
-            second.get_data()
-
-        revisions = self.services.chat_store.scopes.list_revisions_by_chat(
-            "1102"
-        )
-        messages = self.services.chat_store.messages.list_by_chat("1102")
-        inputs = tuple(
-            self.services.chat_store.run_inputs.get(message.run_id)
-            for message in messages
-            if message.role == "user"
-        )
-        self.assertEqual(1, len(revisions))
-        self.assertEqual(
-            (("hash-alpha.pdf",), ("hash-alpha.pdf",)),
-            tuple(
-                tuple(item.file_name for item in run_input.files)
-                for run_input in inputs
-            ),
-        )
-        self.assertEqual(
-            ("architecture_initial", "architecture_reuse"),
-            tuple(run_input.selection_mode for run_input in inputs),
-        )
-
-    def test_architecture_contract_errors_use_approved_status_and_text(self) -> None:
-        cases = (
-            (
-                {"architectureId": None},
-                400,
-                "architectureId不能为空",
-            ),
-            (
-                {"architectureId": True},
-                400,
-                "architectureId必须为1到9007199254740991之间的正整数",
-            ),
-            (
-                {"architectureId": 1, "fileNames": []},
-                400,
-                "architectureId与fileNames不能同时传入",
-            ),
-        )
-        for extra_params, status_code, error_text in cases:
-            with self.subTest(extra_params=extra_params):
-                response = self.client.post(
-                    "/llm/chat",
-                    json={
-                        "businessType": "chat",
-                        "params": {
-                            "chatId": 1103,
-                            "message": "问题",
-                            **extra_params,
-                        },
-                    },
-                )
-                self.assertEqual(status_code, response.status_code)
-                self.assertEqual({"error": error_text}, response.get_json())
-
-        not_found = self._architecture_chat(
-            chat_id=1104,
-            architecture_id=999,
-            message="问题",
-        )
-        self.assertEqual(404, not_found.status_code)
-        self.assertEqual(
-            {"error": "architectureId对应类别不存在或没有可用于对话的文件"},
-            not_found.get_json(),
-        )
-        self.assertIsNone(self.services.chat_store.sessions.get("1104"))
-
-        resolver = self.services.chat_run_executor._architecture_document_resolver
-        with patch.object(
-            resolver,
-            "resolve_by_architecture_id",
-            return_value=ChatArchitectureCandidates(
-                architecture_id=998,
-                resolution_outcome=CHAT_ARCHITECTURE_CANDIDATE_INVALID,
-                error_code=CHAT_ARCHITECTURE_ERROR_INVALID,
-            ),
-        ):
-            invalid = self._architecture_chat(
-                chat_id=1107,
-                architecture_id=998,
-                message="问题",
-            )
-        self.assertEqual(400, invalid.status_code)
-        self.assertEqual(
-            {"error": "architectureId对应类别文件无法形成有效对话范围"},
-            invalid.get_json(),
-        )
-        self.assertIsNone(self.services.chat_store.sessions.get("1107"))
-
-    def test_architecture_mode_and_id_cannot_change_after_first_acceptance(self) -> None:
-        self._save_document()
-        first = self._architecture_chat(
-            chat_id=1105,
-            architecture_id=1,
-            message="首轮",
-        )
-        first.get_data()
-
-        wrong_id = self._architecture_chat(
-            chat_id=1105,
-            architecture_id=2,
-            message="错误 ID",
-        )
-        wrong_mode = self._chat(
-            chat_id=1105,
-            file_names=["hash-alpha.pdf"],
-            message="错误模式",
-        )
-
-        self.assertEqual(409, wrong_id.status_code)
-        self.assertEqual(
-            {"error": "当前对话已绑定其他architectureId"},
-            wrong_id.get_json(),
-        )
-        self.assertEqual(409, wrong_mode.status_code)
-        self.assertEqual(
-            {"error": "当前对话的范围模式不匹配"},
-            wrong_mode.get_json(),
-        )
-        self.assertEqual(
-            1,
-            len(self.services.chat_store.scopes.list_revisions_by_chat("1105")),
-        )
-
-        file_first = self._chat(
-            chat_id=1106,
-            file_names=["hash-alpha.pdf"],
-            message="文件首轮",
-        )
-        file_first.get_data()
-        reverse_mode = self._architecture_chat(
-            chat_id=1106,
-            architecture_id=1,
-            message="错误反向切换",
-        )
-        self.assertEqual(409, reverse_mode.status_code)
-        self.assertEqual(
-            {"error": "当前对话的范围模式不匹配"},
-            reverse_mode.get_json(),
-        )
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1000))
 
     def test_chat_routes_strictly_reject_invalid_chat_id_values(self) -> None:
         """所有公开文件对话路由都必须在业务处理前拒绝非正整数。"""
@@ -545,8 +343,9 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertIn('event: textChunk\ndata: {"content": "第一段"}', body)
         self.assertIn('event: done\ndata: {"chatId": 1001}', body)
 
-        session = self.services.chat_store.sessions.get("1001")
-        messages = self.services.chat_store.messages.list_by_chat("1001")
+        conversation_id = self._conversation_id(1001)
+        session = self.services.chat_store.sessions.get(conversation_id)
+        messages = self.services.chat_store.messages.list_by_chat(conversation_id)
         runs = self.services.chat_store.runs.list_active("1001")
         self.assertIsNotNone(session)
         assert session is not None
@@ -560,7 +359,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             (),
             self.services.chat_store.document_bindings.list_current_by_chat(
-                "1001"
+                conversation_id
             ),
         )
         self.assertEqual(
@@ -608,9 +407,11 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         response.get_data()
         documents = self.services.chat_store.document_bindings.list_current_by_chat(
-            "1003"
+            self._conversation_id(1003)
         )
-        messages = self.services.chat_store.messages.list_by_chat("1003")
+        messages = self.services.chat_store.messages.list_by_chat(
+            self._conversation_id(1003)
+        )
         run = next(
             message.run_id
             for message in messages
@@ -646,13 +447,14 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        messages = self.services.chat_store.messages.list_by_chat("1012")
+        conversation_id = self._conversation_id(1012)
+        messages = self.services.chat_store.messages.list_by_chat(conversation_id)
         run_input = self.services.chat_store.run_inputs.get(
             messages[0].run_id
         )
         bindings = (
             self.services.chat_store.document_bindings.list_current_by_chat(
-                "1012"
+                conversation_id
             )
         )
         self.assertIsNotNone(run_input)
@@ -695,7 +497,9 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual(200, history_response.status_code)
         history = history_response.get_json()
         self.assertEqual([], history[0]["files"])
-        leases = self.services.chat_store.resource_leases.list_by_chat("1012")
+        leases = self.services.chat_store.resource_leases.list_by_chat(
+            conversation_id
+        )
         self.assertEqual(
             ["document_binding", "document_binding", "thread", "workspace"],
             sorted(item.resource_type for item in leases),
@@ -722,7 +526,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             "app.blueprints.llm",
             level="INFO",
         ) as blueprint_logs, self.assertLogs(
-            "app.services.chat",
+            "app.modules.chat",
             level="INFO",
         ) as chat_logs:
             response = self._chat(
@@ -779,15 +583,8 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             {"error": "fileNames超过文件对话数量上限"},
             response.get_json(),
         )
-        self.assertIsNone(self.services.chat_store.sessions.get("1013"))
-        self.assertEqual(
-            (),
-            self.services.chat_store.runs.list_active("1013"),
-        )
-        self.assertEqual(
-            (),
-            self.services.chat_store.messages.list_by_chat("1013"),
-        )
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1013))
+        self.assertEqual((), self.services.chat_store.sessions.list_all())
 
     def test_new_empty_chat_accepts_effective_count_equal_to_limit(self) -> None:
         """最终有效数量等于上限时必须正常受理，不能出现大于等于误判。"""
@@ -811,7 +608,8 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             'event: done\ndata: {"chatId": 1016}',
             body,
         )
-        messages = self.services.chat_store.messages.list_by_chat("1016")
+        conversation_id = self._conversation_id(1016)
+        messages = self.services.chat_store.messages.list_by_chat(conversation_id)
         run_input = self.services.chat_store.run_inputs.get(
             messages[0].run_id
         )
@@ -822,7 +620,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             CHAT_MAX_FILES_PER_REQUEST,
             len(
                 self.services.chat_store.document_bindings
-                .list_current_by_chat("1016")
+                .list_current_by_chat(conversation_id)
             ),
         )
 
@@ -855,7 +653,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             {"error": "全量文件范围存在重复fileName，无法用于对话"},
             response.get_json(),
         )
-        self.assertIsNone(self.services.chat_store.sessions.get("1014"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1014))
         self.assertEqual(
             (),
             self.services.chat_conversation_factory.ports,
@@ -894,7 +692,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             {"error": "全量文件范围存在重复文档引用，无法用于对话"},
             response.get_json(),
         )
-        self.assertIsNone(self.services.chat_store.sessions.get("1017"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1017))
         self.assertEqual(
             (),
             self.services.chat_conversation_factory.ports,
@@ -923,7 +721,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             {"error": "文件 broken.pdf 缺少可用于对话的文档引用"},
             response.get_json(),
         )
-        self.assertIsNone(self.services.chat_store.sessions.get("1018"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1018))
         self.assertEqual(
             (),
             self.services.chat_conversation_factory.ports,
@@ -937,11 +735,11 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         )
 
         self.assertEqual(404, response.status_code)
-        self.assertIsNone(self.services.chat_store.sessions.get("1004"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1004))
 
     def test_active_chat_request_is_rejected_with_409(self) -> None:
         self.services.chat_commands.start_chat_run(
-            chat_id="1005",
+            identity=FileChatIdentity(chat_id=1005),
             user_message="first",
         )
 
@@ -970,16 +768,15 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
 
         response.close()
 
-        messages = self.services.chat_store.messages.list_by_chat(
-            "1006"
-        )
+        conversation_id = self._conversation_id(1006)
+        messages = self.services.chat_store.messages.list_by_chat(conversation_id)
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_COMMITTED, messages[0].status)
         run = self.services.chat_store.runs.get(messages[0].run_id)
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_FAILED, run.status)
-        self.assertEqual((), self.services.chat_store.runs.list_active("1006"))
+        self.assertEqual((), self.services.chat_store.runs.list_active(conversation_id))
 
     def test_global_stream_capacity_returns_429_before_run_acceptance(self) -> None:
         executor = self.services.chat_run_executor
@@ -996,7 +793,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
                 executor.release_stream_slot()
 
         self.assertEqual(429, response.status_code)
-        self.assertIsNone(self.services.chat_store.sessions.get("1007"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1007))
 
     def test_same_chat_admission_conflict_returns_409_before_global_429(
         self,
@@ -1004,7 +801,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         """同一 chatId 已在准入窗口内时，即使全局容量已满也稳定返回 409。"""
         executor = self.services.chat_run_executor
         lease = self.services.chat_commands.reserve_chat_admission(
-            chat_id="1017",
+            identity=FileChatIdentity(chat_id=1017),
             scope_selector=ChatScopeSelector.for_files(()),
         )
         acquired = [
@@ -1027,7 +824,7 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
                 executor.release_stream_slot()
 
         self.assertEqual(409, response.status_code)
-        self.assertIsNone(self.services.chat_store.sessions.get("1017"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1017))
 
     def test_stream_capacity_exception_releases_admission_guard(self) -> None:
         """容量适配器异常不得把同一 chatId 阻塞到 Guard 自然过期。"""
@@ -1044,9 +841,9 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
             )
 
         self.assertEqual(500, response.status_code)
-        self.assertIsNone(self.services.chat_store.sessions.get("1020"))
+        self.assertIsNone(_resolved_conversation_id(self.services.chat_store, 1020))
         retry = self.services.chat_commands.reserve_chat_admission(
-            chat_id="1020",
+            identity=FileChatIdentity(chat_id=1020),
             scope_selector=ChatScopeSelector.for_files(()),
         )
         self.services.chat_commands.release_chat_admission(lease=retry)
@@ -1060,7 +857,11 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         self.assertIn('"isNewChat": false', second.get_data(as_text=True))
         self.assertEqual(
             4,
-            len(self.services.chat_store.messages.list_by_chat("1008")),
+            len(
+                self.services.chat_store.messages.list_by_chat(
+                    self._conversation_id(1008)
+                )
+            ),
         )
 
     def test_later_empty_chat_does_not_absorb_new_knowledge_base_files(self) -> None:
@@ -1105,13 +906,15 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
                 item.file_name
                 for item in (
                     self.services.chat_store.document_bindings
-                    .list_current_by_chat("1015")
+                    .list_current_by_chat(self._conversation_id(1015))
                 )
             ),
         )
         user_messages = [
             item
-            for item in self.services.chat_store.messages.list_by_chat("1015")
+            for item in self.services.chat_store.messages.list_by_chat(
+                self._conversation_id(1015)
+            )
             if item.role == "user"
         ]
         self.assertEqual(2, len(user_messages))
@@ -1135,16 +938,17 @@ class ChatRouteAcceptanceTests(unittest.TestCase):
         )
         second.get_data()
 
+        conversation_id = self._conversation_id(1009)
         documents = self.services.chat_store.document_bindings.list_by_chat(
-            "1009"
+            conversation_id
         )
         document = self.services.chat_store.document_bindings.list_current_by_chat(
-            "1009"
+            conversation_id
         )[0]
         binding_leases = [
             lease
             for lease in self.services.chat_store.resource_leases.list_by_chat(
-                "1009"
+                conversation_id
             )
             if lease.resource_type == "document_binding"
         ]
@@ -1252,14 +1056,22 @@ class ChatDifferentSessionConcurrencyTests(unittest.TestCase):
         thread_refs: set[str] = set()
         run_ids: set[str] = set()
         for index in range(worker_count):
-            chat_id = str(20000 + index)
-            session = self.services.chat_store.sessions.get(chat_id)
+            public_chat_id = 20000 + index
+            conversation_id = _resolved_conversation_id(
+                self.services.chat_store,
+                public_chat_id,
+            )
+            self.assertIsNotNone(conversation_id)
+            assert conversation_id is not None
+            session = self.services.chat_store.sessions.get(conversation_id)
             self.assertIsNotNone(session)
             assert session is not None
             workspace_refs.add(session.workspace_ref)
             thread_refs.add(session.thread_ref)
 
-            messages = self.services.chat_store.messages.list_by_chat(chat_id)
+            messages = self.services.chat_store.messages.list_by_chat(
+                conversation_id
+            )
             self.assertEqual(["user", "assistant"], [
                 message.role for message in messages
             ])
@@ -1283,13 +1095,13 @@ class ChatDifferentSessionConcurrencyTests(unittest.TestCase):
                     item.document_ref
                     for item in (
                         self.services.chat_store.document_bindings
-                        .list_current_by_chat(chat_id)
+                        .list_current_by_chat(conversation_id)
                     )
                 ),
             )
             self.assertEqual(
                 (),
-                self.services.chat_store.runs.list_active(chat_id),
+                self.services.chat_store.runs.list_active(conversation_id),
             )
 
         self.assertEqual(worker_count, len(workspace_refs))

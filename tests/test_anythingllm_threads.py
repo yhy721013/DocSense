@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import unittest
+import json
 from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.integrations.anythingllm.errors import AnythingLLMProtocolError
+from app.integrations.anythingllm.models import (
+    AnythingLLMFinalization,
+    AnythingLLMQueryRejection,
+    AnythingLLMTextDelta,
+)
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport, SSEEvent
 
@@ -163,8 +170,8 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
 
         self.transport.stream_sse.assert_not_called()
 
-    def test_ask_uses_accumulated_chunks_when_final_event_is_missing(self) -> None:
-        """连接在最终事件前结束但已有文本片段时，应形成可审计回答而非静默丢失。"""
+    def test_ask_rejects_accumulated_chunks_when_final_event_is_missing(self) -> None:
+        """没有合法终态的半截文本不能伪装成完整可审计回答。"""
         self.transport.stream_sse.return_value = _event_stream(
             SSEEvent(
                 data='{"type":"textResponseChunk","textResponse":"你"}'
@@ -174,16 +181,13 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
             ),
         )
 
-        answer = self.client.ask(
-            "workspace-a",
-            "thread-a",
-            "问候",
-            mode="chat",
-        )
-
-        self.assertEqual(answer.text, "你好")
-        self.assertEqual(answer.raw_text, "你好")
-        self.assertEqual(answer.sources, ())
+        with self.assertRaises(AnythingLLMProtocolError):
+            self.client.ask(
+                "workspace-a",
+                "thread-a",
+                "问候",
+                mode="chat",
+            )
 
     def test_ask_rejects_stream_without_final_event_or_text(self) -> None:
         """只有心跳或无效 JSON 的流不能被误判为成功回答。"""
@@ -313,10 +317,142 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
             mode="query",
         )
 
-        self.assertEqual(next(stream), "第一段")
+        self.assertEqual(next(stream).content, "第一段")
         stream.close()
 
         self.assertEqual(closed, [True])
+
+    def test_stream_fixture_reads_finalization_after_close_text_chunk(self) -> None:
+        """v1.15.0 的文本 close 不能吞掉后续四条来源。"""
+
+        fixture_path = (
+            Path(__file__).parent
+            / "contracts"
+            / "anythingllm_v1_15_stream.jsonl"
+        )
+        rows = [
+            json.loads(line)
+            for line in fixture_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        normal = [row["event"] for row in rows if row["scenario"] == "normal_sources"]
+        self.transport.stream_sse.return_value = _event_stream(
+            *(SSEEvent(data=json.dumps(item, ensure_ascii=False)) for item in normal)
+        )
+
+        events = list(
+            self.client.stream(
+                "workspace-a",
+                "thread-a",
+                "问题",
+                mode="query",
+            )
+        )
+
+        self.assertIsInstance(events[0], AnythingLLMTextDelta)
+        self.assertEqual("第一段", events[0].content)
+        self.assertIsInstance(events[1], AnythingLLMFinalization)
+        self.assertEqual(4, len(events[1].sources))
+        self.assertEqual(
+            ["来源一", "来源二", "来源三", "来源四"],
+            [item.content for item in events[1].sources],
+        )
+
+    def test_stream_fixture_models_query_no_context_as_distinct_terminal(self) -> None:
+        fixture_path = (
+            Path(__file__).parent
+            / "contracts"
+            / "anythingllm_v1_15_stream.jsonl"
+        )
+        row = next(
+            json.loads(line)
+            for line in fixture_path.read_text(encoding="utf-8").splitlines()
+            if '"query_no_context"' in line
+        )
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(data=json.dumps(row["event"], ensure_ascii=False))
+        )
+
+        events = list(
+            self.client.stream(
+                "workspace-a",
+                "thread-a",
+                "问题",
+                mode="query",
+            )
+        )
+
+        self.assertEqual(1, len(events))
+        self.assertIsInstance(events[0], AnythingLLMQueryRejection)
+        self.assertNotIsInstance(events[0], AnythingLLMFinalization)
+
+    def test_stream_source_content_is_lossless_and_strictly_typed(self) -> None:
+        marker = "docsense_ref:0123456789abcdef0123456789abcdef"
+        original = "  第一行\r\n第二行 e\u0301 与 é  "
+        payload = {
+            "type": "finalizeResponseStream",
+            "sources": [{"text": original, "docSource": marker}],
+            "close": True,
+        }
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(data=json.dumps(payload, ensure_ascii=False))
+        )
+        terminal = list(
+            self.client.stream("workspace-a", "thread-a", "问题", mode="chat")
+        )[0]
+        self.assertEqual(original, terminal.sources[0].content)
+
+        payload["sources"][0]["text"] = 123
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(data=json.dumps(payload, ensure_ascii=False))
+        )
+        with self.assertRaises(AnythingLLMProtocolError):
+            list(self.client.stream("workspace-a", "thread-a", "问题", mode="chat"))
+
+    def test_stream_rejects_missing_or_duplicate_finalization(self) -> None:
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(data='{"type":"textResponseChunk","textResponse":"片段","close":true}')
+        )
+        with self.assertRaises(AnythingLLMProtocolError):
+            list(self.client.stream("workspace-a", "thread-a", "问题", mode="chat"))
+
+        final = SSEEvent(data='{"type":"finalizeResponseStream","sources":[],"close":true}')
+        self.transport.stream_sse.return_value = _event_stream(final, final)
+        with self.assertRaises(AnythingLLMProtocolError):
+            list(self.client.stream("workspace-a", "thread-a", "问题", mode="chat"))
+
+        # 终态后的文本不能被客户端悄悄重排到 Finalization 之前，否则公开 SSE
+        # 看似合法，实际却不再对应供应商原始事件顺序。
+        trailing_text = SSEEvent(
+            data='{"type":"textResponseChunk","textResponse":"越界片段"}'
+        )
+        self.transport.stream_sse.return_value = _event_stream(
+            final,
+            trailing_text,
+        )
+        with self.assertRaisesRegex(
+            AnythingLLMProtocolError,
+            "终态后返回额外事件",
+        ):
+            list(self.client.stream("workspace-a", "thread-a", "问题", mode="chat"))
+
+    def test_stream_rejects_conflicting_structured_source_keys(self) -> None:
+        payload = {
+            "type": "finalizeResponseStream",
+            "sources": [{
+                "text": "证据",
+                "docSource": "docsense_ref:0123456789abcdef0123456789abcdef",
+                "metadata": {
+                    "docSource": "docsense_ref:fedcba9876543210fedcba9876543210"
+                },
+            }],
+            "close": True,
+        }
+        self.transport.stream_sse.return_value = _event_stream(
+            SSEEvent(data=json.dumps(payload))
+        )
+        with self.assertRaises(AnythingLLMProtocolError):
+            list(self.client.stream("workspace-a", "thread-a", "问题", mode="chat"))
 
     def test_stream_rejects_unknown_mode_before_creating_generator(self) -> None:
         """流式入口必须复用同步问答的相同模式白名单。"""

@@ -2,7 +2,7 @@
 
 本目录只保留阶段 1 尚在使用的共享 SQLite 事实服务：任务/执行/回调审计、知识索引操作和 RAG
 资源租约。Analysis、Report、Weaponry、Translation 的业务执行实现已经分别归入 `app/modules/`；
-文件对话的唯一正确位置是 `app/services/chat/`。本目录不得重新成为跨业务编排层。
+Chat 业务的唯一正确位置是 `app/modules/chat/`。本目录不得重新成为跨业务编排层。
 
 ## 文件说明
 
@@ -20,17 +20,19 @@
 
 ## 文件对话迁移说明
 
-历史上的 `chat_service.py` 已删除。文件对话的流式执行、标题、历史、中断、删除、资源租约和清理任务分别由 `services/chat/application/`、`domain/`、`persistence/` 与 `locking/` 承担。
+历史上的 `chat_service.py` 和 `app/services/chat/` 已删除。文件对话与知识谱系对话的流式执行、
+标题、历史、中断、删除、资源租约和清理任务统一由 `app/modules/chat/` 的 Application、Domain、
+Ports 与 Adapters 承担。
 
 ```text
 禁止：llm_service -> 直接编排文件对话 AnythingLLM 调用
-允许：路由 -> services/chat/application -> Chat Port -> 集成层
+允许：路由 -> modules/chat/application -> modules/chat/ports <- modules/chat/adapters
 ```
 
 ## 维护规则
 
 - 不要重新创建 `chat_service.py`，也不要把 `/llm/chat*` 新需求写入本目录。
-- 若既有 LLM 服务需要与文件对话协作，应依赖 `services/chat` 的稳定应用服务或端口，而不是复制会话状态机。
+- 若既有 LLM 服务需要与 Chat 协作，应依赖 `app/modules/chat` 的稳定应用服务或端口，而不是复制会话状态机。
 - `task_service.py` 的阶段 1C-3 方法是单实例 SQLite 过渡实现，不得描述为 MySQL、Outbox、
   RabbitMQ、跨实例锁或可靠队列；业务模块应通过 tasks Port/Adapter 使用，不能继续把业务
   DTO 和外部 I/O 塞入该服务。

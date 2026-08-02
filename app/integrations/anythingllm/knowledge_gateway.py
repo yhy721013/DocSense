@@ -337,6 +337,7 @@ class AnythingLLMKnowledgeGateway:
                 metadata=metadata_snapshot,
                 document_ref=document.document_ref,
                 external_location=document.external_location,
+                source_marker=document.structured_source_key,
             )
             if record.status == STATUS_COMMITTED:
                 return self._indexed_result(record, created=False)
@@ -676,13 +677,19 @@ class AnythingLLMKnowledgeGateway:
         # 此处不能 strip，否则会破坏“回调 source 严格返回原值”的链路。
         original_name = str(metadata.pop("original_name", file_name))
         ingested_file_name = str(metadata.pop("ingested_file_name")).strip()
-        attributes = metadata.pop("attributes")
+        attributes = dict(metadata.pop("attributes"))
         if metadata:
             raise KnowledgeIndexError("协调记录包含未知文档控制字段")
         if not record.external_document_id:
             raise KnowledgeIndexRecoveryRequiredError(
                 "协调记录缺少本地提交所需的外部文档 ID"
             )
+        # 本地目录必须保存上传时写入 AnythingLLM 的同一结构化来源键。后续知识谱系
+        # 对话只允许用该键做一对一 Chunk 归属，不从文件名、标题或路径反向猜测。
+        existing_source_key = attributes.get("docSource")
+        if existing_source_key not in (None, record.source_marker):
+            raise KnowledgeIndexError("业务 metadata.docSource 与协调来源键冲突")
+        attributes["docSource"] = record.source_marker
         self._database_service.commit_indexed_document(
             architecture_id=collection.architecture_id,
             workspace_slug=collection.ref,

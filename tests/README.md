@@ -618,6 +618,12 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     AnythingLLM Integration 和安全全仓九组门禁。2026-08-01 安全全仓动态发现 2,118 项，
     精确排除 13 项，执行 2,105 项，失败 0、错误 0、跳过 3；同时运行
     `tests.test_stage1g_closeout` 固化数据库表与模块所有权、已删除路径不回流和阶段 2 交接边界。
+55. 运行对话模块迁移与知识谱系独立接口阶段 9 关闭验收：定向联合门禁执行 286 项，Analysis
+    定向发现执行 269 项，Stage 1G/DocumentProcessing 资产门禁执行 16 项，均为 failure/error 0；
+    再动态发现 `test*.py` 并严格按“执行限制”中的 13 个完整测试 ID 排除。2026-08-02 最终发现
+    2,158 项、排除 13 项、执行 2,145 项，失败 0、错误 0、跳过 3。该结果只证明临时 SQLite、
+    Fake/Mock 和 Flask Test Client 的 Windows 单实例离线行为；没有运行 `run.py`、真实
+    AnythingLLM、停服清库或前端联调。
 
 ## 执行限制
 

@@ -107,6 +107,7 @@ def _bound_session(execution: AnalysisExecutionRef):  # type: ignore[no-untyped-
         document_location="location:adapter",
         content_sha256="c" * 64,
         ingested_file_name="adapter-demo.txt",
+        structured_source_key="docsense_ref:" + "c" * 32,
     )
 
 
@@ -210,6 +211,7 @@ class _NativeRagSessionFake:
             external_location="location:adapter",
             content_sha256="c" * 64,
             ingested_file_name="adapter-demo.txt",
+            structured_source_key="docsense_ref:" + "c" * 32,
         )
         attempt = RagAttempt(
             operation="analyse",
@@ -829,6 +831,7 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                 external_location="location:adapter",
                 content_sha256="c" * 64,
                 ingested_file_name="adapter-demo.txt",
+                structured_source_key="docsense_ref:" + "c" * 32,
             )
             native_session.start_fresh_conversation = switch_conversation  # type: ignore[method-assign]
             native_session.ask_optional = lambda *_args, **_kwargs: RagResult(  # type: ignore[method-assign]

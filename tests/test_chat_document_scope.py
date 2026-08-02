@@ -7,9 +7,9 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-from app.services.chat.domain.document_candidates import ChatDocumentCandidate
-from app.services.chat.domain.document_candidates import ChatArchitectureCandidates
-from app.services.chat.domain.document_scope import (
+from app.modules.chat.domain.document_candidates import ChatDocumentCandidate
+from app.modules.chat.domain.document_candidates import ChatArchitectureCandidates
+from app.modules.chat.domain.document_scope import (
     CHAT_SCOPE_MODE_ARCHITECTURE,
     CHAT_SCOPE_MODE_FILES,
     CHAT_SCOPE_SELECTION_ACTIVE_REUSE,
@@ -229,14 +229,14 @@ class ChatDocumentScopeDomainTests(unittest.TestCase):
     def test_revision_head_and_decision_are_frozen(self) -> None:
         revision = ChatScopeRevision(
             scope_revision_id="scope-1",
-            chat_id="chat-1",
+            conversation_id="chat-1",
             source_mode=CHAT_SCOPE_SOURCE_EXPLICIT,
             source_run_id="run-1",
             members=_documents(["a.pdf"]),
             created_at="2026-07-28T00:00:00+00:00",
         )
         head = ChatScopeHead(
-            chat_id="chat-1",
+            conversation_id="chat-1",
             scope_revision_id="scope-1",
             updated_at="2026-07-28T00:00:00+00:00",
         )
@@ -249,7 +249,7 @@ class ChatDocumentScopeDomainTests(unittest.TestCase):
     def test_selector_and_session_binding_are_immutable(self) -> None:
         selector = ChatScopeSelector.for_architecture(7)
         binding, created = decide_chat_session_scope_binding(
-            chat_id="chat-1",
+            conversation_id="chat-1",
             selector=selector,
             existing_binding=None,
             created_at="2026-07-28T00:00:00+00:00",
@@ -259,7 +259,7 @@ class ChatDocumentScopeDomainTests(unittest.TestCase):
         self.assertEqual(CHAT_SCOPE_MODE_ARCHITECTURE, binding.scope_mode)
         self.assertEqual(7, binding.architecture_id)
         reused, created = decide_chat_session_scope_binding(
-            chat_id="chat-1",
+            conversation_id="chat-1",
             selector=ChatScopeSelector.for_architecture(7),
             existing_binding=binding,
             created_at="ignored",
@@ -268,21 +268,21 @@ class ChatDocumentScopeDomainTests(unittest.TestCase):
         self.assertFalse(created)
         with self.assertRaises(ChatArchitectureIdConflictError):
             decide_chat_session_scope_binding(
-                chat_id="chat-1",
+                conversation_id="chat-1",
                 selector=ChatScopeSelector.for_architecture(8),
                 existing_binding=binding,
                 created_at="ignored",
             )
         with self.assertRaises(ChatScopeModeConflictError):
             decide_chat_session_scope_binding(
-                chat_id="chat-1",
+                conversation_id="chat-1",
                 selector=ChatScopeSelector.for_files([]),
                 existing_binding=binding,
                 created_at="ignored",
             )
 
         files_binding = ChatSessionScopeBinding(
-            chat_id="chat-2",
+            conversation_id="chat-2",
             scope_mode=CHAT_SCOPE_MODE_FILES,
             architecture_id=None,
             created_at="2026-07-28T00:00:00+00:00",

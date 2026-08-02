@@ -91,6 +91,7 @@ def _state(execution):  # type: ignore[no-untyped-def]
         document_location="location:resource",
         content_sha256="a" * 64,
         ingested_file_name="resource.txt",
+        structured_source_key="docsense_ref:" + "a" * 32,
     )
     state.opened = True
     state.recall_receipt = AnalysisRecallAuditReceipt(

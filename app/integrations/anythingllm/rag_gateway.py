@@ -1294,6 +1294,7 @@ class _AnythingLLMRagSession:
                             external_location=external_location,
                             content_sha256=self._content_sha256,
                             ingested_file_name=self._ingested_file_name,
+                            structured_source_key=self._source_marker,
                         ),
                         trace=self._trace(),
                     )

@@ -188,6 +188,13 @@ _TRANSLATION_DOMAIN_FILE_STDLIB_ROOTS = {
     # 该文件是从旧 Translator 搬迁的纯分块规则；日志只记录计数/错误类型，不执行 I/O。
     "chunks.py": frozenset({"logging"}),
 }
+_CHAT_DOMAIN_FILE_STDLIB_ROOTS = {
+    "document_candidates.py": frozenset({"collections"}),
+    "document_scope.py": frozenset({"collections"}),
+    "events.py": frozenset({"types"}),
+    "identity.py": frozenset({"uuid"}),
+    "models.py": frozenset({"types"}),
+}
 _PORTS_STDLIB_ROOTS = frozenset(
     {"__future__", "dataclasses", "enum", "typing"}
 )
@@ -196,6 +203,10 @@ _PORTS_STDLIB_ROOTS = frozenset(
 _DOCUMENT_PROCESSING_PORT_FILE_STDLIB_ROOTS = {
     "legacy_office.py": frozenset({"pathlib"}),
     "processing.py": frozenset({"threading"}),
+}
+_CHAT_PORT_FILE_STDLIB_ROOTS = {
+    "conversations.py": frozenset({"contextlib"}),
+    "persistence.py": frozenset({"collections", "types"}),
 }
 _APPLICATION_STDLIB_ROOTS = frozenset(
     {
@@ -495,6 +506,14 @@ def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
                 frozenset(),
             )
         )
+    elif module_name == "chat":
+        allowed_stdlib_roots = (
+            _DOMAIN_STDLIB_ROOTS
+            | _CHAT_DOMAIN_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
     allowed_internal = [f"app.modules.{module_name}.domain"]
     if module_name in {"document_processing", "translation"}:
         # TaskId 是跨业务共享的稳定控制面值对象；只放行 tasks domain。
@@ -534,6 +553,14 @@ def _ports_matcher(reference: ImportReference) -> RuleMatch | None:
                 frozenset(),
             )
         )
+    elif module_name == "chat":
+        allowed_stdlib_roots = (
+            _PORTS_STDLIB_ROOTS
+            | _CHAT_PORT_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
     return _first_positive_allowlist_violation(
         reference,
         allowed_stdlib_roots=allowed_stdlib_roots,
@@ -556,9 +583,18 @@ def _application_matcher(reference: ImportReference) -> RuleMatch | None:
         allowed_internal.extend(
             ("app.modules.tasks.domain", "app.modules.tasks.ports")
         )
+    allowed_stdlib_roots = _APPLICATION_STDLIB_ROOTS
+    if module_name == "chat":
+        allowed_stdlib_roots = (
+            _APPLICATION_STDLIB_ROOTS
+            | _CHAT_APPLICATION_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
     return _first_positive_allowlist_violation(
         reference,
-        allowed_stdlib_roots=_APPLICATION_STDLIB_ROOTS,
+        allowed_stdlib_roots=allowed_stdlib_roots,
         allowed_internal_prefixes=tuple(allowed_internal),
         reason="应用层只能依赖批准的标准库、本模块领域类型、端口和应用组件",
     )
@@ -568,7 +604,7 @@ def _tasks_module_matcher(reference: ImportReference) -> RuleMatch | None:
     for target in reference.targets:
         if target.startswith(_DYNAMIC_IMPORT_PREFIX):
             return RuleMatch(target, "tasks 模块禁止动态导入以防止隔离规则被绕过")
-    target = _first_prefix_match(reference, ("app.services.chat.persistence",))
+    target = _first_prefix_match(reference, ("app.modules.chat.adapters.sqlite",))
     if target:
         return RuleMatch(target, "tasks 不拥有 chat 持久化数据，禁止直接依赖其实现")
 
@@ -583,7 +619,12 @@ def _tasks_module_matcher(reference: ImportReference) -> RuleMatch | None:
 
 
 def _presenter_matcher(reference: ImportReference) -> RuleMatch | None:
-    allowed_internal: list[str] = ["app.services.chat.domain"]
+    # Presenter 之间只允许依赖无框架、无 I/O 的 SSE 格式化工具，
+    # 不放开整个 presenters 命名空间，避免展示层形成隐式调用链。
+    allowed_internal: list[str] = [
+        "app.modules.chat.domain",
+        "app.presenters.sse",
+    ]
     for target in reference.targets:
         parts = target.split(".")
         if len(parts) >= 4 and parts[:2] == ["app", "modules"]:
@@ -618,7 +659,7 @@ def _web_route_matcher(reference: ImportReference) -> RuleMatch | None:
         "subprocess",
         "threading",
         "app.integrations.anythingllm",
-        "app.services.chat.persistence",
+        "app.modules.chat.adapters.sqlite",
         "app.services.core.database",
         "app.services.llm_service",
         "app.services.utils.anythingllm_client",
@@ -665,6 +706,10 @@ FRAMEWORK_FREE_CONTAINER_RULE = ArchitectureRule(
     "framework-free-application-container",
     _framework_free_container_matcher,
 )
+_CHAT_APPLICATION_FILE_STDLIB_ROOTS = {
+    # 标题清洗只使用确定性正则，不读取文件、网络或运行时环境。
+    "title_service.py": frozenset({"re"}),
+}
 
 
 __all__ = [

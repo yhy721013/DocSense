@@ -10,7 +10,7 @@ from app.modules.debug.adapters import (
     LocalChatDebugSnapshotReadAdapter,
 )
 from app.modules.debug.application import LoadCallbackPreview, LoadChatDebugBootstrap
-from app.services.chat.persistence.store import ChatPersistenceStore
+from app.modules.chat.adapters.sqlite.store import ChatPersistenceStore
 from app.services.core.database import DatabaseService
 
 

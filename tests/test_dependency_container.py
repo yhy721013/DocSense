@@ -17,16 +17,15 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
 )
-from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
+from app.modules.chat.adapters.anythingllm_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.ports import (
-    ChatConversationFactory,
-    ChatConversationPort,
     DocumentRagFactory,
     DocumentRagPort,
     KnowledgeIndexFactory,
     KnowledgeIndexPort,
 )
+from app.modules.chat.ports import ChatConversationFactory, ChatConversationPort
 from app.services.core.config import (
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
@@ -80,7 +79,7 @@ from app.modules.weaponry.adapters import (
 from app.modules.weaponry.composition import (
     compose_weaponry_application_services,
 )
-from app.services.chat import (
+from app.modules.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
     ChatCommandService,
@@ -726,6 +725,23 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
         self.assertIsInstance(self.services.chat_delete, ChatDeleteService)
+        self.assertIs(self.services.chat_services.store, self.services.chat_store)
+        self.assertIs(
+            self.services.chat_services.commands,
+            self.services.chat_commands,
+        )
+        self.assertIs(
+            self.services.chat_services.run_executor,
+            self.services.chat_run_executor,
+        )
+        self.assertIs(
+            self.services.chat_services.dispatcher,
+            self.services.chat_dispatcher,
+        )
+        self.assertIs(
+            self.services.chat_services.history,
+            self.services.chat_history,
+        )
         self.assertEqual(
             AnalysisClassificationConfig.topk_two_stage(),
             self.services.analysis_classification_config,

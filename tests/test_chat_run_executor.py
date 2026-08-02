@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zlib
 from unittest.mock import patch
 
-from app.ports import ChatChunk, ChatDocumentRef, ChatSessionRefs
-from app.services.chat.domain import CHAT_ARCHITECTURE_CANDIDATE_RESOLVED
-from app.services.chat import (
+from app.modules.chat.ports import (
+    ChatChunk,
+    ChatDocumentRef,
+    ChatSessionRefs,
+    ChatSourceEvidence,
+    ChatSourceFinalization,
+)
+from app.modules.chat.domain import CHAT_ARCHITECTURE_CANDIDATE_RESOLVED
+from app.modules.chat import (
     ChatArchitectureCandidates,
     ChatCommandService,
     ChatDocumentCandidate,
@@ -37,6 +44,23 @@ from app.services.chat import (
 )
 from tests.fakes import FakeChatConversationFactory
 from tests.fakes.chat import FakeChatConversationPort
+from app.modules.chat.domain.identity import FileChatIdentity, WeaponryChatIdentity
+
+
+def _identity(value: str | int) -> FileChatIdentity:
+    """将旧测试标签稳定映射为文件对话公开身份。"""
+    if isinstance(value, int) or str(value).isdigit():
+        return FileChatIdentity(chat_id=int(value))
+    return FileChatIdentity(chat_id=zlib.crc32(str(value).encode("utf-8")) + 1)
+
+
+def _weaponry_identity(value: str | int, architecture_id: int) -> WeaponryChatIdentity:
+    """构造互不冲突的知识谱系复合身份。"""
+    file_identity = _identity(value)
+    return WeaponryChatIdentity(
+        user_id=file_identity.chat_id,
+        architecture_id=architecture_id,
+    )
 
 
 class _StaticDocumentResolver:
@@ -52,6 +76,7 @@ class _StaticDocumentResolver:
             ResolvedChatDocument(
                 file_name=file_name,
                 original_name=f"{file_name}.original",
+                structured_source_key=f"custom-documents/{file_name}.json",
                 document=ChatDocumentRef(
                     document_ref=f"document:{file_name}",
                     external_location=f"custom-documents/{file_name}.json",
@@ -67,6 +92,7 @@ class _StaticDocumentResolver:
             ResolvedChatDocument(
                 file_name=file_name,
                 original_name=f"{file_name}.original",
+                structured_source_key=f"custom-documents/{file_name}.json",
                 document=ChatDocumentRef(
                     document_ref=f"document:{file_name}",
                     external_location=f"custom-documents/{file_name}.json",
@@ -108,6 +134,7 @@ class _ArchitectureDocumentResolver(_StaticDocumentResolver):
                     original_name=f"{file_name}.original",
                     document_ref=f"document:{file_name}",
                     external_location=f"custom-documents/{file_name}.json",
+                    structured_source_key=f"custom-documents/{file_name}.json",
                 )
                 for file_name in self.architecture_file_names
             ),
@@ -120,14 +147,14 @@ class ChatRunStreamRequestTests(unittest.TestCase):
     def test_request_normalizes_text_and_file_snapshots(self) -> None:
         request = ChatRunStreamRequest(
             run_id=" run-1 ",
-            chat_id=" chat-1 ",
+            conversation_id=" chat-1 ",
             message=" 你好 ",
             file_names=(" hash-a.pdf ",),
             file_original_names=(" 原名.pdf ",),
         )
 
         self.assertEqual("run-1", request.run_id)
-        self.assertEqual("chat-1", request.chat_id)
+        self.assertEqual("chat-1", request.conversation_id)
         self.assertEqual("你好", request.message)
         self.assertEqual(("hash-a.pdf",), request.file_names)
         self.assertEqual(("原名.pdf",), request.file_original_names)
@@ -136,7 +163,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ChatRunStreamRequest(
                 run_id="run-1",
-                chat_id="chat-1",
+                conversation_id="chat-1",
                 message="hi",
                 file_names="hash-a.pdf",  # type: ignore[arg-type]
                 file_original_names=("原名.pdf",),
@@ -147,7 +174,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
     ) -> None:
         request = ChatRunStreamRequest(
             run_id="run-1",
-            chat_id="chat-1",
+            conversation_id="chat-1",
             message="hi",
             file_names=("hash-a.pdf",),
             file_original_names=("原名.pdf",),
@@ -165,7 +192,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
         ):
             ChatRunStreamRequest(
                 run_id="run-1",
-                chat_id="chat-1",
+                conversation_id="chat-1",
                 message="hi",
                 file_names=("effective.pdf",),
                 file_original_names=("有效原名.pdf",),
@@ -177,7 +204,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ChatRunStreamRequest(
                 run_id="run-1",
-                chat_id="chat-1",
+                conversation_id="chat-1",
                 message="hi",
                 file_names=("hash-a.pdf",),
                 file_original_names=(),
@@ -198,20 +225,26 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.db_path = f"{self.tmp}/chat.sqlite3"
         self.store = ChatStore(self.db_path)
         self.commands = ChatCommandService(ChatRunLockService(self.db_path))
-        self.store.sessions.create_or_get(chat_id="10001")
+        self.identity = FileChatIdentity(chat_id=10001)
+        self.conversation_id = self.store.identities.create_conversation(
+            self.identity
+        ).conversation_id
         self.store.session_scope_bindings.create(
             ChatSessionScopeBinding(
-                chat_id="10001",
+                conversation_id=self.conversation_id,
                 scope_mode="files",
                 architecture_id=None,
                 created_at="2026-07-28T00:00:00+00:00",
             )
         )
-        self.store.runs.create(run_id="run-1", chat_id="10001")
+        self.store.runs.create(
+            run_id="run-1",
+            conversation_id=self.conversation_id,
+        )
         self.store.runs.mark_running("run-1")
         self.request = ChatRunStreamRequest(
             run_id="run-1",
-            chat_id="10001",
+            conversation_id=self.conversation_id,
             message="请总结",
             file_names=("hash-a.pdf",),
             file_original_names=("原名.pdf",),
@@ -237,7 +270,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertEqual(events, result)
         self.assertIsNotNone(run)
@@ -276,7 +309,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             ),
         )
 
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertIsNotNone(run)
         assert run is not None
@@ -288,7 +321,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_aborted_commits_user_without_partial_assistant(self) -> None:
         events = [
             ChatStreamEvent("textChunk", {"content": "半截"}),
-            ChatStreamEvent("aborted", {"chatId": 10001}),
+            ChatStreamEvent("aborted", {}),
         ]
 
         list(
@@ -300,7 +333,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertIsNotNone(run)
         assert run is not None
@@ -326,17 +359,17 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         second = next(stream)
 
         self.assertEqual(ChatStreamEvent("textChunk", {"content": "第一段"}), first)
-        self.assertEqual(ChatStreamEvent("aborted", {"chatId": 10001}), second)
+        self.assertEqual(ChatStreamEvent("aborted", {}), second)
         with self.assertRaises(StopIteration):
             next(stream)
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_ABORTED, run.status)
-        next_run = self.commands.start_chat_run(chat_id="10001")
+        next_run = self.commands.start_chat_run(identity=self.identity)
         self.assertNotEqual("run-1", next_run.run_id)
         self.assertEqual(RUN_ACCEPTED, next_run.status)
 
@@ -372,11 +405,11 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.assertEqual(
             [
                 ChatStreamEvent("textChunk", {"content": "第一段"}),
-                ChatStreamEvent("aborted", {"chatId": 10001}),
+                ChatStreamEvent("aborted", {}),
             ],
             result,
         )
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -396,8 +429,8 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([ChatStreamEvent("aborted", {"chatId": 10001})], result)
-        messages = self.store.messages.list_by_chat("10001")
+        self.assertEqual([ChatStreamEvent("aborted", {})], result)
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
 
@@ -421,8 +454,8 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([ChatStreamEvent("aborted", {"chatId": 10001})], result)
-        messages = self.store.messages.list_by_chat("10001")
+        self.assertEqual([ChatStreamEvent("aborted", {})], result)
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -450,8 +483,8 @@ class ChatRunEventRecorderTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([ChatStreamEvent("aborted", {"chatId": 10001})], result)
-        messages = self.store.messages.list_by_chat("10001")
+        self.assertEqual([ChatStreamEvent("aborted", {})], result)
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -477,7 +510,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.commands.request_abort(run_id="run-1")
         stream.close()
 
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         run = self.store.runs.get("run-1")
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_ROLE_USER, messages[0].role)
@@ -528,7 +561,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_terminal_event_failure_rolls_back_message_and_run_terminal_state(self) -> None:
         self.store.messages.append(
             message_id="run-1:user",
-            chat_id="10001",
+            conversation_id=self.conversation_id,
             run_id="run-1",
             role=MESSAGE_ROLE_USER,
             content="请总结",
@@ -549,7 +582,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                     terminal_event=ChatStreamEvent("done", {"chatId": 10001}),
                 )
 
-        user = self.store.messages.list_by_chat("10001")[0]
+        user = self.store.messages.list_by_chat(self.conversation_id)[0]
         run = self.store.runs.get("run-1")
         self.assertEqual(MESSAGE_PENDING, user.status)
         self.assertIsNotNone(run)
@@ -574,7 +607,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                 )
 
         run = self.store.runs.get("run-1")
-        messages = self.store.messages.list_by_chat("10001")
+        messages = self.store.messages.list_by_chat(self.conversation_id)
         self.assertIsNotNone(run)
         assert run is not None
         self.assertEqual(RUN_FAILED, run.status)
@@ -600,7 +633,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
 
         same = self.store.messages.append(
             message_id="run-1:user",
-            chat_id="10001",
+            conversation_id=self.conversation_id,
             run_id="run-1",
             role=MESSAGE_ROLE_USER,
             content="请总结",
@@ -613,7 +646,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
     def test_success_terminal_transaction_rolls_back_user_on_assistant_write_error(self) -> None:
         self.store.messages.append(
             message_id="run-1:user",
-            chat_id="10001",
+            conversation_id=self.conversation_id,
             run_id="run-1",
             role=MESSAGE_ROLE_USER,
             content="请总结",
@@ -628,7 +661,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
                 assistant_content="必须导致事务回滚",
             )
 
-        user = self.store.messages.list_by_chat("10001")[0]
+        user = self.store.messages.list_by_chat(self.conversation_id)[0]
         run = self.store.runs.get("run-1")
         self.assertEqual(MESSAGE_PENDING, user.status)
         self.assertIsNotNone(run)
@@ -680,7 +713,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
     def test_non_empty_candidate_scope_resolves_only_explicit_files(self) -> None:
         resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
         candidates = self._executor(resolver).resolve_document_candidates(
-            chat_id="candidate-explicit",
+            identity=_identity("candidate-explicit"),
             file_names=("explicit.pdf",),
         )
 
@@ -695,11 +728,12 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual(0, resolver.resolve_all_available_calls)
 
     def test_existing_session_empty_scope_skips_catalog_scan(self) -> None:
-        self.store.sessions.create_or_get(chat_id="candidate-existing")
+        identity = _identity("candidate-existing")
+        self.store.identities.create_conversation(identity)
         resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
 
         candidates = self._executor(resolver).resolve_document_candidates(
-            chat_id="candidate-existing",
+            identity=identity,
             file_names=(),
         )
 
@@ -714,7 +748,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
         candidates = self._executor(resolver).resolve_document_candidates(
-            chat_id="candidate-new",
+            identity=_identity("candidate-new"),
             file_names=(),
         )
 
@@ -734,7 +768,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         executor = self._executor(resolver)
 
         prepared = executor.prepare_chat_run(
-            chat_id="candidate-stage-gate",
+            identity=_identity("candidate-stage-gate"),
             message="question",
             file_names=(),
         )
@@ -762,11 +796,11 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             side_effect=RuntimeError("injected telemetry read failure"),
         ):
             with self.assertLogs(
-                "app.services.chat.application.run_executor",
+                "app.modules.chat.application.run_executor",
                 level="ERROR",
             ) as captured:
                 prepared = executor.prepare_chat_run(
-                    chat_id="20006",
+                    identity=_identity(20006),
                     message="question",
                     file_names=(),
                 )
@@ -795,8 +829,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
     ) -> None:
         resolver = _StaticDocumentResolver(all_file_names=("all.pdf",))
         executor = self._executor(resolver)
+        identity = _identity("candidate-first-failed")
         first = executor.prepare_chat_run(
-            chat_id="candidate-first-failed",
+            identity=identity,
             message="first",
             file_names=(),
         )
@@ -806,7 +841,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
         retry = executor.prepare_chat_run(
-            chat_id="candidate-first-failed",
+            identity=identity,
             message="retry",
             file_names=(),
         )
@@ -847,12 +882,12 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         explicit = executor.prepare_chat_run(
-            chat_id="20001",
+            identity=_identity(20001),
             message="explicit question",
             file_names=("alpha.pdf", "beta.pdf"),
         )
         default = executor.prepare_chat_run(
-            chat_id="20002",
+            identity=_identity(20002),
             message="default question",
             file_names=(),
         )
@@ -881,19 +916,20 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             )
             self.assertEqual(expected_refs, port.stream_message_calls[0][2])
 
-        for chat_id, prepared, expected_history_files in (
+        for prepared, expected_history_files in (
             (
-                "20001",
                 explicit,
                 ("alpha.pdf.original", "beta.pdf.original"),
             ),
-            ("20002", default, ()),
+            (default, ()),
         ):
             bindings = self.store.document_bindings.list_current_by_chat(
-                chat_id
+                prepared.conversation_id
             )
-            messages = self.store.messages.list_by_chat(chat_id)
-            leases = self.store.resource_leases.list_by_chat(chat_id)
+            messages = self.store.messages.list_by_chat(prepared.conversation_id)
+            leases = self.store.resource_leases.list_by_chat(
+                prepared.conversation_id
+            )
             self.assertEqual(
                 expected_refs,
                 tuple(item.document_ref for item in bindings),
@@ -923,7 +959,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="20006",
+            identity=_identity("20006"),
             message="question",
             file_names=("alpha.pdf",),
         )
@@ -941,7 +977,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual(
             (),
             self.store.document_bindings.list_current_by_chat(
-                "20006"
+                prepared.conversation_id
             ),
         )
         run = self.store.runs.get(prepared.run_id)
@@ -961,7 +997,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="20007",
+            identity=_identity("20007"),
             message="question",
             file_names=("alpha.pdf",),
         )
@@ -989,7 +1025,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual(
             (),
             self.store.document_bindings.list_current_by_chat(
-                "20007"
+                prepared.conversation_id
             ),
         )
 
@@ -1005,7 +1041,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="20008",
+            identity=_identity("20008"),
             message="question",
             file_names=("alpha.pdf",),
         )
@@ -1024,7 +1060,12 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             patch.object(
                 FakeChatConversationPort,
                 "stream_message",
-                return_value=iter((ChatChunk("answer", 1),)),
+                return_value=iter(
+                    (
+                        ChatChunk("answer", 1),
+                        ChatSourceFinalization(sources=()),
+                    )
+                ),
             ) as stream_message,
         ):
             events = list(executor.execute_chat_run(prepared.run_id))
@@ -1033,7 +1074,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             ["chatInfo", "textChunk", "done"],
             [event.event_type for event in events],
         )
-        bindings = self.store.document_bindings.list_current_by_chat("20008")
+        bindings = self.store.document_bindings.list_current_by_chat(
+            prepared.conversation_id
+        )
         self.assertEqual(1, len(bindings))
         self.assertEqual("document:canonical-alpha", bindings[0].document_ref)
         self.assertEqual(
@@ -1059,7 +1102,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="20003",
+            identity=_identity("20003"),
             message="question",
             file_names=(),
         )
@@ -1089,7 +1132,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             tuple(
                 item.document_ref
                 for item in self.store.document_bindings.list_current_by_chat(
-                    "20003"
+                    prepared.conversation_id
                 )
             ),
         )
@@ -1101,7 +1144,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
 
         resolver = _StaticDocumentResolver(all_file_names=("alpha.pdf",))
         prepared = self._executor(resolver).prepare_chat_run(
-            chat_id="30001",
+            identity=_identity("30001"),
             message="question",
             file_names=(),
         )
@@ -1140,7 +1183,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         user_message = next(
             item
             for item in restarted_store.messages.list_by_chat(
-                "30001"
+                prepared.conversation_id
             )
             if item.role == MESSAGE_ROLE_USER
         )
@@ -1154,8 +1197,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         resolver = _ArchitectureDocumentResolver(
             architecture_file_names=("alpha.pdf",)
         )
+        identity = _weaponry_identity(30011, 71)
         prepared = self._executor(resolver).prepare_chat_run(
-            chat_id="30011",
+            identity=identity,
             message="question",
             scope_selector=ChatScopeSelector.for_architecture(71),
         )
@@ -1183,7 +1227,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         events = list(restarted_executor.execute_chat_run(prepared.run_id))
 
         self.assertEqual(
-            ["chatInfo", "textChunk", "done"],
+            ["chatInfo", "textChunk", "source_snapshot", "done"],
             [item.event_type for item in events],
         )
         self.assertEqual([], restarted_resolver.resolve_architecture_calls)
@@ -1193,7 +1237,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
         user_message = next(
             item
-            for item in restarted_store.messages.list_by_chat("30011")
+            for item in restarted_store.messages.list_by_chat(
+                prepared.conversation_id
+            )
             if item.role == MESSAGE_ROLE_USER
         )
         self.assertEqual(71, user_message.architecture_id)
@@ -1215,8 +1261,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         selector = ChatScopeSelector.for_architecture(72)
+        identity = _weaponry_identity(30012, 72)
         first = executor.prepare_chat_run(
-            chat_id="30012",
+            identity=identity,
             message="first",
             scope_selector=selector,
         )
@@ -1224,7 +1271,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
 
         # 模拟供应商 Workspace 被其他流程额外挂入文档。该文档真实存在于远端测试
         # 替身中，但不属于本 chatId 的持久化 Scope Revision。
-        session = self.store.sessions.get("30012")
+        session = self.store.sessions.get(first.conversation_id)
         self.assertIsNotNone(session)
         assert session is not None
         with factory.create() as conversation:
@@ -1242,7 +1289,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             )
 
         second = executor.prepare_chat_run(
-            chat_id="30012",
+            identity=identity,
             message="reuse",
             scope_selector=selector,
         )
@@ -1253,7 +1300,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             ("document:alpha.pdf",),
             factory.ports[2].stream_message_calls[0][2],
         )
-        current_scope = self.store.scopes.get_current_revision("30012")
+        current_scope = self.store.scopes.get_current_revision(
+            first.conversation_id
+        )
         self.assertIsNotNone(current_scope)
         assert current_scope is not None
         self.assertEqual(
@@ -1262,12 +1311,15 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
     def test_architecture_execution_logs_do_not_leak_scope_or_body(self) -> None:
-        """类别对话日志只保留计数和审计键，不输出文件身份、位置或正文。"""
+        """类别对话日志只保留计数和内部审计键，不输出业务身份、来源或正文。"""
 
         secret_file_name = "private-contract.pdf"
+        secret_original_name = f"{secret_file_name}.original"
         secret_document_ref = f"document:{secret_file_name}"
         secret_location = f"custom-documents/{secret_file_name}.json"
         secret_message = "confidential-message-body"
+        secret_chunk = " confidential-source-chunk\r\nΩ "
+        secret_user_id = 9_007_199_254_740_991
         resolver = _ArchitectureDocumentResolver(
             architecture_file_names=(secret_file_name,)
         )
@@ -1275,14 +1327,23 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             store=self.store,
             chat_commands=self.commands,
             conversation_factory=FakeChatConversationFactory(
-                stream_contents=("answer",)
+                stream_contents=("answer",),
+                stream_sources=(
+                    ChatSourceEvidence(
+                        content=secret_chunk,
+                        structured_source_key=secret_location,
+                    ),
+                ),
             ),
             document_resolver=resolver,
         )
 
-        with self.assertLogs("app.services.chat", level="INFO") as captured:
+        with self.assertLogs("app.modules.chat", level="INFO") as captured:
             prepared = executor.prepare_chat_run(
-                chat_id="30013",
+                identity=WeaponryChatIdentity(
+                    user_id=secret_user_id,
+                    architecture_id=73,
+                ),
                 message=secret_message,
                 scope_selector=ChatScopeSelector.for_architecture(73),
             )
@@ -1291,10 +1352,13 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         combined_logs = "\n".join(captured.output)
         self.assertIn("requested_architecture_id=73", combined_logs)
         self.assertIn("lease_token=", combined_logs)
+        self.assertNotIn(str(secret_user_id), combined_logs)
         self.assertNotIn(secret_file_name, combined_logs)
+        self.assertNotIn(secret_original_name, combined_logs)
         self.assertNotIn(secret_document_ref, combined_logs)
         self.assertNotIn(secret_location, combined_logs)
         self.assertNotIn(secret_message, combined_logs)
+        self.assertNotIn(secret_chunk, combined_logs)
 
     def test_workspace_bindings_accumulate_but_explicit_scope_replaces_model_range(
         self,
@@ -1310,19 +1374,19 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         first = executor.prepare_chat_run(
-            chat_id="30002",
+            identity=_identity("30002"),
             message="first",
             file_names=("alpha.pdf", "beta.pdf"),
         )
         list(executor.execute_chat_run(first.run_id))
         second = executor.prepare_chat_run(
-            chat_id="30002",
+            identity=_identity("30002"),
             message="replace",
             file_names=("beta.pdf",),
         )
         list(executor.execute_chat_run(second.run_id))
         third = executor.prepare_chat_run(
-            chat_id="30002",
+            identity=_identity("30002"),
             message="reuse",
             file_names=(),
         )
@@ -1333,7 +1397,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             tuple(
                 item.file_name
                 for item in self.store.document_bindings.list_current_by_chat(
-                    "30002"
+                    first.conversation_id
                 )
             ),
         )
@@ -1350,7 +1414,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         user_messages = tuple(
             item
             for item in self.store.messages.list_by_chat(
-                "30002"
+                first.conversation_id
             )
             if item.role == MESSAGE_ROLE_USER
         )
@@ -1378,13 +1442,13 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         first = executor.prepare_chat_run(
-            chat_id="30003",
+            identity=_identity("30003"),
             message="first",
             file_names=(),
         )
         list(executor.execute_chat_run(first.run_id))
         failed = executor.prepare_chat_run(
-            chat_id="30003",
+            identity=_identity("30003"),
             message="replace",
             file_names=("beta.pdf",),
         )
@@ -1394,7 +1458,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
         retry = executor.prepare_chat_run(
-            chat_id="30003",
+            identity=_identity("30003"),
             message="reuse",
             file_names=(),
         )
@@ -1426,7 +1490,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         first = executor.prepare_chat_run(
-            chat_id="20004",
+            identity=_identity("20004"),
             message="first",
             file_names=(),
         )
@@ -1434,7 +1498,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         resolver.all_file_names = ("alpha.pdf", "new-beta.pdf")
 
         second = executor.prepare_chat_run(
-            chat_id="20004",
+            identity=_identity("20004"),
             message="second",
             file_names=(),
         )
@@ -1463,14 +1527,14 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             tuple(
                 item.file_name
                 for item in self.store.document_bindings.list_current_by_chat(
-                    "20004"
+                    first.conversation_id
                 )
             ),
         )
         user_messages = [
             item
             for item in self.store.messages.list_by_chat(
-                "20004"
+                first.conversation_id
             )
             if item.role == MESSAGE_ROLE_USER
         ]
@@ -1491,7 +1555,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="20005",
+            identity=_identity("20005"),
             message="free question",
             file_names=(),
         )
@@ -1509,17 +1573,17 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual(
             (),
             self.store.document_bindings.list_current_by_chat(
-                "20005"
+                prepared.conversation_id
             ),
         )
-        messages = self.store.messages.list_by_chat("20005")
+        messages = self.store.messages.list_by_chat(prepared.conversation_id)
         self.assertEqual((), messages[0].files)
         self.assertEqual(
             ["thread", "workspace"],
             sorted(
                 item.resource_type
                 for item in self.store.resource_leases.list_by_chat(
-                    "20005"
+                    prepared.conversation_id
                 )
             ),
         )
@@ -1533,7 +1597,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="10002",
+            identity=_identity("10002"),
             message="question",
             file_names=("hash-a.pdf",),
         )
@@ -1546,11 +1610,13 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
 
         events = list(executor.execute_chat_run(prepared.run_id))
 
-        session = self.store.sessions.get("10002")
+        session = self.store.sessions.get(prepared.conversation_id)
         documents = self.store.document_bindings.list_current_by_chat(
-            "10002"
+            prepared.conversation_id
         )
-        leases = self.store.resource_leases.list_by_chat("10002")
+        leases = self.store.resource_leases.list_by_chat(
+            prepared.conversation_id
+        )
         self.assertEqual(["chatInfo", "textChunk", "done"], [event.event_type for event in events])
         self.assertIsNotNone(session)
         assert session is not None
@@ -1569,7 +1635,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
         prepared = executor.prepare_chat_run(
-            chat_id="chat-lease-issue-failure",
+            identity=_identity("chat-lease-issue-failure"),
             message="question",
             file_names=(),
         )
@@ -1580,9 +1646,12 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         ):
             events = list(executor.execute_chat_run(prepared.run_id))
 
-        self.assertEqual((), self.store.runs.list_active("chat-lease-issue-failure"))
+        self.assertEqual(
+            (),
+            self.store.runs.list_active(prepared.conversation_id),
+        )
         self.assertEqual(["error"], [event.event_type for event in events])
-        messages = self.store.messages.list_by_chat("chat-lease-issue-failure")
+        messages = self.store.messages.list_by_chat(prepared.conversation_id)
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_DISCARDED, messages[0].status)
         run = self.store.runs.get(messages[0].run_id)
@@ -1599,7 +1668,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="chat-duplicate-claim",
+            identity=_identity("chat-duplicate-claim"),
             message="question",
             file_names=(),
         )
@@ -1610,7 +1679,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         events = list(executor.execute_chat_run(prepared.run_id))
 
         self.assertEqual(["error"], [event.event_type for event in events])
-        messages = self.store.messages.list_by_chat("chat-duplicate-claim")
+        messages = self.store.messages.list_by_chat(prepared.conversation_id)
         self.assertEqual(1, len(messages))
         self.assertEqual(MESSAGE_PENDING, messages[0].status)
         run = self.store.runs.get(prepared.run_id)
@@ -1628,7 +1697,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="chat-open-fail",
+            identity=_identity("chat-open-fail"),
             message="question",
             file_names=(),
         )
@@ -1636,7 +1705,9 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         events = list(executor.execute_chat_run(prepared.run_id))
 
         run = self.store.runs.get(prepared.run_id)
-        leases = self.store.resource_leases.list_by_chat("chat-open-fail")
+        leases = self.store.resource_leases.list_by_chat(
+            prepared.conversation_id
+        )
         self.assertEqual(["error"], [event.event_type for event in events])
         self.assertIsNotNone(run)
         assert run is not None
@@ -1654,14 +1725,14 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             max_output_chars=3,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="10003",
+            identity=_identity("10003"),
             message="question",
             file_names=(),
         )
 
         events = list(executor.execute_chat_run(prepared.run_id))
 
-        messages = self.store.messages.list_by_chat("10003")
+        messages = self.store.messages.list_by_chat(prepared.conversation_id)
         run = self.store.runs.get(prepared.run_id)
         self.assertEqual(["chatInfo", "error"], [event.event_type for event in events])
         self.assertEqual([MESSAGE_ROLE_USER], [message.role for message in messages])
@@ -1680,7 +1751,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             document_resolver=self.resolver,
         )
         prepared = executor.prepare_chat_run(
-            chat_id="chat-orphan-workspace",
+            identity=_identity("chat-orphan-workspace"),
             message="question",
             file_names=(),
         )
@@ -1688,14 +1759,14 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         list(executor.execute_chat_run(prepared.run_id))
 
         workspace_lease = self.store.resource_leases.get(
-            "chat:chat-orphan-workspace:workspace"
+            f"chat:{prepared.conversation_id}:workspace"
         )
         self.assertIsNotNone(workspace_lease)
         assert workspace_lease is not None
         self.assertEqual("workspace-orphan", workspace_lease.external_ref)
         self.assertEqual("active", workspace_lease.status)
         thread_lease = self.store.resource_leases.get(
-            "chat:chat-orphan-workspace:thread"
+            f"chat:{prepared.conversation_id}:thread"
         )
         self.assertIsNotNone(thread_lease)
         assert thread_lease is not None

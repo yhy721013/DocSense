@@ -8,7 +8,7 @@
 | --- | --- |
 | `__init__.py` | 核心服务包标记。 |
 | `config.py` | 读取和规范化应用配置。 |
-| `database.py` | 既有业务数据库服务；初始化时与文件对话架构兼容，但不替代 `services/chat/persistence/` 的权威仓储。 |
+| `database.py` | 既有知识映射数据库服务；不替代 `app/modules/chat/adapters/sqlite/` 的 Chat 权威仓储。 |
 | `prompts.py` | 构造标题等模型提示词；文件对话标题服务只从这里获取受控提示词。 |
 | `settings.py` | 运行时常量，包括文件对话文件数、输入长度、输出长度和单进程流并发上限。 |
 | `logging.py` | 日志初始化与格式配置。 |
@@ -25,4 +25,5 @@
 
 - 配置项变更需同时考虑单实例边界、容量保护和未来多实例可替换性。
 - 不要在此目录引入具体 AnythingLLM 调用、SSE 格式化或运行状态迁移。
-- 标题提示词变化可能影响模型输出质量，但不应改变 `/llm/chat/title` 的字段契约。
+- 标题提示词变化可能影响模型输出质量，但不应改变 `/llm/chat/title` 或
+  `/llm/weaponry-chat/title` 的字段契约。

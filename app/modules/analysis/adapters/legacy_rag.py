@@ -228,6 +228,7 @@ class LegacyAnalysisRagAdapter(AnalysisRagPort):
                     document_location=prepared.external_location,
                     content_sha256=prepared.content_sha256,
                     ingested_file_name=prepared.ingested_file_name,
+                    structured_source_key=prepared.structured_source_key,
                 )
             elif request.operation is AnalysisRagOperation.IDENTITY_RESELECT:
                 native_result = native_session.ask_optional(

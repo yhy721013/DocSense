@@ -36,6 +36,7 @@ REPORT_ROOT = MODULES_ROOT / "report"
 WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
 REASSIGN_ROOT = MODULES_ROOT / "reassign"
 ANALYSIS_ROOT = MODULES_ROOT / "analysis"
+CHAT_ROOT = MODULES_ROOT / "chat"
 ANALYSIS_APPLICATION_FACADE_PATH = ANALYSIS_ROOT / "application" / "run_analysis.py"
 ANALYSIS_APPLICATION_COLLABORATOR_PATHS = {
     "models": ANALYSIS_ROOT / "application" / "workflow_models.py",
@@ -174,6 +175,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             ANALYSIS_ROOT / "application",
             ANALYSIS_ROOT / "ports",
             ANALYSIS_ROOT / "adapters",
+            CHAT_ROOT,
+            CHAT_ROOT / "domain",
+            CHAT_ROOT / "application",
+            CHAT_ROOT / "ports",
+            CHAT_ROOT / "adapters",
             ROOT / "app" / "adapters",
             ROOT / "app" / "adapters" / "web",
             ROOT / "app" / "adapters" / "web" / "flask",
@@ -723,7 +729,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
         violations = self._scan_source(
             "app/modules/tasks/adapters/legacy_task_service.py",
             """
-            from app.services.chat.persistence import ChatStore
+            from app.modules.chat.adapters.sqlite import ChatStore
             from app.modules.report.adapters.mysql import ReportRepository
             from app.modules.weaponry.domain import WeaponryTask
             """,
@@ -731,7 +737,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                "app.services.chat.persistence",
+                "app.modules.chat.adapters.sqlite",
                 "app.modules.report.adapters.mysql",
                 "app.modules.weaponry.domain",
             },
@@ -909,7 +915,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
             ),
             (
                 "app/presenters/task_status.py",
-                "from app.services.chat.domain.events import ChatStreamEvent\n",
+                "from app.modules.chat.domain.events import ChatStreamEvent\n",
                 PRESENTER_RULE,
             ),
         )

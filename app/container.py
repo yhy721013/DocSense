@@ -19,7 +19,6 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
 )
-from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.policies import (
     analysis_rag_workspace_settings,
     knowledge_index_workspace_settings,
@@ -162,12 +161,9 @@ from app.modules.weaponry.composition import (
     WeaponryApplicationServices,
     compose_weaponry_application_services,
 )
-from app.ports import (
-    ChatConversationFactory,
-    DocumentRagFactory,
-    KnowledgeIndexFactory,
-)
-from app.services.chat import (
+from app.ports import DocumentRagFactory, KnowledgeIndexFactory
+from app.modules.chat.ports import ChatConversationFactory
+from app.modules.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
     ChatCommandService,
@@ -176,12 +172,12 @@ from app.services.chat import (
     ChatHistoryService,
     ChatPersistenceStore,
     ChatRunDispatcher,
-    ChatRunLockService,
-    ChatStore,
     ChatTitleService,
     SynchronousChatRunExecutor,
-    InlineChatRunDispatcher,
-    InlineChatCleanupDispatcher,
+)
+from app.modules.chat.composition import (
+    ChatApplicationServices,
+    compose_chat_application_services,
 )
 from app.services.core.config import (
     AnalysisClassificationConfig,
@@ -302,6 +298,9 @@ class ApplicationServices:
     anythingllm_config: AnythingLLMConfig
     report_infrastructure_config: ReportInfrastructureConfig
     debug_services: DebugApplicationServices
+    # Chat 模块的只读外观是 Web/Worker 新代码的唯一入口。单项字段
+    # 暂保留给现有测试夹具；``__post_init__`` 会确保两者共享对象图。
+    chat_services: ChatApplicationServices | None = field(default=None, repr=False)
     legacy_office_preparer: LegacyOfficePreparer = field(
         default_factory=_disabled_legacy_office_preparer
     )
@@ -333,6 +332,19 @@ class ApplicationServices:
 
     def __post_init__(self) -> None:
         """在应用启动时拒绝缺失关键依赖，避免请求到达后才出现空引用错误。"""
+        resolved_chat_services = self.chat_services or ChatApplicationServices(
+            conversation_factory=self.chat_conversation_factory,
+            store=self.chat_store,
+            commands=self.chat_commands,
+            run_executor=self.chat_run_executor,
+            dispatcher=self.chat_dispatcher,
+            history=self.chat_history,
+            title=self.chat_title,
+            abort=self.chat_abort,
+            delete=self.chat_delete,
+            cleanup_executor=self.chat_cleanup_executor,
+        )
+        object.__setattr__(self, "chat_services", resolved_chat_services)
         required_dependencies: dict[str, Any] = {
             "document_rag_factory": self.document_rag_factory,
             "knowledge_index_factory": self.knowledge_index_factory,
@@ -400,6 +412,28 @@ class ApplicationServices:
             raise TypeError("chat_delete must be ChatDeleteService")
         if not isinstance(self.chat_cleanup_executor, ChatCleanupJobExecutor):
             raise TypeError("chat_cleanup_executor must be ChatCleanupJobExecutor")
+        chat_aliases = {
+            "conversation_factory": self.chat_conversation_factory,
+            "store": self.chat_store,
+            "commands": self.chat_commands,
+            "run_executor": self.chat_run_executor,
+            "dispatcher": self.chat_dispatcher,
+            "history": self.chat_history,
+            "title": self.chat_title,
+            "abort": self.chat_abort,
+            "delete": self.chat_delete,
+            "cleanup_executor": self.chat_cleanup_executor,
+        }
+        divergent_chat_aliases = [
+            name
+            for name, value in chat_aliases.items()
+            if getattr(resolved_chat_services, name) is not value
+        ]
+        if divergent_chat_aliases:
+            raise ValueError(
+                "chat_services 与兼容字段未共享同一对象图: "
+                + ", ".join(divergent_chat_aliases)
+            )
         if not isinstance(
             self.progress_subscription_service,
             ProgressSubscriptionService,
@@ -1062,29 +1096,21 @@ def create_application_services() -> ApplicationServices:
     )
     task_service = LLMTaskService(llm_config.task_db_path)
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
-    chat_store = ChatStore(str(CHAT_DB_PATH))
-    chat_commands = ChatCommandService(ChatRunLockService(str(CHAT_DB_PATH)))
-    chat_history = ChatHistoryService(chat_store)
-    chat_conversation_factory = AnythingLLMChatFactory(anythingllm_config)
-    chat_cleanup_executor = ChatCleanupJobExecutor(
-        store=chat_store,
-        conversation_factory=chat_conversation_factory,
-    )
-    chat_cleanup_dispatcher = InlineChatCleanupDispatcher(
-        execute=chat_cleanup_executor.execute_cleanup_job,
-    )
-    chat_run_executor = SynchronousChatRunExecutor(
-        store=chat_store,
-        chat_commands=chat_commands,
-        conversation_factory=chat_conversation_factory,
+    chat_services = compose_chat_application_services(
+        db_path=str(CHAT_DB_PATH),
+        anythingllm_config=anythingllm_config,
         document_resolver=DatabaseChatDocumentResolver(kb_service),
     )
-
-    # 内联调度器只接收持久化 run_id。执行器会重新加载已受理快照，并在执行时领取运行权，
-    # 因而当前同步路径与未来工作进程入口保持一致。
-    chat_dispatcher = InlineChatRunDispatcher(
-        execute=chat_run_executor.execute_chat_run,
-    )
+    # Container 只保存模块外观公开的实例，不再知道 Store、清理器、标题服务和 Dispatcher 的
+    # 构造顺序。保持以下局部别名只是为了兼容当前 ApplicationServices 字段，阶段 2 的身份/Schema
+    # 改造不会重新把逐项装配职责放回全局组合根。
+    chat_store = chat_services.store
+    chat_commands = chat_services.commands
+    chat_history = chat_services.history
+    chat_conversation_factory = chat_services.conversation_factory
+    chat_cleanup_executor = chat_services.cleanup_executor
+    chat_run_executor = chat_services.run_executor
+    chat_dispatcher = chat_services.dispatcher
     # 旧业务发布方与新应用服务必须共享同一个 Hub。类型化 Adapter 只做边界转换，
     # 不另建 latest 或订阅者副本，避免切换期出现两个权威进度源。
     progress_hub = LLMProgressHub()
@@ -1528,24 +1554,9 @@ def create_application_services() -> ApplicationServices:
         chat_run_executor=chat_run_executor,
         chat_dispatcher=chat_dispatcher,
         chat_history=chat_history,
-        chat_title=ChatTitleService(
-            store=chat_store,
-            history_service=chat_history,
-            conversation_factory=chat_conversation_factory,
-            cleanup_dispatcher=chat_cleanup_dispatcher,
-            cleanup_executor=chat_cleanup_executor,
-        ),
-        chat_abort=ChatAbortService(
-            store=chat_store,
-            chat_commands=chat_commands,
-        ),
-        chat_delete=ChatDeleteService(
-            store=chat_store,
-            chat_commands=chat_commands,
-            conversation_factory=chat_conversation_factory,
-            cleanup_dispatcher=chat_cleanup_dispatcher,
-            cleanup_executor=chat_cleanup_executor,
-        ),
+        chat_title=chat_services.title,
+        chat_abort=chat_services.abort,
+        chat_delete=chat_services.delete,
         chat_cleanup_executor=chat_cleanup_executor,
         progress_hub=progress_hub,
         progress_subscription_service=progress_subscription_service,
@@ -1560,6 +1571,9 @@ def create_application_services() -> ApplicationServices:
             chat_store=chat_store,
             kb_service=kb_service,
         ),
+        # 将 Chat 唯一组合根返回的完整外观原样交给应用容器。兼容字段仍供既有
+        # 测试夹具使用，但公开路由只通过该外观访问同一组共享实例。
+        chat_services=chat_services,
         legacy_office_preparer=legacy_office_preparer,
         legacy_office_config=legacy_office_config,
         analysis_classification_config=analysis_classification_config,

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Callable, Iterable, Iterator, Mapping
+from typing import Callable, Iterable, Iterator
 
-from app.services.chat.domain.chat_id import chat_id_public_value
-from app.services.chat.domain.events import ChatStreamEvent
+from app.modules.chat.domain.chat_id import chat_id_public_value
+from app.modules.chat.domain.events import ChatStreamEvent
+from app.presenters.sse import close_sse_resource, format_sse_event
 
 
 logger = logging.getLogger(__name__)
@@ -15,16 +15,11 @@ _TERMINAL_EVENT_TYPES = frozenset({"aborted", "done", "error"})
 _CHAT_ID_EVENT_TYPES = frozenset({"aborted", "chatInfo", "done"})
 
 
-def format_sse_event(event_type: str, data: Mapping[str, Any] | None = None) -> str:
-    """将一个领域流事件格式化为 Server-Sent Events 载荷。"""
-    normalized_type = str(event_type or "").strip()
-    if not normalized_type:
-        raise ValueError("event_type cannot be empty")
-    payload = json.dumps(dict(data or {}), ensure_ascii=False)
-    return f"event: {normalized_type}\ndata: {payload}\n\n"
-
-
-def _normalize_public_event_data(event: ChatStreamEvent) -> dict[str, Any]:
+def _normalize_public_event_data(
+    event: ChatStreamEvent,
+    *,
+    chat_id: int | None = None,
+) -> dict[str, Any]:
     """在 SSE 最终输出边界确保 chatId 不会以字符串泄露给前端。
 
     运行、租约和事件账本内部仍以文本键关联；若未来替换执行器或任务队列时有新
@@ -37,7 +32,14 @@ def _normalize_public_event_data(event: ChatStreamEvent) -> dict[str, Any]:
         return payload
 
     try:
-        payload["chatId"] = chat_id_public_value(payload.get("chatId"))
+        # 共享 Chat Application 的事件不携带公开身份。文件 Presenter 只使用
+        # 已经在 Web Parser 验证过的 chatId 回填，禁止从内部 conversation UUID
+        # 反推或转换公开身份。
+        source_value = chat_id if chat_id is not None else payload.get("chatId")
+        public_chat_id = chat_id_public_value(source_value)
+        # 文件对话阶段 0 的黄金 SSE 把 chatId 固定为身份事件首字段；虽然 JSON
+        # 对象语义不依赖顺序，仍保持字节级合同，避免前端快照测试无谓变化。
+        payload = {"chatId": public_chat_id, **payload}
     except ValueError:
         logger.error(
             "拒绝输出非规范 chatId 的 SSE 事件: event_type=%s payload_keys=%s",
@@ -48,48 +50,37 @@ def _normalize_public_event_data(event: ChatStreamEvent) -> dict[str, Any]:
     return payload
 
 
-def present_chat_stream(events: Iterable[ChatStreamEvent]) -> Iterator[str]:
+def present_chat_stream(
+    events: Iterable[ChatStreamEvent],
+    *,
+    chat_id: int | None = None,
+) -> Iterator[str]:
     """将供应商无关的对话事件转换为 SSE 载荷。"""
     for event in events:
         if not isinstance(event, ChatStreamEvent):
             raise TypeError("chat stream must yield ChatStreamEvent")
         logger.debug("展示文件对话 SSE 事件: event_type=%s", event.event_type)
-        yield format_sse_event(event.event_type, _normalize_public_event_data(event))
+        yield format_sse_event(
+            event.event_type,
+            _normalize_public_event_data(event, chat_id=chat_id),
+        )
 
 
 def close_chat_stream_resource(
-    resource: Any,
+    resource: object,
     *,
     run_id: str,
     label: str,
 ) -> None:
-    close = getattr(resource, "close", None)
-    if not callable(close):
-        logger.debug(
-            "文件对话流资源无需关闭: run_id=%s resource=%s",
-            run_id,
-            label,
-        )
-        return
-    try:
-        close()
-        logger.debug(
-            "文件对话流资源已关闭: run_id=%s resource=%s",
-            run_id,
-            label,
-        )
-    except Exception:
-        logger.exception(
-            "关闭文件对话流资源失败: run_id=%s resource=%s",
-            run_id,
-            label,
-        )
+    """保留既有公共名称，内部委托给中立 SSE 工具。"""
+    close_sse_resource(resource, run_id=run_id, label=label)
 
 
 def finalize_chat_run_stream(
     *,
     stream: Iterable[ChatStreamEvent],
     run_id: str,
+    chat_id: int | None = None,
     on_close: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     terminal_event_seen = False
@@ -108,7 +99,7 @@ def finalize_chat_run_stream(
             )
             yield format_sse_event(
                 event.event_type,
-                _normalize_public_event_data(event),
+                _normalize_public_event_data(event, chat_id=chat_id),
             )
             if is_terminal:
                 terminal_event_seen = True

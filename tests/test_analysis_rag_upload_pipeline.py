@@ -470,6 +470,7 @@ class AnalysisRagUploadPipelineTests(unittest.TestCase):
                 document_location="location",
                 content_sha256=artifact.metadata.sha256,
                 ingested_file_name="原始资料.md",
+                structured_source_key="docsense_ref:" + "a" * 32,
             )
             lifecycle.checkpoint_rag_state(state)
             assert resource_store.record is not None
@@ -533,6 +534,7 @@ class AnalysisRagUploadPipelineTests(unittest.TestCase):
                 document_location="location",
                 content_sha256=artifact.metadata.sha256,
                 ingested_file_name="provider-rewritten.md",
+                structured_source_key="docsense_ref:" + "a" * 32,
             )
 
             with self.assertRaisesRegex(
