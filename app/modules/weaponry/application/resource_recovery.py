@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -74,6 +76,7 @@ class WeaponryResourceRecoverySweepResult:
     requested_limit: int
     scanned_count: int
     cleaned_count: int
+    cleaned_resource_count: int
     pending_count: int
     quarantined_count: int
     not_ready_count: int
@@ -133,10 +136,18 @@ class WeaponryResourceRecoveryService:
     def store(self) -> WeaponryResourceStorePort:
         return self._store
 
-    def run_once(self, *, limit: int) -> WeaponryResourceRecoverySweepResult:
+    def run_once(
+        self,
+        *,
+        limit: int,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> WeaponryResourceRecoverySweepResult:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
-        if self._creation_intent_recovery is not None:
+        if stop_requested is not None and not callable(stop_requested):
+            raise TypeError("stop_requested 必须可调用或为 None")
+        should_stop = stop_requested or (lambda: False)
+        if self._creation_intent_recovery is not None and not should_stop():
             # 先把 create 崩溃窗口收敛成可审计隔离事实，随后资源扫描才能看到完整现场。
             # 两个扫描分别有界，limit 是单类工作页大小而不是业务积压上限。
             try:
@@ -145,16 +156,25 @@ class WeaponryResourceRecoveryService:
                 # 创建意图查询依赖 AnythingLLM；供应商短暂不可用不能阻塞已经登记资源
                 # 的本地恢复与 Callback Guard 维护。
                 logger.exception("武器谱创建意图恢复批次失败，继续执行资源恢复")
-        task_ids = self._store.list_recoverable(limit=limit)
+        task_ids = (
+            () if should_stop() else self._store.list_recoverable(limit=limit)
+        )
         if not isinstance(task_ids, tuple) or any(
             not isinstance(task_id, TaskId) for task_id in task_ids
         ):
             raise TypeError("Resource Store list_recoverable 必须返回 TaskId tuple")
 
+        # ``limit`` 约束本轮资源恢复操作数，而不是只约束唯一任务数。同一大任务可能登记
+        # 数百个 extraction workspace/thread；按任务每 30 秒只处理一项会让清理速度远低于
+        # 创建速度。这里用轮转队列保证多任务各推进一项后，才继续处理仍有安全候选的任务。
+        # 每次 ``recover`` 仍只执行一个外部副作用并单独提交 lease/fencing 检查点；停止信号
+        # 会在两项之间生效，不会让一个大批次阻塞 Dispatcher 的关闭流程。
+        pending_tasks = deque(task_ids)
         results: list[WeaponryResourceRecoveryResult] = []
-        for task_id in task_ids:
+        while pending_tasks and len(results) < limit and not should_stop():
+            task_id = pending_tasks.popleft()
             try:
-                results.append(self.recover(task_id))
+                result = self.recover(task_id)
             except Exception:
                 # 一条损坏记录不能阻塞同批其他任务。异常分类保留在日志，下一轮仍从
                 # 持久 Store 重新读取，不在内存中累计失败任务。
@@ -162,13 +182,17 @@ class WeaponryResourceRecoveryService:
                     "武器谱资源恢复发生未收敛异常: task_id=%s",
                     task_id.value,
                 )
-                results.append(
-                    WeaponryResourceRecoveryResult(
-                        task_id,
-                        WeaponryResourceRecoveryOutcome.FAILED,
-                        error_code="weaponry_resource_recovery_exception",
-                    )
+                result = WeaponryResourceRecoveryResult(
+                    task_id,
+                    WeaponryResourceRecoveryOutcome.FAILED,
+                    error_code="weaponry_resource_recovery_exception",
                 )
+            results.append(result)
+            if (
+                result.outcome is WeaponryResourceRecoveryOutcome.PENDING
+                and result.cleaned_resource_count > 0
+            ):
+                pending_tasks.append(task_id)
 
         def count(*outcomes: WeaponryResourceRecoveryOutcome) -> int:
             return sum(result.outcome in outcomes for result in results)
@@ -177,6 +201,9 @@ class WeaponryResourceRecoveryService:
             requested_limit=limit,
             scanned_count=len(results),
             cleaned_count=count(WeaponryResourceRecoveryOutcome.CLEANED),
+            cleaned_resource_count=sum(
+                result.cleaned_resource_count for result in results
+            ),
             pending_count=count(
                 WeaponryResourceRecoveryOutcome.PENDING,
                 WeaponryResourceRecoveryOutcome.BUSY,
@@ -191,10 +218,12 @@ class WeaponryResourceRecoveryService:
         logger.log(
             logging.ERROR if sweep.failed_count else logging.DEBUG,
             "武器谱资源有界恢复扫描完成: requested_limit=%d scanned=%d cleaned=%d "
-            "pending=%d quarantined=%d not_ready=%d missing=%d failed=%d",
+            "cleaned_resources=%d pending=%d quarantined=%d not_ready=%d "
+            "missing=%d failed=%d",
             sweep.requested_limit,
             sweep.scanned_count,
             sweep.cleaned_count,
+            sweep.cleaned_resource_count,
             sweep.pending_count,
             sweep.quarantined_count,
             sweep.not_ready_count,

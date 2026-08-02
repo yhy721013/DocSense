@@ -56,6 +56,7 @@ from .creation_intents import (
 )
 from .dispatcher import (
     WeaponryBoundedMaintenancePort,
+    WeaponryResourceMaintenancePort,
     WeaponryTaskDispatcherLifecyclePort,
     WeaponryTaskDispatcherPort,
     WeaponryTaskRunnerPort,
@@ -201,6 +202,7 @@ __all__ = [
     "WeaponryResourceStorePort",
     "WeaponrySourceBoundaryError",
     "WeaponryBoundedMaintenancePort",
+    "WeaponryResourceMaintenancePort",
     "WeaponryTaskDispatcherLifecyclePort",
     "WeaponryTaskDispatcherPort",
     "WeaponryTaskRunnerPort",

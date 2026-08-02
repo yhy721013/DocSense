@@ -24,9 +24,11 @@ from app.modules.tasks.ports import (
 from app.modules.weaponry.application import (
     RunWeaponryOutcome,
     RunWeaponryResult,
+    WeaponryResourceRecoverySweepResult,
 )
 from app.modules.weaponry.ports import (
     WeaponryBoundedMaintenancePort,
+    WeaponryResourceMaintenancePort,
     WeaponryTaskRunnerPort,
 )
 
@@ -38,6 +40,9 @@ logger = logging.getLogger(__name__)
 _WEAPONRY_TASK_TYPE = "weaponry"
 _RESOURCE_MAINTENANCE_NAME = "weaponry-resource-recovery"
 _CALLBACK_GUARD_MAINTENANCE_NAME = "weaponry-callback-guard"
+_RESOURCE_MAINTENANCE_WAKE_STATES = frozenset(
+    {"cleanup_pending", "port_error", "cas_exhausted"}
+)
 
 _PROVIDER_CAPACITY_MARKERS = (
     "capacity",
@@ -107,7 +112,7 @@ class LocalWeaponryTaskDispatcher:
         task_commands: TaskCommandPort[Any, Any, Any],
         queue_inspector: TaskQueueInspectionPort,
         runner: WeaponryTaskRunnerPort,
-        resource_maintenance: WeaponryBoundedMaintenancePort,
+        resource_maintenance: WeaponryResourceMaintenancePort,
         callback_guard_maintenance: WeaponryBoundedMaintenancePort,
         config: WeaponryInfrastructureConfig,
         execution_limiter: TaskExecutionPermitPort | None = None,
@@ -118,9 +123,9 @@ class LocalWeaponryTaskDispatcher:
     ) -> None:
         if not isinstance(runner, WeaponryTaskRunnerPort):
             raise TypeError("runner 必须实现 WeaponryTaskRunnerPort")
-        if not isinstance(resource_maintenance, WeaponryBoundedMaintenancePort):
+        if not isinstance(resource_maintenance, WeaponryResourceMaintenancePort):
             raise TypeError(
-                "resource_maintenance 必须实现 WeaponryBoundedMaintenancePort"
+                "resource_maintenance 必须实现 WeaponryResourceMaintenancePort"
             )
         if not isinstance(
             callback_guard_maintenance,
@@ -200,7 +205,7 @@ class LocalWeaponryTaskDispatcher:
         return self._runner
 
     @property
-    def resource_maintenance(self) -> WeaponryBoundedMaintenancePort:
+    def resource_maintenance(self) -> WeaponryResourceMaintenancePort:
         return self._resource_maintenance
 
     @property
@@ -281,8 +286,22 @@ class LocalWeaponryTaskDispatcher:
             raise TypeError("Weaponry runner 必须返回 RunWeaponryResult")
         if result.task_id != task_id:
             raise RuntimeError("Weaponry runner 返回了其他 TaskId 的结果")
+        self._wake_resource_maintenance(result)
         self._observe_result(result)
         return result
+
+    def _wake_resource_maintenance(self, result: RunWeaponryResult) -> None:
+        """业务终态提交后立即提示清理线程；提示失败不得回滚任务结果。"""
+
+        if result.cleanup_state not in _RESOURCE_MAINTENANCE_WAKE_STATES:
+            return
+        woken = self._kernel.wake_maintenance(_RESOURCE_MAINTENANCE_NAME)
+        logger.info(
+            "武器谱终态资源清理已提示: task_id=%s cleanup_state=%s woken=%s",
+            result.task_id.value,
+            result.cleanup_state,
+            woken,
+        )
 
     def _observe_result(self, result: RunWeaponryResult) -> None:
         """把供应商容量、业务零结果和输入契约错误分开记录。"""
@@ -384,11 +403,24 @@ class LocalWeaponryTaskDispatcher:
 
     def _run_resource_maintenance(self) -> object:
         result = self._resource_maintenance.run_once(
-            limit=self._config.maintenance_limit
+            limit=self._config.maintenance_limit,
+            stop_requested=self._kernel.stop_requested,
         )
+        if (
+            isinstance(result, WeaponryResourceRecoverySweepResult)
+            and result.cleaned_resource_count > 0
+            and (
+                result.pending_count > 0
+                or result.scanned_count >= result.requested_limit
+            )
+        ):
+            # 当前批次已产生可证明的清理进展且仍可能存在积压。再次设置同一常量空间
+            # Event，让维护线程在批次边界检查 stop 后立即续扫；资源身份仍只在 SQLite。
+            self._kernel.wake_maintenance(_RESOURCE_MAINTENANCE_NAME)
         logger.debug(
-            "武器谱资源维护批次完成: limit=%d",
+            "武器谱资源维护批次完成: limit=%d result_type=%s",
             self._config.maintenance_limit,
+            type(result).__name__,
         )
         return result
 

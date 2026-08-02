@@ -997,6 +997,127 @@ class WeaponryResourceRecoveryIntegrationTests(unittest.TestCase):
         self.assertEqual(WeaponryResourceRecordState.TRACKING, active_record.state)
         self.assertEqual(1, len(cleaner.calls))
 
+    def test_sweep_limit_counts_resources_and_round_robins_large_tasks(self) -> None:
+        """单轮可推进同一任务多项资源，同时不能让最老的大任务饿死后续任务。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            store = SQLiteWeaponryResourceStoreAdapter(
+                database,
+                cleanup_lease_seconds=2.0,
+                retry_delay_seconds=30.0,
+            )
+            cleaner = FakeWeaponryExternalResourceCleanupPort()
+            tasks = (
+                (TaskId("weaponry-cleanup-batch-a"), 10610, "a"),
+                (TaskId("weaponry-cleanup-batch-b"), 10611, "b"),
+            )
+            for task_id, architecture_id, label in tasks:
+                record = store.create(
+                    WeaponryResourceRecord(
+                        task_id=task_id,
+                        business_ref=TaskBusinessRef(
+                            "weaponry",
+                            str(architecture_id),
+                        ),
+                    )
+                )
+                for index in range(3):
+                    resource = _owned_workspace(
+                        task_id,
+                        suffix=f"{label}-{index}",
+                    )
+                    record = store.register(
+                        RegisterWeaponryResource(
+                            task_id,
+                            resource,
+                            record.version,
+                        )
+                    )
+                    cleaner.results[resource.resource_id] = (
+                        WeaponryExternalResourceCleanupResult(
+                            WeaponryResourceCleanupOutcome.SUCCEEDED
+                        )
+                    )
+                store.prepare_cleanup(
+                    PrepareWeaponryResourceCleanup(task_id, record.version)
+                )
+
+            recovery = WeaponryResourceRecoveryService(
+                store=store,
+                cleaner=cleaner,
+                audit=FakeWeaponryInteractionAuditPort(),
+                task_commands=FakeWeaponryTaskCommandPort(),
+            )
+            first = recovery.run_once(limit=4)
+            after_first = tuple(store.get(task_id) for task_id, _, _ in tasks)
+            second = recovery.run_once(limit=4)
+
+        self.assertEqual(4, first.scanned_count)
+        self.assertEqual(4, first.cleaned_resource_count)
+        self.assertEqual(4, first.pending_count)
+        self.assertEqual(
+            [tasks[0][0], tasks[1][0], tasks[0][0], tasks[1][0]],
+            [call.task_id for call in cleaner.calls[:4]],
+        )
+        self.assertTrue(
+            all(
+                record is not None
+                and len(record.owned_cleanup_candidates) == 1
+                for record in after_first
+            )
+        )
+        self.assertEqual(2, second.scanned_count)
+        self.assertEqual(2, second.cleaned_count)
+        self.assertEqual(2, second.cleaned_resource_count)
+        self.assertEqual(0, second.pending_count)
+
+    def test_sweep_observes_stop_between_resource_side_effects(self) -> None:
+        """停止只等待当前单项 DELETE，不继续执行同一批次的其余资源。"""
+
+        with workspace_tempdir() as runtime_directory:
+            database = str(Path(runtime_directory) / "tasks.sqlite3")
+            store = SQLiteWeaponryResourceStoreAdapter(database)
+            cleaner = FakeWeaponryExternalResourceCleanupPort()
+            task_id = TaskId("weaponry-cleanup-stop-boundary")
+            record = store.create(
+                WeaponryResourceRecord(
+                    task_id=task_id,
+                    business_ref=TaskBusinessRef("weaponry", "10612"),
+                )
+            )
+            for index in range(4):
+                resource = _owned_workspace(task_id, suffix=f"stop-{index}")
+                record = store.register(
+                    RegisterWeaponryResource(task_id, resource, record.version)
+                )
+                cleaner.results[resource.resource_id] = (
+                    WeaponryExternalResourceCleanupResult(
+                        WeaponryResourceCleanupOutcome.SUCCEEDED
+                    )
+                )
+            store.prepare_cleanup(
+                PrepareWeaponryResourceCleanup(task_id, record.version)
+            )
+            recovery = WeaponryResourceRecoveryService(
+                store=store,
+                cleaner=cleaner,
+                audit=FakeWeaponryInteractionAuditPort(),
+                task_commands=FakeWeaponryTaskCommandPort(),
+            )
+
+            sweep = recovery.run_once(
+                limit=4,
+                stop_requested=lambda: len(cleaner.calls) >= 2,
+            )
+            current = store.get(task_id)
+
+        self.assertEqual(2, sweep.scanned_count)
+        self.assertEqual(2, sweep.cleaned_resource_count)
+        self.assertEqual(2, len(cleaner.calls))
+        self.assertIsNotNone(current)
+        self.assertEqual(2, len(current.owned_cleanup_candidates))
+
     def test_definite_failure_uses_persistent_cooldown_and_unknown_is_quarantined(self) -> None:
         """明确失败可退避重试；删除结果未知永久退出自动扫描。"""
 

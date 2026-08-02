@@ -119,7 +119,7 @@ class LocalPersistentDispatcherSettings:
 
 @dataclass(frozen=True)
 class LocalPersistentMaintenanceTask:
-    """一个与重型执行 Worker 隔离的固定延迟维护任务。"""
+    """一个与重型执行 Worker 隔离、支持定时与提示唤醒的维护任务。"""
 
     name: str
     thread_name: str
@@ -269,6 +269,9 @@ class LocalPersistentTaskDispatcher:
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
+        self._maintenance_wake_events = {
+            item.name: threading.Event() for item in self._maintenance_tasks
+        }
         self._state_lock = threading.RLock()
         self._worker_thread: threading.Thread | None = None
         self._queue_thread: threading.Thread | None = None
@@ -315,6 +318,11 @@ class LocalPersistentTaskDispatcher:
     def execution_limiter(self) -> TaskExecutionPermitPort | None:
         return self._execution_limiter
 
+    def stop_requested(self) -> bool:
+        """返回 Dispatcher 是否已请求停止，供有界维护批次在单项之间让出。"""
+
+        return self._stop_event.is_set()
+
     def dispatch(self, task_id: TaskId) -> None:
         """合并唤醒信号；TaskId 只用于校验和日志，不进入等待容器。"""
 
@@ -331,6 +339,42 @@ class LocalPersistentTaskDispatcher:
         """
 
         self._signal_wakeup(None)
+
+    def wake_maintenance(self, name: str) -> bool:
+        """尽力唤醒一个维护任务，不把提示信号误当作可靠队列事实。
+
+        维护对象必须已经先把工作事实持久化；本方法只缩短固定周期等待。进程正在停止时
+        返回 ``False``，调用方不得因此回滚已经提交的业务终态。即使信号丢失，维护线程
+        仍会在下一固定周期从持久 Store 重新发现工作。
+        """
+
+        normalized = _required_text(name, name="name")
+        with self._state_lock:
+            self._raise_if_forked_locked()
+            event = self._maintenance_wake_events.get(normalized)
+            if event is None:
+                raise ValueError(f"未知 maintenance task: {normalized}")
+            if self._lifecycle_state in {
+                _STATE_STOPPING,
+                _STATE_STOPPED,
+                _STATE_CLOSED,
+            }:
+                return False
+            already_pending = event.is_set()
+            event.set()
+        self._logger.debug(
+            "%s Dispatcher 已接收维护唤醒: task=%s merged=%s",
+            self._settings.business_label,
+            normalized,
+            already_pending,
+        )
+        return True
+
+    def _wake_all_maintenance(self) -> None:
+        """解除全部维护等待；仅用于停止和致命故障收口。"""
+
+        for event in self._maintenance_wake_events.values():
+            event.set()
 
     def _signal_wakeup(self, task_id: TaskId | None) -> None:
         """在同一处维护带/不带任务身份的唤醒计数和生命周期门禁。"""
@@ -391,6 +435,8 @@ class LocalPersistentTaskDispatcher:
                 self._owner_pid = os.getpid()
                 self._stop_event.clear()
                 self._wake_event.clear()
+                for event in self._maintenance_wake_events.values():
+                    event.clear()
                 self._worker_finished.clear()
                 self._queue_finished.clear()
                 for finished in self._maintenance_finished.values():
@@ -422,6 +468,7 @@ class LocalPersistentTaskDispatcher:
         except Exception:
             self._stop_event.set()
             self._wake_event.set()
+            self._wake_all_maintenance()
             with self._state_lock:
                 self._mark_unstarted_threads_finished(started_threads)
                 self._lifecycle_state = _STATE_STOPPING
@@ -467,10 +514,12 @@ class LocalPersistentTaskDispatcher:
                 self._lifecycle_state = _STATE_STOPPED
                 self._stop_event.set()
                 self._wake_event.set()
+                self._wake_all_maintenance()
                 return True
             self._lifecycle_state = _STATE_STOPPING
             self._stop_event.set()
             self._wake_event.set()
+            self._wake_all_maintenance()
 
         current = threading.current_thread()
         if any(thread is current for thread in alive_threads):
@@ -596,10 +645,13 @@ class LocalPersistentTaskDispatcher:
 
     def _run_maintenance(self, task: LocalPersistentMaintenanceTask) -> None:
         try:
+            wake_event = self._maintenance_wake_events[task.name]
             next_run_at = self._monotonic()
             while not self._stop_event.is_set():
                 wait_seconds = max(0.0, next_run_at - self._monotonic())
-                if self._stop_event.wait(timeout=wait_seconds):
+                if wake_event.wait(timeout=wait_seconds):
+                    wake_event.clear()
+                if self._stop_event.is_set():
                     break
                 try:
                     task.execute()
@@ -851,6 +903,7 @@ class LocalPersistentTaskDispatcher:
         self._logger.critical(message, exc_info=True)
         self._stop_event.set()
         self._wake_event.set()
+        self._wake_all_maintenance()
         with self._state_lock:
             if self._lifecycle_state not in {_STATE_STOPPED, _STATE_CLOSED}:
                 self._lifecycle_state = _STATE_STOPPING

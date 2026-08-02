@@ -36,7 +36,8 @@ Document Scope 与 Retrieval 使用同一完整文档位置规范化身份；创
   且不存在 Query/Selected Evidence 字符上限；
 - `local_dispatcher.py`：复用 tasks 通用持久扫描内核，装配一条 Weaponry 执行 Worker、资源与
   Callback Guard 两条隔离维护线程、队列诊断、共享 limiter 和进程锁；供应商容量、业务零结果、
-  输入契约与其他失败使用不同内部日志/计数；
+  输入契约与其他失败使用不同内部日志/计数；业务终态提交后仅唤醒资源维护线程，不等待清理，
+  不连带唤醒 Callback Guard；资源批次有进展且仍可能存在积压时在批次边界继续执行；
 - AnythingLLM Retrieval/Extraction Adapter 将 HTTP 413/429 分类为稳定供应商容量错误，字段
   降级后的诊断事实仍可到达 Dispatcher，不会被计成普通零结果。
 
@@ -47,7 +48,9 @@ Document Scope 与 Retrieval 使用同一完整文档位置规范化身份；创
 - `anythingllm_resource_cleanup.py`：按资源类型执行一次幂等删除，404 视为已清理，明确失败进入
   持久冷却，超时/断连等结果未知进入 quarantine；
 - `resource_store.py`：终态 tracking 候选扫描、立即清理水位、失败持久冷却，以及逐资源
-  cleanup lease/fencing 条件提交。
+  cleanup lease/fencing 条件提交；资源恢复的 `limit` 按本轮逐项恢复尝试数计量，同批任务
+  采用轮转推进，停止请求只在单项边界生效。持久 Store 始终是事实来源，线程 Event 只是
+  可丢失提示，启动与固定周期扫描仍负责恢复历史积压。
 
 当前开发分支已装配上述真实 Adapter 并切换 `/llm/weaponry`，但本轮自动验收没有连接真实模型、
 回调接收端或修改现有 AnythingLLM 资源；部署前的真实供应商能力与运行容量仍需在受控集成环境验证。

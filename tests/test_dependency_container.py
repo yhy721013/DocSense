@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 import os
 import tempfile
 import threading
@@ -122,9 +123,16 @@ from tests.fakes import (
 class _NoopWeaponryMaintenance:
     """1D-5 容器生命周期测试使用的显式有界维护替身。"""
 
-    def run_once(self, *, limit: int) -> object:
+    def run_once(
+        self,
+        *,
+        limit: int,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> object:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
+        if stop_requested is not None and stop_requested():
+            return {"limit": limit, "stopped": True}
         return {"limit": limit}
 
 

@@ -638,6 +638,15 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     tests.test_dependency_container tests.test_analysis_application -q`。必须证明投影中不存在图片移除
     提示、alt、媒体类型、摘要、payload 长度和 Base64，行内图片只留下 Token 分隔空格，
     canonical Artifact、代码示例、外部图片、流式内存、并发隔离与 Analysis 上传边界保持不变。
+58. 运行 Weaponry 临时资源即时持久清理门禁：执行
+    `venv\Scripts\python.exe -B -m unittest tests.test_weaponry_dispatcher
+    tests.test_weaponry_stage1d6 tests.test_dependency_container -q`，再执行
+    `venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_weaponry*.py" -q` 和
+    `venv\Scripts\python.exe -B -m unittest tests.test_report_dispatcher
+    tests.test_analysis_dispatcher -q`。必须证明业务终态只唤醒资源维护而不等待清理、不连带唤醒
+    Callback Guard；批次上限按逐项资源恢复尝试数计量、多个大任务轮转推进、停止信号在单项
+    之间生效；
+    明确失败保留持久退避，Interaction Audit/DELETE/检查点结果未知继续隔离且绝不盲删。
 
 ## 执行限制
 
