@@ -33,6 +33,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `260730-文件分析RAG投影与业务原名上传命名执行记录.md` | 完成 RAG-only Markdown Base64 投影、业务原名/multipart/Provider 身份分离、非法名称整批 HTTP 400、任务 V3 快照、审计与资源恢复接线；后续修复 Callback 等待/close 与维护线程的资源版本竞态，记录 2,178 项安全全仓回归和 AnythingLLM Desktop 1.15.0-r2 单实例真实验收，生产发布仍待独立窗口。 |
+| `260802-文件分析RAG图片占位文本移除执行记录.md` | RAG 投影 v2 完整移除 Base64 图片语法且不再生成提示、alt、媒体类型、摘要或 payload 长度，只保留 Token 分隔空格；升级 Profile/step 并保持公开接口零修改。 |
 
 ## 阶段 1H 共享文档处理
 

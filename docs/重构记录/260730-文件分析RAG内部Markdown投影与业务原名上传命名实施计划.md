@@ -4,8 +4,8 @@
 
 - 文档日期：2026-07-30
 - 计划层级：L3 文件级专项实施计划
-- 当前状态：P0～P7 已实施并通过既有验收；P8 全局唯一 `fileName` 传输命名已完成代码与
-  离线回归，尚待独立受控真实 Provider 复验；尚未部署生产环境
+- 当前状态：P0～P7 已实施并通过既有验收；P8 全局唯一 `fileName` 传输命名、P9 图片占位
+  文本移除均已完成代码与离线回归，尚待独立受控真实 Provider 复验；尚未部署生产环境
 - 适用范围：`POST /llm/analysis` 文件分析链路及其 AnythingLLM 临时/永久文档生命周期
 - 目标 Provider 基线：AnythingLLM Desktop `1.15.0`；实测版本为 `1.15.0-r2`
 - 公开契约变化：不增删任何请求、响应、Callback、Progress、SSE 或 WebSocket 字段；展示
@@ -22,7 +22,7 @@
 | 编号 | 已确认决策 |
 | --- | --- |
 | D01 | 对可文本化的文档生成一份**仅供 RAG 使用的内部 Markdown 投影**；Callback、全文翻译、正文提取和本地原始/规范化 Artifact 不使用该投影替代。 |
-| D02 | RAG 投影不携带图片 Base64 正文；保留有界的图片替代说明、alt 文本和内容摘要，禁止把大段 Base64 切块并向量化。 |
+| D02 | RAG 投影不携带图片 Base64 正文，也不保留图片替代说明、alt、媒体类型、摘要或 payload 长度；完整图片语法仅替换为一个 ASCII 空格，避免相邻文本拼接。图片计数与移除字节数只进入脱敏日志。该决策于 2026-08-02 更新并取代 v1 占位文本策略。 |
 | D03 | Markdown 投影上传 AnythingLLM 时，HTTP multipart 文件名为 `<全局唯一 fileName 主干>.md`。只移除 `fileName` 最后一个后缀，例如 `bded...pdf` 得到 `bded...md`。 |
 | D04 | `originalFileName` 缺失、为 `null`、空字符串或仅含空白时，仅展示标题回退使用 `fileName`；multipart 名称始终从 `fileName` 派生。该兼容分支不新增公开字段。 |
 | D05 | 前端保证 `fileName` 在整个系统中全局唯一。因此同主干或完全同名的业务原文件仍得到不同 multipart 名称；UI 继续分别显示各自 `originalFileName`。远端 UUID/location、DocSense `document_ref` 和任务身份仍负责所有权，传输名只作为供应商降级来源映射键。 |
@@ -355,19 +355,20 @@ AnythingLLM 调用之前。
 - 经 MinerU/OCR 产生的跨行 data URI；
 - 大小写、空白、引号和属性顺序变体。
 
-每张图片替换为有界文本，例如：
+每张图片的完整可渲染语法替换为一个 ASCII 空格，例如：
 
 ```text
-[图片已移除；说明：舰船侧视图；类型：image/png；sha256：12位前缀]
+before![舰船侧视图](data:image/png;base64,...)after
+-> before after
 ```
 
 约束：
 
-- 保留经长度限制和控制字符过滤后的 alt/说明；
-- 只保存 Base64 解码内容摘要前缀，不保存原始 Base64；
-- 无法严格解码时仍移除 payload，并记录 `decode_valid=false` 的脱敏计数日志；
+- 不把 alt/说明、媒体类型、内容摘要、payload 长度或“图片已移除”等提示写入投影正文；
+- 使用一个空格而非零字节替换，避免中英文相邻 Token 因图片删除而意外拼接；
+- 无法严格解码时仍移除完整图片语法，并增加无效/畸形图片的脱敏计数；
 - 不处理 fenced code block 和 inline code 中作为示例出现的 data URI；
-- 单个占位符和整份投影均设上限，防止恶意输入扩大；
+- 继续以固定块流式扫描，大候选落入 Processor 私有 scratch，保持有界内存；
 - 非 data URI 的普通 Markdown 链接不在本阶段重写。
 
 ### 7.3 失败策略
@@ -779,6 +780,7 @@ AnythingLLM 调用之前。
 | P6 | 已完成 | 并发、故障、恢复和受控 AnythingLLM Desktop `1.15.0-r2` 验收通过。 |
 | P7 | 已完成 | 权威接口文档、重构索引、更新记录和测试说明完成收口；生产灰度与发布仍须走独立停服发布流程。 |
 | P8 | 代码与离线回归完成 | Analysis 输入升级到 Schema v4，传输名改由全局唯一 `fileName` 派生；严格兼容读取 v1～v3，并新增同主干/完全同名到武器谱范围的跨模块回归。真实 Provider 复验与生产发布不在本次离线结论内。 |
+| P9 | 代码与离线回归完成 | RAG 投影 Profile/step 升级到 v2，Base64 图片完整语法只留下 Token 分隔空格；占位提示和图片元数据不再参与切块、向量化或检索。既有 Provider 文档不自动重建。 |
 
 P0～P7 的既有受控真实 Provider 使用 `lancedb`、Ollama Embedder
 `qwen3-embedding:0.6b` 和临时 Workspace。实测验证：

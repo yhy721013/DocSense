@@ -631,6 +631,13 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     Architecture/DocumentProcessing Architecture 门禁。必须覆盖合法表格恢复、危险/畸形/资源
     超限候选整段转义、属性白名单、Text 不恢复、MinerU PPTX 当前输出、Analysis 两个结果字段、
     Engine 只接收文本节点和共享 Renderer 并发确定性；不得把纯文本 MHTML 降级解释为可恢复表格。
+57. 运行 RAG 图片占位文本移除门禁：执行
+    `venv\Scripts\python.exe -B -m unittest tests.test_document_processing_rag_projection
+    tests.test_analysis_rag_upload_pipeline tests.test_stage1h_consumer_cutover
+    tests.test_document_processing_architecture tests.test_analysis_production_adapters
+    tests.test_dependency_container tests.test_analysis_application -q`。必须证明投影中不存在图片移除
+    提示、alt、媒体类型、摘要、payload 长度和 Base64，行内图片只留下 Token 分隔空格，
+    canonical Artifact、代码示例、外部图片、流式内存、并发隔离与 Analysis 上传边界保持不变。
 
 ## 执行限制
 

@@ -283,7 +283,10 @@ class AnalysisRagUploadPipelineTests(unittest.TestCase):
             )
             projected = Path(prepared.upload_path).read_text(encoding="utf-8")
             self.assertNotIn("aGVsbG8=", projected)
-            self.assertIn("内嵌图片已移除", projected)
+            self.assertNotIn("内嵌图片已移除", projected)
+            self.assertNotIn("payload_bytes=", projected)
+            self.assertNotIn("sha256=", projected)
+            self.assertNotIn("舰徽", projected)
             with store.open_reader(canonical) as reader:
                 self.assertEqual(payload, reader.read())
 

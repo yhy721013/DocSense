@@ -20,6 +20,7 @@ from app.modules.document_processing.adapters import (
 from app.modules.document_processing.application import (
     PrepareDocument,
     ProjectDocumentForRag,
+    RAG_PROJECTION_STEP_ID,
 )
 from app.modules.document_processing.domain import (
     ArtifactKind,
@@ -120,11 +121,19 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             )
             self.assertNotIn("aGVsbG8=", projected)
             self.assertNotIn("%%%not-valid-base64%%%", projected)
-            self.assertIn("内嵌图片已移除：alt=舰徽", projected)
-            self.assertIn(
-                hashlib.sha256(b"hello").hexdigest(),
-                projected,
-            )
+            # RAG 文本不能混入图片移除提示及其运维元数据；图片说明也属于被删除
+            # 语法的一部分，不应作为无上下文文本参与切块和向量化。
+            for removed_marker in (
+                "内嵌图片已移除",
+                "alt=",
+                "media_type=",
+                "sha256=",
+                "payload_sha256=",
+                "payload_bytes=",
+                "舰徽",
+                "损坏图片",
+            ):
+                self.assertNotIn(removed_marker, projected)
             # fenced 与四空格缩进代码不是可渲染图片，必须逐字保留。
             self.assertIn(
                 "![示例](data:image/png;base64,Y29kZS1leGFtcGxl)",
@@ -147,6 +156,68 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             self.assertTrue(store.verify(source))
             with store.open_reader(source) as reader:
                 self.assertEqual(payload, reader.read())
+
+    def test_removed_images_leave_only_a_token_separator_and_safe_metrics(
+        self,
+    ) -> None:
+        """图片不产生语义文本，同时不得把相邻英文单词拼接成新 Token。"""
+
+        payload = (
+            b"before![inline](data:image/jpeg;base64,aGVsbG8=)after\n"
+            b"![line](data:image/png;base64,d29ybGQ=)\n"
+        )
+        with workspace_tempdir() as temporary:
+            store, project = _build_runtime(temporary)
+            source = _publish_source(
+                store,
+                TaskId("rag-projection-empty-image-replacement"),
+                payload,
+            )
+
+            with self.assertLogs(
+                "app.modules.document_processing.adapters."
+                "markdown_rag_projection",
+                level="INFO",
+            ) as captured:
+                result = project.execute(
+                    source,
+                    trace_id="empty-image-replacement",
+                )
+
+            self.assertEqual(ProcessingOutcome.SUCCEEDED, result.outcome)
+            assert result.artifact is not None
+            with store.open_reader(result.artifact) as reader:
+                projected = reader.read().decode("utf-8")
+
+        self.assertEqual("before after\n \n", projected)
+        self.assertEqual(("rag_projection_removed_images:2",), result.warnings)
+        logs = "\n".join(captured.output)
+        self.assertIn("removed_images=2", logs)
+        self.assertIn("removed_payload_bytes=16", logs)
+        self.assertNotIn("inline", projected)
+        self.assertNotIn("line", projected)
+
+    def test_profile_identifies_no_semantic_image_replacement_v2(self) -> None:
+        """行为变化必须进入冻结 Profile，禁止复用带旧占位符的 v1 Artifact。"""
+
+        profile = build_markdown_rag_projection_profile()
+        parameters = profile.to_dict()["parameters"]
+
+        self.assertEqual(
+            "docsense-markdown-rag-projection-v2",
+            profile.processor_fingerprint,
+        )
+        self.assertEqual(
+            "remove-image-syntax-with-space-v2",
+            parameters["dataUriImagePolicy"],
+        )
+        self.assertEqual(
+            "single-ascii-space-v1",
+            parameters["replacementPolicy"],
+        )
+        self.assertEqual("rag-markdown-projection-v2", RAG_PROJECTION_STEP_ID)
+        self.assertNotIn("altMaxChars", parameters)
+        self.assertNotIn("placeholderMaxChars", parameters)
 
     def test_same_source_and_profile_reuses_identical_projection(self) -> None:
         with workspace_tempdir() as temporary:
@@ -300,6 +371,7 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             with store.open_reader(result.artifact) as reader:
                 projected = reader.read()
             self.assertNotIn(payload_chunk, projected)
+            self.assertNotIn(b"payload_bytes", projected)
             self.assertIn(b"after", projected)
 
     def test_fifty_tasks_with_same_content_do_not_share_artifact_identity(self) -> None:
