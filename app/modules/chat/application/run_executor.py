@@ -50,6 +50,7 @@ from app.modules.chat.domain.resource_ids import (
 )
 from app.modules.chat.domain.events import ChatStreamEvent
 from app.modules.chat.domain.identity import ConversationIdentity, IDENTITY_KIND_FILE
+from app.modules.chat.domain.workspace_naming import chat_workspace_name
 from app.modules.chat.domain.models import (
     MESSAGE_PENDING,
     MESSAGE_ROLE_ASSISTANT,
@@ -107,6 +108,7 @@ class ChatRunStreamRequest:
 
     run_id: str
     conversation_id: str
+    workspace_name: str
     message: str
     file_names: tuple[str, ...] = ()
     file_original_names: tuple[str, ...] = ()
@@ -133,6 +135,11 @@ class ChatRunStreamRequest:
             self,
             "conversation_id",
             _required_text(self.conversation_id, name="conversation_id"),
+        )
+        object.__setattr__(
+            self,
+            "workspace_name",
+            _required_text(self.workspace_name, name="workspace_name"),
         )
         object.__setattr__(
             self,
@@ -767,6 +774,9 @@ class SynchronousChatRunExecutor:
         return ChatRunStreamRequest(
             run_id=run.run_id,
             conversation_id=run.conversation_id,
+            # Workspace 名称只能来自数据库中的不可变身份绑定。执行恢复不重新读取
+            # Web 请求，也不允许调用方把任意供应商资源名称注入后台任务。
+            workspace_name=chat_workspace_name(identity_resolution.binding),
             message=run_input.message,
             file_names=tuple(item.file_name for item in snapshots),
             file_original_names=tuple(item.original_name for item in snapshots),
@@ -980,7 +990,7 @@ class SynchronousChatRunExecutor:
         )
         try:
             refs = conversation.open_conversation(
-                context_name=f"chat-{request.conversation_id}",
+                context_name=request.workspace_name,
                 conversation_name=f"thread-{request.conversation_id}",
             )
         except ChatResourceError as exc:

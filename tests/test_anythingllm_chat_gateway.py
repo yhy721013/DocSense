@@ -20,10 +20,10 @@ from app.integrations.anythingllm.models import (
     AnythingLLMWorkspace,
 )
 from app.modules.chat.ports import (
+    ChatContextNameConflictError,
     ChatConversationNotFoundError,
     ChatDocumentRef,
     ChatResourceError,
-    ChatResponseError,
     ChatRole,
     ChatSessionRefs,
     ChatSourceFinalization,
@@ -35,11 +35,13 @@ class _FakeWorkspaceClient:
         self.workspaces: list[AnythingLLMWorkspace] = []
         self.documents: list[AnythingLLMDocument] = []
         self.created_settings: list[dict[str, Any]] = []
+        self.created_names: list[str] = []
         self.embedding_updates: list[tuple[str, tuple[str, ...], int | None]] = []
         self.delete_calls: list[tuple[str, int | None]] = []
         self.list_error: Exception | None = None
         self.create_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.created_name_override: str | None = None
 
     def list_workspaces(
         self,
@@ -59,11 +61,12 @@ class _FakeWorkspaceClient:
     ) -> AnythingLLMWorkspace:
         if self.create_error:
             raise self.create_error
+        self.created_names.append(name)
         self.created_settings.append(dict(settings or {}))
         workspace = AnythingLLMWorkspace(
             id=f"workspace-{len(self.workspaces) + 1}",
             slug=f"slug-{len(self.workspaces) + 1}",
-            name=name,
+            name=self.created_name_override or name,
         )
         self.workspaces.append(workspace)
         return workspace
@@ -227,23 +230,41 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
             user_id=7,
         )
 
-    def test_open_conversation_reuses_matching_workspace(self) -> None:
+    def test_open_conversation_rejects_matching_workspace_without_ownership(
+        self,
+    ) -> None:
         self.workspace_client.workspaces.append(
             AnythingLLMWorkspace(id="w1", slug="chat-slug", name="chat-c1")
         )
 
-        session = self.gateway.open_conversation(
-            context_name="chat-c1",
-            conversation_name="thread-c1",
+        with self.assertRaises(ChatContextNameConflictError):
+            self.gateway.open_conversation(
+                context_name="chat-c1",
+                conversation_name="thread-c1",
+            )
+
+        self.assertEqual([], self.workspace_client.created_names)
+        self.assertEqual([], self.workspace_client.created_settings)
+        self.assertEqual([], self.thread_client.created_threads)
+        self.assertEqual([], self.workspace_client.delete_calls)
+
+    def test_open_conversation_rejects_multiple_matching_workspaces(self) -> None:
+        self.workspace_client.workspaces.extend(
+            (
+                AnythingLLMWorkspace(id="w1", slug="slug-1", name="chat-c1"),
+                AnythingLLMWorkspace(id="w2", slug="slug-2", name="chat-c1"),
+            )
         )
 
-        self.assertEqual("chat-slug", session.context_ref)
-        self.assertEqual("thread-c1", session.conversation_ref)
-        self.assertEqual([], self.workspace_client.created_settings)
-        self.assertEqual(
-            [("chat-slug", "thread-c1", 7)],
-            self.thread_client.created_threads,
-        )
+        with self.assertRaises(ChatContextNameConflictError):
+            self.gateway.open_conversation(
+                context_name="chat-c1",
+                conversation_name="thread-c1",
+            )
+
+        self.assertEqual([], self.workspace_client.created_names)
+        self.assertEqual([], self.thread_client.created_threads)
+        self.assertEqual([], self.workspace_client.delete_calls)
 
     def test_open_conversation_creates_workspace_with_chat_settings(self) -> None:
         session = self.gateway.open_conversation(
@@ -253,19 +274,21 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
 
         self.assertEqual("slug-1", session.context_ref)
         self.assertEqual("thread-c2", session.conversation_ref)
+        self.assertEqual(["chat-c2"], self.workspace_client.created_names)
         self.assertEqual("chat", self.workspace_client.created_settings[0]["chatMode"])
         self.assertEqual(20, self.workspace_client.created_settings[0]["topN"])
 
     def test_new_workspace_is_compensated_when_thread_creation_fails(self) -> None:
         self.thread_client.create_error = AnythingLLMProtocolError("thread failed")
 
-        with self.assertRaises(ChatResponseError):
+        with self.assertRaises(ChatResourceError) as raised:
             self.gateway.open_conversation(
                 context_name="chat-compensate",
                 conversation_name="thread-compensate",
             )
 
         self.assertEqual([("slug-1", 7)], self.workspace_client.delete_calls)
+        self.assertEqual((), raised.exception.resource_refs)
 
     def test_uncompensated_new_workspace_is_exposed_as_recoverable_resource_ref(self) -> None:
         self.thread_client.create_error = AnythingLLMProtocolError("thread failed")
@@ -278,6 +301,50 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
             )
 
         self.assertEqual(("slug-1",), raised.exception.resource_refs)
+
+    def test_workspace_name_mismatch_is_compensated_and_rejected(self) -> None:
+        self.workspace_client.created_name_override = "provider-rewritten-name"
+
+        with self.assertRaises(ChatResourceError) as raised:
+            self.gateway.open_conversation(
+                context_name="wChat-user10001-arch20001",
+                conversation_name="thread-internal",
+            )
+
+        self.assertEqual((), raised.exception.resource_refs)
+        self.assertEqual([("slug-1", 7)], self.workspace_client.delete_calls)
+        self.assertEqual([], self.thread_client.created_threads)
+
+    def test_uncompensated_workspace_name_mismatch_exposes_created_ref(self) -> None:
+        self.workspace_client.created_name_override = "provider-rewritten-name"
+        self.workspace_client.delete_error = AnythingLLMProtocolError("delete failed")
+
+        with self.assertRaises(ChatResourceError) as raised:
+            self.gateway.open_conversation(
+                context_name="wChat-user10001-arch20001",
+                conversation_name="thread-internal",
+            )
+
+        self.assertEqual(("slug-1",), raised.exception.resource_refs)
+        self.assertEqual([], self.thread_client.created_threads)
+
+    def test_open_conversation_logs_business_workspace_and_internal_refs(self) -> None:
+        workspace_name = "wChat-user10001-arch20001"
+        thread_name = "thread-abcdefab-1234-5678-9234-567812345678"
+
+        with self.assertLogs(
+            "app.modules.chat.adapters.anythingllm_gateway",
+            level="INFO",
+        ) as captured:
+            self.gateway.open_conversation(
+                context_name=workspace_name,
+                conversation_name=thread_name,
+            )
+
+        combined_logs = "\n".join(captured.output)
+        self.assertIn(workspace_name, combined_logs)
+        self.assertIn(thread_name, combined_logs)
+        self.assertIn("workspace_ref=slug-1", combined_logs)
 
     def test_attach_documents_binds_locations_and_returns_workspace_snapshot(
         self,
@@ -455,14 +522,16 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
             self.thread_client.deleted_threads,
         )
 
-    def test_protocol_error_is_translated_to_chat_response_error(self) -> None:
+    def test_workspace_create_protocol_error_is_a_resource_error(self) -> None:
         self.workspace_client.create_error = AnythingLLMProtocolError("bad response")
 
-        with self.assertRaises(ChatResponseError):
+        with self.assertRaises(ChatResourceError) as raised:
             self.gateway.open_conversation(
                 context_name="chat-c3",
                 conversation_name="thread-c3",
             )
+
+        self.assertEqual((), raised.exception.resource_refs)
 
     def test_delete_treats_404_as_idempotent_success(self) -> None:
         self.thread_client.delete_error = _not_found_error()

@@ -12,6 +12,7 @@
 | `document_scope.py` | Requested/Active/Effective Scope 的不可变 DTO、严格内部 Schema 和纯状态转换。 |
 | `events.py` | 供应商无关的 `ChatStreamEvent`，作为应用层到展示层的内部事件载体。 |
 | `resource_ids.py` | 生成稳定租约标识，并以自描述 JSON 封装工作区归属的远端资源引用。 |
+| `workspace_naming.py` | 只根据不可变业务身份生成 File/Weaponry 的精确 Workspace 名称；字段不完整或身份未知时失败关闭。 |
 
 ## 领域关系
 

@@ -100,6 +100,7 @@ class FakeChatConversationPort:
         self.stream_message_calls: list[
             tuple[ChatSessionRefs, str, tuple[str, ...]]
         ] = []
+        self.open_conversation_calls: list[tuple[str, str]] = []
         self.standalone_prompts = self._state.standalone_prompts
 
     def open_conversation(
@@ -109,8 +110,17 @@ class FakeChatConversationPort:
         conversation_name: str,
     ) -> ChatSessionRefs:
         """创建一个可用于后续测试调用的对话引用。"""
-        _required_text(context_name, name="context_name")
-        _required_text(conversation_name, name="conversation_name")
+        normalized_context_name = _required_text(
+            context_name,
+            name="context_name",
+        )
+        normalized_conversation_name = _required_text(
+            conversation_name,
+            name="conversation_name",
+        )
+        self.open_conversation_calls.append(
+            (normalized_context_name, normalized_conversation_name)
+        )
         if self._open_conversation_error_message:
             raise ChatResourceError(
                 self._open_conversation_error_message,

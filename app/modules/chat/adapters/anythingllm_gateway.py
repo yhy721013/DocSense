@@ -26,6 +26,7 @@ from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.modules.chat.ports import (
     ChatChunk,
+    ChatContextNameConflictError,
     ChatConversationNotFoundError,
     ChatConversationPort,
     ChatDocumentRef,
@@ -86,40 +87,80 @@ class AnythingLLMChatGateway(ChatConversationPort):
         context_name: str,
         conversation_name: str,
     ) -> ChatSessionRefs:
-        """创建或复用指定名称的对话上下文，并在其中创建新线程。"""
+        """创建指定业务名称的对话上下文，并在其中创建新线程。
+
+        Application 只有在本地 Session 尚无 Workspace/Thread 引用时才调用本方法。因此发现
+        同名 Workspace 不能证明它属于当前 Conversation；自动复用会让手工资源、旧世代残留
+        或其他实例的资源污染当前对话，必须失败关闭并交由运维核对。
+        """
+
+        normalized_context_name = self._required_text(context_name, "context_name")
+        normalized_conversation_name = self._required_text(
+            conversation_name,
+            "conversation_name",
+        )
         workspace: AnythingLLMWorkspace | None = None
         created_workspace = False
         logger.info(
-            "开始准备 AnythingLLM 文件对话会话: context_name=%s conversation_name=%s",
-            context_name,
-            conversation_name,
+            "开始准备 AnythingLLM 文件对话会话: workspace_name=%s thread_name=%s",
+            normalized_context_name,
+            normalized_conversation_name,
         )
         try:
-            workspace = self._find_workspace(context_name)
-            if workspace is None:
-                workspace = self._workspace_client.create_workspace(
-                    self._required_text(context_name, "context_name"),
-                    settings=self._workspace_settings,
-                    user_id=self._user_id,
+            matches = self._find_workspaces(normalized_context_name)
+            if matches:
+                logger.warning(
+                    "发现同名 AnythingLLM Workspace，因缺少本地所有权引用拒绝认领: "
+                    "workspace_name=%s matched_workspace_count=%d",
+                    normalized_context_name,
+                    len(matches),
                 )
-                created_workspace = True
-                logger.info(
-                    "已创建文件对话工作区，准备创建远端线程: context_name=%s",
-                    context_name,
+                raise ChatContextNameConflictError(
+                    "chat workspace name already exists without local ownership"
                 )
-            else:
-                logger.info(
-                    "复用已有文件对话工作区，准备创建远端线程: context_name=%s",
-                    context_name,
+
+            workspace = self._workspace_client.create_workspace(
+                normalized_context_name,
+                settings=self._workspace_settings,
+                user_id=self._user_id,
+            )
+            created_workspace = True
+            if workspace.name != normalized_context_name:
+                logger.warning(
+                    "AnythingLLM 返回的 Workspace 名称与请求不一致，开始补偿: "
+                    "workspace_name=%s returned_name_chars=%d workspace_ref=%s",
+                    normalized_context_name,
+                    len(workspace.name),
+                    workspace.slug,
                 )
+                if not self._compensate_new_workspace(
+                    workspace.slug,
+                    reason="workspace_name_mismatch",
+                ):
+                    raise ChatResourceError(
+                        "new chat workspace name mismatch and compensation failed",
+                        resource_refs=(workspace.slug,),
+                    )
+                raise ChatResourceError(
+                    "AnythingLLM returned an unexpected chat workspace name"
+                )
+            logger.info(
+                "已创建文件对话工作区，准备创建远端线程: "
+                "workspace_name=%s workspace_ref=%s",
+                normalized_context_name,
+                workspace.slug,
+            )
             thread = self._thread_client.create_thread(
                 workspace.slug,
-                conversation_name,
+                normalized_conversation_name,
                 user_id=self._user_id,
             )
             logger.info(
-                "AnythingLLM 文件对话会话准备完成: context_name=%s created_workspace=%s",
-                context_name,
+                "AnythingLLM 文件对话会话准备完成: workspace_name=%s "
+                "workspace_ref=%s thread_ref=%s created_workspace=%s",
+                normalized_context_name,
+                workspace.slug,
+                thread.slug,
                 created_workspace,
             )
             return ChatSessionRefs(
@@ -128,22 +169,33 @@ class AnythingLLMChatGateway(ChatConversationPort):
             )
         except AnythingLLMTransportError as exc:
             logger.warning(
-                "准备 AnythingLLM 文件对话会话失败: context_name=%s created_workspace=%s error_type=%s",
-                context_name,
+                "准备 AnythingLLM 文件对话会话失败: workspace_name=%s "
+                "created_workspace=%s error_type=%s",
+                normalized_context_name,
                 created_workspace,
                 exc.__class__.__name__,
             )
             if created_workspace and workspace is not None:
                 logger.info(
-                    "远端线程创建失败，开始补偿刚创建的文件对话工作区: context_name=%s",
-                    context_name,
+                    "远端线程创建失败，开始补偿刚创建的文件对话工作区: "
+                    "workspace_name=%s workspace_ref=%s",
+                    normalized_context_name,
+                    workspace.slug,
                 )
-                if not self._compensate_new_workspace(workspace.slug):
+                if not self._compensate_new_workspace(
+                    workspace.slug,
+                    reason="thread_create_failed",
+                ):
                     raise ChatResourceError(
                         "new chat workspace compensation failed",
                         resource_refs=(workspace.slug,),
                     ) from exc
-            raise self._port_error(exc, "open chat conversation") from exc
+            # open_conversation 的所有供应商失败都属于资源创建失败。统一映射为
+            # ChatResourceError，执行器才能关闭没有外部引用的 planned 租约；若补偿
+            # 失败，上面的分支已经携带精确引用，供现有清理流程接管。
+            # 供应商异常可能携带响应正文或 URL。这里保留稳定内部分类并通过异常链供
+            # 受控诊断使用，禁止把原始异常文本拼进应用错误或后续持久化日志。
+            raise ChatResourceError("open chat conversation failed") from exc
 
     def attach_documents(
         self,
@@ -430,16 +482,19 @@ class AnythingLLMChatGateway(ChatConversationPort):
             )
             raise self._port_error(exc, "delete chat context") from exc
 
-    def _find_workspace(self, name: str) -> AnythingLLMWorkspace | None:
-        normalized_name = self._required_text(name, "context_name")
-        for workspace in self._workspace_client.list_workspaces(
-            user_id=self._user_id,
-        ):
-            if workspace.name == normalized_name:
-                return workspace
-        return None
+    def _find_workspaces(self, name: str) -> tuple[AnythingLLMWorkspace, ...]:
+        """返回全部精确同名 Workspace，禁止用列表中的第一项猜测所有权。"""
 
-    def _compensate_new_workspace(self, workspace_ref: str) -> bool:
+        normalized_name = self._required_text(name, "context_name")
+        return tuple(
+            workspace
+            for workspace in self._workspace_client.list_workspaces(
+                user_id=self._user_id,
+            )
+            if workspace.name == normalized_name
+        )
+
+    def _compensate_new_workspace(self, workspace_ref: str, *, reason: str) -> bool:
         """在外部引用尚未持久化前，尽力执行适配器内部补偿。"""
         try:
             self._workspace_client.delete_workspace(
@@ -448,10 +503,18 @@ class AnythingLLMChatGateway(ChatConversationPort):
             )
         except AnythingLLMTransportError:
             logger.exception(
-                "远端线程创建失败后，补偿删除新建文件对话工作区失败"
+                "补偿删除新建文件对话工作区失败: compensation_reason=%s "
+                "workspace_ref=%s",
+                reason,
+                workspace_ref,
             )
             return False
-        logger.info("远端线程创建失败后，新建文件对话工作区补偿删除完成")
+        logger.info(
+            "新建文件对话工作区补偿删除完成: compensation_reason=%s "
+            "workspace_ref=%s",
+            reason,
+            workspace_ref,
+        )
         return True
 
     @staticmethod

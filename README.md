@@ -304,6 +304,7 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
 6. `/llm/chat`（文件对话体系）
    - 基于 SSE（Server-Sent Events）实现流式文本返回打字机效果。
    - 底座上强制 1 对话 = 1 Workspace + 1 Thread 的隔离限制以避污染；历史以本地已提交消息为权威来源。
+   - 新建文件对话的 AnythingLLM Workspace 名称固定为 `chat-id{chatId}`；名称只由持久化业务身份生成，主 Thread 仍使用内部 `thread-{conversation_id}`。已经保存远端引用的历史会话直接复用原资源，不批量重命名。
    - 公开文件对话只接受 `chatId + fileNames`；原来复用该路径的 `architectureId` 模式已经下线，知识谱系对话改用独立的 `/llm/weaponry-chat*`。
    - `fileNames` 表示本轮前端显式文件范围，不是增量追加列表：任意非空列表整体替换会话 Active Scope；后续空数组复用当前 Active Scope，从而保持最后一次成功受理的非空范围。
    - 首次创建 `chatId` 且显式传入 `fileNames=[]` 时，受理事务把当时全部可用已解析文件冻结为 `automatic_initial` Scope；空知识库会冻结空范围，后续知识库新增文件不自动吸收。首次自动范围和任意显式范围都受 `DOCSENSE_CHAT_MAX_FILES` 约束。
@@ -317,13 +318,14 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
    - `POST /llm/chat/delete` 先清理远端 Thread、Workspace 及相关资源租约，全部成功后再把本地会话标记为 `deleted`；清理失败时会保留 `cleanup_failed` 恢复记录，将会话置为 `error` 并返回错误。
 
 7. `/llm/weaponry-chat`（知识谱系对话体系）
-   - 五个接口固定使用 `businessType="weaponryChat"`，由 DocSense 可信业务 `userId` 与 `architectureId` 共同标识对话；不接收、返回或向 AnythingLLM 传递公开 `chatId`/用户身份。
+   - 五个接口固定使用 `businessType="weaponryChat"`，由 DocSense 可信业务 `userId` 与 `architectureId` 共同标识对话；不接收或返回公开 `chatId`，也不通过 AnythingLLM 用户上下文/Header 传递身份。新建 Workspace 的展示名称固定为 `wChat-user{userId}-arch{architectureId}`，主 Thread 仍使用内部 `conversation_id` 隔离。
    - 两个 ID 的公开安全范围均为 `1..9007199254740991`。POST 中 `userId` 必须是 JSON number；`architectureId` 兼容 JSON number 和十进制字符串。History Query 的两个 ID 都允许前导零，未知字段和重复 Query 参数均严格拒绝。
    - 首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续不因类别新增、删除、重新解析或重新分类而刷新。任一候选缺少非空 `originalFileName` 时整次范围失败，不回退到 `fileName`。
    - AnythingLLM v1.15.0 流必须越过最后一个 `textResponseChunk(close=true)` 继续读取最终来源事件；常规回答以唯一 Finalization 收敛，Query 明确拒答允许 `textResponse(close=true, sources=[])` 收敛。其他缺失、重复或冲突终态均失败关闭。
    - 成功 SSE 在全部 `textChunk` 后恰好发送一次 `sourceChunks`，再发送 `done`；每项包含无损 `content`、`fileName` 和 `originalFileName`。非字符串正文、未知/歧义来源、缺失原文件名均失败，不保存不完整 assistant 或 Chunk。
    - History 保持裸消息数组；assistant 的 `chunks` 与当轮 SSE `sourceChunks` 在内容和顺序上完全一致，user 消息不含 `chunks`。正文、全部 Chunk、成功事件和 Run 终态在同一 SQLite 事务提交。
    - 同一复合身份只允许一条未删除对话。删除必须先确认远端资源清理成功，再物理清除消息和 Chunk，只保留不含正文的最小审计事实并释放 Weaponry 身份；随后再次进入会创建新会话和新文件快照。
+   - 当本地没有远端引用却发现同名 Workspace 时失败关闭，不自动认领或删除未知资源；供应商返回名称与目标名称不一致时补偿本次新建资源。应用日志可记录规范化业务 ID、精确 Workspace 名称、内部关联 ID 及必要资源引用，但禁止记录凭据、消息/模型/Chunk/文件正文、Prompt、原始请求响应或 SSE 帧。
    - 当前不对 `sourceChunks` 数量、Chunk 原文长度或 History 响应大小设置独立业务上限；既有每轮文件数、消息/模型输出和进程内流并发限制仍有效。完整公开字段、状态码、Header 与事件顺序以 `docs/接口文档/知识谱系类别文件对话.md` 为准。
 
 8. `/llm/reassign`（分类节点变更）

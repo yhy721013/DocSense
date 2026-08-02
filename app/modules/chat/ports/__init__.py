@@ -2,6 +2,7 @@
 
 from app.modules.chat.ports.conversations import (
     ChatChunk,
+    ChatContextNameConflictError,
     ChatConversationConflictError,
     ChatConversationFactory,
     ChatConversationNotFoundError,
@@ -52,6 +53,7 @@ from app.modules.chat.ports.identities import (
 
 __all__ = [
     "ChatChunk",
+    "ChatContextNameConflictError",
     "ConversationAdmissionBusyError",
     "ConversationAdmissionLease",
     "ConversationAdmissionLostError",

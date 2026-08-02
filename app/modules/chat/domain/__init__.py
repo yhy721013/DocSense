@@ -12,6 +12,12 @@ from app.modules.chat.domain.document_candidates import (
     ChatDocumentSelectionCandidates,
 )
 from app.modules.chat.domain.events import ChatStreamEvent
+from app.modules.chat.domain.workspace_naming import (
+    FILE_CHAT_WORKSPACE_PREFIX,
+    WEAPONRY_CHAT_WORKSPACE_ARCHITECTURE_PREFIX,
+    WEAPONRY_CHAT_WORKSPACE_USER_PREFIX,
+    chat_workspace_name,
+)
 from app.modules.chat.domain.document_scope import (
     CHAT_SCOPE_MODE_ARCHITECTURE,
     CHAT_SCOPE_MODE_FILES,
@@ -128,6 +134,10 @@ __all__ = [
     "ChatSessionScopeBinding",
     "ChatSession",
     "ChatStreamEvent",
+    "FILE_CHAT_WORKSPACE_PREFIX",
+    "WEAPONRY_CHAT_WORKSPACE_ARCHITECTURE_PREFIX",
+    "WEAPONRY_CHAT_WORKSPACE_USER_PREFIX",
+    "chat_workspace_name",
     "chat_id_public_value",
     "chat_id_storage_key",
     "parse_query_chat_id",

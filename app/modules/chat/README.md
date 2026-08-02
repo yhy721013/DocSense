@@ -23,7 +23,8 @@ POST /llm/chat
      -> 持久化会话、运行、输入快照和待处理用户消息
   -> Dispatcher.dispatch(run_id)
   -> RunExecutor.execute_chat_run()
-     -> 领取运行归属、创建或复用远端会话、绑定文档、调用 Chat Port
+     -> 从持久化 Identity Binding 生成 Workspace 名称
+     -> 领取运行归属、创建或复用已保存的远端会话、绑定文档、调用 Chat Port
   -> EventRecorder
      -> 事件先入账，再展示；终态原子收敛消息和运行
   -> Presenter
@@ -38,9 +39,18 @@ POST /llm/chat
 - 删除：`DeleteService` 先使会话进入删除中，再创建清理任务；当前内联调度器同步等待清理完成，以保持已有接口语义。
 - 恢复：`ChatCleanupJobExecutor` 与运行锁服务可基于持久化 `job_id`/`run_id` 重试或收敛，不依赖请求闭包。
 
+## 远端资源命名与归属
+
+- File 新 Workspace 使用 `chat-id{chatId}`；Weaponry 新 Workspace 使用 `wChat-user{userId}-arch{architectureId}`。
+- 名称只由持久化、规范化后的 `ConversationIdentityBinding` 生成，不从 Flask 请求重新拼接，也不写入 SQLite Schema。
+- 主 Thread 保持 `thread-{conversation_id}`，因此 Weaponry 删除后以相同业务名称重建的新世代仍由不同内部 Thread 隔离。
+- 已经持久化 `workspace_ref + thread_ref` 的会话直接复用引用，不查找或重命名历史 Workspace。
+- 没有本地引用时，任何同名 Workspace 都视为归属不明并失败关闭；不得按名称自动认领、创建 Thread 或删除未知资源。
+
 ## 重要边界
 
 - `run_id`、租约、清理任务和事件账本仅供内部使用，绝不能泄露到 HTTP 响应、SSE `data`、响应头或新增接口参数中。
 - Application/Domain/Ports 不得导入 Flask、SQLite、AnythingLLM 或知识库实现；具体产品依赖只能位于 Adapters/Composition。
 - SQLite 当前明确只支持单实例；不要将其误用为跨实例锁、可靠队列或事务发件箱。
 - 新后台工作进程应只接收持久化标识并重新加载数据，不应捕获 Flask 请求、网络会话或内存回调。
+- 日志可记录规范化业务 ID、精确 Workspace 名称、内部关联 ID 和排障必需的资源引用；不得记录凭据、正文、Prompt、原始请求响应或 SSE 帧。

@@ -29,7 +29,7 @@ from app.modules.chat import (
     chat_workspace_lease_id,
 )
 from tests.fakes import FakeChatConversationFactory
-from app.modules.chat.domain.identity import FileChatIdentity
+from app.modules.chat.domain.identity import FileChatIdentity, WeaponryChatIdentity
 
 
 def _identity(value: str) -> FileChatIdentity:
@@ -54,8 +54,13 @@ class ChatDeleteServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
-    def _create_remote_chat(self, label: str = "chat-delete"):
-        identity = _identity(label)
+    def _create_remote_chat(
+        self,
+        label: str = "chat-delete",
+        *,
+        identity: FileChatIdentity | WeaponryChatIdentity | None = None,
+    ):
+        identity = identity or _identity(label)
         conversation_id = self.store.identities.create_conversation(
             identity
         ).conversation_id
@@ -72,8 +77,16 @@ class ChatDeleteServiceTests(unittest.TestCase):
         self.store.session_scope_bindings.create(
             ChatSessionScopeBinding(
                 conversation_id=conversation_id,
-                scope_mode="files",
-                architecture_id=None,
+                scope_mode=(
+                    "architecture"
+                    if isinstance(identity, WeaponryChatIdentity)
+                    else "files"
+                ),
+                architecture_id=(
+                    identity.architecture_id
+                    if isinstance(identity, WeaponryChatIdentity)
+                    else None
+                ),
                 created_at="2026-07-28T00:00:00+00:00",
             )
         )
@@ -173,6 +186,34 @@ class ChatDeleteServiceTests(unittest.TestCase):
             "workspace delete failed",
             leases[RESOURCE_WORKSPACE].error_message,
         )
+
+    def test_weaponry_cleanup_failure_keeps_identity_bound_to_old_generation(
+        self,
+    ) -> None:
+        """远端清理未完成时不得释放复合身份并创建第二个同名 Workspace。"""
+
+        self.factory = FakeChatConversationFactory(
+            delete_context_error_message="workspace delete failed",
+        )
+        self.service = ChatDeleteService(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=self.factory,
+        )
+        identity = WeaponryChatIdentity(user_id=70001, architecture_id=90001)
+        _, _, conversation_id = self._create_remote_chat(
+            "weaponry-workspace-fail",
+            identity=identity,
+        )
+
+        with self.assertRaises(ChatDeleteCleanupError):
+            self.service.delete_chat(identity=identity)
+
+        resolution = self.store.identities.resolve_active(identity)
+        self.assertIsNotNone(resolution)
+        assert resolution is not None
+        self.assertEqual(conversation_id, resolution.conversation_id)
+        self.assertEqual("error", resolution.session.status)
 
     def test_deleted_session_history_returns_empty_list(self) -> None:
         refs, identity, conversation_id = self._create_remote_chat("chat-history-delete")

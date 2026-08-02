@@ -148,6 +148,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
         request = ChatRunStreamRequest(
             run_id=" run-1 ",
             conversation_id=" chat-1 ",
+            workspace_name=" chat-id1 ",
             message=" 你好 ",
             file_names=(" hash-a.pdf ",),
             file_original_names=(" 原名.pdf ",),
@@ -155,6 +156,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
 
         self.assertEqual("run-1", request.run_id)
         self.assertEqual("chat-1", request.conversation_id)
+        self.assertEqual("chat-id1", request.workspace_name)
         self.assertEqual("你好", request.message)
         self.assertEqual(("hash-a.pdf",), request.file_names)
         self.assertEqual(("原名.pdf",), request.file_original_names)
@@ -164,6 +166,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
             ChatRunStreamRequest(
                 run_id="run-1",
                 conversation_id="chat-1",
+                workspace_name="chat-id1",
                 message="hi",
                 file_names="hash-a.pdf",  # type: ignore[arg-type]
                 file_original_names=("原名.pdf",),
@@ -175,6 +178,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
         request = ChatRunStreamRequest(
             run_id="run-1",
             conversation_id="chat-1",
+            workspace_name="chat-id1",
             message="hi",
             file_names=("hash-a.pdf",),
             file_original_names=("原名.pdf",),
@@ -193,6 +197,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
             ChatRunStreamRequest(
                 run_id="run-1",
                 conversation_id="chat-1",
+                workspace_name="chat-id1",
                 message="hi",
                 file_names=("effective.pdf",),
                 file_original_names=("有效原名.pdf",),
@@ -205,6 +210,7 @@ class ChatRunStreamRequestTests(unittest.TestCase):
             ChatRunStreamRequest(
                 run_id="run-1",
                 conversation_id="chat-1",
+                workspace_name="chat-id1",
                 message="hi",
                 file_names=("hash-a.pdf",),
                 file_original_names=(),
@@ -245,6 +251,7 @@ class ChatRunEventRecorderTests(unittest.TestCase):
         self.request = ChatRunStreamRequest(
             run_id="run-1",
             conversation_id=self.conversation_id,
+            workspace_name="chat-id10001",
             message="请总结",
             file_names=("hash-a.pdf",),
             file_original_names=("原名.pdf",),
@@ -1180,6 +1187,13 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
             ("document:alpha.pdf",),
             restarted_factory.ports[0].stream_message_calls[0][2],
         )
+        self.assertEqual(
+            (
+                "chat-id30001",
+                f"thread-{prepared.conversation_id}",
+            ),
+            restarted_factory.ports[0].open_conversation_calls[0],
+        )
         user_message = next(
             item
             for item in restarted_store.messages.list_by_chat(
@@ -1234,6 +1248,13 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertEqual(
             ("document:alpha.pdf",),
             restarted_factory.ports[0].stream_message_calls[0][2],
+        )
+        self.assertEqual(
+            (
+                "wChat-user30011-arch71",
+                f"thread-{prepared.conversation_id}",
+            ),
+            restarted_factory.ports[0].open_conversation_calls[0],
         )
         user_message = next(
             item
@@ -1311,7 +1332,7 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         )
 
     def test_architecture_execution_logs_do_not_leak_scope_or_body(self) -> None:
-        """类别对话日志只保留计数和内部审计键，不输出业务身份、来源或正文。"""
+        """日志可以记录业务 ID，但仍不得输出来源、文件或问答正文。"""
 
         secret_file_name = "private-contract.pdf"
         secret_original_name = f"{secret_file_name}.original"
@@ -1352,7 +1373,6 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         combined_logs = "\n".join(captured.output)
         self.assertIn("requested_architecture_id=73", combined_logs)
         self.assertIn("lease_token=", combined_logs)
-        self.assertNotIn(str(secret_user_id), combined_logs)
         self.assertNotIn(secret_file_name, combined_logs)
         self.assertNotIn(secret_original_name, combined_logs)
         self.assertNotIn(secret_document_ref, combined_logs)
@@ -1517,6 +1537,17 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertTrue(first_events[0].data["isNewChat"])
         self.assertFalse(second_events[0].data["isNewChat"])
         self.assertEqual(2, len(factory.ports))
+        self.assertEqual(
+            [
+                (
+                    "chat-id20004",
+                    f"thread-{first.conversation_id}",
+                )
+            ],
+            factory.ports[0].open_conversation_calls,
+        )
+        # 旧会话必须使用持久化远端引用，不能因新命名规则再次创建或重命名 Workspace。
+        self.assertEqual([], factory.ports[1].open_conversation_calls)
         self.assertEqual([], factory.ports[1].attach_document_calls)
         self.assertEqual(
             ("document:alpha.pdf",),

@@ -24,6 +24,7 @@
 | `260728-知识谱系类别文件对话详细集成计划.md` | L3 历史部分执行计划：记录旧模式开发和离线 I0～I4/I6/C7；原 I7/I8 发布方向不再继续，后续集成以 2026-08-01 独立接口和清库重建计划为准。 |
 | `260801-对话模块迁移与知识谱系独立接口详细实施计划.md` | L3 阶段 0～10 已完成的专项计划：Chat 已迁入 `modules/chat/`，以内部 conversationId 共用 Domain/Application/SQLite/AnythingLLM 核心，并通过独立 `/llm/weaponry-chat*`、复合业务身份、v1.15.0 双终态、无损 Chunk、严格原文件名、冻结 SSE Header、历史原子快照、Weaponry 聚合物理删除与 File chatId 永久墓碑策略替代旧 architecture 公共合同。 |
 | `260802-对话模块迁移与知识谱系独立接口阶段执行记录.md` | 上述专项计划阶段 0～10 的逐阶段实现与门禁事实；阶段 10 已完成指定 Chat DB 清库、Schema v9、本机 AnythingLLM 真实联调及经批准的 Flask 协议级前端替代验收。证据仍不构成生产多实例、可靠队列或容量证明。 |
+| `260802-对话Workspace业务身份命名实施计划.md` | L3 阶段 0～6 已完成专项：File Workspace 使用 `chat-id{chatId}`，Weaponry Workspace 使用 `wChat-user{userId}-arch{architectureId}`；命名从持久化 Identity Binding 生成，旧引用不迁移，同名未知资源失败关闭，并按已批准策略记录必要业务 ID/资源日志而不记录凭据或正文。本机回环 AnythingLLM 的隔离创建、问答和清理真实验收已通过。 |
 | `260725-main与refactor并发重构分支集成实施计划.md` | L3 分支集成计划：以最新 `main` 为第一父基线，将 `refactor/concurrency` 阶段 0～1E 成果集成进主线；逐文件规定 8 个冲突文件、24 个冲突块、Analysis 最新功能保留、SQLite Schema 并集、里程碑、测试、回滚和完成定义。该计划取代 `260722-refactor与analysis优化分支合并实施计划.md` 的旧执行方向。 |
 | `260728-main与file-analysis分支Legacy-Office集成实施计划.md` | L3 分支集成计划：把 `main` 的 Legacy Office、单 Sheet XLSX、Report 与离线交付能力集成到 Stage 1F 文件分析唯一生产链；冻结处理策略、失败关闭、共享转换容量、只读存储治理、逐阶段门禁和真实环境停止条件。 |
 | `260729-report与weaponry-check-task显式unknown重试实施计划.md` | L3 已完成并离线关闭专项计划：U0～U7 已完成 report/weaponry 显式 at-least-once unknown 补发、三类型请求预校验/规范化去重、Guard attempt CAS/追加审计、业务恢复接入、组合根、接口黄金资产、迁移演练及 2,042 项安全全仓回归；负责人确认本次不执行真实环境发布门禁，目标库统计、实例版本/旧 Worker 核对和 Production Attestation 留待未来实际发布前执行。 |

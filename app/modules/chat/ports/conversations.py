@@ -227,6 +227,10 @@ class ChatResourceError(ChatPortError):
         )
 
 
+class ChatContextNameConflictError(ChatResourceError):
+    """本地无所有权引用时发现同名远端上下文，禁止自动认领。"""
+
+
 class ChatResponseError(ChatPortError):
     """外部对话实现返回了无法形成稳定业务结果的响应。"""
 
@@ -241,7 +245,7 @@ class ChatConversationPort(Protocol):
         context_name: str,
         conversation_name: str,
     ) -> ChatSessionRefs:
-        """按业务名称创建或打开一个可持久化引用的对话。"""
+        """按业务名称创建可持久化引用；同名未知资源必须失败关闭。"""
         ...
 
     def attach_documents(

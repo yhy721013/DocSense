@@ -1122,6 +1122,16 @@ class ChatDifferentSessionConcurrencyTests(unittest.TestCase):
             == ("document:shared-document",)
             for port in factory.ports
         ))
+        self.assertEqual(
+            {f"chat-id{20000 + index}" for index in range(worker_count)},
+            {
+                port.open_conversation_calls[0][0]
+                for port in factory.ports
+            },
+        )
+        self.assertTrue(
+            all(len(port.open_conversation_calls) == 1 for port in factory.ports)
+        )
 
 
 if __name__ == "__main__":

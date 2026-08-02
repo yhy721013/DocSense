@@ -8,17 +8,19 @@
 | --- | --- |
 | `test_chat.py` | `/llm/chat` 路由受理、Requested/Active/Effective 范围矩阵、history requested 投影、既有 SSE 事件、响应头、输入校验、同会话并发拒绝、50 个不同会话完整隔离和内部标识不泄露。 |
 | `test_chat_port_contract.py` | `ChatConversationPort` 数据传输对象、异常与协议边界。 |
-| `test_anythingllm_chat_gateway.py` | AnythingLLM 对话网关的离线传输、字段归一化、流关闭和删除行为。 |
+| `test_anythingllm_chat_gateway.py` | AnythingLLM 对话网关的精确名称创建、同名未知资源失败关闭、供应商名称漂移补偿、补偿失败资源证据、日志、流关闭和删除行为。 |
+| `test_chat_workspace_naming.py` | File/Weaponry Workspace 业务身份命名、边界整数、缺失字段和未知身份失败关闭。 |
 | `test_chat_repositories.py` | SQLite 架构迁移、统一有界 busy timeout、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
 | `test_chat_resource_ids.py` | 租约标识和不透明远端引用的编码/解码。 |
 | `test_chat_run_state.py` | 同一会话互斥、Scope Head 原子受理、首次/显式 50 并发唯一更新、全事实回滚、1,000 文件历史压力、执行租约、心跳、过期运行和删除准入。 |
-| `test_chat_run_executor.py` | Requested/Effective 输入冻结与 run-id 重启式恢复、Workspace 累计绑定和模型范围隔离、失败后 Scope 复用、资源租约、流事件记录及异常收敛。 |
+| `test_chat_run_executor.py` | Requested/Effective 输入冻结与 run-id 重启式恢复、从持久化 Identity Binding 生成 Workspace 名称、旧引用零创建、Workspace 累计绑定和模型范围隔离、资源租约、流事件记录及异常收敛。 |
 | `test_chat_event_repository.py` | 内部事件账本的序号、终态唯一性和事务写入。 |
 | `test_chat_dispatcher.py` | 仅以持久化 `run_id` 调度执行的协议和内联实现。 |
 | `test_chat_history_service.py` | 本地权威历史、消息过滤和标题输入。 |
 | `test_chat_title_service.py` | 标题生成、临时线程租约、清理失败与删除竞争。 |
 | `test_chat_abort_service.py` | 活动运行中断、中断通知和终态语义。 |
-| `test_chat_delete_service.py` | 删除状态机、同步清理要求和失败保留。 |
+| `test_chat_delete_service.py` | 删除状态机、同步清理要求、失败保留，以及 Weaponry 清理失败时旧世代身份继续占用。 |
+| `test_weaponry_chat_routes.py` | 知识谱系公开路由、删除后同业务身份新世代/新范围快照、相同 Workspace 名称与不同内部 Thread，以及日志正文防泄漏。 |
 | `test_chat_stream_presenter.py` | 领域事件到冻结 SSE 文本的格式化与关闭回调。 |
 | `test_chat_infrastructure.py` | 当前持久化/调度/租约能力边界，防止 SQLite 被误用为可靠队列。 |
 | `test_debug_application.py`、`test_debug_adapters.py`、`test_debug_presenter.py`、`test_chat_debug_routes.py` | 本地调试 `fileNames` 对齐 Active Scope、Workspace bindings 独立脱敏计数、公开 history requested 语义，以及 Query/Adapter/Presenter/路由分层。 |
@@ -647,6 +649,12 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     Callback Guard；批次上限按逐项资源恢复尝试数计量、多个大任务轮转推进、停止信号在单项
     之间生效；
     明确失败保留持久退避，Interaction Audit/DELETE/检查点结果未知继续隔离且绝不盲删。
+59. 运行对话 Workspace 业务身份命名关闭门禁：先执行命名、Chat 执行器、AnythingLLM Chat
+    Gateway、删除、公开路由、合同、Container 和架构定向组合，再动态发现 `test_chat*.py`；
+    最后动态发现 `test*.py` 并只排除“执行限制”中的 13 个完整测试 ID。2026-08-02 最终定向
+    组合 182 项、Chat 281 项通过；安全全仓发现 2,183、排除 13、执行 2,170，失败 0、错误 0、
+    跳过 3。经授权的阶段 6 另以任务级生产 Chat Gateway 在本机回环 AnythingLLM 完成两类精确
+    命名、文档绑定、最小 Query 和全资源清理；该真实证据仍不替代 Flask/浏览器、多实例或容量验收。
 
 ## 执行限制
 

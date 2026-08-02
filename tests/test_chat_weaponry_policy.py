@@ -25,6 +25,7 @@ from app.modules.chat.domain.identity import (
     FileChatIdentity,
     WeaponryChatIdentity,
 )
+from app.modules.chat.domain.workspace_naming import chat_workspace_name
 from app.modules.chat.ports.conversations import ChatSourceEvidence
 from app.services.core.database import DatabaseService
 from tests.fakes.chat import FakeChatConversationFactory
@@ -64,6 +65,7 @@ class ChatWeaponryPolicyTests(unittest.TestCase):
         return ChatRunStreamRequest(
             run_id=f"run-{suffix}",
             conversation_id=resolution.conversation_id,
+            workspace_name=chat_workspace_name(resolution.binding),
             message="请回答",
             identity_kind=identity.identity_kind,
         )

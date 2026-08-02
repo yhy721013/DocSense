@@ -101,6 +101,7 @@ from app.modules.chat.application.title_service import (
     ChatTitleService,
 )
 from app.modules.chat.domain.events import ChatStreamEvent
+from app.modules.chat.domain.workspace_naming import chat_workspace_name
 from app.modules.chat.domain.models import (
     CLEANUP_JOB_FAILED,
     CLEANUP_JOB_PENDING,
@@ -279,6 +280,7 @@ __all__ = [
     "ChatSessionRepository",
     "ChatStore",
     "ChatStreamEvent",
+    "chat_workspace_name",
     "ChatTitleEmptyHistoryError",
     "ChatTitleGenerationError",
     "ChatTitleUnavailableError",

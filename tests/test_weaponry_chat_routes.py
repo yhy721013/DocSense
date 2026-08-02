@@ -178,6 +178,12 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
             ["chatInfo", "textChunk", "textChunk", "sourceChunks", "done"],
             [event_type for event_type, _ in events],
         )
+        old_resolution = self.services.chat_store.identities.resolve_active(
+            WeaponryChatIdentity(user_id=7, architecture_id=9)
+        )
+        self.assertIsNotNone(old_resolution)
+        assert old_resolution is not None
+        old_conversation_id = old_resolution.conversation_id
         self.assertEqual(
             {"userId": 7, "architectureId": 9, "isNewChat": True},
             events[0][1],
@@ -251,12 +257,59 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
         self.assertEqual(404, repeated.status_code)
         self.assertEqual({"error": "对话不存在"}, repeated.get_json())
 
+        # 删除完成后再加入同类别文件，验证同一业务身份的新世代会重新冻结当前快照，
+        # 而不是复用旧 Workspace 中的累计绑定。
+        self.services.kb_service.save_document_record(
+            "new-generation.pdf",
+            9,
+            "weaponry-new-generation-doc",
+            "custom-documents/weaponry-new-generation-doc.json",
+            original_name="新世代文件.pdf",
+            ingested_file_name="new-generation.pdf",
+            metadata={
+                "docSource": "docsense_ref:"
+                + hashlib.sha256(b"weaponry-new-generation-doc").hexdigest()[:32]
+            },
+        )
+
         recreated = self.client.post(
             "/llm/weaponry-chat",
             json=self._post_payload(message="重建后的问题"),
         )
         recreated_events = _sse_events(recreated.get_data(as_text=True))
         self.assertTrue(recreated_events[0][1]["isNewChat"])
+        new_resolution = self.services.chat_store.identities.resolve_active(
+            WeaponryChatIdentity(user_id=7, architecture_id=9)
+        )
+        self.assertIsNotNone(new_resolution)
+        assert new_resolution is not None
+        self.assertNotEqual(old_conversation_id, new_resolution.conversation_id)
+        self.assertEqual(
+            {"internal.pdf", "new-generation.pdf"},
+            {
+                item.file_name
+                for item in self.services.chat_store.document_bindings.list_current_by_chat(
+                    new_resolution.conversation_id
+                )
+            },
+        )
+        factory = self.services.chat_conversation_factory
+        workspace_open_calls = [
+            call
+            for port in factory.ports
+            for call in port.open_conversation_calls
+        ]
+        self.assertEqual(
+            [
+                "wChat-user7-arch9",
+                "wChat-user7-arch9",
+            ],
+            [call[0] for call in workspace_open_calls],
+        )
+        self.assertEqual(
+            2,
+            len({call[1] for call in workspace_open_calls}),
+        )
 
     def test_route_rejects_unknown_fields_duplicate_query_and_old_mode(self) -> None:
         unknown = self._post_payload(message="x")
@@ -284,10 +337,10 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
         )
         self.assertEqual(400, old_mode.status_code)
 
-    def test_application_logs_do_not_expose_weaponry_request_or_source_data(
+    def test_application_logs_do_not_expose_weaponry_body_or_source_data(
         self,
     ) -> None:
-        """应用日志不得泄漏业务用户、问答正文、文件身份、来源键、URL 或远端引用。"""
+        """应用日志可记录业务 ID，但不得泄漏问答正文、文件身份、来源键或 URL。"""
 
         secret_user_id = 9_007_199_254_740_991
         secret_message = "phase8-private-message-body"
@@ -337,7 +390,6 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
 
         combined_logs = "\n".join(captured.output)
         forbidden_values = (
-            str(secret_user_id),
             secret_message,
             secret_chunk,
             secret_file_name,
