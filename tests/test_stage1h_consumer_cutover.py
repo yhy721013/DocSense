@@ -14,7 +14,6 @@ from app.modules.analysis.adapters import (
 from app.modules.analysis.ports import (
     AnalysisExecutionRef,
     AnalysisFilePreparationRequest,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationRequest,
 )
@@ -463,15 +462,15 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             document = adapter.translate(
                 AnalysisTranslationRequest(
                     execution=execution,
-                    kind=AnalysisTranslationKind.DOCUMENT,
                     prepared_artifact=artifact,
                 )
             )
-            summary = adapter.translate(
+            # 生产 Adapter 不得因兼容路径存在而绕过 Artifact 边界；没有 Artifact 时
+            # 必须给业务层一个可降级失败结果，也不能误调用纯文本翻译引擎。
+            missing_artifact = adapter.translate(
                 AnalysisTranslationRequest(
                     execution=execution,
-                    kind=AnalysisTranslationKind.SUMMARY,
-                    text="<summary>",
+                    source_path=str(source),
                 )
             )
 
@@ -481,14 +480,14 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             )
             self.assertIn("译文:English paragraph", document.document_translation_one)
             self.assertIs(
-                AnalysisTranslationOutcome.SUCCEEDED,
-                summary.outcome,
+                AnalysisTranslationOutcome.FAILED,
+                missing_artifact.outcome,
             )
             self.assertEqual(
-                '<div class="translated-text">译文:&lt;summary&gt;</div>',
-                summary.document_translation_one,
+                "document_translation_artifact_missing",
+                missing_artifact.error_code,
             )
-            self.assertEqual(2, len(engine.calls))
+            self.assertEqual(1, len(engine.calls))
 
 
 if __name__ == "__main__":

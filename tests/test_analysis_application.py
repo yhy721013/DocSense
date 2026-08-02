@@ -70,7 +70,6 @@ from app.modules.analysis.ports import (
     AnalysisResourceScanBatch,
     AnalysisResourceState,
     AnalysisTaskWorkspace,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationResult,
     PreparedAnalysisDocument,
@@ -756,7 +755,6 @@ class RunAnalysisTaskTests(unittest.TestCase):
         if translation_outcome is AnalysisTranslationOutcome.SUCCEEDED:
             translation = AnalysisTranslationResult(
                 execution=prepared.execution,
-                kind=AnalysisTranslationKind.DOCUMENT,
                 outcome=translation_outcome,
                 document_translation_one="单语",
                 document_translation_two="双语",
@@ -764,7 +762,6 @@ class RunAnalysisTaskTests(unittest.TestCase):
         else:
             translation = AnalysisTranslationResult(
                 execution=prepared.execution,
-                kind=AnalysisTranslationKind.DOCUMENT,
                 outcome=translation_outcome,
                 error_code="document_translation_failed",
             )
@@ -893,7 +890,7 @@ class RunAnalysisTaskTests(unittest.TestCase):
         self.assertEqual("task.finish", script.calls[-5][0])
         script.assert_exhausted()
 
-    def test_full_translation_compatibility_fake_uses_prepared_path(self) -> None:
+    def test_translation_source_path_fallback_uses_processing_path(self) -> None:
         """1H-6 后无 Artifact 的旧 Fake 也必须使用 processing，而非 raw source。"""
 
         task_input, _task_execution = _fixture()
@@ -908,7 +905,6 @@ class RunAnalysisTaskTests(unittest.TestCase):
         handoff = _AnalysisKnowledgeHandoff(ports, ports)
         translation_result = AnalysisTranslationResult(
             execution=execution,
-            kind=AnalysisTranslationKind.DOCUMENT,
             outcome=AnalysisTranslationOutcome.SUCCEEDED,
             document_translation_one="单语",
             document_translation_two="双语",
@@ -947,7 +943,6 @@ class RunAnalysisTaskTests(unittest.TestCase):
                 mapped_result = {"fileDataItem": {"summary": "摘要"}}
                 handoff.enrich_translations(
                     execution=execution,
-                    snapshot=task_input,
                     prepared=prepared,
                     mapped_result=mapped_result,
                 )

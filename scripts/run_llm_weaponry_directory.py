@@ -565,7 +565,6 @@ def build_analysis_payload(file_name: str, file_url: str, architecture_id: int) 
                 "originalName": file_name,
                 "originalFileName": file_name,
                 "filePath": file_url,
-                "enableFullTranslation": False,
                 "country": [{"key": "02", "value": "美国"}],
                 "channel": [{"key": "03", "value": "军情"}],
                 "format": [{"key": "03", "value": "文档类"}],

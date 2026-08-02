@@ -42,7 +42,6 @@ from app.modules.analysis.ports import (
     AnalysisResourceScanBatch,
     AnalysisResourceState,
     AnalysisTaskWorkspace,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationResult,
     PreparedAnalysisDocument,
@@ -425,7 +424,6 @@ def _expect_happy_path(
         "translation.translate",
         AnalysisTranslationResult(
             execution=case.execution,
-            kind=AnalysisTranslationKind.DOCUMENT,
             outcome=AnalysisTranslationOutcome.SUCCEEDED,
             document_translation_one=f"单语翻译-{case.index:02d}",
             document_translation_two=f"双语翻译-{case.index:02d}",

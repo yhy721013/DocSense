@@ -48,9 +48,6 @@ class _TranslationServiceFake:
     def translate_document(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         return ("双语结果", "单语结果")
 
-    def translate_text_only(self, text: str, *args, **kwargs) -> str:  # type: ignore[no-untyped-def]
-        return text
-
 
 class AnalysisInfrastructureConfigTests(unittest.TestCase):
     """验证单实例配置、严格环境解析和 Callback lease 安全关系。"""

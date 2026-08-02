@@ -44,8 +44,8 @@ DocSense 当前以甲方协议后端接口服务为主，聚焦 LLM 任务处理
 4. `integrations.anythingllm/report/weaponry adapters -> ports`：Gateway/Adapter 实现端口；新链路每次进入 Factory 租约时创建独立 Transport，不跨任务共享 HTTP Session。
 5. `report/analysis adapters -> document_processing`：下载后的原始文件只进入一条 Artifact 流水线；
    RAG、正文读取和全文翻译共享 prepared Artifact。
-6. `analysis/weaponry adapters -> translation`：全文只调用 `TranslatePreparedDocument`，摘要与
-   Weaponry 纯文本只调用实例级 TranslationEngine。
+6. `analysis/weaponry adapters -> translation`：Analysis 全文只调用
+   `TranslatePreparedDocument`；Weaponry 纯文本只调用实例级 TranslationEngine。
 7. `check-task -> report/weaponry/analysis application`：三类业务分别通过
    `RecoverReportCallbackSynchronously`、`RecoverWeaponryCallbackSynchronously`、
    `RecoverAnalysisCallbackSynchronously` 与正常 Worker 共用 execution 级 Callback Guard；file 不再

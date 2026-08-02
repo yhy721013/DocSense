@@ -553,7 +553,6 @@ class RunAnalysisTask:
                 return RunAnalysisResult(execution.task_id, RunAnalysisOutcome.STALE)
             self._knowledge_handoff.enrich_translations(
                 execution=execution,
-                snapshot=snapshot,
                 prepared=prepared,
                 mapped_result=mapped_result,
             )

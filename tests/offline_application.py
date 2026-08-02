@@ -114,16 +114,6 @@ class _OfflineAnalysisTranslationService:
 
         return ("", "")
 
-    def translate_text_only(
-        self,
-        text: str,
-        *args: object,
-        **kwargs: object,
-    ) -> str:
-        """保留摘要翻译的输入文本，避免测试替身擅自改变业务结果。"""
-
-        return text
-
 
 def _offline_analysis_callback_transport(
     request: AnalysisCallbackDeliveryRequest,

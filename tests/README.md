@@ -421,7 +421,7 @@ Progress 或接口文档。
 | test_analysis_task_adapter.py | `AnalysisSubmissionSnapshot`/`AnalysisTaskInputV1` 的深冻结、原始文件名语义、策略快照、严格 V1 Codec、重复 JSON 键/损坏范围/未知 schema/身份拒绝及 50 个并发输入隔离。 |
 | test_analysis_ports.py、tests/fakes/analysis.py | 九类 Analysis Port 的显式 RAG 生命周期、两阶段/追加审计、Resource CAS、Callback Guard、运行时 Protocol、按 execution 并发脚本和严格身份关联。 |
 | test_analysis_web_adapters.py | Parser/Presenter 对 1F-0 400/413/202/409/503 黄金映射、内部身份不外泄、冻结快照复用、意外异常不误报 400，以及 1F-5B 当前 Blueprint 的唯一新链路 AST 门禁。 |
-| test_analysis_translation_isolation.py | 移除全局任务 callback、全文/摘要共享翻译临界区、注入式协调器串行化、旧字段映射兼容及空结果失败分类。 |
+| test_analysis_translation_isolation.py | 移除全局任务 callback、全文翻译临界区、注入式协调器串行化、旧字段映射兼容及空结果失败分类。 |
 
 1F-2 当时只准备后续组合所需的内部边界。后续 1F-5B 已将 Parser、Presenter、Codec 和 Submit 用例接入
 `/llm/analysis`，但翻译锁仍只保护当前单进程的共享 Translator/MinerU 输出目录，不能解释为分布式锁、

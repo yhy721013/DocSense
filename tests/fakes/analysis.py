@@ -484,8 +484,6 @@ class StrictAnalysisPortFake:
             result.execution,
             "translation.translate",
         )
-        if result.kind is not request.kind:
-            raise AssertionError("translation.translate 结果 kind 与请求不一致")
         return result
 
     def create(self, command: AnalysisResourceCommand) -> AnalysisResourceRecord:

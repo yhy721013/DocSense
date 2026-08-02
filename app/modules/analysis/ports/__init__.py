@@ -86,7 +86,6 @@ from .resources import (
     AnalysisResourceState,
 )
 from .translation import (
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationPort,
     AnalysisTranslationRequest,
@@ -158,7 +157,6 @@ __all__ = (
     "AnalysisResourceState",
     "AnalysisTaskClaim",
     "AnalysisTaskClaimOutcome",
-    "AnalysisTranslationKind",
     "AnalysisTranslationOutcome",
     "AnalysisTranslationPort",
     "AnalysisTranslationRequest",

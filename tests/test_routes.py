@@ -486,8 +486,8 @@ class LLMRouteValidationTests(unittest.TestCase):
                     }
                 ]
             },
-            {"enableFullTranslation": float("nan")},
-            {"enableFullTranslation": float("inf")},
+            {"testNonFiniteValue": float("nan")},
+            {"testNonFiniteValue": float("inf")},
         )
         for index, invalid_value in enumerate(invalid_values, start=1):
             with self.subTest(invalid_value=invalid_value):
