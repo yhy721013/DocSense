@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 
+from app.domain.knowledge_workspace import permanent_architecture_workspace_name
 from app.modules.reassign.domain import (
     ReassignmentBindingState,
     ReassignmentDocumentSnapshot,
     ReassignmentStepName,
+    architecture_id_storage_value,
     build_step_idempotency_key,
 )
 from app.modules.reassign.ports import (
@@ -287,13 +289,17 @@ class ReassignmentRecoveryObserver:
     def workspace_preparation_request(
         record: ReassignmentOperationRecord,
     ) -> ReassignmentWorkspacePreparationRequest:
-        """复用前向服务的确定性名称规则，仅用于恢复时的只读查回。"""
+        """复用前向服务的规范化名称规则，仅用于恢复时的只读查回。"""
 
-        raw_target_value = record.operation.target_architecture_raw.to_python()
+        target_architecture_id = architecture_id_storage_value(
+            record.operation.target_architecture_raw,
+            name="target_architecture_raw",
+        )
+        workspace_name = permanent_architecture_workspace_name(target_architecture_id)
         return ReassignmentWorkspacePreparationRequest(
             operation_id=record.operation.operation_id,
             target_architecture_raw=record.operation.target_architecture_raw,
-            desired_workspace_name=f"architectureId-{raw_target_value}",
+            desired_workspace_name=workspace_name,
             idempotency_key=build_step_idempotency_key(
                 record.operation,
                 # 创建步骤的幂等键只用于供应商只读查回的精确资源身份，不触发创建。

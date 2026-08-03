@@ -52,8 +52,8 @@ class _KnowledgeGatewayHarness:
         self.workspace_client = Mock(spec=AnythingLLMWorkspaceClient)
         self.workspace = AnythingLLMWorkspace(
             id="workspace-1",
-            slug="architectureid-100",
-            name="architectureId-100",
+            slug="archid-100",
+            name="archId-100",
         )
         self.workspace_client.create_workspace.return_value = self.workspace
         self.workspace_client.get_workspace.return_value = self.workspace
@@ -76,7 +76,7 @@ class _KnowledgeGatewayHarness:
             user_id=1,
         )
         self.collection = self.gateway.ensure_collection(
-            CollectionSpec(architecture_id=100, name="architectureId-100")
+            CollectionSpec(architecture_id=100, name="archId-100")
         )
 
     @staticmethod
@@ -187,15 +187,27 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
             )
 
             reused = second_gateway.ensure_collection(
-                CollectionSpec(architecture_id=100, name="architectureId-100")
+                CollectionSpec(architecture_id=100, name="archId-100")
             )
 
             self.assertEqual(harness.collection, reused)
             harness.workspace_client.get_workspace.assert_called_with(
-                "architectureid-100",
+                "archid-100",
+                user_id=1,
+            )
+            harness.workspace_client.create_workspace.assert_called_once_with(
+                "archId-100",
+                settings=None,
                 user_id=1,
             )
             self.assertEqual(1, harness.workspace_client.create_workspace.call_count)
+            with sqlite3.connect(harness.task_service.db_path) as connection:
+                persisted_name = connection.execute(
+                    "SELECT collection_name FROM knowledge_index_collections "
+                    "WHERE architecture_id = ?",
+                    (100,),
+                ).fetchone()[0]
+            self.assertEqual("archId-100", persisted_name)
 
     def test_workspace_policy_update_failure_is_retried(self):
         """远程策略更新失败时不得提前标记版本，下一任务必须继续应用。"""
@@ -218,13 +230,13 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 user_id=1,
                 workspace_settings={"chatMode": "query", "topN": 6},
             )
-            spec = CollectionSpec(architecture_id=100, name="architectureId-100")
+            spec = CollectionSpec(architecture_id=100, name="archId-100")
 
             with self.assertRaisesRegex(RuntimeError, "workspace update failed"):
                 gateway.ensure_collection(spec)
             collection = gateway.ensure_collection(spec)
 
-            self.assertEqual("architectureid-100", collection.ref)
+            self.assertEqual("archid-100", collection.ref)
             self.assertEqual(2, harness.workspace_client.update_workspace.call_count)
 
     def test_prepared_document_is_transferred_without_upload_or_metadata_api(self):

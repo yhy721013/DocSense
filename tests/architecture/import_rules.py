@@ -530,6 +530,17 @@ def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
     )
 
 
+def _shared_domain_matcher(reference: ImportReference) -> RuleMatch | None:
+    """保护 ``app/domain`` 共享内核，禁止它成为跨模块基础设施捷径。"""
+
+    return _first_positive_allowlist_violation(
+        reference,
+        allowed_stdlib_roots=_DOMAIN_STDLIB_ROOTS,
+        allowed_internal_prefixes=("app.domain",),
+        reason="共享领域层只能依赖批准的标准库和共享领域内的纯规则",
+    )
+
+
 def _ports_matcher(reference: ImportReference) -> RuleMatch | None:
     context = _module_context(reference.source)
     module_name = context[0] if context is not None else ""
@@ -583,6 +594,10 @@ def _application_matcher(reference: ImportReference) -> RuleMatch | None:
         allowed_internal.extend(
             ("app.modules.tasks.domain", "app.modules.tasks.ports")
         )
+    if module_name in {"analysis", "reassign"}:
+        # 永久知识谱系名称是两个业务模块共享的稳定业务规则。只放行该精确纯领域模块，
+        # 不允许 Application 借此依赖整个 app.domain 或其他跨业务实现。
+        allowed_internal.append("app.domain.knowledge_workspace")
     allowed_stdlib_roots = _APPLICATION_STDLIB_ROOTS
     if module_name == "chat":
         allowed_stdlib_roots = (
@@ -697,6 +712,7 @@ def _framework_free_container_matcher(
 
 
 DOMAIN_RULE = ArchitectureRule("module-domain-purity", _domain_matcher)
+SHARED_DOMAIN_RULE = ArchitectureRule("shared-domain-purity", _shared_domain_matcher)
 PORTS_RULE = ArchitectureRule("module-ports-abstraction", _ports_matcher)
 APPLICATION_RULE = ArchitectureRule("module-application-direction", _application_matcher)
 TASKS_MODULE_RULE = ArchitectureRule("tasks-module-isolation", _tasks_module_matcher)
@@ -723,6 +739,7 @@ __all__ = [
     "PRESENTER_RULE",
     "RuleMatch",
     "RouteOperationViolation",
+    "SHARED_DOMAIN_RULE",
     "TASKS_MODULE_RULE",
     "WEB_ROUTE_RULE",
     "collect_violations",

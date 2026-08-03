@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Callable
 
+from app.domain.knowledge_workspace import permanent_architecture_workspace_name
 from app.modules.reassign.domain import (
     ReassignDocumentCommand,
     ReassignmentBindingState,
@@ -28,6 +29,7 @@ from app.modules.reassign.domain import (
     ReassignmentStepState,
     ReassignmentTerminalEvidence,
     ReassignmentTerminalEvidenceKind,
+    architecture_id_storage_value,
     build_step_idempotency_key,
 )
 from app.modules.reassign.ports import (
@@ -1687,13 +1689,21 @@ class DocumentReassignmentService:
         self,
         record: ReassignmentOperationRecord,
     ) -> ReassignmentWorkspacePreparationRequest:
-        """按遗留 f-string 规则构造 workspace 名称，不擅自规范化公开新分类原始值。"""
+        """按数据库权威目标分类构造唯一的永久 Workspace 名称。
 
-        raw_target_value = record.operation.target_architecture_raw.to_python()
+        公开接口仍保留既有有限兼容输入；名称后缀必须先使用同一领域投影收敛为 SQLite
+        权威整数，避免 ``12``、``"0012"`` 和 ``" 12 "`` 创建不同远端资源。
+        """
+
+        target_architecture_id = architecture_id_storage_value(
+            record.operation.target_architecture_raw,
+            name="target_architecture_raw",
+        )
+        workspace_name = permanent_architecture_workspace_name(target_architecture_id)
         return ReassignmentWorkspacePreparationRequest(
             operation_id=record.operation.operation_id,
             target_architecture_raw=record.operation.target_architecture_raw,
-            desired_workspace_name=f"architectureId-{raw_target_value}",
+            desired_workspace_name=workspace_name,
             idempotency_key=build_step_idempotency_key(
                 record.operation,
                 ReassignmentStepName.PREPARE_TARGET_WORKSPACE,

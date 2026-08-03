@@ -145,7 +145,7 @@ class ReassignmentStrictFakeTests(unittest.TestCase):
         request = ReassignmentWorkspacePreparationRequest(
             operation_id="operation-1",
             target_architecture_raw=12,
-            desired_workspace_name="architectureId-12",
+            desired_workspace_name="archId-12",
             idempotency_key="prepare-key",
         )
         unknown = ReassignmentWorkspacePreparationResult(
@@ -165,7 +165,7 @@ class ReassignmentStrictFakeTests(unittest.TestCase):
         request = ReassignmentWorkspacePreparationRequest(
             operation_id="operation-1",
             target_architecture_raw=12,
-            desired_workspace_name="architectureId-12",
+            desired_workspace_name="archId-12",
             idempotency_key="prepare-key",
         )
         result = ReassignmentWorkspaceProbeResult(

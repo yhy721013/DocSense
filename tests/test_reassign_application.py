@@ -223,6 +223,12 @@ class DocumentReassignmentServiceTests(unittest.TestCase):
         self.assertEqual(ReassignmentResultCategory.SUCCEEDED, result.category)
         self.assertEqual(ReassignmentPublicMessage.SUCCEEDED, result.public_message)
         knowledge.assert_expectations_consumed()
+        prepare_request = next(
+            request
+            for method, request in knowledge.calls
+            if method == "prepare_target_workspace"
+        )
+        self.assertEqual("archId-12", prepare_request.desired_workspace_name)
         with repository.unit_of_work(read_only=True) as unit_of_work:
             moved = unit_of_work.get_document_snapshot(
                 file_name="document.pdf",
@@ -244,6 +250,55 @@ class DocumentReassignmentServiceTests(unittest.TestCase):
         self.assertIn(ReassignmentEventType.LEASE_RENEWED, event_types)
         self.assertIn(ReassignmentEventType.BEST_EFFORT_PIN_ATTEMPTED, event_types)
         self.assertIn(ReassignmentEventType.BEST_EFFORT_PIN_COMPLETED, event_types)
+
+    def test_compatible_target_representations_share_canonical_workspace_name(self) -> None:
+        """公开兼容表示必须先投影为同一数据库整数，再生成永久 Workspace 名称。"""
+
+        cases = (
+            (12, "archId-12"),
+            ("0012", "archId-12"),
+            (" 12 ", "archId-12"),
+            (False, "archId-0"),
+            (-12, "archId--12"),
+        )
+        for target, expected_name in cases:
+            with self.subTest(target=target):
+                repository = FakeReassignmentRepository(
+                    documents=(self._snapshot(),),
+                    workspace_mappings=((11, "source-workspace"),),
+                    clock=self.clock,
+                )
+                knowledge = FakeReassignmentKnowledgePort(
+                    transaction_active=lambda: repository.transaction_active
+                )
+                applied = ReassignmentDocumentMutationResult(
+                    ReassignmentKnowledgeOutcome.APPLIED
+                )
+                knowledge.expect_detach_document(applied)
+                knowledge.expect_prepare_target_workspace(
+                    ReassignmentWorkspacePreparationResult(
+                        ReassignmentKnowledgeOutcome.APPLIED,
+                        workspace=ReassignmentWorkspaceReference("target-workspace"),
+                        ownership=(
+                            ReassignmentWorkspaceOwnership.CREATED_BY_OPERATION
+                        ),
+                    )
+                )
+                knowledge.expect_attach_document(applied)
+                knowledge.expect_pin_document_best_effort(applied)
+
+                result = self._service(repository, knowledge).execute(
+                    self._command(target=target)
+                )
+
+                self.assertEqual(ReassignmentResultCategory.SUCCEEDED, result.category)
+                prepare_request = next(
+                    request
+                    for method, request in knowledge.calls
+                    if method == "prepare_target_workspace"
+                )
+                self.assertEqual(expected_name, prepare_request.desired_workspace_name)
+                knowledge.assert_expectations_consumed()
 
     def test_empty_doc_path_only_updates_local_authority_without_network_calls(self) -> None:
         """空 doc_path 保持既有兼容分支：远端三步均不应发生。"""

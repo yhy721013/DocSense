@@ -201,8 +201,8 @@ class _CloseSpyTransport:
 
 def _workspace(
     *,
-    slug: str = "architectureid-12",
-    name: str = "architectureId-12",
+    slug: str = "archid-12",
+    name: str = "archId-12",
 ) -> AnythingLLMWorkspace:
     return AnythingLLMWorkspace(id=slug, slug=slug, name=name)
 
@@ -223,7 +223,7 @@ def _workspace_request() -> ReassignmentWorkspacePreparationRequest:
     return ReassignmentWorkspacePreparationRequest(
         operation_id="reassign-op-1",
         target_architecture_raw=12,
-        desired_workspace_name="architectureId-12",
+        desired_workspace_name="archId-12",
         idempotency_key="prepare-target-workspace-key",
     )
 
@@ -244,7 +244,7 @@ def _mutation_request(
     return ReassignmentDocumentMutationRequest(
         operation_id="reassign-op-1",
         step_name=step_name,
-        workspace=ReassignmentWorkspaceReference("architectureid-12"),
+        workspace=ReassignmentWorkspaceReference("archid-12"),
         document=_document_reference(),
         architecture_raw=12,
         idempotency_key=f"{step_name.value}-key",
@@ -423,7 +423,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
         result = self.adapter.prepare_target_workspace(_workspace_request())
 
         self.assertEqual(ReassignmentKnowledgeOutcome.ALREADY_IN_DESIRED_STATE, result.outcome)
-        self.assertEqual("architectureid-12", result.workspace.slug)
+        self.assertEqual("archid-12", result.workspace.slug)
         self.assertIs(
             ReassignmentWorkspaceOwnership.PREEXISTING,
             result.ownership,
@@ -452,8 +452,8 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
     def test_multiple_exact_workspace_matches_are_unknown_not_arbitrarily_selected(self) -> None:
         self.workspaces.list_results = [
             [
-                _workspace(slug="architectureid-12-a"),
-                _workspace(slug="architectureid-12-b"),
+                _workspace(slug="archid-12-a"),
+                _workspace(slug="archid-12-b"),
             ]
         ]
 
@@ -479,7 +479,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
             AnythingLLMWorkspace(
                 id="workspace-id",
                 slug="",
-                name="architectureId-12",
+                name="archId-12",
             )
         ]
 
@@ -502,7 +502,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
             ReassignmentKnowledgeOutcome.ALREADY_IN_DESIRED_STATE,
             result.outcome,
         )
-        self.assertEqual("architectureid-12", result.workspace.slug)
+        self.assertEqual("archid-12", result.workspace.slug)
         self.assertIs(ReassignmentWorkspaceOwnership.UNKNOWN, result.ownership)
         self.assertEqual(
             ["list_workspaces", "create_workspace", "list_workspaces"],
@@ -524,7 +524,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
             result.outcome,
         )
         self.assertIs(ReassignmentWorkspaceOwnership.UNKNOWN, result.ownership)
-        self.assertEqual("architectureid-12", result.workspace.slug)
+        self.assertEqual("archid-12", result.workspace.slug)
         self.assertEqual(
             ["list_workspaces", "create_workspace", "list_workspaces"],
             [call[0] for call in self.workspaces.calls],
@@ -547,7 +547,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
 
         self.assertEqual(ReassignmentWorkspaceProbeState.PRESENT, result.state)
         self.assertIs(ReassignmentWorkspaceOwnership.UNKNOWN, result.ownership)
-        self.assertEqual("architectureid-12", result.workspace.slug)
+        self.assertEqual("archid-12", result.workspace.slug)
 
     def test_reference_probe_uses_persisted_slug_instead_of_current_name_rule(
         self,
@@ -582,7 +582,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
         self.workspaces.find_results = [_document(location="custom-documents/other-uuid.json")]
         request = ReassignmentMembershipProbeRequest(
             operation_id="reassign-op-1",
-            workspace=ReassignmentWorkspaceReference("architectureid-12"),
+            workspace=ReassignmentWorkspaceReference("archid-12"),
             document=_document_reference(),
         )
 
@@ -664,7 +664,7 @@ class ReassignmentAnythingLLMKnowledgeAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(ReassignmentKnowledgeOutcome.ALREADY_IN_DESIRED_STATE, result.outcome)
-        self.assertEqual("architectureid-12", result.external_reference)
+        self.assertEqual("archid-12", result.external_reference)
 
     def test_timeout_after_detach_and_unknown_probe_never_blindly_replays_write(self) -> None:
         self.workspaces.update_results = [AnythingLLMTimeoutError("timeout")]

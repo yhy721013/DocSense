@@ -16,6 +16,9 @@
 
 当前边界：
 
+- 永久知识入库根据数据库权威 `architecture_id` 使用共享领域规则生成
+  `archId-{architecture_id}`；本模块不兼容或迁移旧 `architectureId-*` Workspace，供应商 Gateway
+  仍只消费业务层传入的 `CollectionSpec`，不拥有业务命名规则；
 - `domain/`：领域树校验与内存索引、文档信号召回、分类/范围保护、结果映射、Prompt、回调
   载荷和受理期不可变输入；不导入 Flask、SQLite、HTTP Client、文件解析库、旧 Service 或
   Integrations。仅允许为既有并发安全缓存使用标准库内存同步原语；

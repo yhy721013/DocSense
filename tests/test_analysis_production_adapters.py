@@ -135,11 +135,13 @@ class _KnowledgePortFake:
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self.calls: list[str] = []
+        self.last_collection_spec = None
         self.last_document = None
         self.last_metadata = None
 
     def ensure_collection(self, spec):  # type: ignore[no-untyped-def]
         self.calls.append("ensure_collection")
+        self.last_collection_spec = spec
         return CollectionRef(
             ref=f"collection:{spec.architecture_id}",
             name=spec.name,
@@ -596,6 +598,8 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                 self.assertEqual(1, factory.entered)
                 self.assertEqual(1, factory.exited)
                 self.assertEqual(["ensure_collection", "store_prepared_document"], port.calls)
+                self.assertEqual(103, port.last_collection_spec.architecture_id)
+                self.assertEqual("archId-103", port.last_collection_spec.name)
                 if outcome is AnalysisKnowledgeWriteOutcome.COMMITTED:
                     self.assertEqual("knowledge:adapter", result.external_ref)
                 else:

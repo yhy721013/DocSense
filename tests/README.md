@@ -10,6 +10,7 @@
 | `test_chat_port_contract.py` | `ChatConversationPort` 数据传输对象、异常与协议边界。 |
 | `test_anythingllm_chat_gateway.py` | AnythingLLM 对话网关的精确名称创建、同名未知资源失败关闭、供应商名称漂移补偿、补偿失败资源证据、日志、流关闭和删除行为。 |
 | `test_chat_workspace_naming.py` | File/Weaponry Workspace 业务身份命名、边界整数、缺失字段和未知身份失败关闭。 |
+| `test_knowledge_workspace_naming.py` | 永久知识谱系 Workspace 的 `archId-{id}` 精确命名、有符号 64 位边界、非法输入失败关闭，以及 50 个并发分类 ID 的唯一性。 |
 | `test_chat_repositories.py` | SQLite 架构迁移、统一有界 busy timeout、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
 | `test_chat_resource_ids.py` | 租约标识和不透明远端引用的编码/解码。 |
 | `test_chat_run_state.py` | 同一会话互斥、Scope Head 原子受理、首次/显式 50 并发唯一更新、全事实回滚、1,000 文件历史压力、执行租约、心跳、过期运行和删除准入。 |
@@ -655,6 +656,14 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     组合 182 项、Chat 281 项通过；安全全仓发现 2,183、排除 13、执行 2,170，失败 0、错误 0、
     跳过 3。经授权的阶段 6 另以任务级生产 Chat Gateway 在本机回环 AnythingLLM 完成两类精确
     命名、文档绑定、最小 Query 和全资源清理；该真实证据仍不替代 Flask/浏览器、多实例或容量验收。
+60. 运行永久知识谱系 Workspace 命名关闭门禁：先执行共享命名、Analysis 入库、Knowledge
+    Gateway、Reassign 前向/恢复/AnythingLLM Adapter、Weaponry 合同、公开路由与架构组合；必须
+    覆盖 50 个不同分类 ID 的并发唯一性、数据库权威 ID 规范化、旧前缀生产引用清零和恢复链同名。
+    2026-08-03 阶段 0～6 定向组合依次通过 154、290、67 和最终 38 项；安全全仓发现 2,193、
+    精确排除 13、执行 2,180 项，失败 0、错误 0、跳过 3。该证据仅覆盖 Windows 临时
+    SQLite/Fake 单实例。阶段 7 随后以本机回环 AnythingLLM 完成永久 Knowledge Gateway、
+    Weaponry 任务级 Client、Reassign Adapter 的隔离创建、精确核名和全量 Workspace 基线恢复；
+    该证据仍不代表浏览器、完整模型抽取质量、多实例、可靠队列或容量验收。
 
 ## 执行限制
 

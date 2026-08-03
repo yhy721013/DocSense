@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from app.domain.knowledge_workspace import permanent_architecture_workspace_name
 from app.modules.analysis.ports.knowledge import (
     AnalysisKnowledgePort,
     AnalysisKnowledgeWriteOutcome,
@@ -66,15 +67,20 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
             business_type="file",
             business_key=request.execution.file_name,
         )
+        # 永久 Workspace 名称必须由跨业务共享的纯规则生成，确保 Analysis 首次入库、
+        # Reassign 目标准备和故障恢复不会各自维护不同前缀。
+        workspace_name = permanent_architecture_workspace_name(request.architecture_id)
         collection_spec = CollectionSpec(
             architecture_id=request.architecture_id,
-            name=f"architectureId-{request.architecture_id}",
+            name=workspace_name,
         )
 
         logger.info(
-            "开始将文件分析文档转交永久知识库: task_id=%s architecture_id=%d",
+            "开始将文件分析文档转交永久知识库: task_id=%s architecture_id=%d "
+            "workspace_name=%s",
             request.execution.task_id,
             request.architecture_id,
+            workspace_name,
         )
         try:
             with self._knowledge_index_factory.create() as knowledge_index:
@@ -94,9 +100,10 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
             if not external_ref:
                 logger.critical(
                     "文件分析永久知识库成功结果缺少外部引用，结果保持未知: "
-                    "task_id=%s architecture_id=%d",
+                    "task_id=%s architecture_id=%d workspace_name=%s",
                     request.execution.task_id,
                     request.architecture_id,
+                    workspace_name,
                 )
                 return AnalysisKnowledgeWriteResult(
                     execution=request.execution,
@@ -106,9 +113,11 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
                 )
         except KnowledgeIndexDocumentReleasedError:
             logger.warning(
-                "文件分析永久知识库未接管且补偿已确认: task_id=%s architecture_id=%d",
+                "文件分析永久知识库未接管且补偿已确认: task_id=%s "
+                "architecture_id=%d workspace_name=%s",
                 request.execution.task_id,
                 request.architecture_id,
+                workspace_name,
                 exc_info=True,
             )
             return AnalysisKnowledgeWriteResult(
@@ -119,9 +128,11 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
             )
         except (KnowledgeIndexRetentionRequiredError, KnowledgeIndexRecoveryRequiredError):
             logger.critical(
-                "文件分析永久知识库写入结果需保留现场: task_id=%s architecture_id=%d",
+                "文件分析永久知识库写入结果需保留现场: task_id=%s "
+                "architecture_id=%d workspace_name=%s",
                 request.execution.task_id,
                 request.architecture_id,
+                workspace_name,
                 exc_info=True,
             )
             return AnalysisKnowledgeWriteResult(
@@ -133,17 +144,20 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
         except KnowledgeIndexConflictError:
             # 幂等键对应了不同业务事实属于本地合同损坏，不能伪装成普通“未写入”。
             logger.exception(
-                "文件分析永久知识库幂等事实冲突: task_id=%s architecture_id=%d",
+                "文件分析永久知识库幂等事实冲突: task_id=%s "
+                "architecture_id=%d workspace_name=%s",
                 request.execution.task_id,
                 request.architecture_id,
+                workspace_name,
             )
             raise
         except Exception:
             logger.critical(
                 "文件分析永久知识库写入出现未分类异常，结果保持未知: "
-                "task_id=%s architecture_id=%d",
+                "task_id=%s architecture_id=%d workspace_name=%s",
                 request.execution.task_id,
                 request.architecture_id,
+                workspace_name,
                 exc_info=True,
             )
             return AnalysisKnowledgeWriteResult(
@@ -154,9 +168,11 @@ class LegacyAnalysisKnowledgeAdapter(AnalysisKnowledgePort):
             )
 
         logger.info(
-            "文件分析文档已转交永久知识库: task_id=%s architecture_id=%d",
+            "文件分析文档已转交永久知识库: task_id=%s architecture_id=%d "
+            "workspace_name=%s",
             request.execution.task_id,
             request.architecture_id,
+            workspace_name,
         )
         return AnalysisKnowledgeWriteResult(
             execution=request.execution,

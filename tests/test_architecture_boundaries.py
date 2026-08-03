@@ -19,6 +19,7 @@ from tests.architecture.import_rules import (
     FRAMEWORK_FREE_CONTAINER_RULE,
     PORTS_RULE,
     PRESENTER_RULE,
+    SHARED_DOMAIN_RULE,
     TASKS_MODULE_RULE,
     WEB_ROUTE_RULE,
     ArchitectureRule,
@@ -31,6 +32,7 @@ from tests.architecture.import_rules import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES_ROOT = ROOT / "app" / "modules"
+SHARED_DOMAIN_ROOT = ROOT / "app" / "domain"
 TASKS_ROOT = MODULES_ROOT / "tasks"
 REPORT_ROOT = MODULES_ROOT / "report"
 WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
@@ -191,6 +193,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
 
     def test_all_module_domain_layers_are_framework_and_infrastructure_free(self) -> None:
         self.assert_rule_clean(_module_layer_dirs("domain"), DOMAIN_RULE)
+
+    def test_shared_domain_is_framework_and_infrastructure_free(self) -> None:
+        """共享业务规则不得成为跨模块访问数据库或供应商实现的捷径。"""
+
+        self.assert_rule_clean((SHARED_DOMAIN_ROOT,), SHARED_DOMAIN_RULE)
 
     def test_all_module_ports_remain_abstract(self) -> None:
         self.assert_rule_clean(_module_layer_dirs("ports"), PORTS_RULE)
@@ -668,6 +675,35 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
             DOMAIN_RULE,
         )
         self.assertEqual({"flask", "sqlite3", "requests"}, self._targets(violations))
+
+    def test_shared_domain_rule_rejects_database_and_supplier_dependencies(self) -> None:
+        violations = self._scan_source(
+            "app/domain/knowledge_workspace.py",
+            """
+            import sqlite3
+            from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
+            """,
+            SHARED_DOMAIN_RULE,
+        )
+        self.assertEqual(
+            {"sqlite3", "app.integrations.anythingllm.workspaces"},
+            self._targets(violations),
+        )
+
+    def test_application_rule_only_allows_the_approved_shared_naming_module(self) -> None:
+        allowed = self._scan_source(
+            "app/modules/reassign/application/service.py",
+            "from app.domain.knowledge_workspace import permanent_architecture_workspace_name\n",
+            APPLICATION_RULE,
+        )
+        rejected = self._scan_source(
+            "app/modules/reassign/application/service.py",
+            "from app.domain.unreviewed_rules import unsafe_rule\n",
+            APPLICATION_RULE,
+        )
+
+        self.assertEqual((), allowed)
+        self.assertEqual({"app.domain.unreviewed_rules"}, self._targets(rejected))
 
     def test_ports_rule_rejects_reverse_application_dependency(self) -> None:
         violations = self._scan_source(

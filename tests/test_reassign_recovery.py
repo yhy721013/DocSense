@@ -692,6 +692,18 @@ class ReassignmentRecoveryTests(unittest.TestCase):
             ],
             [method for method, _ in knowledge.calls],
         )
+        workspace_probe_requests = tuple(
+            request
+            for method, request in knowledge.calls
+            if method == "probe_target_workspace"
+        )
+        self.assertTrue(workspace_probe_requests)
+        self.assertTrue(
+            all(
+                request.desired_workspace_name == "archId-12"
+                for request in workspace_probe_requests
+            )
+        )
         knowledge.assert_expectations_consumed()
 
     def test_workspace_prepare_intent_without_created_workspace_is_no_side_effect_failure(self) -> None:
