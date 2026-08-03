@@ -428,7 +428,10 @@ class AnythingLLMChatGatewayTests(unittest.TestCase):
 
     def test_stream_message_preserves_typed_sources_and_empty_finalization(self) -> None:
         marker = "docsense_ref:0123456789abcdef0123456789abcdef"
-        original = "  Chunk\r\n原文 e\u0301  "
+        original = (
+            "<document_metadata>\nsourceDocument: internal.pdf\n"
+            "</document_metadata>\n\n  Chunk\r\n原文 e\u0301  "
+        )
         self.thread_client.stream_events = [
             AnythingLLMTextDelta("回答"),
             AnythingLLMFinalization((

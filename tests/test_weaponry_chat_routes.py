@@ -133,11 +133,16 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
             + hashlib.sha256(self.document_id.encode()).hexdigest()[:32]
         )
         self.source_content = "  原文首行\n原文尾行  "
+        self.raw_source_content = (
+            "<document_metadata>\nsourceDocument: provider-private.pdf\n"
+            "</document_metadata>\n\n"
+            + self.source_content
+        )
         self.services = _build_test_services(
             self.tmp,
             stream_sources=(
                 ChatSourceEvidence(
-                    content=self.source_content,
+                    content=self.raw_source_content,
                     structured_source_key=self.source_key,
                 ),
             ),
@@ -173,7 +178,10 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
         self.assertTrue(send.content_type.startswith("text/event-stream"))
         self.assertEqual("no-cache", send.headers["Cache-Control"])
         self.assertEqual("no", send.headers["X-Accel-Buffering"])
-        events = _sse_events(send.get_data(as_text=True))
+        send_text = send.get_data(as_text=True)
+        self.assertNotIn("<document_metadata>", send_text)
+        self.assertNotIn("provider-private.pdf", send_text)
+        events = _sse_events(send_text)
         self.assertEqual(
             ["chatInfo", "textChunk", "textChunk", "sourceChunks", "done"],
             [event_type for event_type, _ in events],
@@ -403,6 +411,66 @@ class WeaponryChatRouteAcceptanceTests(unittest.TestCase):
         for forbidden_value in forbidden_values:
             with self.subTest(forbidden_value=forbidden_value):
                 self.assertNotIn(forbidden_value, combined_logs)
+
+    def test_malformed_source_metadata_emits_error_without_history_assistant(
+        self,
+    ) -> None:
+        """畸形供应商包装必须在公开来源前失败，History 只保留已提交 user。"""
+
+        architecture_id = 89
+        document_id = "malformed-metadata-document"
+        source_key = (
+            "docsense_ref:"
+            + hashlib.sha256(document_id.encode()).hexdigest()[:32]
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            services = _build_test_services(
+                temp_dir,
+                stream_sources=(
+                    ChatSourceEvidence(
+                        content="<document_metadata>missing closing tag",
+                        structured_source_key=source_key,
+                    ),
+                ),
+            )
+            services.kb_service.save_document_record(
+                "malformed.pdf",
+                architecture_id,
+                document_id,
+                f"custom-documents/{document_id}.json",
+                original_name="畸形来源测试.pdf",
+                ingested_file_name="malformed.pdf",
+                metadata={"docSource": source_key},
+            )
+            client = create_app(services=services).test_client()
+
+            response = client.post(
+                "/llm/weaponry-chat",
+                json={
+                    "businessType": "weaponryChat",
+                    "params": {
+                        "userId": 89,
+                        "architectureId": architecture_id,
+                        "message": "验证畸形来源失败关闭",
+                    },
+                },
+            )
+            response_text = response.get_data(as_text=True)
+            events = _sse_events(response_text)
+            history = client.get(
+                "/llm/weaponry-chat/history?userId=89&architectureId=89"
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("error", events[-1][0])
+        self.assertNotIn("sourceChunks", tuple(item[0] for item in events))
+        self.assertNotIn("done", tuple(item[0] for item in events))
+        self.assertNotIn("<document_metadata>", response_text)
+        self.assertEqual(200, history.status_code)
+        history_payload = history.get_json()
+        self.assertEqual(1, len(history_payload))
+        self.assertEqual("user", history_payload[0]["role"])
+        self.assertNotIn("chunks", history_payload[0])
 
     def test_unbounded_source_and_history_projection_preserves_controlled_sample(
         self,

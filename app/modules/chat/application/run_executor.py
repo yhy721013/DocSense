@@ -887,6 +887,37 @@ class SynchronousChatRunExecutor:
                                     for item in request.documents
                                 ),
                             )
+                            sanitized_source_count = sum(
+                                1
+                                for source, mapped in zip(
+                                    provider_event.sources,
+                                    mapped_sources,
+                                )
+                                if source.content != mapped.content
+                            )
+                            removed_char_count = sum(
+                                len(source.content) - len(mapped.content)
+                                for source, mapped in zip(
+                                    provider_event.sources,
+                                    mapped_sources,
+                                )
+                                if source.content != mapped.content
+                            )
+                            # 只记录关联 ID 和数量，禁止记录 Metadata、Chunk 正文、来源键或
+                            # 文件身份。该日志既可审计规则是否命中，也不会把被删除的信息
+                            # 重新写入日志系统。
+                            logger.info(
+                                "知识谱系对话来源公开清洗完成: conversation_id=%s "
+                                "run_id=%s requested_architecture_id=%s "
+                                "source_count=%d sanitized_source_count=%d "
+                                "removed_char_count=%d",
+                                request.conversation_id,
+                                request.run_id,
+                                request.requested_architecture_id,
+                                len(provider_event.sources),
+                                sanitized_source_count,
+                                removed_char_count,
+                            )
                             yield ChatStreamEvent(
                                 "source_snapshot",
                                 {
@@ -1572,7 +1603,7 @@ class ChatRunEventRecorder:
         event: ChatStreamEvent,
         assistant_message_id: str,
     ) -> tuple[ChatMessageSourceChunk, ...]:
-        """严格把内部来源快照转换为原子持久化 DTO，不改写正文。"""
+        """严格把已清洗的内部来源快照转换为原子持久化 DTO，不再改写正文。"""
         if event.event_type != "source_snapshot" or set(event.data) != {"chunks"}:
             raise ValueError("source_snapshot event fields are invalid")
         raw_chunks = event.data["chunks"]

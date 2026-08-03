@@ -47,7 +47,7 @@ class WeaponryChatContractAssetTests(unittest.TestCase):
 
     def test_contract_has_exact_top_level_schema_and_implementation_gate(self) -> None:
         """合同资产必须标记五个独立路由已切换实现。"""
-        self.assertEqual(1, self.contract["schemaVersion"])
+        self.assertEqual(2, self.contract["schemaVersion"])
         self.assertEqual(
             "implemented",
             self.contract["implementationGate"],
@@ -119,14 +119,20 @@ class WeaponryChatContractAssetTests(unittest.TestCase):
         self.assertEqual(1, self.contract["sse"]["sourceChunksOnSuccessCount"])
 
     def test_chunk_history_and_delete_rules_are_unambiguous(self) -> None:
-        """Chunk 无损、裸数组历史和删除留痕规则不得由实现层重新解释。"""
+        """Chunk 窄清洗、裸数组历史和删除留痕规则不得由实现层重新解释。"""
         chunk = self.contract["sourceChunk"]
         self.assertEqual(
             ["content", "fileName", "originalFileName"],
             chunk["fields"],
         )
         self.assertTrue(chunk["contentRequiresJsonString"])
-        self.assertTrue(chunk["contentPreservesExactStringValue"])
+        self.assertTrue(chunk["contentRemovesLeadingDocumentMetadata"])
+        self.assertTrue(chunk["contentPreservesRemainingStringValue"])
+        self.assertEqual(
+            "reject_run",
+            chunk["malformedLeadingDocumentMetadataPolicy"],
+        )
+        self.assertNotIn("contentPreservesExactStringValue", chunk)
         self.assertEqual("reject_entire_scope", chunk["originalFileNameMissingPolicy"])
         self.assertFalse(chunk["originalFileNameFallback"])
         self.assertIsNone(chunk["resourceLimit"])
@@ -261,6 +267,7 @@ class WeaponryChatContractAssetTests(unittest.TestCase):
         self.assertIn("`Cache-Control` | `no-cache`", document)
         self.assertIn("`X-Accel-Buffering` | `no`", document)
         self.assertIn("也不回退为 `fileName`", document)
+        self.assertIn("删除开头完整的供应商 Metadata 包装", document)
 
 
 if __name__ == "__main__":

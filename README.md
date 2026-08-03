@@ -323,11 +323,11 @@ HTTP 仅以 2xx 作为投递成功；发送结果未知时不自动重发。
    - 两个 ID 的公开安全范围均为 `1..9007199254740991`。POST 中 `userId` 必须是 JSON number；`architectureId` 兼容 JSON number 和十进制字符串。History Query 的两个 ID 都允许前导零，未知字段和重复 Query 参数均严格拒绝。
    - 首次成功受理只冻结该类别当时的直接文件，不包含子类别；后续不因类别新增、删除、重新解析或重新分类而刷新。任一候选缺少非空 `originalFileName` 时整次范围失败，不回退到 `fileName`。
    - AnythingLLM v1.15.0 流必须越过最后一个 `textResponseChunk(close=true)` 继续读取最终来源事件；常规回答以唯一 Finalization 收敛，Query 明确拒答允许 `textResponse(close=true, sources=[])` 收敛。其他缺失、重复或冲突终态均失败关闭。
-   - 成功 SSE 在全部 `textChunk` 后恰好发送一次 `sourceChunks`，再发送 `done`；每项包含无损 `content`、`fileName` 和 `originalFileName`。非字符串正文、未知/歧义来源、缺失原文件名均失败，不保存不完整 assistant 或 Chunk。
+   - 成功 SSE 在全部 `textChunk` 后恰好发送一次 `sourceChunks`，再发送 `done`；每项包含已删除开头完整 AnythingLLM `<document_metadata>` 包装的 `content`、`fileName` 和 `originalFileName`，剩余正文保持原值。非字符串/畸形 Metadata/清洗后空正文、未知或歧义来源、缺失原文件名均失败，不保存不完整 assistant 或 Chunk。
    - History 保持裸消息数组；assistant 的 `chunks` 与当轮 SSE `sourceChunks` 在内容和顺序上完全一致，user 消息不含 `chunks`。正文、全部 Chunk、成功事件和 Run 终态在同一 SQLite 事务提交。
    - 同一复合身份只允许一条未删除对话。删除必须先确认远端资源清理成功，再物理清除消息和 Chunk，只保留不含正文的最小审计事实并释放 Weaponry 身份；随后再次进入会创建新会话和新文件快照。
    - 当本地没有远端引用却发现同名 Workspace 时失败关闭，不自动认领或删除未知资源；供应商返回名称与目标名称不一致时补偿本次新建资源。应用日志可记录规范化业务 ID、精确 Workspace 名称、内部关联 ID 及必要资源引用，但禁止记录凭据、消息/模型/Chunk/文件正文、Prompt、原始请求响应或 SSE 帧。
-   - 当前不对 `sourceChunks` 数量、Chunk 原文长度或 History 响应大小设置独立业务上限；既有每轮文件数、消息/模型输出和进程内流并发限制仍有效。完整公开字段、状态码、Header 与事件顺序以 `docs/接口文档/知识谱系类别文件对话.md` 为准。
+   - 当前不对 `sourceChunks` 数量、清洗后 Chunk 正文长度或 History 响应大小设置独立业务上限；既有每轮文件数、消息/模型输出和进程内流并发限制仍有效。完整公开字段、状态码、Header 与事件顺序以 `docs/接口文档/知识谱系类别文件对话.md` 为准。
 
 8. `/llm/reassign`（分类节点变更）
    - 这是即时同步过程接口，不产生额外后台队列任务和 HTTP 进度回调。
@@ -558,8 +558,8 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 
 为保护该模式下的资源，`DOCSENSE_CHAT_MAX_FILES`、`DOCSENSE_CHAT_MAX_MESSAGE_CHARS`、`DOCSENSE_CHAT_MAX_OUTPUT_CHARS` 和 `DOCSENSE_CHAT_MAX_CONCURRENT_STREAMS` 分别限制单轮文件数、消息/输出长度和进程内同时流数。持久化能力、运行租约、取消通知和资源清理均通过内部可替换边界装配：当前实现只提供本地事务、同步执行、持久化取消轮询和同步清理。删除和标题临时资源会先写入持久化清理任务；当前内联执行器只同步处理本次新建任务，失败记录不会被伪装成已具备自动延迟重试能力。不提供事务 outbox、可靠队列、跨实例通知或 fencing。数据库迁移、可靠调度与多实例部署尚未启用；在选型、迁移和故障演练完成前，不得开放对应运行模式。
 
-知识谱系对话当前不对 `sourceChunks` 数量、Chunk 原文长度或 History 响应大小设置独立业务
-上限，也不分页、截断或改写来源；上述既有文件数和模型输出限制仍照常生效。部署前必须按实际
+知识谱系对话当前不对 `sourceChunks` 数量、清洗后 Chunk 正文长度或 History 响应大小设置独立
+业务上限，也不分页、截断、去重或执行 Metadata 清洗之外的正文改写；上述既有文件数和模型输出限制仍照常生效。部署前必须按实际
 数据规模执行容量验证，并完成以下日志安全检查：
 
 - Web Server、API Gateway、负载均衡和反向代理不得记录

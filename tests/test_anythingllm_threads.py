@@ -388,7 +388,10 @@ class AnythingLLMThreadClientTests(unittest.TestCase):
 
     def test_stream_source_content_is_lossless_and_strictly_typed(self) -> None:
         marker = "docsense_ref:0123456789abcdef0123456789abcdef"
-        original = "  第一行\r\n第二行 e\u0301 与 é  "
+        original = (
+            "<document_metadata>\nsourceDocument: internal.pdf\n"
+            "</document_metadata>\n\n  第一行\r\n第二行 e\u0301 与 é  "
+        )
         payload = {
             "type": "finalizeResponseStream",
             "sources": [{"text": original, "docSource": marker}],

@@ -1339,7 +1339,12 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         secret_document_ref = f"document:{secret_file_name}"
         secret_location = f"custom-documents/{secret_file_name}.json"
         secret_message = "confidential-message-body"
-        secret_chunk = " confidential-source-chunk\r\nΩ "
+        secret_metadata = "sourceDocument: private-provider-name.pdf"
+        clean_secret_chunk = " confidential-source-chunk\r\nΩ "
+        secret_chunk = (
+            f"<document_metadata>{secret_metadata}</document_metadata>\r\n\r\n"
+            f"{clean_secret_chunk}"
+        )
         secret_user_id = 9_007_199_254_740_991
         resolver = _ArchitectureDocumentResolver(
             architecture_file_names=(secret_file_name,)
@@ -1372,6 +1377,11 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
 
         combined_logs = "\n".join(captured.output)
         self.assertIn("requested_architecture_id=73", combined_logs)
+        self.assertIn("sanitized_source_count=1", combined_logs)
+        self.assertIn(
+            f"removed_char_count={len(secret_chunk) - len(clean_secret_chunk)}",
+            combined_logs,
+        )
         self.assertIn("lease_token=", combined_logs)
         self.assertNotIn(secret_file_name, combined_logs)
         self.assertNotIn(secret_original_name, combined_logs)
@@ -1379,6 +1389,108 @@ class SynchronousChatRunExecutorTests(unittest.TestCase):
         self.assertNotIn(secret_location, combined_logs)
         self.assertNotIn(secret_message, combined_logs)
         self.assertNotIn(secret_chunk, combined_logs)
+        self.assertNotIn(secret_metadata, combined_logs)
+        self.assertNotIn(clean_secret_chunk, combined_logs)
+
+    def test_architecture_source_metadata_is_cleaned_before_atomic_commit(
+        self,
+    ) -> None:
+        """内部快照、SQLite 来源和后续公开投影必须共享同一份清洗正文。"""
+
+        file_name = "metadata.pdf"
+        source_key = f"custom-documents/{file_name}.json"
+        clean_body = "  正文首行\r\n正文尾行 e\u0301  "
+        raw_content = (
+            "<document_metadata>\nsourceDocument: private.pdf\n"
+            "</document_metadata>\r\n\r\n"
+            + clean_body
+        )
+        resolver = _ArchitectureDocumentResolver(
+            architecture_file_names=(file_name,)
+        )
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(
+                stream_contents=("answer",),
+                stream_sources=(
+                    ChatSourceEvidence(
+                        content=raw_content,
+                        structured_source_key=source_key,
+                    ),
+                ),
+            ),
+            document_resolver=resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            identity=WeaponryChatIdentity(user_id=30013, architecture_id=74),
+            message="question",
+            scope_selector=ChatScopeSelector.for_architecture(74),
+        )
+
+        events = list(executor.execute_chat_run(prepared.run_id))
+
+        source_event = next(
+            item for item in events if item.event_type == "source_snapshot"
+        )
+        self.assertEqual(clean_body, source_event.data["chunks"][0]["content"])
+        persisted = self.store.message_sources.list_by_conversation(
+            prepared.conversation_id
+        )
+        self.assertEqual(1, len(persisted))
+        self.assertEqual(clean_body, persisted[0].content)
+        self.assertNotIn("<document_metadata>", persisted[0].content)
+
+    def test_malformed_architecture_source_metadata_fails_without_partial_commit(
+        self,
+    ) -> None:
+        """未闭合包装必须收敛为 error，不能保存 assistant 或任何来源快照。"""
+
+        file_name = "malformed.pdf"
+        source_key = f"custom-documents/{file_name}.json"
+        resolver = _ArchitectureDocumentResolver(
+            architecture_file_names=(file_name,)
+        )
+        executor = SynchronousChatRunExecutor(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=FakeChatConversationFactory(
+                stream_contents=("partial answer",),
+                stream_sources=(
+                    ChatSourceEvidence(
+                        content="<document_metadata>missing closing tag",
+                        structured_source_key=source_key,
+                    ),
+                ),
+            ),
+            document_resolver=resolver,
+        )
+        prepared = executor.prepare_chat_run(
+            identity=WeaponryChatIdentity(user_id=30014, architecture_id=75),
+            message="question",
+            scope_selector=ChatScopeSelector.for_architecture(75),
+        )
+
+        events = list(executor.execute_chat_run(prepared.run_id))
+
+        self.assertEqual("error", events[-1].event_type)
+        self.assertNotIn(
+            "source_snapshot",
+            tuple(item.event_type for item in events),
+        )
+        self.assertNotIn("done", tuple(item.event_type for item in events))
+        messages = self.store.messages.list_by_chat(prepared.conversation_id)
+        self.assertEqual([MESSAGE_ROLE_USER], [item.role for item in messages])
+        self.assertEqual(
+            (),
+            self.store.message_sources.list_by_conversation(
+                prepared.conversation_id
+            ),
+        )
+        run = self.store.runs.get(prepared.run_id)
+        self.assertIsNotNone(run)
+        assert run is not None
+        self.assertEqual(RUN_FAILED, run.status)
 
     def test_workspace_bindings_accumulate_but_explicit_scope_replaces_model_range(
         self,

@@ -14,14 +14,14 @@
 | `test_chat_repositories.py` | SQLite 架构迁移、统一有界 busy timeout、会话/运行/消息/文档绑定/清理任务的约束与幂等性。 |
 | `test_chat_resource_ids.py` | 租约标识和不透明远端引用的编码/解码。 |
 | `test_chat_run_state.py` | 同一会话互斥、Scope Head 原子受理、首次/显式 50 并发唯一更新、全事实回滚、1,000 文件历史压力、执行租约、心跳、过期运行和删除准入。 |
-| `test_chat_run_executor.py` | Requested/Effective 输入冻结与 run-id 重启式恢复、从持久化 Identity Binding 生成 Workspace 名称、旧引用零创建、Workspace 累计绑定和模型范围隔离、资源租约、流事件记录及异常收敛。 |
+| `test_chat_run_executor.py` | Requested/Effective 输入冻结与 run-id 重启式恢复、从持久化 Identity Binding 生成 Workspace 名称、旧引用零创建、Workspace 累计绑定和模型范围隔离、Weaponry 来源 Metadata 提交前清洗、资源租约、流事件记录及异常收敛。 |
 | `test_chat_event_repository.py` | 内部事件账本的序号、终态唯一性和事务写入。 |
 | `test_chat_dispatcher.py` | 仅以持久化 `run_id` 调度执行的协议和内联实现。 |
 | `test_chat_history_service.py` | 本地权威历史、消息过滤和标题输入。 |
 | `test_chat_title_service.py` | 标题生成、临时线程租约、清理失败与删除竞争。 |
 | `test_chat_abort_service.py` | 活动运行中断、中断通知和终态语义。 |
 | `test_chat_delete_service.py` | 删除状态机、同步清理要求、失败保留，以及 Weaponry 清理失败时旧世代身份继续占用。 |
-| `test_weaponry_chat_routes.py` | 知识谱系公开路由、删除后同业务身份新世代/新范围快照、相同 Workspace 名称与不同内部 Thread，以及日志正文防泄漏。 |
+| `test_weaponry_chat_routes.py` | 知识谱系公开路由、SSE/History 共用已清洗来源快照、删除后同业务身份新世代/新范围快照、相同 Workspace 名称与不同内部 Thread，以及日志正文与 Metadata 防泄漏。 |
 | `test_chat_stream_presenter.py` | 领域事件到冻结 SSE 文本的格式化与关闭回调。 |
 | `test_chat_infrastructure.py` | 当前持久化/调度/租约能力边界，防止 SQLite 被误用为可靠队列。 |
 | `test_debug_application.py`、`test_debug_adapters.py`、`test_debug_presenter.py`、`test_chat_debug_routes.py` | 本地调试 `fileNames` 对齐 Active Scope、Workspace bindings 独立脱敏计数、公开 history requested 语义，以及 Query/Adapter/Presenter/路由分层。 |
@@ -664,6 +664,16 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     SQLite/Fake 单实例。阶段 7 随后以本机回环 AnythingLLM 完成永久 Knowledge Gateway、
     Weaponry 任务级 Client、Reassign Adapter 的隔离创建、精确核名和全量 Workspace 基线恢复；
     该证据仍不代表浏览器、完整模型抽取质量、多实例、可靠队列或容量验收。
+61. 运行知识谱系对话来源 Metadata 清洗门禁：先执行 Source Mapper、Chat Executor、Weaponry
+    Route/History、合同资产、AnythingLLM Thread/Chat Gateway、持久化、Presenter、策略、日志与
+    架构定向组合。必须证明只删除一个完整前置 `document_metadata` 包装，剩余正文码点保持，SSE
+    与 SQLite/History 快照一致；畸形包装失败关闭且无部分 assistant/chunks；File Chat 不暴露来源，
+    通用供应商 DTO 保留原值。2026-08-03 最终定向组合 186 项通过；安全全仓发现 2,203、精确排除
+    13、执行 2,190 项，失败 0、错误 0、跳过 3。经单独授权的阶段 7 随后使用本机
+    AnythingLLM 和 Flask 协议客户端证明：原始 Finalization 的 1 个来源真实含前置 Metadata，
+    公开 SSE/History 的 1 个来源均已清洗且快照一致；Workspace 基线从 4 恢复为 4，目标
+    Workspace、Thread、全局文档和临时本地数据残留为 0。该证据仍不代表浏览器、多实例、可靠
+    队列、共享数据库、容量或其他 AnythingLLM 版本。
 
 ## 执行限制
 

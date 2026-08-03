@@ -25,6 +25,7 @@
 
 | 文件 | 作用 |
 | --- | --- |
+| `260803-知识谱系对话来源Metadata清洗执行记录.md` | 在 Weaponry 来源公开映射边界删除完整前置 AnythingLLM `document_metadata` 包装，清洗后快照原子用于 SSE 与 History；畸形包装失败关闭且日志不记录正文。安全全仓发现 2,203、排除 13、执行 2,190 项，失败/错误为 0；本机 AnythingLLM 原始 Metadata、公开 SSE/History 和资源零残留真实验收通过。 |
 | `260802-对话Workspace业务身份命名执行记录.md` | 完成 File `chat-id{chatId}` 与 Weaponry `wChat-user{userId}-arch{architectureId}` 命名、旧引用兼容、未知同名失败关闭、名称漂移补偿、删除重建和日志治理；离线门禁及本机回环 AnythingLLM 隔离创建、问答、清理真实验收通过，公开接口参数与响应协议零变化。 |
 | `260802-对话模块迁移与知识谱系独立接口离线关闭执行记录.md` | 完成 Chat 向 `app/modules/chat/` 迁移、独立 `/llm/weaponry-chat*` 五接口、复合身份、v1.15.0 双终态、无损 Chunk/History、删除清理与日志门禁；安全全仓发现 2,158、排除 13、执行 2,145 项且失败/错误为 0。阶段 10 随后已在明确维护窗口完成。 |
 | `260802-对话模块迁移与知识谱系独立接口阶段10真实联调执行记录.md` | 指定 Chat SQLite 清库重建、Schema v9 最小删除审计修正、本机 AnythingLLM v1.15.0 五接口/双空来源终态/中断/断连/资源清理真实验收，以及经负责人批准的 Flask 协议级前端替代验收。 |

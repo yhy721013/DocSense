@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "implementationGate": "implemented",
   "identity": {
     "kind": "weaponry",
@@ -123,7 +123,9 @@
       "originalFileName"
     ],
     "contentRequiresJsonString": true,
-    "contentPreservesExactStringValue": true,
+    "contentRemovesLeadingDocumentMetadata": true,
+    "contentPreservesRemainingStringValue": true,
+    "malformedLeadingDocumentMetadataPolicy": "reject_run",
     "preservesUpstreamOrder": true,
     "deduplicates": false,
     "emptySourcesAllowed": true,

@@ -34,6 +34,9 @@ POST /llm/chat
 ## 辅助工作流
 
 - 历史：`HistoryService` 只读取本地已提交消息，不读取 AnythingLLM 历史作为权威来源。
+- Weaponry 来源：`ChatSourceMapper` 在成功提交前只删除 Chunk 开头完整的 AnythingLLM
+  `<document_metadata>` 包装；清洗后的同一快照同时用于 SSE 与 History。通用供应商 Client、
+  Gateway、Presenter 和 History 读取路径不复制该规则，畸形包装失败关闭。
 - 标题：`TitleService` 基于本地历史创建带租约的临时线程；清理失败会留下持久化任务。
 - 中断：`AbortService` 持久化中断标记，执行器在消费上游事件时观察该标记并收敛本轮消息。
 - 删除：`DeleteService` 先使会话进入删除中，再创建清理任务；当前内联调度器同步等待清理完成，以保持已有接口语义。
