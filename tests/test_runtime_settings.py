@@ -27,15 +27,17 @@ class RuntimeSettingsTests(unittest.TestCase):
             environment.pop(name, None)
         return environment
 
-    def test_absolute_runtime_root_derives_all_component_paths(self):
+    def test_absolute_runtime_root_derives_paths_without_creating_legacy_caches(self):
         with workspace_tempdir() as temp_dir:
             runtime_dir = pathlib.Path(temp_dir) / "runtime"
             script = (
                 "import json; import sys; "
+                "from app.services.core.config import load_llm_integration_config, load_ocr_config; "
                 "from app.services.core.settings import ("
                 "RUNTIME_DIR, LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH, CHAT_DB_PATH, "
                 "LLM_DOWNLOAD_DIR, OCR_CACHE_DIR, MINERU_CACHE_DIR, SQLITE_EXPORT_DIR"
                 "); "
+                "load_llm_integration_config(); load_ocr_config(); "
                 "sys.stdout.write(json.dumps([str(p) for p in ("
                 "RUNTIME_DIR, LLM_TASK_DB_PATH, KNOWLEDGE_BASE_DB_PATH, CHAT_DB_PATH, "
                 "LLM_DOWNLOAD_DIR, OCR_CACHE_DIR, MINERU_CACHE_DIR, SQLITE_EXPORT_DIR"
@@ -62,6 +64,13 @@ class RuntimeSettingsTests(unittest.TestCase):
                 runtime_dir / "sqlite",
             ]
             self.assertEqual([path.resolve() for path in paths], [path.resolve() for path in expected])
+            for deprecated_directory in expected[4:7]:
+                self.assertFalse(
+                    deprecated_directory.exists(),
+                    f"加载 Core 配置时不应预创建废弃目录: {deprecated_directory}",
+                )
+            self.assertTrue(runtime_dir.is_dir())
+            self.assertTrue((runtime_dir / "sqlite").is_dir())
 
     def test_explicit_runtime_root_must_be_absolute(self):
         result = subprocess.run(

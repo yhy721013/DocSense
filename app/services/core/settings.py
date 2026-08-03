@@ -74,16 +74,20 @@ CHAT_DB_PATH = _ensure_parent(
     _resolve_component_path(("DOCSENSE_CHAT_DB",), "chat_sessions.sqlite3")
 )
 
-# 运行期目录。
-LLM_DOWNLOAD_DIR = _ensure_directory(
-    _resolve_component_path(("FILE_DOWNLOAD_DIR",), "llm_downloads")
+# 旧文件准备入口仍会读取以下路径值，因此本阶段保留路径解析兼容性；但当前正式
+# Report/Analysis 已使用任务私有目录和 DocumentProcessing Artifact，不应仅因导入
+# 配置模块就创建无业务所有者的空目录。若旧入口被显式调用，应由实际写入方按需建目录。
+LLM_DOWNLOAD_DIR = _resolve_component_path(
+    ("FILE_DOWNLOAD_DIR",), "llm_downloads"
 )
-OCR_CACHE_DIR = _ensure_directory(
-    _resolve_component_path(("DOCSENSE_OCR_CACHE_DIR",), "ocr_markdown")
+OCR_CACHE_DIR = _resolve_component_path(
+    ("DOCSENSE_OCR_CACHE_DIR",), "ocr_markdown"
 )
-MINERU_CACHE_DIR = _ensure_directory(
-    _resolve_component_path(("DOCSENSE_MINERU_CACHE_DIR",), "mineru_markdown")
+MINERU_CACHE_DIR = _resolve_component_path(
+    ("DOCSENSE_MINERU_CACHE_DIR",), "mineru_markdown"
 )
+
+# 当前仍由 Core Settings 明确拥有并在启动配置阶段创建的运行期目录。
 SQLITE_EXPORT_DIR = _ensure_directory(RUNTIME_DIR / "sqlite")
 
 # Web UI 限制：单次请求最大 500MB。

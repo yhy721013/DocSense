@@ -546,13 +546,19 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 - 任务库：`${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`
 - 知识库映射库：`${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3`
 - 对话状态库：`${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`
-- 下载缓存：`${DOCSENSE_RUNTIME_DIR}/llm_downloads/`
-- OCR Markdown 缓存：`${DOCSENSE_RUNTIME_DIR}/ocr_markdown/`
-- MinerU Markdown 缓存：`${DOCSENSE_RUNTIME_DIR}/mineru_markdown/`
+- 任务私有文件：`${DOCSENSE_RUNTIME_DIR}/tasks/`
+- 共享文档 Artifact：`${DOCSENSE_RUNTIME_DIR}/document_processing/artifacts/`
+- 文档转换物化文件：`${DOCSENSE_RUNTIME_DIR}/document_processing/materializations/`
+- RAG 投影物化文件：`${DOCSENSE_RUNTIME_DIR}/document_processing/rag_projection_materializations/`
 - Legacy Office 临时任务：`${DOCSENSE_RUNTIME_DIR}/office_conversion/jobs/`
 - 回调历史：`${DOCSENSE_RUNTIME_DIR}/callback/`
 - SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
 - 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`
+
+旧的 `llm_downloads`、`ocr_markdown` 和 `mineru_markdown` 已退出当前生产组合根，应用加载配置时
+不会再预创建这些目录。文件下载由任务私有目录承载，OCR/MinerU 结果由共享 DocumentProcessing
+Artifact 与物化目录管理。Legacy Office 的 `jobs` 目录仍是有效的短生命周期工作目录；转换任务
+结束后会清理其拥有的 `job-*` 子目录，启动时也会扫描可安全回收的遗留任务。
 
 文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
 
@@ -577,14 +583,12 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 只保存在 SQLite，`Event` 不保存任务列表。领取前毒任务和坏资源记录使用持久冷却让出扫描
 首页，但不对正常积压设置数量上限。该实现仍不是 RabbitMQ 可靠队列，也不支持多实例。
 
-旧的组件级变量仍可作为兼容覆盖项，一旦配置就会优先于统一根目录。若希望全部内容位于同一目录，应删除这些覆盖项：
+当前仍对外保留说明的数据库组件级变量可作为兼容覆盖项，一旦配置就会优先于统一根目录。
+若希望持久数据库全部位于同一目录，应删除这些覆盖项：
 
 - 任务库：`DOCSENSE_LLM_TASK_DB`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/llm_tasks.sqlite3`
 - 知识库映射库：`DOCSENSE_KNOWLEDGE_BASE_DB` 或兼容变量 `KNOWLEDGE_BASE_DB_PATH`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/knowledge_base.sqlite3`
 - 对话状态库：`DOCSENSE_CHAT_DB`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/chat_sessions.sqlite3`
-- 下载缓存：`FILE_DOWNLOAD_DIR`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/llm_downloads/`
-- OCR Markdown 缓存：`DOCSENSE_OCR_CACHE_DIR`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/ocr_markdown/`
-- MinerU Markdown 缓存：`DOCSENSE_MINERU_CACHE_DIR`；未覆盖时为 `${DOCSENSE_RUNTIME_DIR}/mineru_markdown/`
 - 回调历史固定为 `${DOCSENSE_RUNTIME_DIR}/callback/`
 - 旧版最近一次回调预览固定为 `${DOCSENSE_RUNTIME_DIR}/call_back.json`；这是历史兼容遗留文件，当前新回调和 debug 页不再更新或读取
 
