@@ -555,10 +555,9 @@ DOCSENSE_RUNTIME_DIR=/Users/your-name/DocSenseRuntime
 - SQLite JSON 导出：`${DOCSENSE_RUNTIME_DIR}/sqlite/`
 - 旧版回调预览：`${DOCSENSE_RUNTIME_DIR}/call_back.json`
 
-旧的 `llm_downloads`、`ocr_markdown` 和 `mineru_markdown` 已退出当前生产组合根，应用加载配置时
-不会再预创建这些目录。文件下载由任务私有目录承载，OCR/MinerU 结果由共享 DocumentProcessing
-Artifact 与物化目录管理。Legacy Office 的 `jobs` 目录仍是有效的短生命周期工作目录；转换任务
-结束后会清理其拥有的 `job-*` 子目录，启动时也会扫描可安全回收的遗留任务。
+文件下载由任务私有目录承载，OCR/MinerU 结果由共享 DocumentProcessing Artifact 与物化目录
+管理。Legacy Office 的 `jobs` 目录仍是有效的短生命周期工作目录；转换任务结束后会清理其拥有的
+`job-*` 子目录，启动时也会扫描可安全回收的遗留任务。
 
 文件对话当前以 SQLite 单实例模式运行：同一个 `chat_sessions.sqlite3` 只能由一个应用副本使用，不能放在网络共享目录模拟多实例。`DOCSENSE_CHAT_RUNTIME_MODE` 必须为 `single_instance`（默认值）；配置 `cluster`、外部调度或其他未安装模式时，应用会在依赖装配阶段拒绝启动，而不会以共享 SQLite 文件伪装集群能力。
 

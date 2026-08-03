@@ -665,7 +665,6 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 callback_timeout=5.0,
                 task_db_path=f"{self.runtime_directory}/tasks.sqlite3",
                 download_timeout=5.0,
-                download_dir=self.runtime_directory,
             ),
             anythingllm_config=AnythingLLMConfig(
                 base_url="http://anythingllm.invalid/api/v1",
@@ -862,7 +861,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         register.assert_not_called()
 
     def test_production_container_constructs_one_shared_office_preparer(self) -> None:
-        """Report 与 Analysis 必须引用同一个进程级转换容量许可。"""
+        """共享文档处理器与应用容器必须引用同一个进程级 Office 转换器。"""
 
         source_path = Path(__file__).resolve().parents[1] / "app" / "container.py"
         module = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -879,8 +878,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             and isinstance(node.func, ast.Name)
             and node.func.id == "LibreOfficeLegacyOfficePreparer"
         ]
-        # 生产组合根内部只能构造一次，随后把同一局部变量注入 Report、Analysis
-        # 和 ApplicationServices；离线默认依赖工厂不属于这个函数作用域。
+        # 生产组合根内部只能构造一次。Report 与 Analysis 已统一依赖共享文档处理器，
+        # 因此 Office 转换器只注入该处理器和 ApplicationServices；离线默认依赖工厂
+        # 不属于这个函数作用域。
         self.assertEqual(1, len(constructor_calls))
 
         injected_targets: dict[str, str] = {}
@@ -888,8 +888,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
             if node.func.id not in {
-                "LegacyReportFileAdapter",
-                "LegacyAnalysisFilePreparationAdapter",
+                "LocalDocumentPreparationAdapter",
                 "ApplicationServices",
             }:
                 continue
@@ -906,10 +905,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "LegacyReportFileAdapter": "legacy_office_preparer",
-                "LegacyAnalysisFilePreparationAdapter": (
-                    "legacy_office_preparer"
-                ),
+                "LocalDocumentPreparationAdapter": "legacy_office_preparer",
                 "ApplicationServices": "legacy_office_preparer",
             },
             injected_targets,

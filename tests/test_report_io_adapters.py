@@ -9,8 +9,6 @@ from app.modules.report.adapters.legacy_files import LegacyReportFileAdapter
 from app.modules.report.adapters.local_artifacts import LocalReportArtifactAdapter
 from app.modules.report.domain import (
     ReportArtifactError,
-    ReportInputError,
-    ReportSourceNormalizationError,
     ReportTemplateError,
 )
 from app.modules.report.ports import (
@@ -22,6 +20,7 @@ from app.modules.report.ports import (
 from app.modules.tasks.domain import TaskId
 from app.services.utils.word_extractor import extract_text_from_word
 from tests import workspace_tempdir
+from tests.document_processing_fixtures import build_test_document_preparer
 
 
 class ReportIoAdapterTests(unittest.TestCase):
@@ -201,21 +200,12 @@ class ReportIoAdapterTests(unittest.TestCase):
                 target.write_bytes(f"download:{url}".encode("utf-8"))
                 return str(target)
 
-            def normalizer(file_path: str) -> str:
-                output = Path(file_path).with_suffix(".normalized.md")
-                output.write_text("normalized", encoding="utf-8")
-                return str(output)
-
-            def upload_preparer(file_path: str) -> list[str]:
-                output = Path(file_path).with_suffix(".ocr.md")
-                output.write_text("ocr", encoding="utf-8")
-                return [str(output)]
-
             adapter = LegacyReportFileAdapter(
                 artifacts,
+                document_preparer=build_test_document_preparer(
+                    root / "document-processing"
+                ),
                 downloader=downloader,
-                normalizer=normalizer,
-                upload_preparer=upload_preparer,
                 word_extractor=lambda _: "模板正文",
             )
             task_id = TaskId("execution-download")
@@ -223,7 +213,7 @@ class ReportIoAdapterTests(unittest.TestCase):
             self.assertEqual([], downloads)
 
             source = adapter.download_source(
-                ReportSourceDownload(scope, "http://files.local/a.pdf?token=secret", 1)
+                ReportSourceDownload(scope, "http://files.local/a.txt?token=secret", 1)
             )
             normalized = adapter.normalize_source(source)
             prepared = adapter.prepare_upload_files(normalized)
@@ -241,200 +231,21 @@ class ReportIoAdapterTests(unittest.TestCase):
             self.assertEqual(1, normalized.sequence_no)
             self.assertEqual(1, prepared[0].sequence_no)
             self.assertNotIn("secret", source.artifact_id)
-            self.assertEqual("normalized", artifacts.resolve_path(normalized).read_text("utf-8"))
-            self.assertEqual("ocr", artifacts.resolve_path(prepared[0]).read_text("utf-8"))
-            self.assertEqual("模板正文", adapter.extract_template_text(template))
-
-    def test_normalizer_failure_is_mapped_to_compatible_fallback_error(self) -> None:
-        with workspace_tempdir() as tmp:
-            root = Path(tmp)
-            artifacts = LocalReportArtifactAdapter(root / "artifacts")
-
-            def downloader(
-                url: str,
-                file_name: str,
-                temp_root: str,
-                timeout: float,
-                max_bytes: int,
-            ) -> str:
-                self.assertGreater(max_bytes, 0)
-                target = Path(temp_root) / file_name
-                target.write_bytes(b"source")
-                return str(target)
-
-            adapter = LegacyReportFileAdapter(
-                artifacts,
-                downloader=downloader,
-                normalizer=lambda _: (_ for _ in ()).throw(RuntimeError("boom")),
-                upload_preparer=lambda path: [path],
-                word_extractor=lambda _: "模板",
-            )
-            scope = artifacts.begin(TaskId("execution-normalizer"))
-            source = adapter.download_source(
-                ReportSourceDownload(scope, "http://files.local/a.mhtml", 1)
-            )
-
-            with self.assertRaises(ReportSourceNormalizationError):
-                adapter.normalize_source(source)
-
-    def test_legacy_office_source_is_converted_before_normalization_and_published(self) -> None:
-        with workspace_tempdir() as tmp:
-            root = Path(tmp)
-            artifacts = LocalReportArtifactAdapter(root / "artifacts")
-            prepare_calls: list[tuple[Path, str]] = []
-            normalizer_calls: list[str] = []
-
-            def downloader(
-                url: str,
-                file_name: str,
-                temp_root: str,
-                timeout: float,
-                max_bytes: int,
-            ) -> str:
-                self.assertGreater(max_bytes, 0)
-                target = Path(temp_root) / file_name
-                target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy")
-                return str(target)
-
-            class Preparation:
-                converted = True
-                target_suffix = ".docx"
-
-                def __init__(self, prepared_path: Path) -> None:
-                    self.prepared_path = prepared_path
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, exc_type, exc, traceback) -> None:
-                    self.prepared_path.unlink(missing_ok=True)
-
-            class Preparer:
-                def prepare(self, file_path, *, job_id: str):
-                    source_path = Path(file_path)
-                    prepare_calls.append((source_path, job_id))
-                    output = root / "private-conversion-output.docx"
-                    output.write_bytes(b"converted-ooxml")
-                    return Preparation(output)
-
-            def normalizer(path: str) -> str:
-                normalizer_calls.append(path)
-                raise AssertionError("legacy Office 不应进入 MHTML normalizer")
-
-            adapter = LegacyReportFileAdapter(
-                artifacts,
-                downloader=downloader,
-                normalizer=normalizer,
-                upload_preparer=lambda path: [path],
-                word_extractor=lambda _: "模板",
-                legacy_office_preparer=Preparer(),
-            )
-            scope = artifacts.begin(TaskId("execution-legacy-doc"))
-            source = adapter.download_source(
-                ReportSourceDownload(scope, "http://files.local/source.DOC", 2)
-            )
-
-            normalized = adapter.normalize_source(source)
-
-            self.assertEqual([], normalizer_calls)
-            self.assertEqual(1, len(prepare_calls))
-            self.assertEqual(".doc", prepare_calls[0][0].suffix)
-            self.assertEqual("report-execution-legacy-doc-2", prepare_calls[0][1])
-            self.assertEqual(ReportArtifactCategory.NORMALIZED_SOURCE, normalized.category)
-            self.assertEqual(2, normalized.sequence_no)
             self.assertEqual(
-                b"converted-ooxml",
+                "download:http://files.local/a.txt?token=secret",
+                artifacts.resolve_path(normalized).read_text("utf-8"),
+            )
+            self.assertEqual(
                 artifacts.resolve_path(normalized).read_bytes(),
+                artifacts.resolve_path(prepared[0]).read_bytes(),
             )
-            self.assertEqual(".docx", artifacts.resolve_path(normalized).suffix)
-            self.assertFalse((root / "private-conversion-output.docx").exists())
-
-    def test_legacy_office_conversion_failure_is_hard_report_input_error(self) -> None:
-        with workspace_tempdir() as tmp:
-            root = Path(tmp)
-            artifacts = LocalReportArtifactAdapter(root / "artifacts")
-            normalizer_calls: list[str] = []
-
-            def downloader(
-                url: str,
-                file_name: str,
-                temp_root: str,
-                timeout: float,
-                max_bytes: int,
-            ) -> str:
-                self.assertGreater(max_bytes, 0)
-                target = Path(temp_root) / file_name
-                target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy")
-                return str(target)
-
-            class FailingPreparer:
-                def prepare(self, file_path, *, job_id: str):
-                    raise RuntimeError("private LibreOffice failure")
-
-            adapter = LegacyReportFileAdapter(
-                artifacts,
-                downloader=downloader,
-                normalizer=lambda path: normalizer_calls.append(path) or path,
-                upload_preparer=lambda path: [path],
-                word_extractor=lambda _: "模板",
-                legacy_office_preparer=FailingPreparer(),
-            )
-            scope = artifacts.begin(TaskId("execution-legacy-failure"))
-            source = adapter.download_source(
-                ReportSourceDownload(scope, "http://files.local/source.xls", 1)
-            )
-
-            with self.assertLogs(
-                "app.modules.report.adapters.legacy_files",
-                level="WARNING",
-            ) as logs:
-                with self.assertRaises(ReportInputError) as captured:
-                    adapter.normalize_source(source)
-
-            self.assertNotIsInstance(captured.exception, ReportSourceNormalizationError)
-            self.assertIsNone(captured.exception.__cause__)
-            self.assertTrue(captured.exception.__suppress_context__)
-            self.assertEqual([], normalizer_calls)
-            self.assertNotIn("private LibreOffice failure", "\n".join(logs.output))
-
-    def test_legacy_office_source_fails_closed_without_preparer(self) -> None:
-        with workspace_tempdir() as tmp:
-            root = Path(tmp)
-            artifacts = LocalReportArtifactAdapter(root / "artifacts")
-
-            def downloader(
-                url: str,
-                file_name: str,
-                temp_root: str,
-                timeout: float,
-                max_bytes: int,
-            ) -> str:
-                self.assertGreater(max_bytes, 0)
-                target = Path(temp_root) / file_name
-                target.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy")
-                return str(target)
-
-            adapter = LegacyReportFileAdapter(
-                artifacts,
-                downloader=downloader,
-                normalizer=lambda path: path,
-                upload_preparer=lambda path: [path],
-                word_extractor=lambda _: "模板",
-            )
-            scope = artifacts.begin(TaskId("execution-no-office-preparer"))
-            source = adapter.download_source(
-                ReportSourceDownload(scope, "http://files.local/source.ppt", 1)
-            )
-
-            with self.assertRaises(ReportInputError):
-                adapter.normalize_source(source)
+            self.assertEqual("模板正文", adapter.extract_template_text(template))
 
     def test_legacy_doc_template_is_rejected_without_download_or_conversion(self) -> None:
         with workspace_tempdir() as tmp:
             root = Path(tmp)
             artifacts = LocalReportArtifactAdapter(root / "artifacts")
             download_calls: list[str] = []
-            prepare_calls: list[str] = []
 
             def downloader(
                 url: str,
@@ -446,18 +257,13 @@ class ReportIoAdapterTests(unittest.TestCase):
                 download_calls.append(url)
                 raise AssertionError("legacy .doc 模板不应进入下载")
 
-            class Preparer:
-                def prepare(self, file_path, *, job_id: str):
-                    prepare_calls.append(job_id)
-                    raise AssertionError("legacy .doc 模板不应进入转换")
-
             adapter = LegacyReportFileAdapter(
                 artifacts,
+                document_preparer=build_test_document_preparer(
+                    root / "document-processing"
+                ),
                 downloader=downloader,
-                normalizer=lambda path: path,
-                upload_preparer=lambda path: [path],
                 word_extractor=lambda _: "模板",
-                legacy_office_preparer=Preparer(),
             )
             scope = artifacts.begin(TaskId("execution-doc-template"))
 
@@ -470,7 +276,6 @@ class ReportIoAdapterTests(unittest.TestCase):
                 )
 
             self.assertEqual([], download_calls)
-            self.assertEqual([], prepare_calls)
 
 
 if __name__ == "__main__":

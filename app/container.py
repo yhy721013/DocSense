@@ -1249,7 +1249,6 @@ def create_application_services() -> ApplicationServices:
         report_artifacts,
         download_timeout=llm_config.download_timeout,
         max_download_bytes=report_infrastructure_config.max_download_bytes,
-        legacy_office_preparer=legacy_office_preparer,
         document_preparer=document_preparer,
     )
     report_rag = AnythingLLMReportRagAdapter(
@@ -1355,7 +1354,6 @@ def create_application_services() -> ApplicationServices:
         ),
         files=LegacyAnalysisFilePreparationAdapter(
             download_timeout_seconds=llm_config.download_timeout,
-            legacy_office_preparer=legacy_office_preparer,
             document_preparer=document_preparer,
             rag_projector=analysis_rag_projector,
             document_scanned_pdf_engine=ScannedPDFEngine(

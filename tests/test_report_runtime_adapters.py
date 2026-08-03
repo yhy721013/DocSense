@@ -29,6 +29,7 @@ from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.modules.tasks.ports import TaskSubmissionCommand, TaskSubmissionOutcome
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.document_processing_fixtures import build_test_document_preparer
 from tests.fakes.report import (
     FakeProgressPublisherPort,
     FakeReportCallbackPort,
@@ -54,8 +55,8 @@ class ReportRuntimeAdapterTests(unittest.TestCase):
             submission = ReportSubmission(
                 report_id=ReportId.from_public_value(132),
                 source_urls=(
-                    "http://files.local/source-a.pdf",
-                    "http://files.local/source-b.pdf",
+                    "http://files.local/source-a.txt",
+                    "http://files.local/source-b.txt",
                 ),
                 template_outline_url="http://files.local/template.docx",
                 template_desc="测试模板",
@@ -89,9 +90,10 @@ class ReportRuntimeAdapterTests(unittest.TestCase):
 
             files = LegacyReportFileAdapter(
                 artifacts,
+                document_preparer=build_test_document_preparer(
+                    root / "document-processing"
+                ),
                 downloader=downloader,
-                normalizer=lambda path: path,
-                upload_preparer=lambda path: [path],
                 word_extractor=lambda _: "第一章\n第二章",
             )
             backend = _Backend()
@@ -188,7 +190,7 @@ class ReportRuntimeAdapterTests(unittest.TestCase):
             )
             submission = ReportSubmission(
                 report_id=ReportId.from_public_value(133),
-                source_urls=("http://files.local/source.pdf",),
+                source_urls=("http://files.local/source.txt",),
                 template_outline_url="http://files.local/template.docx",
                 template_desc="测试模板",
                 requirement="生成报告",
@@ -232,9 +234,10 @@ class ReportRuntimeAdapterTests(unittest.TestCase):
 
             files = LegacyReportFileAdapter(
                 artifacts,
+                document_preparer=build_test_document_preparer(
+                    root / "document-processing"
+                ),
                 downloader=downloader,
-                normalizer=lambda path: path,
-                upload_preparer=lambda path: [path],
                 word_extractor=lambda _: "模板正文",
             )
             backend = _Backend()

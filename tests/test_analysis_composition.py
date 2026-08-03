@@ -39,6 +39,10 @@ from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from tests import workspace_tempdir
+from tests.document_processing_fixtures import (
+    build_test_document_preparer,
+    build_test_rag_projector,
+)
 from tests.fakes import FakeDocumentRagFactory, FakeKnowledgeIndexFactory
 
 
@@ -134,6 +138,9 @@ class AnalysisCompositionTests(unittest.TestCase):
                 callback_timeout=1.0,
                 lease_seconds=10.0,
             )
+            document_preparer = build_test_document_preparer(
+                root / "document-processing"
+            )
 
             services = compose_analysis_application_services(
                 task_commands=task_commands,
@@ -143,6 +150,11 @@ class AnalysisCompositionTests(unittest.TestCase):
                 ),
                 files=LegacyAnalysisFilePreparationAdapter(
                     download_timeout_seconds=1.0,
+                    document_preparer=document_preparer,
+                    rag_projector=build_test_rag_projector(
+                        document_preparer,
+                        root / "rag-projection",
+                    ),
                 ),
                 rag_factory=LegacyAnalysisRagAdapterFactory(
                     FakeDocumentRagFactory()

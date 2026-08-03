@@ -1414,7 +1414,6 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                     callback_timeout=5.0,
                     task_db_path=str(root / "tasks.sqlite3"),
                     download_timeout=5.0,
-                    download_dir=str(root / "downloads"),
                 ),
             ), patch("requests.Session") as session_factory:
                 services = create_application_services()

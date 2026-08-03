@@ -191,7 +191,6 @@ def _build_test_services(
             callback_timeout=5.0,
             task_db_path=f"{tmp}/tasks.sqlite3",
             download_timeout=5.0,
-            download_dir=tmp,
         ),
         anythingllm_config=AnythingLLMConfig(
             base_url="http://anythingllm.invalid/api/v1",

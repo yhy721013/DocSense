@@ -350,9 +350,6 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             adapter = LegacyReportFileAdapter(
                 report_store,
                 document_preparer=document_preparer,
-                upload_preparer=lambda _: self.fail(
-                    "新 Report 路径不得再次调用旧 OCR 上传准备器"
-                ),
             )
 
             normalized = adapter.normalize_source(source)
@@ -392,15 +389,6 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
                 downloader=downloader,
                 document_preparer=document_preparer,
                 rag_projector=rag_projector,
-                normalizer=lambda _: self.fail(
-                    "新 Analysis 路径不得调用旧 normalizer"
-                ),
-                upload_preparer=lambda *_: self.fail(
-                    "新 Analysis 路径不得调用旧 OCR 上传准备器"
-                ),
-                text_reader=lambda _: self.fail(
-                    "正文必须从同一 Artifact 读取"
-                ),
             )
             execution = _execution("stage1h-cutover-analysis")
             prepared = adapter.prepare(

@@ -1712,57 +1712,59 @@
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_uses_mineru_first",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_uses_mineru_first"
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_scanned_pdf_confirmed_failures_fallback_to_source_for_rag_only"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "旧路径式入口已物理删除；当前共享流水线测试直接证明 Analysis 保持 MinerU 到内置 OCR 的明确失败降级顺序。"
         },
         {
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_falls_back_to_builtin_ocr",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_falls_back_to_builtin_ocr"
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_scanned_pdf_confirmed_failures_fallback_to_source_for_rag_only"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "共享流水线在 MinerU 明确失败后调用一次内置 OCR；旧自由函数及其全局缓存配置不再存在。"
         },
         {
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_falls_back_to_original_pdf",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_falls_back_to_original_pdf"
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_scanned_pdf_confirmed_failures_fallback_to_source_for_rag_only"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "共享流水线测试覆盖 MinerU 与内置 OCR 均明确失败后仅把原 PDF 交给 RAG、且不伪装成正文 Artifact。"
         },
         {
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_engine_ocr_skips_mineru",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_engine_ocr_skips_mineru"
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_report_builtin_ocr_failure_falls_back_to_source_pdf"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "显式选择内置 OCR 时不启动 MinerU 的规则现由共享 DocumentProcessing 消费切换测试覆盖。"
         },
         {
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_non_scanned_pdf_keeps_original",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_non_scanned_pdf_keeps_original"
+            "tests/test_ocr_preprocessor.py::OCRPreprocessorRemovalTests.test_removed_path_functions_are_not_available"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "该断言属于已删除自由函数的旧返回路径；永久门禁改为禁止该路径式 API 回归，PDF 当前行为由共享流水线负责。"
         },
         {
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_default_prepare_file_for_upload_keeps_builtin_ocr",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_default_prepare_file_for_upload_keeps_builtin_ocr"
+            "tests/test_ocr_preprocessor.py::OCRPreprocessorRemovalTests.test_removed_path_functions_are_not_available",
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_report_builtin_ocr_failure_falls_back_to_source_pdf"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "旧上传准备函数已删除；Report 的内置 OCR 选择由共享流水线规则测试继续覆盖。"
         },
         {
           "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_mineru_pdf_to_markdown_caches_markdown_with_metadata",
           "disposition": "migrated",
           "targetTests": [
-            "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_mineru_pdf_to_markdown_caches_markdown_with_metadata"
+            "tests/test_ocr_preprocessor.py::OCRPreprocessorRemovalTests.test_current_builtin_ocr_adapter_owns_materialization_root",
+            "tests/test_document_processing_formats.py::DocumentFormatAdapterTests.test_mineru_fifty_tasks_use_distinct_scratch_and_provider_identity"
           ],
-          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+          "semanticReason": "全局 Markdown 缓存已删除；当前门禁验证处理器显式拥有物化根，并验证 MinerU 并发任务使用独立 scratch 与供应商身份。"
         }
       ]
     },

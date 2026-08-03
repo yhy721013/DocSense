@@ -674,6 +674,13 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     公开 SSE/History 的 1 个来源均已清洗且快照一致；Workspace 基线从 4 恢复为 4，目标
     Workspace、Thread、全局文档和临时本地数据残留为 0。该证据仍不代表浏览器、多实例、可靠
     队列、共享数据库、容量或其他 AnythingLLM 版本。
+62. 运行 Core 旧目录配置与 Report/Analysis 旧路径式 OCR/MinerU 兼容链完整删除门禁：依次执行
+    Runtime/Container、DocumentProcessing、Report/Analysis、Stage 1G/1H 资产门禁，再动态发现
+    `test*.py` 并严格排除“执行限制”中的 13 个完整测试 ID。2026-08-03 最终发现 2192 项、排除
+    13 项、执行 2179 项，失败 0、错误 0、跳过 3；三个旧路径常量、Config 字段、环境变量解析、
+    路径式自由函数和业务 fallback 均已删除，公开接口文档哈希保持不变。该证据仅覆盖 Windows
+    临时 SQLite、Fake/Mock 与 Flask Test Client，不代表真实 OCR/MinerU/LibreOffice、生产容量、
+    多实例、可靠队列或跨数据库一致性。
 
 ## 执行限制
 

@@ -20,7 +20,6 @@
     "app/modules/analysis/ports/translation.py",
     "app/modules/report/adapters/legacy_files.py",
     "app/modules/report/adapters/local_artifacts.py",
-    "app/modules/report/adapters/upload_files.py",
     "app/services/core/config.py",
     "app/modules/translation/domain/models.py",
     "app/modules/translation/ports/translation.py"

@@ -88,6 +88,10 @@ from app.services.core.config import (
 from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
+from tests.document_processing_fixtures import (
+    build_test_document_preparer,
+    build_test_rag_projector,
+)
 from tests.fakes import (
     FakeChatConversationFactory,
     FakeDocumentRagFactory,
@@ -246,7 +250,6 @@ def build_offline_application_services(
         callback_timeout=5.0,
         task_db_path=str(task_db_path),
         download_timeout=5.0,
-        download_dir=str(root),
     )
     analysis_config = AnalysisInfrastructureConfig.single_instance()
     analysis_task_commands = SQLiteAnalysisBatchCommandAdapter(task_service)
@@ -262,6 +265,9 @@ def build_offline_application_services(
     )
     # 显式注入的 Flask 测试容器不会调用 start_background_services，因此这里只构造
     # Dispatcher、受理和同步恢复链，不会创建后台线程或执行文件/RAG/模型 I/O。
+    analysis_document_preparer = build_test_document_preparer(
+        root / "analysis-document-processing"
+    )
     analysis_services = compose_analysis_application_services(
         task_commands=analysis_task_commands,
         progress_publisher=LatestTaskProgressPublisherAdapter(
@@ -271,6 +277,11 @@ def build_offline_application_services(
         workspaces=LocalAnalysisTaskWorkspaceAdapter(str(root / "analysis-tasks")),
         files=LegacyAnalysisFilePreparationAdapter(
             download_timeout_seconds=llm_integration_config.download_timeout,
+            document_preparer=analysis_document_preparer,
+            rag_projector=build_test_rag_projector(
+                analysis_document_preparer,
+                root / "analysis-rag-projection",
+            ),
         ),
         rag_factory=LegacyAnalysisRagAdapterFactory(FakeDocumentRagFactory()),
         knowledge=LegacyAnalysisKnowledgeAdapter(FakeKnowledgeIndexFactory()),

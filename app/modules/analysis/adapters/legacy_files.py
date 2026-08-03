@@ -1,13 +1,12 @@
-"""文件分析任务目录与遗留文件处理能力的基础设施适配器。
+"""文件分析任务目录与共享文档处理能力的基础设施适配器。
 
-本模块只封装既有下载、MHTML 规范化、OCR/MinerU 与正文读取工具。它不参与领域分类、
-任务终态或回调；每次调用都必须接收由 ``AnalysisTaskWorkspacePort`` 创建的任务目录，
-避免遗留工具把临时文件写入共享下载目录后被其他 execution 误用。
+本模块只负责受控下载、调用共享 DocumentProcessing，并把 canonical/RAG Artifact 映射到
+当前 Analysis 任务目录。它不参与领域分类、任务终态或回调；每次调用都必须接收由
+``AnalysisTaskWorkspacePort`` 创建的任务目录，避免临时文件在不同 execution 间混用。
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 import logging
 import os
 from pathlib import Path
@@ -16,11 +15,7 @@ import shutil
 from typing import Callable
 from urllib.parse import unquote, urlsplit
 
-import fitz
-
 from app.modules.document_processing import (
-    LegacyOfficeConversionError,
-    LegacyOfficePreparer,
     is_legacy_office_path,
 )
 from app.modules.document_processing.adapters import (
@@ -39,30 +34,15 @@ from app.modules.analysis.ports.files import (
     AnalysisTaskWorkspacePort,
     PreparedAnalysisDocument,
 )
-from app.services.core.config import OCRConfig, load_ocr_config
 from app.services.utils.file_downloader import (
     DEFAULT_MAX_DOWNLOAD_BYTES,
     download_to_temp_file,
 )
-from app.modules.document_processing.adapters.path_compat import (
-    extract_text_from_mhtml,
-    is_mhtml_file,
-    normalize_file_for_llm,
-)
-from app.modules.document_processing.adapters.builtin_ocr import (
-    prepare_analysis_file_for_upload,
-)
-from app.services.utils.word_extractor import extract_text_from_word
-
-
 logger = logging.getLogger(__name__)
 
 _SAFE_SUFFIX_PATTERN = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 
 Downloader = Callable[[str, str, str, float, int], str]
-Normalizer = Callable[[str], str]
-UploadPreparer = Callable[[str, OCRConfig], str]
-TextReader = Callable[[str], str]
 
 
 class AnalysisFilePreparationError(RuntimeError):
@@ -132,25 +112,21 @@ class LocalAnalysisTaskWorkspaceAdapter(AnalysisTaskWorkspacePort):
 
 
 class LegacyAnalysisFilePreparationAdapter:
-    """将遗留文件预处理限制在当前任务目录内。
+    """把共享文档处理结果安全映射到当前 Analysis 任务目录。
 
-    OCR 配置在本 Adapter 内复制，并把 OCR/MinerU 缓存根改写为任务目录下的明确子目录。
-    这保留了原有算法和降级规则，同时避免共享缓存路径成为并发任务之间的隐式通信通道。
+    OCR/MinerU 的格式判定、转换和降级统一由显式注入的 ``document_preparer`` 承担；
+    RAG 专用 Markdown 投影由 ``rag_projector`` 承担。本 Adapter 不解析全局缓存目录，
+    只在调用方提供的任务根下创建下载目录和最终映射文件。
     """
 
     def __init__(
         self,
         *,
+        document_preparer: LocalDocumentPreparationAdapter,
+        rag_projector: ProjectDocumentForRag,
         download_timeout_seconds: float = 60.0,
         max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
-        ocr_config_loader: Callable[[], OCRConfig] = load_ocr_config,
         downloader: Downloader = download_to_temp_file,
-        normalizer: Normalizer = normalize_file_for_llm,
-        upload_preparer: UploadPreparer = prepare_analysis_file_for_upload,
-        text_reader: TextReader | None = None,
-        legacy_office_preparer: LegacyOfficePreparer | None = None,
-        document_preparer: LocalDocumentPreparationAdapter | None = None,
-        rag_projector: ProjectDocumentForRag | None = None,
         document_scanned_pdf_engine: ScannedPDFEngine = (
             ScannedPDFEngine.MINERU
         ),
@@ -168,43 +144,23 @@ class LegacyAnalysisFilePreparationAdapter:
         ):
             raise ValueError("max_download_bytes 必须是正整数")
         for name, dependency in (
-            ("ocr_config_loader", ocr_config_loader),
             ("downloader", downloader),
-            ("normalizer", normalizer),
-            ("upload_preparer", upload_preparer),
         ):
             if not callable(dependency):
                 raise TypeError(f"{name} 必须可调用")
-        if text_reader is not None and not callable(text_reader):
-            raise TypeError("text_reader 必须可调用或 None")
-        if legacy_office_preparer is not None and any(
-            not callable(getattr(legacy_office_preparer, method_name, None))
-            for method_name in ("preflight", "prepare")
-        ):
-            raise TypeError("legacy_office_preparer 必须实现 preflight/prepare")
-        if document_preparer is not None and not callable(
+        if not callable(
             getattr(document_preparer, "prepare", None)
         ):
             raise TypeError("document_preparer 必须实现 prepare")
-        if rag_projector is not None and not isinstance(
-            rag_projector,
-            ProjectDocumentForRag,
-        ):
-            raise TypeError("rag_projector 必须是 ProjectDocumentForRag 或 None")
-        if rag_projector is not None and document_preparer is None:
-            raise ValueError("rag_projector 必须与 document_preparer 一起注入")
+        if not isinstance(rag_projector, ProjectDocumentForRag):
+            raise TypeError("rag_projector 必须是 ProjectDocumentForRag")
         if not isinstance(document_scanned_pdf_engine, ScannedPDFEngine):
             raise TypeError(
                 "document_scanned_pdf_engine 必须是 ScannedPDFEngine"
             )
         self._download_timeout_seconds = float(download_timeout_seconds)
         self._max_download_bytes = max_download_bytes
-        self._ocr_config_loader = ocr_config_loader
         self._downloader = downloader
-        self._normalizer = normalizer
-        self._upload_preparer = upload_preparer
-        self._text_reader = text_reader or self._read_original_text
-        self._legacy_office_preparer = legacy_office_preparer
         self._document_preparer = document_preparer
         self._rag_projector = rag_projector
         self._document_scanned_pdf_engine = document_scanned_pdf_engine
@@ -245,26 +201,11 @@ class LegacyAnalysisFilePreparationAdapter:
                 file_name=source_name,
                 download_dir=download_dir,
             )
-            if self._document_preparer is not None:
-                return self._prepare_shared_artifact(
-                    request,
-                    downloaded_path=downloaded_path,
-                    normalized_dir=normalized_dir,
-                )
-            processing_path, internal_prepared_basename = (
-                self._prepare_processing_path(
-                    downloaded_path,
-                    normalized_dir=normalized_dir,
-                    request=request,
-                )
+            return self._prepare_shared_artifact(
+                request,
+                downloaded_path=downloaded_path,
+                normalized_dir=normalized_dir,
             )
-            upload_path = self._prepare_upload_path(
-                processing_path,
-                task_root=task_root,
-            )
-            original_text = self._text_reader(str(upload_path))
-            if not isinstance(original_text, str):
-                raise TypeError("正文读取器必须返回 str")
         except AnalysisFilePreparationError:
             raise
         except Exception as exc:
@@ -275,21 +216,6 @@ class LegacyAnalysisFilePreparationAdapter:
                 type(exc).__name__,
             )
             raise AnalysisFilePreparationError("文件分析文件准备失败") from exc
-
-        logger.info(
-            "文件分析任务文件准备完成: task_id=%s file_name=%s text_chars=%d",
-            request.execution.task_id,
-            request.execution.file_name,
-            len(original_text),
-        )
-        return PreparedAnalysisDocument(
-            execution=request.execution,
-            source_path=str(downloaded_path),
-            processing_path=str(processing_path),
-            upload_path=str(upload_path),
-            original_text=original_text,
-            internal_prepared_basename=internal_prepared_basename,
-        )
 
     def _prepare_shared_artifact(
         self,
@@ -305,7 +231,6 @@ class LegacyAnalysisFilePreparationAdapter:
         """
 
         preparer = self._document_preparer
-        assert preparer is not None
         policy = request.document_processing_policy
         if policy is None:  # pragma: no cover - DTO 已保证
             raise AnalysisFilePreparationError("文件处理策略缺失")
@@ -337,8 +262,6 @@ class LegacyAnalysisFilePreparationAdapter:
                 DocumentRepresentation.MARKDOWN,
                 DocumentRepresentation.TEXT,
             }:
-                if self._rag_projector is None:
-                    raise AnalysisFilePreparationError("RAG Markdown 投影能力未配置")
                 projected = self._rag_projector.execute(
                     canonical_rag_artifact,
                     trace_id=(
@@ -436,126 +359,6 @@ class LegacyAnalysisFilePreparationAdapter:
             rag_projection_profile_id=projection_profile_id,
         )
 
-    def _prepare_processing_path(
-        self,
-        source_path: Path,
-        *,
-        normalized_dir: Path,
-        request: AnalysisFilePreparationRequest,
-    ) -> tuple[Path, str]:
-        """按受理快照选择转换或既有规范化，Legacy 失败时禁止 raw fallback。"""
-
-        policy = request.document_processing_policy
-        if policy is None:  # pragma: no cover - DTO 已保证非空，保留防御边界
-            raise AnalysisFilePreparationError("文件处理策略缺失")
-        legacy_source = is_legacy_office_path(source_path)
-        if legacy_source != policy.legacy_office_required:
-            logger.error(
-                "文件分析输入类型与处理策略不一致: task_id=%s "
-                "legacy_source=%s legacy_office_required=%s policy_fingerprint=%s",
-                request.execution.task_id,
-                legacy_source,
-                policy.legacy_office_required,
-                policy.processing_policy_fingerprint,
-            )
-            raise AnalysisFilePreparationError("文件类型与冻结处理策略不一致")
-        if not legacy_source:
-            normalized = self._normalize_into_task(
-                source_path,
-                normalized_dir=normalized_dir,
-                task_id=str(request.execution.task_id),
-            )
-            return normalized, ""
-        return self._convert_legacy_into_task(
-            source_path,
-            normalized_dir=normalized_dir,
-            request=request,
-        )
-
-    def _convert_legacy_into_task(
-        self,
-        source_path: Path,
-        *,
-        normalized_dir: Path,
-        request: AnalysisFilePreparationRequest,
-    ) -> tuple[Path, str]:
-        """转换 Legacy Office 并在清理临时 Job 前发布到 execution 专属目录。"""
-
-        preparer = self._legacy_office_preparer
-        policy = request.document_processing_policy
-        assert policy is not None
-        if preparer is None:
-            logger.error(
-                "文件分析 Legacy Office 转换能力未配置: task_id=%s policy_fingerprint=%s",
-                request.execution.task_id,
-                policy.processing_policy_fingerprint,
-            )
-            raise AnalysisFilePreparationError("Legacy Office 文件本地转换失败")
-        try:
-            runtime_version = preparer.preflight()
-            expected_series = policy.legacy_office_allowed_version_series
-            if not runtime_version or not (
-                runtime_version == expected_series
-                or runtime_version.startswith(f"{expected_series}.")
-            ):
-                raise LegacyOfficeConversionError("snapshot_version_mismatch")
-            with preparer.prepare(
-                source_path,
-                job_id=str(request.execution.task_id),
-            ) as result:
-                prepared_path = Path(result.prepared_path)
-                target_suffix = self._safe_suffix(result.target_suffix)
-                if (
-                    not result.converted
-                    or target_suffix not in {".docx", ".pptx", ".xlsx"}
-                    or not prepared_path.is_file()
-                ):
-                    raise LegacyOfficeConversionError("invalid_prepared_result")
-                # 保留转换器生成的唯一 opaque basename，既避免任务间覆盖，也允许最终
-                # Callback 对本次精确内部名称执行窄替换。复制完成后才能退出上下文清理。
-                basename = prepared_path.name
-                if Path(basename).name != basename or prepared_path.suffix.lower() != target_suffix:
-                    raise LegacyOfficeConversionError("invalid_prepared_basename")
-                target = normalized_dir / basename
-                shutil.copy2(prepared_path, target)
-            processing_path = self._require_file_within(
-                target,
-                root=normalized_dir,
-                label="Legacy Office 转换产物",
-            )
-        except LegacyOfficeConversionError as exc:
-            # 转换层 diagnostic 可能包含宿主路径或进程输出，本业务层只记录稳定错误码；
-            # 切断异常链，避免外层通用异常日志再次展开敏感细节。
-            logger.error(
-                "文件分析 Legacy Office 预处理失败: task_id=%s error_code=%s "
-                "policy_fingerprint=%s",
-                request.execution.task_id,
-                exc.code,
-                policy.processing_policy_fingerprint,
-            )
-            raise AnalysisFilePreparationError(
-                "Legacy Office 文件本地转换失败"
-            ) from None
-        except Exception as exc:
-            logger.error(
-                "文件分析 Legacy Office 预处理失败: task_id=%s error_type=%s "
-                "policy_fingerprint=%s",
-                request.execution.task_id,
-                type(exc).__name__,
-                policy.processing_policy_fingerprint,
-            )
-            raise AnalysisFilePreparationError(
-                "Legacy Office 文件本地转换失败"
-            ) from None
-        logger.info(
-            "文件分析 Legacy Office 预处理完成: task_id=%s target_suffix=%s "
-            "policy_fingerprint=%s",
-            request.execution.task_id,
-            processing_path.suffix.lower(),
-            policy.processing_policy_fingerprint,
-        )
-        return processing_path, processing_path.name
-
     def _download(
         self,
         *,
@@ -577,57 +380,6 @@ class LegacyAnalysisFilePreparationAdapter:
         )
         return path
 
-    def _normalize_into_task(
-        self,
-        source_path: Path,
-        *,
-        normalized_dir: Path,
-        task_id: str,
-    ) -> Path:
-        """保留原有 MHTML 降级语义，并将任何输出复制回任务目录。"""
-
-        candidate = source_path
-        try:
-            normalized = self._normalizer(str(source_path))
-            candidate = self._require_file_within(
-                normalized,
-                root=source_path.parent.parent,
-                label="规范化器返回路径",
-            )
-        except Exception as exc:
-            # 旧链路把 MHTML 规范化视为增强能力：失败后继续上传原文件。这里保留同一
-            # 业务语义，但完整异常仅写日志，避免记录 URL、正文或潜在敏感文件名。
-            logger.warning(
-                "文件分析 MHTML 规范化失败，降级使用原文件: task_id=%s error_type=%s",
-                task_id,
-                type(exc).__name__,
-                exc_info=True,
-            )
-            candidate = source_path
-        suffix = self._safe_suffix(candidate.suffix)
-        target = normalized_dir / f"rag-input{suffix}"
-        if candidate.resolve() != target.resolve():
-            shutil.copy2(candidate, target)
-        return self._require_file_within(target, root=normalized_dir, label="规范化产物")
-
-    def _prepare_upload_path(self, source_path: Path, *, task_root: Path) -> Path:
-        """把 OCR/MinerU 的两个缓存目录固定到本任务根目录内。"""
-
-        config = self._ocr_config_loader()
-        if not isinstance(config, OCRConfig):
-            raise TypeError("ocr_config_loader 必须返回 OCRConfig")
-        task_config = replace(
-            config,
-            cache_dir=str(task_root / "ocr"),
-            mineru_cache_dir=str(task_root / "mineru"),
-        )
-        prepared = self._upload_preparer(str(source_path), task_config)
-        return self._require_file_within(
-            prepared,
-            root=task_root,
-            label="OCR 准备器返回路径",
-        )
-
     @staticmethod
     def _task_root(raw_path: str) -> Path:
         path = Path(raw_path).resolve()
@@ -638,9 +390,9 @@ class LegacyAnalysisFilePreparationAdapter:
 
     @staticmethod
     def _require_file_within(value: object, *, root: Path, label: str) -> Path:
-        # 外部 Downloader/Normalizer/UploadPreparer 的 Port 返回值仍限定为 str；但本 Adapter
-        # 在复制规范化产物后会把自己刚构造的 ``Path`` 再交给该统一校验函数。两种形式都要
-        # 先解析并做相对根目录校验，不能因为内部 Path 与外部 str 的表示差异绕过或误伤隔离。
+        # 外部 Downloader 返回值仍限定为 str；本 Adapter 在映射共享 Artifact 后也会把
+        # 自己构造的 ``Path`` 交给统一校验。两种形式都必须先解析并做相对根目录校验，
+        # 不能因为内部 Path 与外部 str 的表示差异绕过或误伤任务隔离。
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise AnalysisFilePreparationError(f"{label} 不是有效路径")
         path = Path(value).resolve()
@@ -664,24 +416,6 @@ class LegacyAnalysisFilePreparationAdapter:
     def _safe_suffix(value: str) -> str:
         normalized = str(value or "")
         return normalized.lower() if _SAFE_SUFFIX_PATTERN.fullmatch(normalized) else ""
-
-    @staticmethod
-    def _read_original_text(file_path: str) -> str:
-        """保持旧 Analysis 的正文读取规则，不把读取失败伪装为空正文。"""
-
-        path = Path(file_path)
-        suffix = path.suffix.lower()
-        if suffix in {".txt", ".md", ".json", ".csv"}:
-            return path.read_text(encoding="utf-8", errors="ignore")
-        if suffix == ".pdf":
-            with fitz.open(path) as document:
-                return "\n".join(page.get_text() for page in document)
-        if suffix == ".docx":
-            return extract_text_from_word(str(path))
-        if is_mhtml_file(str(path)):
-            return extract_text_from_mhtml(str(path))
-        return ""
-
 
 __all__ = (
     "AnalysisFilePreparationError",
