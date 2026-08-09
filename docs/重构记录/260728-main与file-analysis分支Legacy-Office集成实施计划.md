@@ -40,20 +40,8 @@
 | M9 离线关闭验收 | 已完成 | 九组门禁通过；安全全仓发现 1,986、排除 13、执行 1,973，零失败零错误 |
 | M10 真实平台认证与发布准备 | 已完成 | 外部实机验收、本机 26.2.5.2 启动门禁、128 项定向及发现 1,986/排除 13/执行 1,973 项全仓回归通过；`refactor/file-analysis` 已严格快进并复验 |
 
-M0—M9 的详细证据见：
-
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M0执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M1执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M2执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M3执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M4执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M5执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M6执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M7执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M8执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M9执行记录.md`；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M10准备检查记录.md`（首次准备检查）；
-- `docs/更新记录/260728-main与file-analysis分支Legacy-Office集成M10执行记录.md`。
+M0～M10、首次准备检查、平台证据和最终边界已经统一整合到
+`docs/更新记录/260728-Legacy-Office主线集成整合执行记录.md`。
 
 ---
 

@@ -45,7 +45,7 @@ assistant 或任何 Chunk；本轮 user 消息仍按既有受理语义保留。
 
 已同步：
 
-- `docs/接口文档/知识谱系类别文件对话.md`：冻结“删除一个完整前置包装、其余正文保持原值”以及
+- `docs/接口文档/知识谱系对话.md`：冻结“删除一个完整前置包装、其余正文保持原值”以及
   畸形包装失败关闭语义；
 - `docs/接口文档/README.md`：同步接口索引摘要；
 - `tests/contracts/weaponry_chat_contract.json`：升级为 schema v2，新增前置包装删除、剩余正文保留

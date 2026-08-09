@@ -575,7 +575,7 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     `test*.py`，逐项排除本文件“执行限制”中的 13 个测试 ID，并报告发现、排除、执行、成功、失败、错误和
     跳过数量。2026-07-27 的结果为发现 1,752 项、排除 13 项、执行/成功 1,739 项、失败 0 项、错误 0 项、
     跳过 0 项；完整排除清单、分组和环境边界见
-    `docs/更新记录/260727-阶段1F-7B关闭验收执行记录.md`。
+    `docs/更新记录/260727-阶段1F文件分析整合执行记录.md`。
 45. 运行阶段 1F 关闭后审查修复回归：重点覆盖 `test_analysis_callback_guard.py`、
     `test_analysis_resource_recovery.py`、`test_analysis_dispatcher.py`、
     `test_stage1a1_check_task_contract.py` 和 `test_clean_runtime.py`；2026-07-27 的安全全仓结果为

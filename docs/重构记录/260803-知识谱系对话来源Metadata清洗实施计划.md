@@ -16,7 +16,7 @@
 `<document_metadata>...</document_metadata>`”直接冲突。因此进入代码实施前，负责人需要明确
 批准同步修改：
 
-1. `docs/接口文档/知识谱系类别文件对话.md` 的 Chunk 正文定义和完整规则；
+1. `docs/接口文档/知识谱系对话.md` 的 Chunk 正文定义和完整规则；
 2. `docs/接口文档/README.md` 的知识谱系对话合同摘要；
 3. `tests/contracts/weaponry_chat_contract.json` 的内部黄金合同断言。
 
@@ -158,7 +158,7 @@ sourceDocument: secret.pdf
 
 在阶段 0 已批准的范围内：
 
-1. 修改 `docs/接口文档/知识谱系类别文件对话.md`，将“上游字符串完全不变”修订为“仅删除开头
+1. 修改 `docs/接口文档/知识谱系对话.md`，将“上游字符串完全不变”修订为“仅删除开头
    完整 Metadata 包装，其余正文保持不变”，同步 SSE 与 History 说明和示例；
 2. 修改 `docs/接口文档/README.md` 的合同摘要；
 3. 更新 `tests/contracts/weaponry_chat_contract.json`，用显式键冻结“删除前置 Metadata、保留
@@ -245,7 +245,7 @@ exactly-once 证明。
 
 ### 6.3 预计修改的当前文档
 
-- `docs/接口文档/知识谱系类别文件对话.md`（必须先获批准）；
+- `docs/接口文档/知识谱系对话.md`（必须先获批准）；
 - `docs/接口文档/README.md`（必须先获批准）；
 - `README.md`；
 - `app/modules/chat/README.md`；

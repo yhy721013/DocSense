@@ -45,7 +45,7 @@
 ## 3. 日志与接口文档
 
 负责人确认应用日志可以记录 `userId`，因此同步修改
-`docs/接口文档/知识谱系类别文件对话.md` 中唯一一段日志说明：
+`docs/接口文档/知识谱系对话.md` 中唯一一段日志说明：
 
 - 可以记录规范化 `chatId`、`userId`、`architectureId`、精确 Workspace/Thread 名称、内部
   `conversation_id`/`run_id`/租约 ID、状态/计数/补偿结果及排障必需的资源引用；

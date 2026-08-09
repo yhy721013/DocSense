@@ -36,7 +36,7 @@
 - Application 12 项、1F-3R 联合 196 项、`test_analysis*.py` 发现 253 项以及安全全仓 1,683 项均通过；
   安全全仓动态发现 1,696 项，精确排除既有 13 项，0 failure / 0 error / 0 skipped。
 - `docs/接口文档/`、`app/blueprints/llm.py`、Port、Schema、配置与公开契约均为零修改；实际证据见
-  `docs/更新记录/260726-阶段1F-3S文件分析Application等价拆分执行记录.md`。
+  `docs/更新记录/260727-阶段1F文件分析整合执行记录.md`。
 
 ## 2. 当前实现事实
 

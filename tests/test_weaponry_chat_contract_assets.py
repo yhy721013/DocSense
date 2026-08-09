@@ -25,7 +25,7 @@ _REFERENCE_BASELINE_PATH = (
 )
 _REPOSITORY_ROOT = _TESTS_DIR.parent
 _INTERFACE_DOC_PATH = (
-    _REPOSITORY_ROOT / "docs" / "接口文档" / "知识谱系类别文件对话.md"
+    _REPOSITORY_ROOT / "docs" / "接口文档" / "知识谱系对话.md"
 )
 _ROUTE_SOURCE_PATH = _REPOSITORY_ROOT / "app" / "blueprints" / "llm.py"
 
