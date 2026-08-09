@@ -96,6 +96,7 @@ app/
     weaponry/                       # 武器谱检索、证据、抽取、任务与资源闭环
     reassign/                       # 分类节点变更同步 Saga 与持久恢复
     debug/                          # /debug/* 只读 Query/Port/Adapter
+    chat/                           # 文件对话与知识谱系对话的会话、运行和资源生命周期
     document_processing/            # Artifact/Profile/Lineage 与通用文档 Processor
     translation/                    # prepared Artifact 翻译与实例级语言引擎
   ports/                            # RAG、知识库、文件对话等供应商无关 Port、DTO 与 Factory Protocol
@@ -115,13 +116,13 @@ app/
       architecture_tree.py          # 完整领域树校验、不可变索引与进程内 LRU 缓存
     llm_service/
       task_service.py               # 任务状态、结果、回调状态与领域召回审计持久化
-    chat/
-      application/                  # 对话命令、历史、标题、中断、删除与运行执行器
-      persistence/                  # 本地消息、会话及资源租约持久化
-      locking/                      # 会话级锁服务
+      interaction_audit_service.py  # 交互及调用尝试审计事实
+      knowledge_index_operation_service.py # 知识索引外部操作事实
+      rag_resource_lease_service.py # RAG 资源租约事实
     utils/
       callback_client.py            # 回调发送
       file_downloader.py            # 下载到临时文件
+      word_extractor.py             # DOCX 文本提取辅助
   templates/
     debug/
       callback.html                 # 本地回调结果调试页模板

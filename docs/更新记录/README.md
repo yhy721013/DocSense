@@ -18,7 +18,7 @@
 | `260725-阶段1E分类节点变更整合执行记录.md` | `/llm/reassign` 同步 Saga、Operation/Step/Event、补偿恢复、组合根和多实例前置责任。 |
 | `260727-阶段1F文件分析整合执行记录.md` | Analysis TaskId-only 主链、批量原子受理、资源/Callback、Dispatcher 切换及关闭审查。 |
 | `260729-阶段1H共享文档处理整合执行记录.md` | DocumentProcessing、Artifact、Legacy Office/MHTML/MinerU/OCR、Translation 和业务单路径切换。 |
-| `260801-阶段1G结构关闭整合执行记录.md` | Debug/组合根/薄路由收口、测试价值迁移、遗留物理删除和阶段 2 交接。 |
+| `260801-阶段1G结构关闭整合执行记录.md` | Debug/组合根/薄路由收口、测试价值迁移、遗留物理删除、2026-08-09 最终复核和阶段 2 交接。 |
 | `260728-文件对话范围语义演进整合执行记录.md` | 首次空数组自动全量与 Requested/Active/Effective Scope 分离的最终状态机。 |
 | `260729-知识谱系类别文件对话整合执行记录.md` | 已被独立 Weaponry Chat 取代的旧复合入口历史实现与可复用内部规则。 |
 | `260728-Legacy-Office主线集成整合执行记录.md` | main/file-analysis 的 M0～M10、Windows LibreOffice 门禁、Git 集成和发布边界。 |

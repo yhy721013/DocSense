@@ -514,7 +514,7 @@ Dispatcher、可靠队列或多实例运行时。
 | `test_stage1g_bootstrap_boundaries.py`、`test_architecture_boundaries.py` | 禁止生产组合根依赖 Flask，并限制正式/Debug 蓝图只承担 Parser、Application 调用和 Presenter。 |
 | `test_stage1g_reference_inspector.py` | 验证遗留引用检查器的分类、动态引用识别、候选定义和负例能力。 |
 | `contracts/stage1g_legacy_test_migration.json`、`test_stage1g_legacy_test_migration.py` | 记录十个旧测试文件共 200 条断言的现行语义归属，并永久禁止旧模块重新进入测试执行路径。 |
-| `test_stage1g_closeout.py` | 1G-6 关闭资产门禁：全部静态数据库表均有所有权、八个现行模块均有说明、1G-5 已删除运行路径不得回流。 |
+| `test_stage1g_closeout.py` | 1G-6 关闭资产门禁：全部静态数据库表均有所有权、九个现行模块均有说明、1G-5 已删除运行路径不得回流。 |
 | `docs/重构记录/阶段0资产/260801-阶段1关闭模块所有权与遗留适配矩阵.md` | 固化阶段 1 关闭时的模块/表所有权、依赖方向、保留适配、回滚点、阶段 2 输入和生产未验证边界。 |
 
 1G-4 删除的是已由现行分层测试承接的重复或实现耦合测试；1G-5 在负责人确认仓库外条件后才逐候选
@@ -566,7 +566,7 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
 36. 运行阶段 1F-3R 审查修复回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_application tests.test_analysis_production_adapters tests.test_analysis_ports tests.test_task_service tests.test_anythingllm_rag_gateway tests.test_rag_port_contract tests.test_architecture_boundaries -q`。
 37. 运行阶段 1F-3S 等价拆分回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_application tests.test_analysis_production_adapters tests.test_analysis_ports tests.test_task_service tests.test_anythingllm_rag_gateway tests.test_rag_port_contract tests.test_architecture_boundaries -q`；该命令同时覆盖结构化轨迹和 AST 门禁。
 38. 运行阶段 1F-4 批量受理联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_batch tests.test_analysis_task_adapter tests.test_analysis_ports tests.test_analysis_application tests.test_analysis_web_adapters tests.test_task_service tests.test_report_task_adapter tests.test_weaponry_task_adapter tests.test_architecture_boundaries -q`。
-39. 运行文件分析定向发现回归：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_analysis*.py" -q`；安全全仓回归应动态发现后精确排除 7 个 `test_local_scripts.LocalScriptTests.*`、5 个 `test_test_assets.LLMTestAssetsTests.*` 和 `test_migrate_analysis_security.AnalysisSecurityMigrationTests.test_apply_is_idempotent_and_preserves_callback_metadata_and_audit`，再覆盖所有其余用例。
+39. 运行文件分析定向发现回归：`venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_analysis*.py" -q`；安全全仓回归应动态发现后精确排除整个 `test_local_scripts.LocalScriptTests` 测试类（当前 16 项）、5 个 `test_test_assets.LLMTestAssetsTests.*` 和 `test_migrate_analysis_security.AnalysisSecurityMigrationTests.test_apply_is_idempotent_and_preserves_callback_metadata_and_audit`，当前合计排除 22 项，再覆盖所有其余用例。
 40. 运行阶段 1F-6 资源与 Callback 联合回归：`venv\Scripts\python.exe -B -m unittest tests.test_task_service tests.test_analysis_batch tests.test_analysis_resource_recovery tests.test_analysis_callback_guard tests.test_analysis_application tests.test_analysis_ports tests.test_analysis_production_adapters tests.test_architecture_boundaries -q`。
 41. 运行阶段 1F-7A 隔离与门禁回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_cutover_preflight tests.test_analysis_stage1f7a tests.test_analysis_application tests.test_analysis_resource_recovery tests.test_analysis_callback_guard tests.test_analysis_batch tests.test_analysis_production_adapters tests.test_analysis_translation_isolation tests.test_architecture_boundaries -q`；再运行 `venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_analysis*.py" -q`。
 42. 运行 1F-6/1F-7A 全面复核修复回归：`venv\Scripts\python.exe -B -m unittest tests.test_analysis_callback_guard tests.test_analysis_resource_recovery tests.test_analysis_cutover_preflight tests.test_analysis_ports tests.test_task_service tests.test_report_callback_guard tests.test_weaponry_stage1d6 tests.test_architecture_boundaries -q`；重点验证 Callback attempt fencing、资源不可逆状态机、毒记录隔离和只读预检句柄释放。
@@ -676,17 +676,24 @@ RabbitMQ ACK/DLQ、生产容量或 exactly-once。新增固定表或模块时必
     队列、共享数据库、容量或其他 AnythingLLM 版本。
 62. 运行 Core 旧目录配置与 Report/Analysis 旧路径式 OCR/MinerU 兼容链完整删除门禁：依次执行
     Runtime/Container、DocumentProcessing、Report/Analysis、Stage 1G/1H 资产门禁，再动态发现
-    `test*.py` 并严格排除“执行限制”中的 13 个完整测试 ID。2026-08-03 最终发现 2192 项、排除
+    `test*.py`；2026-08-03 按当时的 13 项清单精确排除。最终发现 2192 项、排除
     13 项、执行 2179 项，失败 0、错误 0、跳过 3；三个旧路径常量、Config 字段、环境变量解析、
     路径式自由函数和业务 fallback 均已删除，公开接口文档哈希保持不变。该证据仅覆盖 Windows
     临时 SQLite、Fake/Mock 与 Flask Test Client，不代表真实 OCR/MinerU/LibreOffice、生产容量、
     多实例、可靠队列或跨数据库一致性。
+63. 运行阶段 1 文档与黄金基线最终收口：修正当前接口索引链接、模块/服务 README、阶段计划状态，
+    并将已授权文档引用调整后的接口索引 SHA-256 同步到阶段 1H 黄金资产。2026-08-09 定向契约、
+    架构和关闭资产组合 76 项通过；安全全仓发现 2192 项，按当前清单精确排除 22 项，执行
+    2170 项，失败 0、错误 0、跳过 3；`compileall`、遗留引用检查和 `git diff --check` 通过。
+    该结论正式关闭阶段 1 的单实例离线结构门禁，但不证明生产、多实例、可靠队列、共享数据库、
+    容量或 exactly-once。
 
 ## 执行限制
 
-- 不要直接使用原始全量发现命令替代上述定向测试；当前原始发现会包含 7 个可能触发本地
-  `run.py`/Shell 的环境测试、5 个依赖被 `.gitignore` 排除样例的资产测试和 1 个 Windows 不支持的
-  POSIX 权限位断言。安全全仓口径必须逐项排除这 13 项并报告名称和理由，禁止笼统写成“全量通过”。
+- 不要直接使用原始全量发现命令替代上述定向测试；当前原始发现会包含整个
+  `test_local_scripts.LocalScriptTests` 测试类的 16 个可能触发本地 `run.py`/Shell、访问本地应用或
+  启动文件服务的环境测试，另有 5 个依赖被 `.gitignore` 排除样例的资产测试和 1 个 Windows 不支持的
+  POSIX 权限位断言。安全全仓口径必须精确排除当前 22 项并报告名称和理由，禁止笼统写成“全量通过”。
 - 新文件对话测试必须显式构造临时目录和临时数据库，不能读取开发机 `.runtime` 数据。
 - 新测试不得为了方便而放宽 `/llm/chat*` 既有请求字段或 SSE 协议断言。
 - 架构测试必须静态解析源码，不能通过 import 生产组合根来收集依赖；规则调整应与模块边界设计一起评审。

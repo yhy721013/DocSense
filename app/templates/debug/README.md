@@ -11,7 +11,9 @@
 
 ## 工作流程
 
-`blueprints/debug.py` 调用 `services/utils/chat_debug_preview.py` 读取本地权威数据，再渲染 `chat.html`。页面用于排查会话、消息、运行、租约和清理任务的状态，不应直接调用或改写 AnythingLLM 资源。
+`blueprints/debug.py` 通过容器取得 `app/modules/debug` 的只读 Query，由 Chat Snapshot Adapter 读取
+本地权威数据，再渲染 `chat.html`。页面用于排查会话、消息、运行、租约和清理任务的状态，不应
+直接读取数据库或调用、改写 AnythingLLM 资源。
 
 ## 维护规则
 

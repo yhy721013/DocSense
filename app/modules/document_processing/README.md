@@ -44,8 +44,9 @@ Markdown/Text Artifact。它拥有格式判断、MHTML、LibreOffice、MinerU、
   多实例对象存储的条件写/租约。
 - MHTML 浏览器 Profile 固定 `confirmed failure -> Markdown`、`unknown -> reconcile`，并按负责人
   要求持续使用 `--no-sandbox`。
-- 旧 `services/translator` 与 `services/utils` 入口仅为兼容 Facade/回滚证据；当前生产组合根不得
-  从旧 `mhtml2pdf` 或 `MinerUConverter` 路径取得转换器。
+- 旧 `app/services/translator` 包以及 MHTML/OCR/MinerU 文件处理 Facade 已在阶段 1G 删除；当前
+  生产组合根只能从本模块取得转换能力。历史文档中的 `mhtml2pdf`、`MinerUConverter` 等路径仅作为
+  迁移证据保留，不得重新创建或接回运行链。
 - MySQL、MinIO、可靠任务队列、跨实例 lease/fencing、自动 Artifact GC 和真实生产容量仍属于
   后续阶段。
 - Analysis/Report accepted 快照尚未冻结全部 OCR/MinerU/Translation 参数与依赖版本；阶段 2
