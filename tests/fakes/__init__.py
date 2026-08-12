@@ -45,6 +45,7 @@ from .tasks import (
     FakeProgressSubscriptionPort,
     FakeTaskReadPort,
 )
+from .task_execution import FakeClock, StrictTaskControlFake
 from .weaponry import (
     FakeAuxiliaryGuidancePort,
     FakeEvidenceExtractionPort,
@@ -91,6 +92,7 @@ __all__ = [
     "FakeProgressSnapshotPort",
     "FakeProgressSubscriptionPort",
     "FakeTaskReadPort",
+    "FakeClock",
     "FakeAuxiliaryGuidancePort",
     "FakeEvidenceExtractionPort",
     "FakeTargetEvidenceRetrievalPort",
@@ -110,4 +112,5 @@ __all__ = [
     "sample_report_trace",
     "StrictAnalysisFakeScript",
     "StrictAnalysisPortFake",
+    "StrictTaskControlFake",
 ]

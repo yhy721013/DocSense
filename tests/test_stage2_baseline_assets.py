@@ -59,6 +59,27 @@ class Stage2TaskExecutionContractAssetTests(unittest.TestCase):
         self.assertNotIn("queued", task_states)
         self.assertNotIn("cancelled", task_states)
 
+        completion = self.contract["stepStateMachine"]["completionCommand"]
+        self.assertTrue(completion["explicitTransitionRequired"])
+        self.assertEqual(
+            {"succeed", "fail", "mark_outcome_unknown"},
+            set(completion["executionAuthorityTransitions"]),
+        )
+        self.assertTrue(completion["outcomeUnknownRequiresRecoveryIsolation"])
+        self.assertTrue(completion["outcomeUnknownAtomicallyAbandonsAttempt"])
+        self.assertTrue(completion["outcomeUnknownAtomicallyCreatesRecoveryCase"])
+        self.assertEqual("duplicate_step_intent", completion["duplicateIntentOutcome"])
+        self.assertTrue(
+            completion["duplicateIntentRequiresExactAuthorityDefinitionVersionKeyAndTime"]
+        )
+        retry_step = self.contract["stepStateMachine"]["recoveryAuthorizedTransition"]
+        self.assertFalse(retry_step["stepAttemptIdempotencyIndex"]["unique"])
+        self.assertTrue(
+            retry_step["stepAttemptIdempotencyIndex"][
+                "stableKeyMayRepeatAcrossRecoveryAuthorizedAttempts"
+            ]
+        )
+
     def test_recovery_cannot_directly_restart_or_reuse_old_attempt(self) -> None:
         """恢复授权只能回 accepted，之后必须由普通 claim 创建新执行权。"""
 
@@ -100,6 +121,34 @@ class Stage2TaskExecutionContractAssetTests(unittest.TestCase):
         self.assertFalse(authority["ownerIdIsAuthority"])
         self.assertIn("lease_token", authority["secretFields"])
         self.assertTrue(required.issubset(public_forbidden))
+        owner = authority["claimOwnerIdentity"]
+        self.assertEqual("TaskOwnerIdentity", owner["typeName"])
+        self.assertEqual(
+            {
+                "instance_start_id",
+                "process_id",
+                "executor_name",
+                "worker_slot",
+            },
+            set(owner["requiredFields"]),
+        )
+        self.assertTrue(owner["ownerIdDerived"])
+        self.assertTrue(owner["persistSplitFields"])
+
+    def test_analysis_batch_identity_is_explicit_and_ordered(self) -> None:
+        """Store 不得从 payload 猜测 Analysis 批次，也不得重排请求。"""
+
+        admission = self.contract["admission"]
+        batch = admission["batchAdmission"]
+        self.assertEqual("TaskBatchRef", admission["batchReferenceType"])
+        self.assertEqual({"batch_id", "sequence"}, set(admission["batchReferenceFields"]))
+        self.assertTrue(admission["fileTasksRequireBatch"])
+        self.assertTrue(admission["nonFileTasksForbidBatch"])
+        self.assertTrue(batch["allOrNothing"])
+        self.assertTrue(batch["singleBatchId"])
+        self.assertEqual(1, batch["sequenceStartsAt"])
+        self.assertTrue(batch["sequenceContinuous"])
+        self.assertTrue(batch["requestOrderPreserved"])
 
     def test_reaper_is_a_classifier_not_a_running_resetter(self) -> None:
         """租约过期只能产生恢复候选，不能自动授权重放副作用。"""
@@ -118,6 +167,60 @@ class Stage2TaskExecutionContractAssetTests(unittest.TestCase):
             },
             set(reaper["classifications"]),
         )
+        persistence = reaper["classificationPersistence"]
+        self.assertEqual("classify_candidate_if_current", persistence["method"])
+        self.assertEqual("create_case_if_current", persistence["legacyMethodForbidden"])
+        self.assertEqual(
+            {"finalize_from_checkpoint", "reconcile_required"},
+            set(persistence["caseIdRequiredFor"]),
+        )
+        self.assertEqual(
+            {"retry_safe", "defer"},
+            set(persistence["nextActionAtRequiredFor"]),
+        )
+        self.assertTrue(persistence["sourceAttemptAndFencingCasRequired"])
+        retry_safe = reaper["retrySafeTransition"]
+        self.assertEqual("running", retry_safe["source"])
+        self.assertEqual("accepted", retry_safe["target"])
+        self.assertFalse(retry_safe["ordinaryWorkerMayInvoke"])
+        self.assertTrue(retry_safe["sourceAttemptAndFencingCasRequired"])
+        self.assertEqual(
+            [["running", "accepted"]],
+            self.contract["taskStateMachine"]["reaperClassifiedTransitions"],
+        )
+
+    def test_recovery_heartbeat_and_terminal_projection_are_explicit(self) -> None:
+        recovery = self.contract["recovery"]
+        heartbeat = recovery["heartbeat"]
+        self.assertEqual("heartbeat_case", heartbeat["method"])
+        self.assertTrue(heartbeat["completeRecoveryAuthorityRequired"])
+        self.assertTrue(heartbeat["successfulRenewalInvalidatesOldAuthority"])
+
+        keep = recovery["decisions"]["keep_quarantined"]
+        terminal = recovery["decisions"]["finalize_from_checkpoint"]
+        self.assertTrue(keep["optionalNextObservationAt"])
+        self.assertEqual(
+            "TaskRecoveryTerminalProjection",
+            terminal["terminalProjectionType"],
+        )
+        self.assertTrue(terminal["sourceCheckpointCasRequired"])
+        self.assertTrue(terminal["latestProjectionUpdatedAtomically"])
+        self.assertFalse(terminal["storeMayGuessPublicProjectionByBusinessType"])
+
+        claim_rules = recovery["claimRules"]
+        self.assertEqual(
+            {"open", "awaiting_evidence"},
+            set(claim_rules["directlyClaimableStates"]),
+        )
+        self.assertTrue(claim_rules["observingTakeoverRequiresPersistedLeaseExpiry"])
+        self.assertFalse(claim_rules["unexpiredOwnerMayBePreempted"])
+        operations = recovery["operations"]
+        self.assertTrue(operations["intentCommittedBeforeExternalIo"])
+        self.assertTrue(operations["observationAndOperationConvergeAtomically"])
+        retry = recovery["decisions"]["retry_authorized"]
+        self.assertEqual("TaskRecoveryStepResolution", retry["stepResolutionType"])
+        self.assertTrue(retry["sourceStepAttemptAndRowVersionCasRequired"])
+        self.assertTrue(retry["oldOutcomeUnknownStepAttemptRemainsImmutable"])
 
     def test_canonical_profile_vector_is_reproducible(self) -> None:
         """Profile 身份不依赖字典插入顺序、空白或平台默认编码。"""
@@ -217,6 +320,20 @@ class Stage2OwnershipContractAssetTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     tables.update(pattern.findall(node.value))
+        # 阶段 2-2 根表由生产 Manifest 确定生成，不会以静态 CREATE TABLE 字符串出现。
+        # 所有权门禁必须把该 Manifest 当作同等权威输入，避免动态 DDL 绕过唯一 Writer 盘点。
+        root_manifest_path = (
+            PROJECT_ROOT
+            / "app"
+            / "modules"
+            / "tasks"
+            / "adapters"
+            / "sqlite"
+            / "root_schema_manifest.json"
+        )
+        if root_manifest_path.is_file():
+            root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
+            tables.update(str(table["name"]) for table in root_manifest["tables"])
         return tables
 
     def test_every_services_file_is_in_the_ownership_inventory(self) -> None:
@@ -254,6 +371,10 @@ class Stage2OwnershipContractAssetTests(unittest.TestCase):
         self.assertFalse(rules["targetWriterMayCallLegacyService"])
         self.assertTrue(rules["dualWriteForbidden"])
         self.assertTrue(rules["cyclicDelegationForbidden"])
+        self.assertFalse(rules["stage22ProductionCutover"])
+        self.assertTrue(rules["authorityRuntimeRequiredBeforeBusinessCutover"])
+        self.assertEqual(["2-4", "2-5", "2-6"], rules["businessWaveCutoverStages"])
+        self.assertTrue(rules["taskAndCallbackCutoverIsAtomicPerBusiness"])
 
 
 class Stage2RuntimeConfigOwnershipAssetTests(unittest.TestCase):
@@ -796,6 +917,8 @@ class Stage2RuntimeTopologyContractAssetTests(unittest.TestCase):
                 "business_terminal",
                 "reaper_classify",
                 "recovery_claim",
+                "recovery_heartbeat",
+                "recovery_operation_intent",
                 "recovery_observation",
                 "recovery_decision",
             },

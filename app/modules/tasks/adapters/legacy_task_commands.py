@@ -8,22 +8,24 @@ Repository 时，Application 和业务 Codec 均无需改变签名。
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
 from app.modules.tasks.domain import TaskBusinessRef, TaskExecutionSnapshot, TaskId
 from app.modules.tasks.ports import (
     ExpectedProgressUpdate,
     ExpectedTaskCompletion,
+    EncodedTaskResult,
+    EncodedTaskSubmission,
     TaskClaimOutcome,
     TaskClaimResult,
     TaskSubmissionCommand,
     TaskSubmissionOutcome,
     TaskSubmissionResult,
     TaskQueueSnapshot,
+    TaskCommandCodec,
 )
 from app.services.llm_service.task_service import LLMTaskService
 
@@ -74,89 +76,6 @@ def _required_text(value: object, *, name: str) -> str:
 
 class LegacyTaskCommandAdapterError(RuntimeError):
     """兼容存储返回了损坏、未知或跨业务的 execution 数据。"""
-
-
-@dataclass(frozen=True)
-class EncodedTaskSubmission(Generic[TTaskInput]):
-    """业务 Codec 交给通用 SQLite Adapter 的完整受理编码。"""
-
-    input_snapshot: TTaskInput
-    input_payload: Mapping[str, Any]
-    projection_request_payload: Mapping[str, Any]
-    initial_public_status: str
-    active_public_statuses: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        if self.input_snapshot is None:
-            raise ValueError("input_snapshot 不能为空")
-        if not isinstance(self.input_payload, Mapping):
-            raise TypeError("input_payload 必须是 Mapping")
-        if not isinstance(self.projection_request_payload, Mapping):
-            raise TypeError("projection_request_payload 必须是 Mapping")
-        object.__setattr__(
-            self,
-            "initial_public_status",
-            _required_text(
-                self.initial_public_status,
-                name="initial_public_status",
-            ),
-        )
-        statuses = tuple(self.active_public_statuses)
-        if not statuses:
-            raise ValueError("active_public_statuses 不能为空")
-        normalized = tuple(
-            _required_text(item, name="active_public_status")
-            for item in statuses
-        )
-        object.__setattr__(self, "active_public_statuses", normalized)
-
-
-@dataclass(frozen=True)
-class EncodedTaskResult:
-    """区分追加 execution 事实与旧 ``llm_tasks`` 公共回调投影。
-
-    两类 JSON 具有不同用途，禁止再次把包含内部 Schema、Artifact 引用的执行结果直接
-    暴露给 check-task 回调恢复。具体业务 Codec 可以让 execution 仅保存恢复和审计所需
-    的最小事实，而 projection 必须保持既有外部 Callback 载荷。
-    """
-
-    execution_result_payload: Mapping[str, Any]
-    projection_result_payload: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.execution_result_payload, Mapping):
-            raise TypeError("execution_result_payload 必须是 Mapping")
-        if not isinstance(self.projection_result_payload, Mapping):
-            raise TypeError("projection_result_payload 必须是 Mapping")
-
-
-class TaskCommandCodec(
-    Protocol,
-    Generic[TTaskSubmission, TTaskInput, TTaskResult],
-):
-    """把业务 DTO 映射为供应商无关 JSON 的 Adapter 内部协议。"""
-
-    task_type: str
-
-    def encode_submission(
-        self,
-        command: TaskSubmissionCommand[TTaskSubmission],
-        *,
-        task_id: TaskId,
-        accepted_at: str,
-    ) -> EncodedTaskSubmission[TTaskInput]:
-        ...
-
-    def decode_input(
-        self,
-        *,
-        schema_version: int,
-        payload: Mapping[str, Any],
-    ) -> TTaskInput:
-        ...
-
-    def encode_result(self, result: TTaskResult) -> EncodedTaskResult:
-        ...
 
 
 class LegacyTaskCommandAdapter(
@@ -524,9 +443,6 @@ class LegacyTaskCommandAdapter(
 
 
 __all__ = [
-    "EncodedTaskResult",
-    "EncodedTaskSubmission",
     "LegacyTaskCommandAdapter",
     "LegacyTaskCommandAdapterError",
-    "TaskCommandCodec",
 ]

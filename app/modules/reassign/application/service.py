@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Callable
 
-from app.domain.knowledge_workspace import permanent_architecture_workspace_name
+from app.shared.domain.knowledge_workspace import permanent_architecture_workspace_name
 from app.modules.reassign.domain import (
     ReassignDocumentCommand,
     ReassignmentBindingState,

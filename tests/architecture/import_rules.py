@@ -531,12 +531,12 @@ def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
 
 
 def _shared_domain_matcher(reference: ImportReference) -> RuleMatch | None:
-    """保护 ``app/domain`` 共享内核，禁止它成为跨模块基础设施捷径。"""
+    """保护 ``app/shared/domain`` 共享内核，禁止其成为基础设施捷径。"""
 
     return _first_positive_allowlist_violation(
         reference,
         allowed_stdlib_roots=_DOMAIN_STDLIB_ROOTS,
-        allowed_internal_prefixes=("app.domain",),
+        allowed_internal_prefixes=("app.shared.domain",),
         reason="共享领域层只能依赖批准的标准库和共享领域内的纯规则",
     )
 
@@ -596,8 +596,8 @@ def _application_matcher(reference: ImportReference) -> RuleMatch | None:
         )
     if module_name in {"analysis", "reassign"}:
         # 永久知识谱系名称是两个业务模块共享的稳定业务规则。只放行该精确纯领域模块，
-        # 不允许 Application 借此依赖整个 app.domain 或其他跨业务实现。
-        allowed_internal.append("app.domain.knowledge_workspace")
+        # 不允许 Application 借此依赖整个 app.shared 或其他跨业务实现。
+        allowed_internal.append("app.shared.domain.knowledge_workspace")
     allowed_stdlib_roots = _APPLICATION_STDLIB_ROOTS
     if module_name == "chat":
         allowed_stdlib_roots = (

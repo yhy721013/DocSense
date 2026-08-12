@@ -1,7 +1,7 @@
 {
-  "assetVersion": 1,
+  "assetVersion": 4,
   "frozenAt": "2026-08-12",
-  "scope": "stage-2-0-internal-design-gate",
+  "scope": "stage-2-2-contract-v5-confirmed",
   "runtimeImplemented": false,
   "publicContractChanged": false,
   "executorTopology": {
@@ -109,13 +109,15 @@
       {"name": "start", "facts": ["authority_and_lease_recheck", "attempt_running", "started_event"], "outside": ["create_task_directory", "begin_first_step"]},
       {"name": "heartbeat", "facts": ["authority_conditional_lease_renewal", "sampled_heartbeat_event"], "outside": []},
       {"name": "begin_external_step", "facts": ["authority", "step_intent", "step_attempt", "business_resource_or_external_operation_intent", "event"], "outside": ["external_io"]},
-      {"name": "complete_step", "facts": ["authority", "step_result", "checkpoint", "external_reference", "business_resource_or_audit_fact", "event"], "outside": ["next_business_step"]},
+      {"name": "complete_step", "facts": ["authority", "explicit_step_transition", "step_result", "checkpoint", "external_reference", "business_resource_or_audit_fact", "outcome_unknown_atomic_recovery_isolation", "event"], "outside": ["next_business_step"]},
       {"name": "progress", "facts": ["authority", "task_latest_public_projection", "event"], "outside": ["publish_process_local_progress"]},
       {"name": "business_terminal", "facts": ["authority", "task_and_attempt_terminal", "latest_public_projection", "result_reference", "event", "callback_eligibility_or_guard_fact"], "outside": ["callback_http", "resource_cleanup"]},
       {"name": "reaper_classify", "facts": ["expired_authority_recheck", "old_attempt_convergence", "task_recovery_or_accepted_or_stale", "recovery_case", "event"], "outside": ["business_probe_or_compensation"]},
-      {"name": "recovery_claim", "facts": ["case_generation_state_recheck", "recovery_lease", "recovery_fencing", "event"], "outside": ["read_only_probe", "controlled_compensation"]},
-      {"name": "recovery_observation", "facts": ["recovery_fencing_recheck", "append_observation", "event"], "outside": ["pure_recovery_policy"]},
-      {"name": "recovery_decision", "facts": ["task_row_version", "current_case", "source_attempt", "recovery_fencing", "append_decision", "task_state", "retry_checkpoint", "event"], "outside": ["local_wakeup"]}
+      {"name": "recovery_claim", "facts": ["case_generation_state_recheck", "open_or_awaiting_claim", "observing_only_after_persisted_lease_expiry", "recovery_lease", "recovery_fencing", "event"], "outside": []},
+      {"name": "recovery_heartbeat", "facts": ["recovery_authority_and_lease_recheck", "conditional_recovery_lease_renewal", "sampled_heartbeat_event"], "outside": []},
+      {"name": "recovery_operation_intent", "facts": ["recovery_fencing_recheck", "operation_id", "case_scoped_idempotency_key", "operation_intent", "event"], "outside": ["read_only_probe", "controlled_compensation"]},
+      {"name": "recovery_observation", "facts": ["recovery_fencing_recheck", "operation_identity_recheck", "append_observation", "operation_result_convergence", "event"], "outside": ["pure_recovery_policy"]},
+      {"name": "recovery_decision", "facts": ["task_row_version", "current_case", "source_attempt", "recovery_fencing", "append_decision", "task_state", "retry_checkpoint", "retry_step_attempt_and_row_version_cas", "retry_evidence_operation_observation_digest", "old_unknown_step_attempt_immutable", "optional_next_observation_at", "terminal_projection_and_source_checkpoint_cas", "event"], "outside": ["local_wakeup"]}
     ]
   },
   "clockAndLease": {

@@ -1,6 +1,7 @@
 {
-  "assetVersion": 1,
-  "stage": "2-0",
+  "assetVersion": 5,
+  "runtimeAsset": true,
+  "stage": "2-2-contract-v5-confirmed",
   "frozenAt": "2026-08-12",
   "publicContractChanged": false,
   "paths": {
@@ -20,11 +21,14 @@
     "compatibleGenerationMin": 2,
     "compatibleGenerationMax": 2,
     "metadataTable": "task_control_schema_metadata",
+    "componentRegistryTable": "task_control_schema_components",
     "requiredMetadataFields": [
+      "metadata_id",
       "schema_name",
       "schema_generation",
       "compatible_generation_min",
       "compatible_generation_max",
+      "root_manifest_version",
       "schema_fingerprint",
       "db_instance_uuid",
       "created_at"
@@ -33,9 +37,178 @@
       "algorithm": "SHA-256",
       "manifestEncoding": "UTF-8",
       "manifestFormat": "canonical_json_v1",
-      "material": "schema_name + LF + schema_generation + LF + canonical_schema_manifest",
+      "material": "schema_name + LF + schema_generation + LF + canonical_root_manifest_json",
       "hexCase": "UPPER",
       "sqliteMasterSqlIsNotFingerprintSource": true
+    }
+  },
+  "schemaComposition": {
+    "decisionStatus": "user_confirmed",
+    "decisionDocument": "docs/重构记录/阶段2资产/260812-阶段2-2根Schema与组件Manifest设计.md",
+    "compositionPolicy": "strict_root_plus_registered_components_union_v1",
+    "canonicalJsonProfile": {
+      "name": "canonical_json_v1",
+      "encoding": "UTF-8",
+      "bom": false,
+      "objectKeyOrder": "unicode_code_point_ascending",
+      "separators": [",", ":"],
+      "allowFloat": false,
+      "allowNaN": false,
+      "allowInfinity": false,
+      "arrayOrderIsContractual": true,
+      "allowedValueKinds": ["object", "array", "string", "integer", "boolean", "null"]
+    },
+    "rootManifest": {
+      "componentName": "core",
+      "componentVersion": 1,
+      "rootSchemaGeneration": 2,
+      "manifestAsset": "app/modules/tasks/adapters/sqlite/root_schema_manifest.json",
+      "canonicalManifestUtf8Bytes": 41939,
+      "expectedFingerprint": "8947401B0E04AB68A3073A1D663386FAD9D786DBDCA2FF71BDE0849AC0B5479F",
+      "businessComponentsMayAlterRootObjects": false,
+      "ownedTables": [
+        "task_control_schema_metadata",
+        "task_control_schema_components",
+        "llm_task_executions",
+        "llm_tasks",
+        "task_attempts",
+        "task_steps",
+        "task_step_attempts",
+        "task_recovery_cases",
+        "task_recovery_operations",
+        "task_recovery_observations",
+        "task_recovery_decisions",
+        "task_events",
+        "callback_delivery_guards",
+        "callback_guard_release_audits",
+        "callback_delivery_attempt_events"
+      ],
+      "ownedIndexes": [
+        "idx_llm_task_executions_dispatch_sequence",
+        "idx_llm_task_executions_file_batch_sequence",
+        "idx_llm_task_executions_scan",
+        "idx_llm_task_executions_ready_scan",
+        "idx_llm_task_executions_business",
+        "idx_llm_tasks_execution_id",
+        "idx_task_attempts_expiry",
+        "idx_task_attempts_owner_state",
+        "idx_task_steps_state",
+        "idx_task_step_attempts_idempotency",
+        "idx_task_recovery_cases_task_generation",
+        "idx_task_recovery_cases_scan",
+        "idx_task_recovery_operations_case",
+        "idx_task_recovery_operations_idempotency",
+        "idx_task_recovery_observations_case",
+        "idx_task_recovery_observations_operation",
+        "idx_task_recovery_decisions_case",
+        "idx_task_recovery_decisions_single_close",
+        "idx_task_events_task_sequence",
+        "idx_task_events_type_created",
+        "idx_callback_delivery_guards_recovery",
+        "idx_callback_guard_release_audits_key",
+        "idx_callback_attempt_events_key",
+        "idx_callback_attempt_events_trace"
+      ],
+      "allowedObjectTypes": ["table", "index"],
+      "forbiddenObjectTypes": ["trigger", "view", "virtual_table"],
+      "sqliteSequenceForbidden": true,
+      "autoincrementForbidden": true
+    },
+    "componentRegistry": {
+      "primaryKey": "component_name",
+      "requiredFields": [
+        "component_name",
+        "component_version",
+        "root_schema_generation",
+        "schema_fingerprint",
+        "manifest_profile",
+        "installed_at"
+      ],
+      "manifestProfile": "canonical_json_v1",
+      "componentFingerprintMaterial": "component_name + LF + component_version + LF + canonical_component_manifest_json",
+      "initialRows": [],
+      "ordinaryOpenMayInstallComponent": false,
+      "unknownComponentFailsClosed": true,
+      "unknownComponentVersionFailsClosed": true,
+      "missingRequiredComponentFailsClosed": true,
+      "unregisteredObjectFailsClosed": true,
+      "objectOwnershipOverlapFailsClosed": true,
+      "componentMayAlterRootObject": false,
+      "componentMayAlterAnotherComponentObject": false
+    },
+    "plannedComponents": [
+      {
+        "componentName": "report_control",
+        "firstInstallStage": "2-4",
+        "objectPrefixes": ["report_"],
+        "manifestFrozen": false,
+        "precreateInStage22": false
+      },
+      {
+        "componentName": "weaponry_control",
+        "firstInstallStage": "2-5",
+        "objectPrefixes": ["weaponry_"],
+        "manifestFrozen": false,
+        "precreateInStage22": false,
+        "excludedIndependentObjects": ["weaponry_terms_catalog", "weaponry_terms_catalog_metadata"]
+      },
+      {
+        "componentName": "analysis_control",
+        "firstInstallStage": "2-6",
+        "objectPrefixes": ["analysis_"],
+        "manifestFrozen": false,
+        "precreateInStage22": false,
+        "excludedIndependentObjects": ["knowledge_index_operations", "rag_resource_leases"]
+      }
+    ],
+    "stage22RuntimeProfile": {
+      "knownComponents": [],
+      "requiredComponents": [],
+      "registeredComponentsOnFreshDatabase": []
+    },
+    "actualSchemaVerification": {
+      "actualObjectsMustEqualManifestUnion": true,
+      "enumerateObjectNamesAndTypesFrom": "sqlite_schema",
+      "tableVerificationPragmas": ["table_list", "table_xinfo"],
+      "foreignKeyVerificationPragma": "foreign_key_list",
+      "indexVerificationPragmas": ["index_list", "index_xinfo"],
+      "sqliteSchemaSqlUse": "check_partial_predicate_and_foreign_key_deferrability_verification_only",
+      "sqliteSchemaSqlIncludedInFingerprint": false,
+      "autoIndexNamesAreStableIdentity": false,
+      "autoIndexesVerifiedFromDeclaredConstraints": true,
+      "integrityCheckRequired": true,
+      "foreignKeyCheckRequired": true,
+      "foreignKeysPragmaMustBeOn": true,
+      "createIfNotExistsRepairForbidden": true,
+      "alterTableRepairForbidden": true
+    },
+    "componentInstallation": {
+      "explicitInstallerOnly": true,
+      "startupSchemaLockRequired": true,
+      "backgroundWorkersStoppedRequired": true,
+      "transactionMode": "BEGIN EXCLUSIVE",
+      "networkIoForbidden": true,
+      "componentRegistryWrittenAfterObjectVerification": true,
+      "allSuccessOrRollback": true,
+      "postCommitFullValidationRequired": true,
+      "skipVersionForbidden": true,
+      "downgradeForbidden": true,
+      "oldBinaryUnknownComponentFailsClosed": true
+    },
+    "fingerprintProfileTestVector": {
+      "schemaName": "docsense.task-control",
+      "schemaGeneration": 2,
+      "payload": {
+        "componentName": "core",
+        "componentVersion": 1,
+        "objectNames": [
+          "task_control_schema_metadata",
+          "task_control_schema_components"
+        ],
+        "policy": "strict_root_plus_registered_components_union_v1"
+      },
+      "canonicalJson": "{\"componentName\":\"core\",\"componentVersion\":1,\"objectNames\":[\"task_control_schema_metadata\",\"task_control_schema_components\"],\"policy\":\"strict_root_plus_registered_components_union_v1\"}",
+      "sha256": "E5A44B4BE845CA1E6E9812B816C2C928D6162D1E7DCBB5CAAC94EEEBA8C53527"
     }
   },
   "initialization": {

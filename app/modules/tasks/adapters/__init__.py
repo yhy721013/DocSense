@@ -19,17 +19,12 @@ from .local_persistent_dispatcher import (
     LocalPersistentTaskDispatcher,
 )
 from .legacy_task_commands import (
-    EncodedTaskResult,
-    EncodedTaskSubmission,
     LegacyTaskCommandAdapter,
     LegacyTaskCommandAdapterError,
-    TaskCommandCodec,
 )
 from app.modules.tasks.http_deadlines import required_http_lease_seconds
 
 __all__ = [
-    "EncodedTaskResult",
-    "EncodedTaskSubmission",
     "FileProcessSingletonGuard",
     "InMemoryProgressAdapter",
     "LocalPersistentDispatcherSettings",
@@ -42,7 +37,6 @@ __all__ = [
     "LegacyTaskReadAdapter",
     "SynchronousCallbackRecoveryRouterAdapter",
     "LatestTaskProgressPublisherAdapter",
-    "TaskCommandCodec",
     "UploadTaskLimiter",
     "required_http_lease_seconds",
 ]

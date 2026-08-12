@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from app.modules.tasks.adapters import EncodedTaskResult, EncodedTaskSubmission
+from app.modules.tasks.ports import EncodedTaskResult, EncodedTaskSubmission
 from app.modules.tasks.domain import TaskId
 from app.modules.tasks.ports import ExpectedTaskCompletion, TaskSubmissionCommand
 from app.modules.weaponry.domain import (

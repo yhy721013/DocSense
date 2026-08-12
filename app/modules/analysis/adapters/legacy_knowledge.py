@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from app.domain.knowledge_workspace import permanent_architecture_workspace_name
+from app.shared.domain.knowledge_workspace import permanent_architecture_workspace_name
 from app.modules.analysis.ports.knowledge import (
     AnalysisKnowledgePort,
     AnalysisKnowledgeWriteOutcome,

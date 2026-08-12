@@ -32,7 +32,7 @@ from tests.architecture.import_rules import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES_ROOT = ROOT / "app" / "modules"
-SHARED_DOMAIN_ROOT = ROOT / "app" / "domain"
+SHARED_DOMAIN_ROOT = ROOT / "app" / "shared" / "domain"
 TASKS_ROOT = MODULES_ROOT / "tasks"
 REPORT_ROOT = MODULES_ROOT / "report"
 WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
@@ -678,7 +678,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
 
     def test_shared_domain_rule_rejects_database_and_supplier_dependencies(self) -> None:
         violations = self._scan_source(
-            "app/domain/knowledge_workspace.py",
+            "app/shared/domain/knowledge_workspace.py",
             """
             import sqlite3
             from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
@@ -693,17 +693,17 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
     def test_application_rule_only_allows_the_approved_shared_naming_module(self) -> None:
         allowed = self._scan_source(
             "app/modules/reassign/application/service.py",
-            "from app.domain.knowledge_workspace import permanent_architecture_workspace_name\n",
+            "from app.shared.domain.knowledge_workspace import permanent_architecture_workspace_name\n",
             APPLICATION_RULE,
         )
         rejected = self._scan_source(
             "app/modules/reassign/application/service.py",
-            "from app.domain.unreviewed_rules import unsafe_rule\n",
+            "from app.shared.domain.unreviewed_rules import unsafe_rule\n",
             APPLICATION_RULE,
         )
 
         self.assertEqual((), allowed)
-        self.assertEqual({"app.domain.unreviewed_rules"}, self._targets(rejected))
+        self.assertEqual({"app.shared.domain.unreviewed_rules"}, self._targets(rejected))
 
     def test_ports_rule_rejects_reverse_application_dependency(self) -> None:
         violations = self._scan_source(

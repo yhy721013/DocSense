@@ -1,6 +1,6 @@
 {
-  "assetVersion": 1,
-  "stage": "2-0",
+  "assetVersion": 5,
+  "stage": "2-2-completed-business-wave-cutover-confirmed",
   "frozenAt": "2026-08-12",
   "publicContractChanged": false,
   "serviceFiles": [
@@ -33,21 +33,39 @@
     "targetWriterMayCallLegacyService": false,
     "dualWriteForbidden": true,
     "cyclicDelegationForbidden": true,
-    "deleteLegacySqlImmediatelyAfterCallerCutover": true
+    "deleteLegacySqlImmediatelyAfterCallerCutover": true,
+    "stage22ProductionCutover": false,
+    "authorityRuntimeRequiredBeforeBusinessCutover": true,
+    "businessWaveCutoverStages": ["2-4", "2-5", "2-6"],
+    "taskAndCallbackCutoverIsAtomicPerBusiness": true
   },
   "currentTableGroups": [
     {
       "tables": ["llm_tasks", "llm_task_executions"],
-      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "currentWriter": "legacy production path: app/services/llm_service/task_service.py::LLMTaskService; unconnected v2 path: app/modules/tasks/adapters/sqlite/control_store.py",
       "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
-      "exitStage": "2-2_to_2-8",
+      "exitStage": "2-4_to_2-6_business_wave_then_2-8_cleanup",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["task_control_schema_metadata", "task_control_schema_components"],
+      "currentWriter": "app/modules/tasks/adapters/sqlite/schema.py::create_root_schema",
+      "targetWriter": "app/modules/tasks/adapters/sqlite/schema.py::create_root_schema",
+      "exitStage": "retained_stage2",
+      "lifecycle": "persistent_schema_identity"
+    },
+    {
+      "tables": ["task_attempts", "task_steps", "task_step_attempts", "task_recovery_cases", "task_recovery_operations", "task_recovery_observations", "task_recovery_decisions", "task_events"],
+      "currentWriter": "app/modules/tasks/adapters/sqlite/control_store.py (implemented; production runtime not wired)",
+      "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
+      "exitStage": "retained_stage2",
       "lifecycle": "persistent"
     },
     {
       "tables": ["callback_delivery_guards", "callback_guard_release_audits", "callback_delivery_attempt_events"],
-      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "currentWriter": "legacy production path: app/services/llm_service/task_service.py::LLMTaskService; v2 path: root DDL only and Admission conflict reads, no Callback business row writer wired",
       "targetWriter": "app/modules/tasks/adapters/sqlite/callback_control_store.py",
-      "exitStage": "2-2_to_2-8",
+      "exitStage": "2-4_to_2-6_business_wave_then_2-8_cleanup",
       "lifecycle": "persistent"
     },
     {
@@ -170,16 +188,5 @@
       "lifecycle": "persistent"
     }
   ],
-  "plannedTaskControlTables": [
-    {
-      "tables": ["task_control_schema_metadata"],
-      "targetWriter": "app/bootstrap/task_control_schema.py",
-      "stage": "2-2"
-    },
-    {
-      "tables": ["task_attempts", "task_steps", "task_step_attempts", "task_recovery_cases", "task_recovery_observations", "task_recovery_decisions", "task_events"],
-      "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
-      "stage": "2-2"
-    }
-  ]
+  "plannedTaskControlTables": []
 }

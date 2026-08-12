@@ -21,7 +21,8 @@ class FileProcessSingletonGuard:
     因而遗留锁文件不会造成永久假死。
 
     ``component_name`` 和 ``event_logger`` 仅用于输出业务可读日志。通用实现不导入
-    report、weaponry 等业务模块，业务薄适配器可以注入自己的日志命名空间。
+    report、weaponry 等业务模块，业务薄适配器可以注入自己的日志命名空间；敏感路径的
+    调用方可通过 ``path_log_value`` 注入摘要，同时真实锁地址仍由 ``path`` 决定。
     """
 
     def __init__(
@@ -30,13 +31,21 @@ class FileProcessSingletonGuard:
         *,
         component_name: str = "本地后台组件",
         event_logger: logging.Logger | None = None,
+        path_log_value: str | None = None,
     ) -> None:
         normalized_name = str(component_name or "").strip()
         if not normalized_name:
             raise ValueError("component_name 不能为空")
         if event_logger is not None and not isinstance(event_logger, logging.Logger):
             raise TypeError("event_logger 必须是 logging.Logger 或 None")
+        normalized_log_path = (
+            str(path_log_value).strip() if path_log_value is not None else ""
+        )
+        if path_log_value is not None and not normalized_log_path:
+            raise ValueError("path_log_value 不能为空字符串")
         self._path = Path(path).expanduser().resolve()
+        # 默认保留历史日志行为；数据库 Bootstrap 可传入路径摘要，避免泄露部署目录。
+        self._path_log_value = normalized_log_path or str(self._path)
         self._component_name = normalized_name
         self._logger = event_logger or logger
         self._state_lock = threading.RLock()
@@ -72,7 +81,7 @@ class FileProcessSingletonGuard:
                     self._logger.error(
                         "%s 单实例锁已被占用: path=%s pid=%d",
                         self._component_name,
-                        self._path,
+                        self._path_log_value,
                         current_pid,
                     )
                     return False
@@ -82,7 +91,7 @@ class FileProcessSingletonGuard:
             self._logger.info(
                 "已取得 %s 单实例进程锁: path=%s pid=%d",
                 self._component_name,
-                self._path,
+                self._path_log_value,
                 current_pid,
             )
             return True
@@ -105,7 +114,7 @@ class FileProcessSingletonGuard:
                     "检测到%s跨 fork 的单实例锁释放请求，仅关闭子进程句柄: "
                     "path=%s owner_pid=%s current_pid=%s",
                     self._component_name,
-                    self._path,
+                    self._path_log_value,
                     owner_pid,
                     os.getpid(),
                 )
@@ -114,7 +123,7 @@ class FileProcessSingletonGuard:
         self._logger.info(
             "已释放 %s 单实例进程锁: path=%s pid=%d",
             self._component_name,
-            self._path,
+            self._path_log_value,
             os.getpid(),
         )
 

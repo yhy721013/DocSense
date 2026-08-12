@@ -17,10 +17,13 @@
 | `260812-阶段2-0三业务Step与恢复注册表.md` | 逐业务冻结最终 Step、恢复矩阵、Intent/Checkpoint/ExternalRef、幂等身份与 Canonical Input Profile。 |
 | `260812-阶段2-0Executor事务时钟租约与受理解锁拓扑.md` | 冻结统一 Executor、分层公平容量、窄 UoW、Clock/owner/租约不等式及新受理/解锁矩阵。 |
 | `260812-阶段2-0完成验收记录.md` | 汇总十步完成状态、37 项自动验证、旧库只读预检与阶段 2-1 入口条件。 |
+| `260812-阶段2-1完成验收记录.md` | 汇总纯 Domain/Port/Fake、共享领域路径迁移、授权门禁修复、156 项聚合与 2255 项全量离线验收。 |
+| `260812-阶段2-2根Schema与组件Manifest设计.md` | 冻结根 fingerprint、组件注册/安装、实际 SQLite 精确核验、内部 Port 补全、Control Store 实施结果及已确认的按业务切换边界。 |
+| `260812-阶段2-2完成验收记录.md` | 汇总 Schema/Bootstrap、UoW、Control Store、双连接 fencing、方案 A 切换顺序、154 项聚合与 2314 项全量离线验收。 |
 
 机器可读内部契约位于 `tests/contracts/stage2_task_execution_contract.json`、
 `tests/contracts/stage2_interface_contract_hashes.json` 和
-`tests/contracts/stage2_task_control_database_contract.json`、
+`app/modules/tasks/adapters/sqlite/database_contract.json`、
 `tests/contracts/stage2_ownership_contract.json`、
 `tests/contracts/stage2_runtime_config_ownership.json`、
 `tests/contracts/stage2_boundary_contract.json`、
@@ -29,6 +32,11 @@
 `tests/contracts/stage2_runtime_topology_contract.json`；对应测试固定状态机、Authority、恢复、Canonical
 Profile、公开接口哈希、数据库切换门禁、文件/表所有权、配置归属、跨层边界、专项隔离和三业务
 Step/Runtime 拓扑。
+
+阶段 2-2 根 SQLite 的逐表语义 Manifest 位于
+`app/modules/tasks/adapters/sqlite/root_schema_manifest.json`；它是生产 Bootstrap 与严格打开共同加载的
+唯一根 Schema 真相源。测试侧数据库组合治理契约另外固定其规范化字节数和指纹，防止生产实现与验收资产
+各自维护一份 Schema。
 
 ## 维护规则
 

@@ -38,4 +38,3 @@ __all__ = [
     "PERMANENT_ARCHITECTURE_WORKSPACE_PREFIX",
     "permanent_architecture_workspace_name",
 ]
-

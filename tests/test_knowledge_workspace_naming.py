@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-from app.domain import (
+from app.shared.domain import (
     ARCHITECTURE_ID_MAX,
     ARCHITECTURE_ID_MIN,
     permanent_architecture_workspace_name,
@@ -17,6 +17,12 @@ class PermanentKnowledgeWorkspaceNamingTests(unittest.TestCase):
 
     def test_positive_architecture_id_uses_exact_new_prefix(self) -> None:
         self.assertEqual("archId-10605", permanent_architecture_workspace_name(10605))
+
+    def test_rule_is_owned_by_shared_domain_after_stage2_path_migration(self) -> None:
+        self.assertEqual(
+            permanent_architecture_workspace_name.__module__,
+            "app.shared.domain.knowledge_workspace",
+        )
 
     def test_signed_storage_projection_values_have_deterministic_names(self) -> None:
         self.assertEqual("archId-0", permanent_architecture_workspace_name(0))

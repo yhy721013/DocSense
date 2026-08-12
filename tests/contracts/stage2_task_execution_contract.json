@@ -1,12 +1,26 @@
 {
-  "schemaVersion": 1,
-  "stage": "2-0",
+  "schemaVersion": 5,
+  "stage": "2-2-internal-contract-v5-confirmed",
   "frozenAt": "2026-08-12",
   "publicContractChanged": false,
   "taskIdentity": {
     "taskIdSource": "llm_task_executions.execution_id",
     "businessKeyRole": "latest_projection_and_admission_conflict_only",
     "publicExposureForbidden": true
+  },
+  "admission": {
+    "batchReferenceType": "TaskBatchRef",
+    "batchReferenceFields": ["batch_id", "sequence"],
+    "fileTasksRequireBatch": true,
+    "nonFileTasksForbidBatch": true,
+    "batchAdmission": {
+      "allOrNothing": true,
+      "singleBatchId": true,
+      "sequenceStartsAt": 1,
+      "sequenceContinuous": true,
+      "requestOrderPreserved": true,
+      "mixedTaskTypesForbiddenForFileBatches": true
+    }
   },
   "taskStateMachine": {
     "states": [
@@ -35,6 +49,9 @@
       ["recovery_required", "succeeded"],
       ["recovery_required", "failed"],
       ["recovery_required", "stale"]
+    ],
+    "reaperClassifiedTransitions": [
+      ["running", "accepted"]
     ],
     "forbiddenDirectTransitions": [
       ["recovery_required", "running"],
@@ -65,6 +82,7 @@
       ["running", "succeeded"],
       ["running", "failed"],
       ["running", "expired"],
+      ["running", "abandoned"],
       ["expired", "abandoned"]
     ]
   },
@@ -98,7 +116,42 @@
       "never_auto"
     ],
     "externalWriteRequiresIntentBeforeIo": true,
-    "networkIoInsideDatabaseTransactionForbidden": true
+    "networkIoInsideDatabaseTransactionForbidden": true,
+    "completionCommand": {
+      "typeName": "TaskStepCompletionCommand",
+      "explicitTransitionRequired": true,
+      "executionAuthorityTransitions": [
+        "succeed",
+        "fail",
+        "mark_outcome_unknown"
+      ],
+      "checkpointDoesNotImplicitlyChooseState": true,
+      "outcomeUnknownRequiresRecoveryIsolation": true,
+      "outcomeUnknownAtomicallyAbandonsAttempt": true,
+      "outcomeUnknownAtomicallyCreatesRecoveryCase": true,
+      "skipUsesSeparateCommand": "TaskStepSkipCommand",
+      "compensateRequiresRecoveryAuthority": true,
+      "duplicateIntentOutcome": "duplicate_step_intent",
+      "duplicateIntentRequiresExactAuthorityDefinitionVersionKeyAndTime": true,
+      "conflictingIntentIsNeverReportedAsDuplicate": true,
+      "readMethods": ["get_step", "get_step_attempt"]
+    },
+    "recoveryAuthorizedTransition": {
+      "transitionName": "retry_authorized",
+      "source": "outcome_unknown",
+      "target": "pending",
+      "ordinaryWorkerMayInvoke": false,
+      "recoveryDecisionOnly": true,
+      "sourceStepAttemptAndRowVersionCasRequired": true,
+      "oldStepAttemptRemainsImmutable": true,
+      "nextStepAttemptCreatedByOrdinaryBegin": true,
+      "stepAttemptIdempotencyIndex": {
+        "name": "idx_task_step_attempts_idempotency",
+        "unique": false,
+        "stableKeyMayRepeatAcrossRecoveryAuthorizedAttempts": true,
+        "immutableIdentity": ["task_id", "step_key", "step_attempt_no"]
+      }
+    }
   },
   "authority": {
     "typeName": "TaskExecutionAuthority",
@@ -122,7 +175,19 @@
       "lease_token"
     ],
     "ownerIdIsAuthority": false,
-    "taskIdAloneCanWrite": false
+    "taskIdAloneCanWrite": false,
+    "claimOwnerIdentity": {
+      "typeName": "TaskOwnerIdentity",
+      "requiredFields": [
+        "instance_start_id",
+        "process_id",
+        "executor_name",
+        "worker_slot"
+      ],
+      "canonicalOwnerIdFormat": "instance_start_id/process_id/executor_name/worker_slot",
+      "ownerIdDerived": true,
+      "persistSplitFields": true
+    }
   },
   "sequenceNamespaces": {
     "attempt_no": "increment_only_when_ordinary_executor_claims_new_business_authority",
@@ -141,7 +206,36 @@
       "defer"
     ],
     "leaseExpiryAloneAllowsRetry": false,
-    "genericRunningToAcceptedResetForbidden": true
+    "genericRunningToAcceptedResetForbidden": true,
+    "retrySafeTransition": {
+      "transitionName": "retry_safe",
+      "source": "running",
+      "target": "accepted",
+      "ordinaryWorkerMayInvoke": false,
+      "sourceAttemptAndFencingCasRequired": true,
+      "oldAttemptConvergesTo": "abandoned",
+      "finiteBackoffRequired": true,
+      "eventRequired": true
+    },
+    "classificationPersistence": {
+      "method": "classify_candidate_if_current",
+      "legacyMethodForbidden": "create_case_if_current",
+      "commandType": "TaskRecoveryClassificationCommand",
+      "resultType": "TaskRecoveryClassificationResult",
+      "caseIdRequiredFor": [
+        "finalize_from_checkpoint",
+        "reconcile_required"
+      ],
+      "nextActionAtRequiredFor": [
+        "retry_safe",
+        "defer"
+      ],
+      "caseCreationOnlyFor": [
+        "finalize_from_checkpoint",
+        "reconcile_required"
+      ],
+      "sourceAttemptAndFencingCasRequired": true
+    }
   },
   "recovery": {
     "caseStates": [
@@ -155,23 +249,63 @@
       "resolved",
       "superseded"
     ],
+    "heartbeat": {
+      "method": "heartbeat_case",
+      "commandType": "TaskRecoveryHeartbeatCommand",
+      "resultType": "TaskRecoveryHeartbeatResult",
+      "completeRecoveryAuthorityRequired": true,
+      "successfulRenewalInvalidatesOldAuthority": true
+    },
+    "claimRules": {
+      "directlyClaimableStates": ["open", "awaiting_evidence"],
+      "observingTakeoverRequiresPersistedLeaseExpiry": true,
+      "persistedLeaseMustBeNoLaterThanClaimedAt": true,
+      "unexpiredOwnerMayBePreempted": false,
+      "successfulTakeoverIncrementsRecoveryFencing": true,
+      "successfulTakeoverIncrementsRecoveryGeneration": false
+    },
+    "operations": {
+      "typeName": "TaskRecoveryOperation",
+      "intentCommandType": "TaskRecoveryOperationIntentCommand",
+      "beginMethod": "begin_operation",
+      "kinds": ["probe", "compensation"],
+      "states": ["intent_recorded", "observation_recorded"],
+      "operationIdUnique": true,
+      "idempotencyKeyUniqueWithinCase": true,
+      "intentCommittedBeforeExternalIo": true,
+      "observationReferencesOperation": true,
+      "observationAndOperationConvergeAtomically": true,
+      "takeoverMayConvergeOldFencingIntent": true,
+      "oneObservationPerOperation": true
+    },
     "decisions": {
       "keep_quarantined": {
         "closesCase": false,
         "taskState": "recovery_required",
-        "startsRunnerDirectly": false
+        "startsRunnerDirectly": false,
+        "optionalNextObservationAt": true
       },
       "retry_authorized": {
         "closesCase": true,
         "taskState": "accepted",
         "startsRunnerDirectly": false,
         "incrementsRecoveryGeneration": false,
-        "nextExecutionRequiresOrdinaryClaim": true
+        "nextExecutionRequiresOrdinaryClaim": true,
+        "stepResolutionType": "TaskRecoveryStepResolution",
+        "stepResolutionRequired": true,
+        "sourceStepAttemptAndRowVersionCasRequired": true,
+        "evidenceOperationObservationAndDigestRequired": true,
+        "currentStepProjectionBecomes": "pending",
+        "oldOutcomeUnknownStepAttemptRemainsImmutable": true
       },
       "finalize_from_checkpoint": {
         "closesCase": true,
         "taskState": "succeeded_or_failed",
-        "startsRunnerDirectly": false
+        "startsRunnerDirectly": false,
+        "terminalProjectionType": "TaskRecoveryTerminalProjection",
+        "sourceCheckpointCasRequired": true,
+        "latestProjectionUpdatedAtomically": true,
+        "storeMayGuessPublicProjectionByBusinessType": false
       },
       "mark_stale": {
         "closesCase": true,
@@ -233,7 +367,8 @@
     "event_sequence_no",
     "recovery_case_id",
     "recovery_generation",
-    "recovery_fencing_token"
+    "recovery_fencing_token",
+    "operation_id",
+    "observation_id"
   ]
 }
-
