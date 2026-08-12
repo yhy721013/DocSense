@@ -1,0 +1,255 @@
+{
+  "assetVersion": 1,
+  "stage": "2-0",
+  "frozenAt": "2026-08-12",
+  "publicContractChanged": false,
+  "paths": {
+    "environmentKey": "DOCSENSE_TASK_CONTROL_DB_PATH",
+    "defaultRelativeToRuntimeDir": "db/task-control-v2.sqlite3",
+    "legacyEnvironmentKey": "DOCSENSE_LLM_TASK_DB",
+    "oldAndNewResolvedPathsMustDiffer": true,
+    "caseInsensitiveComparisonOnWindows": true
+  },
+  "databaseIdentity": {
+    "applicationId": 1146307378,
+    "applicationIdHex": "0x44534332",
+    "applicationIdAscii": "DSC2",
+    "userVersion": 2,
+    "schemaName": "docsense.task-control",
+    "schemaGeneration": 2,
+    "compatibleGenerationMin": 2,
+    "compatibleGenerationMax": 2,
+    "metadataTable": "task_control_schema_metadata",
+    "requiredMetadataFields": [
+      "schema_name",
+      "schema_generation",
+      "compatible_generation_min",
+      "compatible_generation_max",
+      "schema_fingerprint",
+      "db_instance_uuid",
+      "created_at"
+    ],
+    "fingerprintProfile": {
+      "algorithm": "SHA-256",
+      "manifestEncoding": "UTF-8",
+      "manifestFormat": "canonical_json_v1",
+      "material": "schema_name + LF + schema_generation + LF + canonical_schema_manifest",
+      "hexCase": "UPPER",
+      "sqliteMasterSqlIsNotFingerprintSource": true
+    }
+  },
+  "initialization": {
+    "oldDatabaseIsReadOnly": true,
+    "historicalRowsAreNotMigrated": true,
+    "newDatabaseMustBeAbsentOrStrictlyCompatible": true,
+    "newDatabaseCreationAllowsEmptyV2Only": true,
+    "createTableIfNotExistsRepairForbidden": true,
+    "storeConstructionBeforePreflightForbidden": true,
+    "backgroundThreadStartBeforePreflightForbidden": true
+  },
+  "fileSet": {
+    "members": [".sqlite3", ".sqlite3-wal", ".sqlite3-shm"],
+    "transientMemberAlsoProtected": ".sqlite3-journal",
+    "archiveRequiresAllRelevantProcessesStopped": true,
+    "partialMoveOrDeleteForbidden": true,
+    "applicationAutomaticArchiveForbidden": true
+  },
+  "rollback": {
+    "requiresAllRelevantProcessesStopped": true,
+    "requiresNoV2FactsToPreserve": true,
+    "blockers": [
+      "accepted_or_running_task",
+      "open_recovery_case",
+      "callback_sending_or_outcome_unknown",
+      "cleanup_unknown_or_pending",
+      "unreconciled_external_side_effect",
+      "new_task_fact_required_for_public_observation"
+    ],
+    "onBlocked": "retain_v2_file_set_and_repair_forward",
+    "oldAndNewConsumersMayNotRunConcurrently": true
+  },
+  "oldDatabasePreflight": {
+    "missingTableIsAllowedForOlderSchema": true,
+    "existingTableMissingRequiredStateColumnFailsClosed": true,
+    "rowIdentityOutputForbidden": true,
+    "stateDomains": [
+      {
+        "table": "llm_task_executions",
+        "column": "execution_state",
+        "allowed": ["accepted", "running", "succeeded", "failed", "stale"]
+      },
+      {
+        "table": "llm_task_executions",
+        "column": "callback_status",
+        "allowed": ["pending", "sending", "success", "failed", "skipped", "outcome_unknown"]
+      },
+      {
+        "table": "llm_tasks",
+        "column": "status",
+        "allowed": ["0", "1", "2", "3"]
+      },
+      {
+        "table": "llm_tasks",
+        "column": "callback_status",
+        "allowed": ["pending", "sending", "success", "failed", "skipped", "outcome_unknown"]
+      },
+      {
+        "table": "callback_delivery_guards",
+        "column": "state",
+        "allowed": ["idle", "sending", "outcome_unknown"]
+      },
+      {
+        "table": "report_resource_records",
+        "column": "state",
+        "allowed": ["tracking", "cleanup_pending", "audit_pending", "cleaned", "quarantined"]
+      },
+      {
+        "table": "analysis_resource_records",
+        "column": "state",
+        "allowed": ["tracking", "cleanup_pending", "audit_pending", "cleaned", "quarantined"]
+      },
+      {
+        "table": "weaponry_resource_records",
+        "column": "state",
+        "allowed": ["tracking", "cleanup_pending", "cleaned", "quarantined"]
+      },
+      {
+        "table": "weaponry_creation_intents",
+        "column": "state",
+        "allowed": ["pending", "recovering", "resolved", "quarantined"]
+      },
+      {
+        "table": "weaponry_interaction_audits",
+        "column": "state",
+        "allowed": ["pending", "completed"]
+      },
+      {
+        "table": "llm_interactions",
+        "column": "workspace_cleanup_status",
+        "allowed": ["pending", "deleted", "failed"]
+      },
+      {
+        "table": "rag_resource_leases",
+        "column": "status",
+        "allowed": ["planned", "active", "audit_failed", "audited", "closed"]
+      }
+    ],
+    "blockerRules": [
+      {
+        "id": "active_execution",
+        "category": "active_task",
+        "table": "llm_task_executions",
+        "column": "execution_state",
+        "operator": "in",
+        "values": ["accepted", "running"]
+      },
+      {
+        "id": "unsettled_execution_callback",
+        "category": "callback_or_recovery",
+        "table": "llm_task_executions",
+        "column": "callback_status",
+        "operator": "in",
+        "values": ["pending", "failed", "sending", "outcome_unknown"]
+      },
+      {
+        "id": "active_file_latest_projection",
+        "category": "active_task",
+        "table": "llm_tasks",
+        "column": "status",
+        "operator": "in",
+        "values": ["0", "1"],
+        "filters": {"business_type": ["file"]}
+      },
+      {
+        "id": "active_report_latest_projection",
+        "category": "active_task",
+        "table": "llm_tasks",
+        "column": "status",
+        "operator": "in",
+        "values": ["0"],
+        "filters": {"business_type": ["report"]}
+      },
+      {
+        "id": "active_weaponry_latest_projection",
+        "category": "active_task",
+        "table": "llm_tasks",
+        "column": "status",
+        "operator": "in",
+        "values": ["0", "1"],
+        "filters": {"business_type": ["weaponry"]}
+      },
+      {
+        "id": "unsettled_latest_callback",
+        "category": "callback_or_recovery",
+        "table": "llm_tasks",
+        "column": "callback_status",
+        "operator": "in",
+        "values": ["pending", "failed", "sending", "outcome_unknown"]
+      },
+      {
+        "id": "callback_guard_not_idle",
+        "category": "callback_or_recovery",
+        "table": "callback_delivery_guards",
+        "column": "state",
+        "operator": "in",
+        "values": ["sending", "outcome_unknown"]
+      },
+      {
+        "id": "report_resource_not_cleaned",
+        "category": "resource_or_cleanup",
+        "table": "report_resource_records",
+        "column": "state",
+        "operator": "not_in",
+        "values": ["cleaned"]
+      },
+      {
+        "id": "analysis_resource_not_cleaned",
+        "category": "resource_or_cleanup",
+        "table": "analysis_resource_records",
+        "column": "state",
+        "operator": "not_in",
+        "values": ["cleaned"]
+      },
+      {
+        "id": "weaponry_resource_not_cleaned",
+        "category": "resource_or_cleanup",
+        "table": "weaponry_resource_records",
+        "column": "state",
+        "operator": "not_in",
+        "values": ["cleaned"]
+      },
+      {
+        "id": "weaponry_creation_intent_not_resolved",
+        "category": "external_side_effect",
+        "table": "weaponry_creation_intents",
+        "column": "state",
+        "operator": "not_in",
+        "values": ["resolved"]
+      },
+      {
+        "id": "weaponry_interaction_audit_pending",
+        "category": "external_side_effect",
+        "table": "weaponry_interaction_audits",
+        "column": "state",
+        "operator": "in",
+        "values": ["pending"]
+      },
+      {
+        "id": "workspace_cleanup_unsettled",
+        "category": "resource_or_cleanup",
+        "table": "llm_interactions",
+        "column": "workspace_cleanup_status",
+        "operator": "in",
+        "values": ["pending", "failed"]
+      },
+      {
+        "id": "legacy_rag_resource_lease_open",
+        "category": "resource_or_cleanup",
+        "table": "rag_resource_leases",
+        "column": "status",
+        "operator": "not_in",
+        "values": ["closed"]
+      }
+    ]
+  }
+}

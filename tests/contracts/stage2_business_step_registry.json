@@ -1,0 +1,194 @@
+{
+  "assetVersion": 1,
+  "frozenAt": "2026-08-12",
+  "scope": "stage-2-0-internal-design-gate",
+  "runtimeImplemented": false,
+  "publicContractChanged": false,
+  "policyPort": {
+    "name": "TaskRecoveryPolicyPort",
+    "pureDecisionOnly": true,
+    "mayReadDatabase": false,
+    "mayCallNetwork": false,
+    "inputs": [
+      "canonical_input_profile",
+      "task_snapshot",
+      "attempt_history",
+      "step_history",
+      "checkpoints",
+      "external_references",
+      "persisted_observations",
+      "latest_projection"
+    ]
+  },
+  "excludedIndependentStateMachines": [
+    "callback_delivery_attempt",
+    "resource_cleanup_attempt",
+    "llm_interaction_attempt",
+    "document_processing_external_operation",
+    "reassignment_step_attempt"
+  ],
+  "schemaCatalog": {
+    "pure.v1": {
+      "intent": ["input_profile_fingerprint", "input_digest"],
+      "checkpoint": ["result_digest", "result_ref"],
+      "externalRef": []
+    },
+    "local_artifact.v1": {
+      "intent": ["input_profile_fingerprint", "target_artifact_key", "expected_owner"],
+      "checkpoint": ["artifact_id", "content_sha256", "size_bytes", "representation"],
+      "externalRef": []
+    },
+    "external_read_artifact.v1": {
+      "intent": ["input_profile_fingerprint", "source_identity_digest", "target_artifact_key"],
+      "checkpoint": ["artifact_id", "content_sha256", "size_bytes", "source_identity_digest"],
+      "externalRef": ["sanitized_source_ref"]
+    },
+    "external_write.v1": {
+      "intent": ["input_profile_fingerprint", "operation_identity", "request_digest", "idempotency_key", "intent_recorded_at"],
+      "checkpoint": ["outcome", "response_digest", "effect_confirmed_at", "observation_ref"],
+      "externalRef": ["provider_kind", "external_resource_type", "external_resource_ref", "ownership", "parent_external_ref"]
+    },
+    "audit_write.v1": {
+      "intent": ["input_profile_fingerprint", "audit_kind", "idempotency_key", "payload_digest"],
+      "checkpoint": ["audit_id", "audit_version", "committed_at"],
+      "externalRef": []
+    },
+    "terminal.v1": {
+      "intent": ["result_checkpoint_digest", "expected_latest_task_id", "expected_attempt_no", "expected_fencing_token"],
+      "checkpoint": ["execution_state", "public_status", "result_ref", "committed_at"],
+      "externalRef": []
+    }
+  },
+  "recoveryMatrices": {
+    "deterministic.v1": {
+      "retry_safe": "没有成功检查点，输入 Profile 匹配，且 latest 仍指向本 Task",
+      "finalize_from_checkpoint": "结果摘要与引用均完整且校验通过",
+      "reconcile_required": "检查点结构损坏、输入身份冲突或出现未登记副作用",
+      "defer": "同一 Recovery Case 的证据收集尚未完成",
+      "mark_stale": "latest 已由更高世代合法 Task 取代"
+    },
+    "local_idempotent.v1": {
+      "retry_safe": "意图尚未提交，或目标不存在且没有未知所有权",
+      "finalize_from_checkpoint": "Artifact/本地事实按稳定键存在，owner、摘要和大小均匹配",
+      "reconcile_required": "稳定键已存在但 owner 或摘要不匹配，或提交结果未知且无法原子核验",
+      "defer": "本地 Store 正由有效维护租约核验",
+      "mark_stale": "latest 已变化且目标事实不属于当前 Task/Attempt"
+    },
+    "external_read.v1": {
+      "retry_safe": "未得到完整内容检查点；重新读取后必须首次冻结内容摘要",
+      "finalize_from_checkpoint": "已保存完整 Artifact 且 source identity、SHA-256、大小均匹配",
+      "reconcile_required": "同一源身份得到与已冻结摘要不同的内容，或 Artifact 所有权不明",
+      "defer": "来源暂不可探测且尚无证据证明内容漂移",
+      "mark_stale": "latest 已合法变化且旧 Artifact 不会被新 Task 复用"
+    },
+    "external_write_reconcile.v1": {
+      "retry_safe": "持久证据明确为 definitely_not_sent，且没有外部引用或创建意图",
+      "finalize_from_checkpoint": "按稳定身份探测到唯一效果，外部引用、owner 和结果摘要全部匹配",
+      "reconcile_required": "请求可能已发送、结果未知、探测歧义、owner 不明或响应无法重建",
+      "defer": "已持久化 probe intent，但 Observation 尚未返回或外部系统暂不可用",
+      "mark_stale": "latest 已变化且旧效果已确认隔离或完成受控补偿"
+    },
+    "optional_degrade.v1": {
+      "retry_safe": "持久证据明确为 definitely_not_sent，且冻结 Profile 仍匹配",
+      "finalize_from_checkpoint": "成功结果已保存；或上游核心结果完整且已记录按既有契约降级为空结果的决定",
+      "reconcile_required": "外部结果未知且缺少允许降级的完整上游检查点，或外部引用所有权不明",
+      "defer": "可选效果正在探测且尚未超过恢复预算",
+      "mark_stale": "latest 已合法变化且可选效果不被任何新 Task 复用"
+    },
+    "terminal.v1": {
+      "retry_safe": "终态意图未开始，且全部前置 Step 均有可验证结果",
+      "finalize_from_checkpoint": "终态事务已提交，或完整结果检查点允许以新 Authority 单次 CAS 收敛",
+      "reconcile_required": "终态与 latest/结果/Artifact 事实冲突，或前置核心 Step 未知",
+      "defer": "同一 Task 的终态事务结果正在只读核验",
+      "mark_stale": "latest 已由合法新 Task 取代且旧 Task 未提交终态"
+    }
+  },
+  "businesses": {
+    "report": {
+      "currentInputSchema": "ReportInputSnapshot/v1",
+      "targetInputSchema": "ReportInputSnapshot/v2",
+      "canonicalProfile": {
+        "topLevelFields": ["schema_version", "task_id", "report_id", "source_urls", "template_outline_url", "template_desc", "requirement", "accepted_at", "trace_id", "execution_profile"],
+        "executionProfileFields": ["schema_name", "schema_version", "source_transport_profile_id", "max_download_bytes", "document_processing_profile_id", "document_processing_fingerprint", "template_extractor_profile_id", "rag_provider_id", "rag_provider_fingerprint", "rag_model_fingerprint", "rag_workspace_settings_fingerprint", "rag_upload_policy_fingerprint", "prompt_profile_id", "sanitizer_profile_id", "renderer_profile_id", "empty_result_policy"],
+        "newWritesUseTargetSchema": true,
+        "legacyV1ReadOnlyCompatibility": true
+      },
+      "steps": [
+        {"stepKey": "artifact.scope.begin", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "local_artifact.v1", "idempotencyKey": "report:{task_id}:artifact-scope", "inputProfileFields": ["task_id"], "successResultRef": "ReportArtifactScope", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/report/application/run_report.py:artifacts.begin", "app/modules/report/application/run_report.py:resources.register"]},
+        {"stepKey": "source.download:{source_sequence}", "definitionVersion": 1, "effectKind": "external_read", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_read_artifact.v1", "idempotencyKey": "report:{task_id}:source:{source_sequence}:{source_identity_digest}", "inputProfileFields": ["source_urls", "execution_profile.source_transport_profile_id", "execution_profile.max_download_bytes"], "successResultRef": "ReportArtifactRef/source", "recoveryMatrixRef": "external_read.v1", "currentCallSites": ["app/modules/report/application/run_report.py:files.download_source"]},
+        {"stepKey": "document.prepare:{source_sequence}", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "local_artifact.v1", "idempotencyKey": "report:{task_id}:prepared:{source_sequence}:{source_sha256}:{document_processing_fingerprint}", "inputProfileFields": ["execution_profile.document_processing_profile_id", "execution_profile.document_processing_fingerprint"], "successResultRef": "ReportArtifactRef/rag_input[]+DocumentProcessingRef", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/report/application/run_report.py:files.normalize_source", "app/modules/report/application/run_report.py:files.prepare_upload_files"]},
+        {"stepKey": "template.download", "definitionVersion": 1, "effectKind": "external_read", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_read_artifact.v1", "idempotencyKey": "report:{task_id}:template:{source_identity_digest}", "inputProfileFields": ["template_outline_url", "execution_profile.source_transport_profile_id", "execution_profile.max_download_bytes"], "successResultRef": "ReportArtifactRef/template", "recoveryMatrixRef": "external_read.v1", "currentCallSites": ["app/modules/report/application/run_report.py:files.download_template"]},
+        {"stepKey": "template.extract", "definitionVersion": 1, "effectKind": "pure", "replayPolicy": "safe", "schemaRef": "pure.v1", "idempotencyKey": "report:{task_id}:template-text:{template_sha256}:{template_extractor_profile_id}", "inputProfileFields": ["execution_profile.template_extractor_profile_id"], "successResultRef": "template_text_digest", "recoveryMatrixRef": "deterministic.v1", "currentCallSites": ["app/modules/report/application/run_report.py:files.extract_template_text"]},
+        {"stepKey": "rag.session.open", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "reconcile_only", "schemaRef": "external_write.v1", "idempotencyKey": "report:{task_id}:rag-session", "inputProfileFields": ["report_id", "execution_profile.rag_provider_fingerprint", "execution_profile.rag_workspace_settings_fingerprint"], "successResultRef": "workspace_ref+conversation_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/report/adapters/anythingllm_rag.py:_create_context", "app/modules/report/adapters/anythingllm_rag.py:_create_conversation"]},
+        {"stepKey": "rag.document.upload:{artifact_sequence}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "reconcile_only", "schemaRef": "external_write.v1", "idempotencyKey": "report:{task_id}:rag-upload:{artifact_sequence}:{artifact_sha256}", "inputProfileFields": ["execution_profile.rag_provider_fingerprint", "execution_profile.rag_upload_policy_fingerprint"], "successResultRef": "document_location+document_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/report/adapters/anythingllm_rag.py:_upload_and_bind_documents"]},
+        {"stepKey": "rag.document.bind:{artifact_sequence}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "report:{task_id}:rag-bind:{workspace_ref}:{artifact_sequence}:{document_location}", "inputProfileFields": ["execution_profile.rag_provider_fingerprint"], "successResultRef": "workspace_ref+document_location", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/report/adapters/anythingllm_rag.py:_bind_document"]},
+        {"stepKey": "rag.generate", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "report:{task_id}:generation:{prompt_digest}:{ordered_document_digest}", "inputProfileFields": ["template_desc", "requirement", "execution_profile.rag_model_fingerprint", "execution_profile.prompt_profile_id"], "successResultRef": "raw_response_digest+trace_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/report/adapters/anythingllm_rag.py:_query"]},
+        {"stepKey": "interaction_audit.commit", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "audit_write.v1", "idempotencyKey": "report-rag:{task_id}", "inputProfileFields": ["trace_id"], "successResultRef": "ReportAuditReceipt", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/report/application/run_report.py:_persist_trace"]},
+        {"stepKey": "report.render", "definitionVersion": 1, "effectKind": "pure", "replayPolicy": "safe", "schemaRef": "pure.v1", "idempotencyKey": "report:{task_id}:render:{raw_response_digest}:{sanitizer_profile_id}:{renderer_profile_id}", "inputProfileFields": ["source_urls", "execution_profile.sanitizer_profile_id", "execution_profile.renderer_profile_id", "execution_profile.empty_result_policy"], "successResultRef": "ReportResult+html_digest", "recoveryMatrixRef": "deterministic.v1", "currentCallSites": ["app/modules/report/application/run_report.py:sanitize_public_report_content", "app/modules/report/application/run_report.py:build_report_result"]},
+        {"stepKey": "artifact.publish", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "local_artifact.v1", "idempotencyKey": "report:{task_id}:report-html:{html_digest}", "inputProfileFields": ["execution_profile.renderer_profile_id"], "successResultRef": "ReportArtifactRef/report_html", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/report/application/run_report.py:artifacts.persist_report_html", "app/modules/report/application/run_report.py:resources.track_final_artifact"]},
+        {"stepKey": "terminal.commit", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "terminal.v1", "idempotencyKey": "report:{task_id}:terminal:{result_checkpoint_digest}", "inputProfileFields": ["report_id"], "successResultRef": "TaskExecution terminal projection", "recoveryMatrixRef": "terminal.v1", "currentCallSites": ["app/modules/report/application/run_report.py:finish_if_current"]}
+      ]
+    },
+    "weaponry": {
+      "currentInputSchema": "WeaponryInputSnapshot/v2",
+      "targetInputSchema": "WeaponryInputSnapshot/v2",
+      "canonicalProfile": {
+        "topLevelFields": ["schema_version", "task_id", "architecture_id", "fields", "document_scope", "evidence_selection_policy", "execution_policy", "auxiliary_guidance_policy", "accepted_at", "trace_id"],
+        "reusedWithoutVersionBump": true,
+        "specialtyReservedVersion": 3
+      },
+      "steps": [
+        {"stepKey": "resource.record.begin", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "local_artifact.v1", "idempotencyKey": "weaponry:{task_id}:resource-record", "inputProfileFields": ["task_id", "architecture_id"], "successResultRef": "WeaponryResourceRecord", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/weaponry/application/run_weaponry.py:resources.create"]},
+        {"stepKey": "document_scope.load", "definitionVersion": 1, "effectKind": "pure", "replayPolicy": "safe", "schemaRef": "pure.v1", "idempotencyKey": "weaponry:{task_id}:document-scope:{scope_digest}", "inputProfileFields": ["document_scope"], "successResultRef": "validated_document_scope_digest", "recoveryMatrixRef": "deterministic.v1", "currentCallSites": ["app/modules/weaponry/application/run_weaponry.py:snapshot.document_scope"]},
+        {"stepKey": "rag.workspace.create", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "reconcile_only", "schemaRef": "external_write.v1", "idempotencyKey": "weaponry:{task_id}:retrieval-scope", "inputProfileFields": ["document_scope", "evidence_selection_policy"], "successResultRef": "TargetEvidenceScope.scope_ref+creation_intent_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/weaponry/adapters/anythingllm_retrieval.py:open_scope"]},
+        {"stepKey": "rag.document.bind:{document_sequence}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "weaponry:{task_id}:retrieval-binding:{document_sequence}", "inputProfileFields": ["document_scope", "evidence_selection_policy.provider_fingerprint", "evidence_selection_policy.embedding_fingerprint"], "successResultRef": "document_binding_resource_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/weaponry/adapters/anythingllm_retrieval.py:open_scope"]},
+        {"stepKey": "auxiliary_guidance.load:{field_sequence}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "{weaponry_call_attempt_key}:auxiliary-guidance", "inputProfileFields": ["fields", "auxiliary_guidance_policy"], "successResultRef": "WeaponryCallAuditReceipt+guidance_digest", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/weaponry/application/field_execution.py:_load_guidance"]},
+        {"stepKey": "retrieval.execute:{field_sequence}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "{weaponry_call_attempt_key}:retrieval", "inputProfileFields": ["fields", "document_scope", "evidence_selection_policy"], "successResultRef": "WeaponryCallAuditReceipt+TargetEvidenceSearchResult", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/weaponry/application/field_execution.py:_retrieve_and_select", "app/modules/weaponry/adapters/anythingllm_retrieval.py:search_target"]},
+        {"stepKey": "evidence.select:{field_sequence}", "definitionVersion": 1, "effectKind": "pure", "replayPolicy": "safe", "schemaRef": "pure.v1", "idempotencyKey": "weaponry:{task_id}:evidence:{field_sequence}:{candidate_digest}:{profile_id}", "inputProfileFields": ["fields", "evidence_selection_policy"], "successResultRef": "selected_evidence_digest", "recoveryMatrixRef": "deterministic.v1", "currentCallSites": ["app/modules/weaponry/application/field_execution.py:_retrieve_and_select"]},
+        {"stepKey": "field_model.execute:{field_sequence}:{document_sequence}:{model_attempt}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "{weaponry_call_attempt_key}", "inputProfileFields": ["fields", "execution_policy", "document_scope"], "successResultRef": "WeaponryCallAuditReceipt+ExtractionAnswer+workspace/thread refs", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/weaponry/application/field_execution.py:_extract_source", "app/modules/weaponry/adapters/provided_evidence_extraction.py:extract"]},
+        {"stepKey": "translation.execute:{field_sequence}:{document_sequence}:{item_sequence}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "{weaponry_call_attempt_key}:translation", "inputProfileFields": ["fields", "execution_policy"], "successResultRef": "WeaponryCallAuditReceipt+translation_digest", "recoveryMatrixRef": "optional_degrade.v1", "currentCallSites": ["app/modules/weaponry/application/field_execution.py:_translate"]},
+        {"stepKey": "interaction_audit.commit:{call_id}", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "audit_write.v1", "idempotencyKey": "{weaponry_call_attempt_key}", "inputProfileFields": ["trace_id"], "successResultRef": "WeaponryCallAuditReceipt", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/weaponry/application/field_execution.py:_reserve", "app/modules/weaponry/application/field_execution.py:_complete"]},
+        {"stepKey": "result.map", "definitionVersion": 1, "effectKind": "pure", "replayPolicy": "safe", "schemaRef": "pure.v1", "idempotencyKey": "weaponry:{task_id}:result:{ordered_field_result_digest}", "inputProfileFields": ["architecture_id", "fields"], "successResultRef": "WeaponryResult", "recoveryMatrixRef": "deterministic.v1", "currentCallSites": ["app/modules/weaponry/application/run_weaponry.py:WeaponryResult", "app/modules/weaponry/application/run_weaponry.py:validate_weaponry_result_completeness"]},
+        {"stepKey": "terminal.commit", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "terminal.v1", "idempotencyKey": "weaponry:{task_id}:terminal:{result_checkpoint_digest}", "inputProfileFields": ["architecture_id"], "successResultRef": "TaskExecution terminal projection", "recoveryMatrixRef": "terminal.v1", "currentCallSites": ["app/modules/weaponry/application/run_weaponry.py:finish_if_current"]}
+      ]
+    },
+    "analysis": {
+      "currentInputSchema": "AnalysisTaskInput/v4",
+      "targetInputSchema": "AnalysisTaskInput/v5",
+      "canonicalProfile": {
+        "topLevelFields": ["schema_version", "task_id", "batch_id", "batch_sequence", "file_name", "original_file_name", "original_file_name_present", "file_path", "raw_params", "effective_ranges", "policy_snapshot", "document_processing_policy", "rag_naming", "execution_profile", "translation_profile", "accepted_at", "trace_id"],
+        "executionProfileFields": ["schema_name", "schema_version", "source_transport_profile_id", "max_download_bytes", "rag_provider_id", "rag_provider_fingerprint", "rag_model_fingerprint", "rag_workspace_profile_id", "rag_projection_profile_id", "prompt_profile_id", "knowledge_provider_id", "knowledge_provider_fingerprint", "knowledge_protocol_version"],
+        "translationProfileFields": ["engineFingerprint", "engineId", "failurePolicy", "mode", "parameters", "profileId", "rendererFingerprint", "rendererId"],
+        "newWritesUseTargetSchema": true,
+        "legacyV1ToV4ReadOnlyCompatibility": true
+      },
+      "steps": [
+        {"stepKey": "source.download", "definitionVersion": 1, "effectKind": "external_read", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_read_artifact.v1", "idempotencyKey": "analysis:{task_id}:source:{source_identity_digest}", "inputProfileFields": ["file_path", "execution_profile.source_transport_profile_id", "execution_profile.max_download_bytes"], "successResultRef": "source_artifact_ref", "recoveryMatrixRef": "external_read.v1", "currentCallSites": ["app/modules/analysis/adapters/legacy_files.py:prepare"]},
+        {"stepKey": "document.prepare", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "local_artifact.v1", "idempotencyKey": "analysis:{task_id}:prepared:{source_sha256}:{processing_policy_fingerprint}", "inputProfileFields": ["document_processing_policy", "execution_profile.rag_projection_profile_id"], "successResultRef": "PreparedAnalysisDocument+DocumentProcessingRef", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/analysis/application/run_analysis.py:files.prepare", "app/modules/analysis/adapters/legacy_files.py:prepare"]},
+        {"stepKey": "recall.reserve", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "audit_write.v1", "idempotencyKey": "analysis-recall:{task_id}", "inputProfileFields": ["effective_ranges", "policy_snapshot"], "successResultRef": "AnalysisRecallAuditReceipt", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/analysis/application/audit_lifecycle.py:reserve_recall"]},
+        {"stepKey": "rag.session.open", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "reconcile_only", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:rag-session", "inputProfileFields": ["rag_naming", "execution_profile.rag_provider_fingerprint", "execution_profile.rag_workspace_profile_id"], "successResultRef": "AnalysisRagSessionRef/context+conversation", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/application/run_analysis.py:rag.open_session", "app/modules/analysis/adapters/legacy_rag.py:open_session"]},
+        {"stepKey": "rag.document.upload", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "reconcile_only", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:rag-upload:{prepared_sha256}:{transport_file_name}", "inputProfileFields": ["rag_naming", "execution_profile.rag_provider_fingerprint", "execution_profile.rag_projection_profile_id"], "successResultRef": "document_ref+document_location+content_sha256", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/application/model_workflow.py:checkpoint_document_upload_intent", "app/modules/analysis/adapters/legacy_rag.py:execute"]},
+        {"stepKey": "rag.document.bind", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:rag-bind:{context_ref}:{document_ref}", "inputProfileFields": ["execution_profile.rag_provider_fingerprint"], "successResultRef": "AnalysisRagSessionRef/document_bound", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/adapters/legacy_rag.py:execute"]},
+        {"stepKey": "classification.execute:{attempt_number}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:classification:{attempt_number}:{prompt_digest}", "inputProfileFields": ["effective_ranges", "policy_snapshot", "execution_profile.rag_model_fingerprint", "execution_profile.prompt_profile_id"], "successResultRef": "AnalysisInteractionAttempt/classification", "recoveryMatrixRef": "external_write_reconcile.v1", "coversOperations": ["classification", "classification_repair"], "currentCallSites": ["app/modules/analysis/application/model_workflow.py:classify_topk_two_stage"]},
+        {"stepKey": "identity.reselect", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:identity-reselect:{prompt_digest}", "inputProfileFields": ["policy_snapshot.identity_reselect_mode", "effective_ranges", "execution_profile.rag_model_fingerprint"], "successResultRef": "AnalysisInteractionAttempt/identity_reselect", "recoveryMatrixRef": "optional_degrade.v1", "coversOperations": ["identity_reselect"], "currentCallSites": ["app/modules/analysis/application/model_workflow.py:classify_topk_two_stage"]},
+        {"stepKey": "extraction.execute:{attempt_number}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:extraction:{attempt_number}:{prompt_digest}", "inputProfileFields": ["raw_params", "effective_ranges", "policy_snapshot", "execution_profile.rag_model_fingerprint", "execution_profile.prompt_profile_id"], "successResultRef": "AnalysisInteractionAttempt/extraction", "recoveryMatrixRef": "external_write_reconcile.v1", "coversOperations": ["extraction", "extraction_repair"], "currentCallSites": ["app/modules/analysis/application/model_workflow.py:execute_extraction_with_repair"]},
+        {"stepKey": "combined.execute:{attempt_number}", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "analysis:{task_id}:combined:{attempt_number}:{prompt_digest}", "inputProfileFields": ["raw_params", "effective_ranges", "policy_snapshot", "execution_profile.rag_model_fingerprint", "execution_profile.prompt_profile_id"], "successResultRef": "AnalysisInteractionAttempt/combined", "recoveryMatrixRef": "external_write_reconcile.v1", "coversOperations": ["combined"], "currentCallSites": ["app/modules/analysis/application/model_workflow.py:run_model_workflow"]},
+        {"stepKey": "recall.finalize", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "audit_write.v1", "idempotencyKey": "analysis-recall:{task_id}", "inputProfileFields": ["effective_ranges", "policy_snapshot"], "successResultRef": "finalized AnalysisRecallAuditReceipt", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/analysis/application/audit_lifecycle.py:finalize_recall_success", "app/modules/analysis/application/audit_lifecycle.py:finalize_recall_failure"]},
+        {"stepKey": "interaction_audit.commit", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "audit_write.v1", "idempotencyKey": "analysis-rag:{task_id}", "inputProfileFields": ["trace_id"], "successResultRef": "AnalysisInteractionAuditReceipt", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/analysis/application/audit_lifecycle.py:persist_interaction"]},
+        {"stepKey": "result.map", "definitionVersion": 1, "effectKind": "pure", "replayPolicy": "safe", "schemaRef": "pure.v1", "idempotencyKey": "analysis:{task_id}:result:{model_result_digest}:{effective_ranges_digest}", "inputProfileFields": ["raw_params", "effective_ranges", "policy_snapshot"], "successResultRef": "mapped_result_digest", "recoveryMatrixRef": "deterministic.v1", "currentCallSites": ["app/modules/analysis/application/model_workflow.py:map_result"]},
+        {"stepKey": "knowledge.workspace.ensure", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "document:v1:{sha256(file_name+NUL+storage_architecture_id+NUL+content_sha256)}:workspace", "inputProfileFields": ["file_name", "execution_profile.knowledge_provider_fingerprint", "execution_profile.knowledge_protocol_version"], "successResultRef": "permanent_workspace_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/adapters/legacy_knowledge.py:persist"]},
+        {"stepKey": "knowledge.document.bind", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "document:v1:{sha256(file_name+NUL+storage_architecture_id+NUL+content_sha256)}", "inputProfileFields": ["file_name", "original_file_name", "effective_ranges", "execution_profile.knowledge_provider_fingerprint", "execution_profile.knowledge_protocol_version"], "successResultRef": "AnalysisKnowledgeWriteResult/external_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/application/knowledge_handoff.py:persist_knowledge", "app/modules/analysis/adapters/legacy_knowledge.py:persist"]},
+        {"stepKey": "translation.execute", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "{TranslationRequest.translation_key}", "inputProfileFields": ["translation_profile"], "successResultRef": "translation_result_digest+degrade_decision", "recoveryMatrixRef": "optional_degrade.v1", "currentCallSites": ["app/modules/analysis/application/knowledge_handoff.py:enrich_translations", "app/modules/translation/application/translate_prepared.py:TranslatePreparedDocument"]},
+        {"stepKey": "terminal.commit", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "terminal.v1", "idempotencyKey": "analysis:{task_id}:terminal:{result_checkpoint_digest}", "inputProfileFields": ["file_name", "batch_id", "batch_sequence"], "successResultRef": "TaskExecution terminal projection", "recoveryMatrixRef": "terminal.v1", "currentCallSites": ["app/modules/analysis/application/run_analysis.py:failure_convergence.finish_success"]}
+      ]
+    }
+  },
+  "failClosedRules": [
+    "unregistered_step_enters_recovery_required",
+    "unknown_external_effect_never_maps_to_retry_safe_without_definitely_not_sent_evidence",
+    "profile_mismatch_never_uses_current_environment_defaults",
+    "source_digest_drift_enters_recovery_required",
+    "callback_and_cleanup_unknown_never_restart_business_steps",
+    "old_attempt_history_is_append_only"
+  ]
+}

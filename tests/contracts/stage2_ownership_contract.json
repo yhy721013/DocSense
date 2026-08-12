@@ -1,0 +1,185 @@
+{
+  "assetVersion": 1,
+  "stage": "2-0",
+  "frozenAt": "2026-08-12",
+  "publicContractChanged": false,
+  "serviceFiles": [
+    "app/services/README.md",
+    "app/services/__init__.py",
+    "app/services/core/README.md",
+    "app/services/core/__init__.py",
+    "app/services/core/architecture_tree.py",
+    "app/services/core/config.py",
+    "app/services/core/database.py",
+    "app/services/core/logging.py",
+    "app/services/core/progress.py",
+    "app/services/core/progress_hub.py",
+    "app/services/core/prompts.py",
+    "app/services/core/settings.py",
+    "app/services/llm_service/README.md",
+    "app/services/llm_service/__init__.py",
+    "app/services/llm_service/interaction_audit_service.py",
+    "app/services/llm_service/knowledge_index_operation_service.py",
+    "app/services/llm_service/rag_resource_lease_service.py",
+    "app/services/llm_service/task_service.py",
+    "app/services/utils/README.md",
+    "app/services/utils/__init__.py",
+    "app/services/utils/callback_client.py",
+    "app/services/utils/file_downloader.py",
+    "app/services/utils/word_extractor.py"
+  ],
+  "migrationRules": {
+    "legacyEntryMayOnlyDelegateToTargetWriter": true,
+    "targetWriterMayCallLegacyService": false,
+    "dualWriteForbidden": true,
+    "cyclicDelegationForbidden": true,
+    "deleteLegacySqlImmediatelyAfterCallerCutover": true
+  },
+  "currentTableGroups": [
+    {
+      "tables": ["llm_tasks", "llm_task_executions"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
+      "exitStage": "2-2_to_2-8",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["callback_delivery_guards", "callback_guard_release_audits", "callback_delivery_attempt_events"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "targetWriter": "app/modules/tasks/adapters/sqlite/callback_control_store.py",
+      "exitStage": "2-2_to_2-8",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["report_resource_records"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "targetWriter": "app/modules/report/adapters/sqlite/resource_store.py",
+      "exitStage": "2-4",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["analysis_resource_records"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "targetWriter": "app/modules/analysis/adapters/sqlite/resource_store.py",
+      "exitStage": "2-6",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["weaponry_task_document_snapshots"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "targetWriter": "app/modules/weaponry/adapters/sqlite/task_document_snapshot_store.py",
+      "exitStage": "2-5",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["llm_architecture_recall_decisions"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "targetWriter": "app/modules/analysis/adapters/sqlite/recall_audit_store.py",
+      "exitStage": "2-6",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["llm_interactions", "llm_interaction_attempts", "llm_interaction_lifecycle_events"],
+      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService_and_SQLiteAuditExecutor",
+      "targetWriter": "app/infrastructure/observability/llm_interaction_store.py",
+      "exitStage": "2-4_and_2-6",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["weaponry_creation_intents"],
+      "currentWriter": "app/modules/weaponry/adapters/creation_intent_store.py",
+      "targetWriter": "app/modules/weaponry/adapters/sqlite/creation_intent_store.py",
+      "exitStage": "2-5",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["weaponry_interaction_audits"],
+      "currentWriter": "app/modules/weaponry/adapters/interaction_audit.py",
+      "targetWriter": "app/modules/weaponry/adapters/sqlite/interaction_audit_store.py",
+      "exitStage": "2-5",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["weaponry_resource_records", "weaponry_resource_operator_audits"],
+      "currentWriter": "app/modules/weaponry/adapters/resource_store.py",
+      "targetWriter": "app/modules/weaponry/adapters/sqlite/resource_store.py",
+      "exitStage": "2-5",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["weaponry_terms_catalog_state", "weaponry_terms_card_state"],
+      "currentWriter": "app/modules/weaponry/adapters/terms_catalog.py",
+      "targetWriter": "app/modules/weaponry/adapters/terms_catalog.py",
+      "exitStage": "retained_stage2",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["document_processing_steps", "document_processing_artifact_catalog", "document_processing_artifacts", "document_processing_lineage"],
+      "currentWriter": "app/modules/document_processing/adapters/sqlite_records.py",
+      "targetWriter": "app/modules/document_processing/adapters/sqlite_records.py",
+      "exitStage": "stage3b_input",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["document_processing_external_operations"],
+      "currentWriter": "app/modules/document_processing/adapters/sqlite_operations.py",
+      "targetWriter": "app/modules/document_processing/adapters/sqlite_operations.py",
+      "exitStage": "stage3a_and_3b_input",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["reassign_operations", "reassign_steps", "reassign_events", "reassign_workspace_preparation_claims", "reassign_recovery_observations"],
+      "currentWriter": "app/modules/reassign/adapters/sqlite_repository.py",
+      "targetWriter": "app/modules/reassign/adapters/sqlite_repository.py",
+      "exitStage": "stage3a_input",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["chat_schema_metadata", "chat_schema_migrations", "conversations", "chat_runs", "chat_run_inputs", "chat_run_events", "conversation_identities", "conversation_admissions", "chat_admission_guards", "conversation_deletion_audits", "chat_document_bindings", "chat_document_heads", "chat_messages", "chat_message_files", "chat_scope_revisions", "chat_scope_members", "chat_scope_heads", "chat_session_scope_bindings", "message_source_chunks", "chat_resource_leases", "chat_cleanup_jobs"],
+      "currentWriter": "app/modules/chat/adapters/sqlite/repositories.py",
+      "targetWriter": "app/modules/chat/adapters/sqlite/repositories.py",
+      "exitStage": "chat_future_shared_database_stage",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["chat_scope_revisions_v5", "chat_scope_members_v5", "chat_scope_heads_v5", "conversation_deletion_audits_v9"],
+      "currentWriter": "app/modules/chat/adapters/sqlite/repositories.py",
+      "targetWriter": "app/modules/chat/adapters/sqlite/repositories.py",
+      "exitStage": "transaction_local_only",
+      "lifecycle": "migration_temporary"
+    },
+    {
+      "tables": ["workspaces", "documents"],
+      "currentWriter": "app/services/core/database.py::DatabaseService",
+      "targetWriter": "stage3a_knowledge_repository",
+      "exitStage": "3A",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["knowledge_index_operations", "knowledge_index_collections"],
+      "currentWriter": "app/services/llm_service/knowledge_index_operation_service.py",
+      "targetWriter": "stage3a_knowledge_index_repository",
+      "exitStage": "3A",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["rag_resource_leases"],
+      "currentWriter": "app/services/llm_service/rag_resource_lease_service.py",
+      "targetWriter": "stage3a_knowledge_resource_repository",
+      "exitStage": "3A",
+      "lifecycle": "persistent"
+    }
+  ],
+  "plannedTaskControlTables": [
+    {
+      "tables": ["task_control_schema_metadata"],
+      "targetWriter": "app/bootstrap/task_control_schema.py",
+      "stage": "2-2"
+    },
+    {
+      "tables": ["task_attempts", "task_steps", "task_step_attempts", "task_recovery_cases", "task_recovery_observations", "task_recovery_decisions", "task_events"],
+      "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
+      "stage": "2-2"
+    }
+  ]
+}

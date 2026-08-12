@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "stage": "2-0",
+  "frozenAt": "2026-08-12",
+  "publicContractChanged": false,
+  "taskIdentity": {
+    "taskIdSource": "llm_task_executions.execution_id",
+    "businessKeyRole": "latest_projection_and_admission_conflict_only",
+    "publicExposureForbidden": true
+  },
+  "taskStateMachine": {
+    "states": [
+      "accepted",
+      "running",
+      "recovery_required",
+      "succeeded",
+      "failed",
+      "stale"
+    ],
+    "terminalStates": [
+      "succeeded",
+      "failed",
+      "stale"
+    ],
+    "ordinaryTransitions": [
+      ["accepted", "running"],
+      ["accepted", "stale"],
+      ["running", "succeeded"],
+      ["running", "failed"],
+      ["running", "recovery_required"],
+      ["running", "stale"]
+    ],
+    "recoveryTransitions": [
+      ["recovery_required", "accepted"],
+      ["recovery_required", "succeeded"],
+      ["recovery_required", "failed"],
+      ["recovery_required", "stale"]
+    ],
+    "forbiddenDirectTransitions": [
+      ["recovery_required", "running"],
+      ["succeeded", "running"],
+      ["failed", "running"],
+      ["stale", "running"]
+    ],
+    "queuedStateForbiddenInStage2": true,
+    "cancelledStateForbiddenInStage2": true
+  },
+  "attemptStateMachine": {
+    "states": [
+      "leased",
+      "running",
+      "succeeded",
+      "failed",
+      "expired",
+      "abandoned"
+    ],
+    "terminalStates": [
+      "succeeded",
+      "failed",
+      "abandoned"
+    ],
+    "transitions": [
+      ["leased", "running"],
+      ["leased", "expired"],
+      ["running", "succeeded"],
+      ["running", "failed"],
+      ["running", "expired"],
+      ["expired", "abandoned"]
+    ]
+  },
+  "stepStateMachine": {
+    "states": [
+      "pending",
+      "running",
+      "succeeded",
+      "failed",
+      "outcome_unknown",
+      "skipped",
+      "compensated"
+    ],
+    "terminalStates": [
+      "succeeded",
+      "failed",
+      "outcome_unknown",
+      "skipped",
+      "compensated"
+    ],
+    "effectKinds": [
+      "pure",
+      "local_write",
+      "external_read",
+      "external_write"
+    ],
+    "replayPolicies": [
+      "safe",
+      "idempotent_after_probe",
+      "reconcile_only",
+      "never_auto"
+    ],
+    "externalWriteRequiresIntentBeforeIo": true,
+    "networkIoInsideDatabaseTransactionForbidden": true
+  },
+  "authority": {
+    "typeName": "TaskExecutionAuthority",
+    "requiredFields": [
+      "task_id",
+      "attempt_no",
+      "owner_id",
+      "lease_token",
+      "fencing_token",
+      "lease_expires_at"
+    ],
+    "requiredForWrites": [
+      "heartbeat",
+      "progress",
+      "step_intent",
+      "step_result",
+      "artifact_reference",
+      "business_terminal"
+    ],
+    "secretFields": [
+      "lease_token"
+    ],
+    "ownerIdIsAuthority": false,
+    "taskIdAloneCanWrite": false
+  },
+  "sequenceNamespaces": {
+    "attempt_no": "increment_only_when_ordinary_executor_claims_new_business_authority",
+    "task_fencing_token": "increment_only_when_new_task_execution_authority_is_created",
+    "recovery_generation": "increment_only_when_a_new_independent_recovery_case_is_created",
+    "recovery_fencing_token": "increment_only_when_a_new_owner_claims_the_same_recovery_case"
+  },
+  "reaper": {
+    "role": "classifier_not_resetter",
+    "candidateCondition": "task_running_and_current_attempt_lease_expired",
+    "classifications": [
+      "retry_safe",
+      "finalize_from_checkpoint",
+      "reconcile_required",
+      "mark_stale",
+      "defer"
+    ],
+    "leaseExpiryAloneAllowsRetry": false,
+    "genericRunningToAcceptedResetForbidden": true
+  },
+  "recovery": {
+    "caseStates": [
+      "open",
+      "observing",
+      "awaiting_evidence",
+      "resolved",
+      "superseded"
+    ],
+    "closedStates": [
+      "resolved",
+      "superseded"
+    ],
+    "decisions": {
+      "keep_quarantined": {
+        "closesCase": false,
+        "taskState": "recovery_required",
+        "startsRunnerDirectly": false
+      },
+      "retry_authorized": {
+        "closesCase": true,
+        "taskState": "accepted",
+        "startsRunnerDirectly": false,
+        "incrementsRecoveryGeneration": false,
+        "nextExecutionRequiresOrdinaryClaim": true
+      },
+      "finalize_from_checkpoint": {
+        "closesCase": true,
+        "taskState": "succeeded_or_failed",
+        "startsRunnerDirectly": false
+      },
+      "mark_stale": {
+        "closesCase": true,
+        "taskState": "stale",
+        "startsRunnerDirectly": false
+      }
+    },
+    "taskAndRecoveryFencingAreIndependent": true,
+    "checkTaskCanRecoverBusinessExecution": false,
+    "directSqlUnlockForbidden": true
+  },
+  "events": {
+    "eventSourcing": false,
+    "stateRowsAreCurrentTruth": true,
+    "appendInSameTransactionAsStateChange": true,
+    "uniqueSequencePerTask": true,
+    "publicReplaySourceInStage2": false,
+    "sensitivePayloadForbidden": true
+  },
+  "canonicalProfile": {
+    "encoding": "UTF-8",
+    "objectKeyOrder": "unicode_code_point_ascending",
+    "arrayOrder": "business_order_preserved",
+    "setOrder": "normalize_then_stable_sort",
+    "jsonSeparators": [",", ":"],
+    "allowNaN": false,
+    "allowInfinity": false,
+    "exactNumbers": "canonical_decimal_string",
+    "timestamps": "UTC_RFC3339_microseconds_Z",
+    "secretsForbidden": true,
+    "fingerprintAlgorithm": "SHA-256(schema_name + LF + schema_version + LF + canonical_json_utf8)",
+    "testVector": {
+      "schemaName": "docsense.execution-profile",
+      "schemaVersion": "1",
+      "payload": {
+        "capabilities": [
+          "document_processing:v1",
+          "translation:machine"
+        ],
+        "limits": {
+          "prompt_chars": 32000,
+          "timeout_seconds": "60.000"
+        },
+        "profile_name": "stage2-baseline",
+        "timestamp": "2026-08-12T00:00:00.000000Z"
+      },
+      "canonicalJson": "{\"capabilities\":[\"document_processing:v1\",\"translation:machine\"],\"limits\":{\"prompt_chars\":32000,\"timeout_seconds\":\"60.000\"},\"profile_name\":\"stage2-baseline\",\"timestamp\":\"2026-08-12T00:00:00.000000Z\"}",
+      "sha256": "62424C0F0A8E88AEE0E40333E96FE06311962EB32D3724002E2F3EE39BE440A8"
+    }
+  },
+  "publicExposureForbiddenFields": [
+    "task_id",
+    "attempt_no",
+    "owner_id",
+    "lease_token",
+    "fencing_token",
+    "lease_expires_at",
+    "step_key",
+    "event_sequence_no",
+    "recovery_case_id",
+    "recovery_generation",
+    "recovery_fencing_token"
+  ]
+}
+

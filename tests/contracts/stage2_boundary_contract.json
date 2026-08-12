@@ -1,0 +1,106 @@
+{
+  "assetVersion": 1,
+  "stage": "2-0",
+  "frozenAt": "2026-08-12",
+  "publicContractChanged": false,
+  "callbackHistory": {
+    "currentWriter": "app/services/utils/callback_client.py::save_callback_history_payload",
+    "targetWriter": "app/infrastructure/observability/callback_history.py",
+    "currentConsumers": [
+      "app/modules/analysis/adapters/callback_guard.py",
+      "app/modules/report/adapters/callback_guard.py",
+      "app/modules/weaponry/adapters/callback_guard.py",
+      "scripts/mock_callback_server.py"
+    ],
+    "debugReader": "app/modules/debug/adapters/callback_history.py::FileCallbackHistoryReadAdapter",
+    "defaultRelativePath": "callback",
+    "semantics": {
+      "bestEffort": true,
+      "appendOnlyNoOverwrite": true,
+      "authoritativeForDelivery": false,
+      "authoritativeForRetry": false,
+      "authoritativeForTaskRecovery": false,
+      "authoritativeForLatestWins": false,
+      "writeFailureChangesBusinessOutcome": false,
+      "automaticTtlEnabled": false,
+      "payloadOrFullPathLoggingForbidden": true
+    },
+    "genericPostCallbackProductionConsumers": []
+  },
+  "knowledgeDatabase": {
+    "currentWriter": "app/services/core/database.py::DatabaseService",
+    "targetWriter": "stage3a_knowledge_repository",
+    "stage2PhysicalMoveForbidden": true,
+    "newStage2DirectDependenciesForbidden": true,
+    "currentDirectDependencies": [
+      "app/container.py",
+      "app/integrations/anythingllm/factory.py",
+      "app/integrations/anythingllm/knowledge_gateway.py",
+      "app/modules/chat/adapters/knowledge_documents.py",
+      "app/modules/debug/adapters/chat_snapshot.py",
+      "app/modules/debug/composition.py",
+      "app/modules/weaponry/adapters/knowledge_documents.py"
+    ],
+    "tables": {
+      "workspaces": ["id", "architecture_id", "workspace_slug"],
+      "documents": ["id", "file_name", "original_name", "ingested_file_name", "architecture_id", "anything_doc_id", "doc_path", "metadata_json"]
+    },
+    "constraints": [
+      "workspaces.architecture_id_unique",
+      "workspaces.workspace_slug_unique",
+      "documents.architecture_id_file_name_unique",
+      "documents.id_stable_for_reassign"
+    ],
+    "stage3aInputs": [
+      "Knowledge ports for workspace and document mapping",
+      "Reassign document_row_id coordination",
+      "Knowledge Index operation and collection facts",
+      "RAG resource lease facts",
+      "foreign key and transaction ordering",
+      "zero-downtime migration and rollback rules"
+    ]
+  },
+  "webAdapters": {
+    "root": "app/adapters/web",
+    "retainedAsTargetBoundary": true,
+    "wholeDirectoryMoveInStage2Forbidden": true,
+    "files": [
+      "app/adapters/web/README.md",
+      "app/adapters/web/__init__.py",
+      "app/adapters/web/chat_scope.py",
+      "app/adapters/web/flask/README.md",
+      "app/adapters/web/flask/__init__.py",
+      "app/adapters/web/flask/analysis_requests.py",
+      "app/adapters/web/flask/analysis_submission.py",
+      "app/adapters/web/flask/check_task_requests.py",
+      "app/adapters/web/flask/progress_connection.py",
+      "app/adapters/web/flask/progress_requests.py",
+      "app/adapters/web/flask/reassign_requests.py",
+      "app/adapters/web/flask/report_requests.py",
+      "app/adapters/web/flask/weaponry_requests.py",
+      "app/adapters/web/report_ids.py",
+      "app/adapters/web/weaponry_chat.py",
+      "app/adapters/web/weaponry_ids.py"
+    ],
+    "allowedResponsibilities": [
+      "framework_request_parsing",
+      "framework_connection_lifecycle",
+      "framework_independent_public_id_normalization",
+      "application_command_construction"
+    ],
+    "forbiddenImports": [
+      "sqlite3",
+      "app.services.llm_service.task_service",
+      "app.services.core.database",
+      "app.integrations.anythingllm"
+    ],
+    "forbiddenThreadConstructors": ["Thread", "threading.Thread"],
+    "forbiddenResponsibilities": [
+      "database_construction_or_sql",
+      "background_thread_construction",
+      "task_state_machine",
+      "supplier_http",
+      "public_contract_redefinition"
+    ]
+  }
+}

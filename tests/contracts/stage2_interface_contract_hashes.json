@@ -1,0 +1,53 @@
+{
+  "assetVersion": 1,
+  "frozenAt": "2026-08-12",
+  "contractRoot": "docs/接口文档",
+  "hashProfile": {
+    "algorithm": "SHA-256",
+    "encoding": "UTF-8",
+    "stripUtf8Bom": true,
+    "normalizeLineEndingsToLf": true,
+    "hexCase": "UPPER"
+  },
+  "publicContractChanged": false,
+  "forbiddenWithoutExplicitConfirmation": [
+    "add_or_remove_route",
+    "add_or_remove_request_parameter",
+    "add_or_remove_response_field",
+    "change_status_code",
+    "change_header_semantics",
+    "change_callback_semantics",
+    "change_sse_semantics",
+    "change_websocket_semantics"
+  ],
+  "files": [
+    {
+      "path": "docs/接口文档/README.md",
+      "canonicalSha256": "DCD013658BBC6896F6927639BB28BB9B7921B1D0CA566AE25B43D9B16234A12F"
+    },
+    {
+      "path": "docs/接口文档/分类节点变更.md",
+      "canonicalSha256": "1977EF243B047E5181D5D8F408C572D613902DEBDF0D9EA6EFD0F82BACC2145C"
+    },
+    {
+      "path": "docs/接口文档/文件处理和报告生成.md",
+      "canonicalSha256": "6F8F333E346A44FF09411C7D63C0EADB365343181C956A1EDCB7455C11710955"
+    },
+    {
+      "path": "docs/接口文档/文件对话.md",
+      "canonicalSha256": "BF59EC7670FA3383380129C51ABABF8156184C0545BA9F6506E5E934A7674342"
+    },
+    {
+      "path": "docs/接口文档/文件对话新增接口.md",
+      "canonicalSha256": "699DFBD5E6D218CD1BBE3BCC4975FAAFC3C71959EAF6CAEA627604236F9C39C6"
+    },
+    {
+      "path": "docs/接口文档/知识谱系对话.md",
+      "canonicalSha256": "215945948AB30EFAD292053B82A0F232D6FB6A2C2842529875E198F05D1E482F"
+    },
+    {
+      "path": "docs/接口文档/知识谱系解析.md",
+      "canonicalSha256": "6FFA41D65C194CA552E2BBBA9D911AE8FCA38687EC7AC98D0F9228064F7C4D17"
+    }
+  ]
+}

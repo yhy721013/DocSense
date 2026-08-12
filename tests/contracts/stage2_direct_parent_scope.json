@@ -1,0 +1,50 @@
+{
+  "assetVersion": 1,
+  "stage": "2-0",
+  "frozenAt": "2026-08-12",
+  "specialtyPlan": "docs/重构记录/260804-知识谱系解析直接父节点文件范围实施计划.md",
+  "status": "blocked_by_own_stage0_confirmation_gate",
+  "blocksStage2TaskKernel": false,
+  "publicContractConfirmationRequired": true,
+  "publicContractDocuments": [
+    "docs/接口文档/README.md",
+    "docs/接口文档/知识谱系解析.md"
+  ],
+  "confirmedScope": {
+    "targetRoute": "POST /llm/weaponry",
+    "onlyEmptyOrMissingFilePathListMayExpand": true,
+    "explicitNonEmptyFilePathListRemainsExact": true,
+    "architectureIdIsKnowledgeStorageCategoryId": true,
+    "analysisValidatedParentIdIsOnlyAllowedRelationSource": true,
+    "pathOrPathNameInferenceForbidden": true,
+    "newPublicFieldsForbidden": true
+  },
+  "unresolvedDecisions": [
+    "whether_compatibility_default_tree_may_publish_parent_relations",
+    "same_node_conflicting_parent_admission_and_manual_resolution",
+    "public_http_status_and_existing_error_body_for_unknown_conflict_or_corruption",
+    "enablement_coverage_backfill_sources_and_threshold",
+    "relation_revision_scope_source_selection_and_append_event_requirement"
+  ],
+  "reservedForSpecialtyOnly": {
+    "weaponryInputSchemaVersion": 3,
+    "environmentKey": "DOCSENSE_WEAPONRY_INCLUDE_DIRECT_PARENT_DOCUMENTS",
+    "schemaTables": [
+      "architecture_parent_relations",
+      "architecture_relation_revisions",
+      "architecture_relation_events"
+    ],
+    "inputFields": [
+      "resolution_policy",
+      "resolved_architecture_ids",
+      "catalog_relation_revision"
+    ]
+  },
+  "stage2KernelMustPreserve": {
+    "weaponryInputSchemaVersion": 2,
+    "currentCategoryOnlySemanticsForEmptyFilePathList": true,
+    "immutableDocumentScopeSnapshot": true,
+    "genericTaskAuthorityAndStepRecoveryMayBeAdded": true,
+    "parentCatalogOrScopeExpansionMayBeAdded": false
+  }
+}

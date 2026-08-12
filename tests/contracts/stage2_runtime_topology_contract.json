@@ -1,0 +1,200 @@
+{
+  "assetVersion": 1,
+  "frozenAt": "2026-08-12",
+  "scope": "stage-2-0-internal-design-gate",
+  "runtimeImplemented": false,
+  "publicContractChanged": false,
+  "executorTopology": {
+    "kernelImplementation": "app/modules/tasks/adapters/local_executor.py:LocalTaskExecutor",
+    "sharedRuntime": "app/modules/tasks/application/execution_runtime.py:TaskExecutionRuntime",
+    "compositionRoot": "app/container.py",
+    "instances": [
+      {"name": "ReportExecutor", "taskType": "report", "workerCountKey": "DOCSENSE_TASK_REPORT_WORKER_COUNT", "runner": "RunReportTask", "futureQueueRoute": "report"},
+      {"name": "WeaponryExecutor", "taskType": "weaponry", "workerCountKey": "DOCSENSE_TASK_WEAPONRY_WORKER_COUNT", "runner": "RunWeaponryTask", "futureQueueRoute": "weaponry"},
+      {"name": "AnalysisExecutor", "taskType": "analysis", "workerCountKey": "DOCSENSE_TASK_ANALYSIS_WORKER_COUNT", "runner": "RunAnalysisTask", "futureQueueRoute": "analysis"}
+    ],
+    "rules": {
+      "oneKernelThreeInstances": true,
+      "instanceScansOnlyOwnTaskType": true,
+      "businessDispatcherOwnsSchedulingAlgorithm": false,
+      "eventWakeupIsLossyHint": true,
+      "startupAndPeriodicScanAreRecoveryTruth": true,
+      "acceptedIdsCachedInMemory": false,
+      "inflightTaskIdsBoundedByWorkerCount": true,
+      "oneCoalescedWakeupPerInstance": true,
+      "poisonCooldownPersisted": true,
+      "crossBusinessStrictFifoPromised": false,
+      "businessDispatchSequencePreserved": true,
+      "analysisBatchRunnableGatePreserved": true
+    },
+    "fairCapacity": {
+      "implementation": "app/modules/tasks/adapters/fair_capacity.py",
+      "algorithm": "strict_round_robin_over_nonempty_business_queues_v1",
+      "businessOrder": ["report", "weaponry", "analysis"],
+      "capacityKey": "DOCSENSE_TASK_HEAVY_CONCURRENCY",
+      "initialCapacity": 1,
+      "defaultWeight": 1,
+      "maxConsecutiveGrantsWhenAnotherBusinessWaits": 1,
+      "starvationBound": "在三个业务持续有资格等待且许可持续释放时，每个业务至多跨过另外两个 grant；不承诺绝对等待时长或跨业务完成顺序",
+      "boundedWaitersPerBusiness": "worker_count",
+      "cancelAndStopInterruptible": true,
+      "permitReleaseInFinally": true,
+      "capacityClaim": "single_instance_fake_only_until_real_provider_validation"
+    },
+    "limiterLayers": [
+      {"name": "business_worker_slot", "scope": "per_business", "covers": ["runner_thread"], "fairAcrossBusinesses": false},
+      {"name": "shared_heavy_business", "scope": "report+weaponry+analysis", "covers": ["anythingllm_ingestion", "model_call", "document_processing"], "fairAcrossBusinesses": true},
+      {"name": "anythingllm_ingestion", "scope": "provider_operation", "covers": ["upload", "embedding", "workspace_binding"], "fairAcrossBusinesses": false},
+      {"name": "model_call", "scope": "provider_operation", "covers": ["rag_query", "extraction", "translation_model"], "fairAcrossBusinesses": false},
+      {"name": "document_processing", "scope": "shared_capability", "covers": ["converter", "browser", "mineru", "ocr"], "fairAcrossBusinesses": false},
+      {"name": "callback_delivery", "scope": "independent_terminal_delivery", "covers": ["callback_http"], "fairAcrossBusinesses": false},
+      {"name": "resource_maintenance", "scope": "independent_maintenance", "covers": ["external_delete", "resource_probe", "controlled_compensation"], "fairAcrossBusinesses": false}
+    ],
+    "permitProtocol": {
+      "heavyAndOperationPermitGrantedAtomically": true,
+      "nestedBlockingPermitWaitForbidden": true,
+      "databaseTransactionHeldWhileWaiting": false,
+      "callbackConsumesBusinessHeavyPermit": false,
+      "maintenanceConsumesBusinessWorkerSlot": false,
+      "providerSpecificLimiterStillAppliesToMaintenance": true
+    },
+    "maintenance": {
+      "implementation": "LocalMaintenanceScheduler",
+      "periodicJobs": ["task_reaper", "callback_guard_sweep", "report_resource_recovery", "weaponry_resource_recovery", "analysis_resource_recovery"],
+      "sharesBusinessSchedulingLoop": false,
+      "eventWakeupIsLossyHint": true,
+      "persistentScanRequired": true
+    },
+    "readinessIsolation": {
+      "oneBusinessFailureBlocksOtherTaskTypes": false,
+      "controlDatabaseFailureBlocksAllNewClaims": true,
+      "clockAnomalyBlocksAllNewClaims": true,
+      "clockAnomalyBlocksNewExternalSteps": true
+    }
+  },
+  "unitOfWork": {
+    "infrastructure": {
+      "connectionFactory": "SQLiteConnectionFactory",
+      "transactionManager": "SQLiteTransactionManager",
+      "beginMode": "BEGIN IMMEDIATE",
+      "responsibilities": ["connection_create", "schema_identity_check", "busy_locked_classification", "commit", "rollback", "close"],
+      "knowsBusinessSemantics": false
+    },
+    "rules": {
+      "storesShareOneConnectionPerUnitOfWork": true,
+      "storeMayCommit": false,
+      "storeMayRollback": false,
+      "storeMayCloseConnection": false,
+      "applicationMustCommitExplicitly": true,
+      "normalExitWithoutCommitRollsBack": true,
+      "exceptionOrCancellationRollsBack": true,
+      "nestedUnitOfWorkAllowed": false,
+      "businessSavepointAllowed": false,
+      "connectionSharedAcrossThreads": false,
+      "writeOutsideExplicitUnitOfWorkAllowed": false,
+      "readOnlyQueryMayUseShortIndependentConnection": true,
+      "staleReadGrantsWriteAuthority": false,
+      "networkInsideTransactionAllowed": false,
+      "modelCallInsideTransactionAllowed": false,
+      "fileConversionInsideTransactionAllowed": false,
+      "objectDeletionInsideTransactionAllowed": false,
+      "blockingPermitWaitInsideTransactionAllowed": false,
+      "hiddenStoreRetryAllowed": false,
+      "transactionManagerReplaysCallerLogic": false,
+      "legacyFacadeDelegationDirection": "legacy_to_new_only"
+    },
+    "atomicCases": [
+      {"name": "admission", "facts": ["active_task_and_callback_conflict_check", "input_execution", "latest_projection", "accepted_event", "analysis_batch_all_or_nothing"], "outside": ["coalesced_wakeup"]},
+      {"name": "claim", "facts": ["runnable_latest_batch_recheck", "task_attempt", "fencing_increment", "current_attempt", "task_running", "claimed_event"], "outside": ["start_heartbeat_supervisor", "invoke_business_workflow"]},
+      {"name": "start", "facts": ["authority_and_lease_recheck", "attempt_running", "started_event"], "outside": ["create_task_directory", "begin_first_step"]},
+      {"name": "heartbeat", "facts": ["authority_conditional_lease_renewal", "sampled_heartbeat_event"], "outside": []},
+      {"name": "begin_external_step", "facts": ["authority", "step_intent", "step_attempt", "business_resource_or_external_operation_intent", "event"], "outside": ["external_io"]},
+      {"name": "complete_step", "facts": ["authority", "step_result", "checkpoint", "external_reference", "business_resource_or_audit_fact", "event"], "outside": ["next_business_step"]},
+      {"name": "progress", "facts": ["authority", "task_latest_public_projection", "event"], "outside": ["publish_process_local_progress"]},
+      {"name": "business_terminal", "facts": ["authority", "task_and_attempt_terminal", "latest_public_projection", "result_reference", "event", "callback_eligibility_or_guard_fact"], "outside": ["callback_http", "resource_cleanup"]},
+      {"name": "reaper_classify", "facts": ["expired_authority_recheck", "old_attempt_convergence", "task_recovery_or_accepted_or_stale", "recovery_case", "event"], "outside": ["business_probe_or_compensation"]},
+      {"name": "recovery_claim", "facts": ["case_generation_state_recheck", "recovery_lease", "recovery_fencing", "event"], "outside": ["read_only_probe", "controlled_compensation"]},
+      {"name": "recovery_observation", "facts": ["recovery_fencing_recheck", "append_observation", "event"], "outside": ["pure_recovery_policy"]},
+      {"name": "recovery_decision", "facts": ["task_row_version", "current_case", "source_attempt", "recovery_fencing", "append_decision", "task_state", "retry_checkpoint", "event"], "outside": ["local_wakeup"]}
+    ]
+  },
+  "clockAndLease": {
+    "clockPort": "ClockPort.now_utc",
+    "persistedFormat": "UTC RFC3339 with exactly six fractional digits and Z suffix",
+    "persistedRegex": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+    "naiveDatetimeAllowed": false,
+    "localTimezonePersistedAllowed": false,
+    "repositoryStrictlyParsesTime": true,
+    "fakeClockRequiredForLeaseTests": true,
+    "realSleepUsedToProveLease": false,
+    "monotonicUse": ["process_wait", "timeout_budget", "wall_clock_anomaly_detection"],
+    "monotonicPersisted": false,
+    "clockAnomaly": {
+      "thresholdKey": "DOCSENSE_TASK_MAX_CLOCK_JITTER_SECONDS",
+      "pauseNewClaims": true,
+      "pauseReaper": true,
+      "blockNewExternalSteps": true,
+      "readiness": "degraded",
+      "assumeLeaseExpired": false,
+      "logLevel": "CRITICAL",
+      "logSensitiveValues": false
+    },
+    "owner": {
+      "instanceStartId": "UUID generated once per process start",
+      "ownerIdFormat": "{instance_start_id}/{pid}/{executor_name}/{worker_slot}",
+      "ownerIdIsAuthority": false,
+      "pidIsDiagnosticOnly": true,
+      "completeAuthorityFields": ["task_id", "attempt_no", "lease_token", "fencing_token", "lease_expires_at"],
+      "leaseTokenHighEntropy": true,
+      "leaseTokenLogged": false,
+      "fencingStrictlyMonotonicPerTask": true
+    },
+    "defaults": {
+      "heartbeat": {"key": "DOCSENSE_TASK_HEARTBEAT_INTERVAL_SECONDS", "seconds": 5},
+      "sqliteBusy": {"key": "DOCSENSE_TASK_SQLITE_BUSY_BUDGET_SECONDS", "seconds": 2},
+      "clockJitter": {"key": "DOCSENSE_TASK_MAX_CLOCK_JITTER_SECONDS", "seconds": 3},
+      "taskLease": {"key": "DOCSENSE_TASK_LEASE_DURATION_SECONDS", "seconds": 30},
+      "recoveryLease": {"key": "DOCSENSE_TASK_RECOVERY_LEASE_DURATION_SECONDS", "seconds": 30},
+      "reaperScan": {"key": "DOCSENSE_TASK_REAPER_SCAN_INTERVAL_SECONDS", "seconds": 5},
+      "stopGrace": {"key": "DOCSENSE_TASK_STOP_GRACE_SECONDS", "seconds": 10}
+    },
+    "inequalities": [
+      "task_lease >= 3 * heartbeat + 2 * sqlite_busy + clock_jitter",
+      "recovery_lease >= 3 * heartbeat + 2 * sqlite_busy + clock_jitter",
+      "reaper_scan <= task_lease",
+      "reaper_scan <= recovery_lease",
+      "stop_grace >= heartbeat + sqlite_busy"
+    ],
+    "invalidCombinationFailsBeforeBackgroundThreads": true,
+    "taskAndRecoveryLeaseNamespacesSeparate": true
+  },
+  "admissionAndUnlock": {
+    "publicStateExpansion": false,
+    "publicParameterChange": false,
+    "globalRules": {
+      "timeoutAloneUnlocks": false,
+      "manualSqlUnlockAllowed": false,
+      "checkTaskMayRestartBusinessStep": false,
+      "unknownProjectedAsFakePublicFailure": false,
+      "unrelatedDifferentBusinessKeyBlockedByUnknown": false,
+      "terminalCleanupUnknownBlocksNewSubmission": false,
+      "unlockRequiresPersistedRecoveryDecision": true,
+      "oldUnknownHistoryPreservedAfterUnlock": true
+    },
+    "matrix": [
+      {"scope": "report_core_unknown", "sameKeyAdmission": "existing_active_conflict_409", "differentKeyAdmission": "allowed", "publicProjection": "retain_existing_active_status_progress_message", "blockedEffects": ["business_step_replay", "new_same_key_execution"], "unlockEvidence": ["unique_effect_confirmed", "controlled_compensation_confirmed", "definitely_not_sent_confirmed"], "unlockDecision": ["finalize_from_checkpoint", "retry_authorized", "mark_stale"]},
+      {"scope": "report_terminal_cleanup_unknown", "sameKeyAdmission": "allowed_by_business_task_rule", "differentKeyAdmission": "allowed", "publicProjection": "terminal_unchanged", "blockedEffects": ["blind_resource_delete"], "unlockEvidence": ["resource_owner_and_delete_result_confirmed"], "unlockDecision": ["maintenance_complete", "maintenance_quarantine"]},
+      {"scope": "weaponry_core_unknown", "sameKeyAdmission": "existing_processing_conflict", "differentKeyAdmission": "allowed", "publicProjection": "retain_existing_processing_projection", "blockedEffects": ["business_step_replay", "same_name_workspace_reuse", "ownerless_delete"], "unlockEvidence": ["stable_remote_id_plus_task_owner_plus_fencing", "controlled_compensation_confirmed", "definitely_not_sent_confirmed"], "unlockDecision": ["finalize_from_checkpoint", "retry_authorized", "mark_stale"]},
+      {"scope": "weaponry_terminal_cleanup_unknown", "sameKeyAdmission": "allowed_by_business_task_rule", "differentKeyAdmission": "allowed", "publicProjection": "terminal_unchanged", "blockedEffects": ["blind_resource_delete", "permanent_knowledge_workspace_delete"], "unlockEvidence": ["task_scoped_resource_cleanup_observation"], "unlockDecision": ["maintenance_complete", "maintenance_quarantine"]},
+      {"scope": "analysis_core_unknown", "sameKeyAdmission": "existing_active_conflict", "differentKeyAdmission": "allowed_unless_same_batch_predecessor_gate", "publicProjection": "retain_existing_active_status_progress_message", "blockedEffects": ["same_file_new_execution", "later_task_in_same_batch", "whole_batch_implicit_supersede"], "unlockEvidence": ["per_task_unique_effect_confirmed", "per_task_controlled_compensation", "per_task_definitely_not_sent", "per_task_mark_stale_evidence"], "unlockDecision": ["finalize_from_checkpoint", "retry_authorized", "mark_stale"]},
+      {"scope": "analysis_terminal_cleanup_unknown", "sameKeyAdmission": "allowed_by_business_task_rule", "differentKeyAdmission": "allowed", "publicProjection": "terminal_unchanged", "blockedEffects": ["blind_rag_close_or_delete"], "unlockEvidence": ["resource_close_observation_and_audit_confirmed"], "unlockDecision": ["maintenance_complete", "maintenance_quarantine"]},
+      {"scope": "callback_delivery_unknown", "sameKeyAdmission": "existing_callback_guard_rule", "differentKeyAdmission": "allowed", "publicProjection": "business_terminal_unchanged", "blockedEffects": ["automatic_callback_resend", "business_step_replay"], "unlockEvidence": ["existing_check_task_or_internal_recovery_authorization"], "unlockDecision": ["callback_guard_complete", "explicit_unknown_redelivery_result", "callback_guard_manual_release"]}
+    ]
+  },
+  "evidenceLimits": [
+    "offline_fake_fairness_does_not_prove_provider_capacity",
+    "windows_sqlite_single_instance_does_not_prove_multi_instance_correctness",
+    "event_wakeup_does_not_replace_persistent_scan",
+    "initial_heavy_capacity_one_is_a_conservative_default_not_a_production_sla"
+  ]
+}

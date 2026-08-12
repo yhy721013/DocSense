@@ -1,0 +1,134 @@
+{
+  "assetVersion": 1,
+  "stage": "2-0",
+  "frozenAt": "2026-08-12",
+  "publicContractChanged": false,
+  "globalRules": {
+    "realEnvFileMayBeModifiedByApplication": false,
+    "invalidValueFailsBeforeBackgroundThreads": true,
+    "logSecretsOrRawEnvironmentValues": false,
+    "logFullPathsOrEndpoints": false,
+    "allowedLogMaterial": ["mode", "validated_numeric_value", "boolean_gate", "aggregate_config_sha256", "path_sha256"],
+    "existingBusinessKeysMayBeRenamed": false
+  },
+  "groups": [
+    {
+      "name": "task_runtime_planned",
+      "currentOwner": "stage2_design_asset",
+      "targetOwner": "app/modules/tasks/adapters/runtime_config.py::TaskRuntimeConfig",
+      "envExampleStatus": "planned_add_with_implementation",
+      "logPolicy": "记录全部校验后数值、模式和聚合 fingerprint；数据库路径只记录摘要",
+      "entries": [
+        {"key": "DOCSENSE_TASK_CONTROL_DB_PATH", "default": "${DOCSENSE_RUNTIME_DIR}/db/task-control-v2.sqlite3", "validation": "解析为绝对路径且不得与旧 Task DB 相同", "plannedEnvExampleLine": "# DOCSENSE_TASK_CONTROL_DB_PATH=${DOCSENSE_RUNTIME_DIR}/db/task-control-v2.sqlite3"},
+        {"key": "DOCSENSE_TASK_REPORT_WORKER_COUNT", "default": "1", "validation": "正整数", "plannedEnvExampleLine": "DOCSENSE_TASK_REPORT_WORKER_COUNT=1"},
+        {"key": "DOCSENSE_TASK_WEAPONRY_WORKER_COUNT", "default": "1", "validation": "正整数", "plannedEnvExampleLine": "DOCSENSE_TASK_WEAPONRY_WORKER_COUNT=1"},
+        {"key": "DOCSENSE_TASK_ANALYSIS_WORKER_COUNT", "default": "1", "validation": "正整数；不得放宽 Analysis 同批顺序", "plannedEnvExampleLine": "DOCSENSE_TASK_ANALYSIS_WORKER_COUNT=1"},
+        {"key": "DOCSENSE_TASK_HEAVY_CONCURRENCY", "default": "1", "validation": "正整数；初始阶段必须为 1", "plannedEnvExampleLine": "DOCSENSE_TASK_HEAVY_CONCURRENCY=1"},
+        {"key": "DOCSENSE_TASK_HEARTBEAT_INTERVAL_SECONDS", "default": "5", "validation": "正有限数并满足租约不等式", "plannedEnvExampleLine": "DOCSENSE_TASK_HEARTBEAT_INTERVAL_SECONDS=5"},
+        {"key": "DOCSENSE_TASK_LEASE_DURATION_SECONDS", "default": "30", "validation": "正有限数；lease >= 3*heartbeat + 2*busy + jitter", "plannedEnvExampleLine": "DOCSENSE_TASK_LEASE_DURATION_SECONDS=30"},
+        {"key": "DOCSENSE_TASK_RECOVERY_LEASE_DURATION_SECONDS", "default": "30", "validation": "正有限数；recovery lease >= 3*heartbeat + 2*busy + jitter", "plannedEnvExampleLine": "DOCSENSE_TASK_RECOVERY_LEASE_DURATION_SECONDS=30"},
+        {"key": "DOCSENSE_TASK_SQLITE_BUSY_BUDGET_SECONDS", "default": "2", "validation": "正有限数并参与租约/stop 不等式", "plannedEnvExampleLine": "DOCSENSE_TASK_SQLITE_BUSY_BUDGET_SECONDS=2"},
+        {"key": "DOCSENSE_TASK_MAX_CLOCK_JITTER_SECONDS", "default": "3", "validation": "非负有限数并参与租约不等式", "plannedEnvExampleLine": "DOCSENSE_TASK_MAX_CLOCK_JITTER_SECONDS=3"},
+        {"key": "DOCSENSE_TASK_EXECUTOR_SCAN_INTERVAL_SECONDS", "default": "1", "validation": "正有限数", "plannedEnvExampleLine": "DOCSENSE_TASK_EXECUTOR_SCAN_INTERVAL_SECONDS=1"},
+        {"key": "DOCSENSE_TASK_REAPER_SCAN_INTERVAL_SECONDS", "default": "5", "validation": "正有限数且不大于 Task lease", "plannedEnvExampleLine": "DOCSENSE_TASK_REAPER_SCAN_INTERVAL_SECONDS=5"},
+        {"key": "DOCSENSE_TASK_STOP_GRACE_SECONDS", "default": "10", "validation": "正有限数；stop >= heartbeat + busy", "plannedEnvExampleLine": "DOCSENSE_TASK_STOP_GRACE_SECONDS=10"}
+      ]
+    },
+    {
+      "name": "report_runtime_current",
+      "currentOwner": "app/services/core/config.py::ReportInfrastructureConfig",
+      "targetOwner": "app/modules/report/adapters/runtime_config.py::ReportRuntimeConfig",
+      "envExampleStatus": "present",
+      "logPolicy": "记录校验后模式/数值和聚合 fingerprint，不记录环境原值",
+      "entries": [
+        {"key": "DOCSENSE_REPORT_RUNTIME_MODE", "default": "single_instance", "validation": "当前只允许 single_instance", "envExampleLine": "DOCSENSE_REPORT_RUNTIME_MODE=single_instance"},
+        {"key": "DOCSENSE_REPORT_SCAN_INTERVAL_SECONDS", "default": "1", "validation": "正有限数", "envExampleLine": "DOCSENSE_REPORT_SCAN_INTERVAL_SECONDS=1"},
+        {"key": "DOCSENSE_REPORT_ACCEPTED_BATCH_SIZE", "default": "50", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_REPORT_ACCEPTED_BATCH_SIZE=50"},
+        {"key": "DOCSENSE_REPORT_DISPATCH_FAILURE_RETRY_SECONDS", "default": "30", "validation": "正有限数", "envExampleLine": "DOCSENSE_REPORT_DISPATCH_FAILURE_RETRY_SECONDS=30"},
+        {"key": "DOCSENSE_REPORT_RESOURCE_SWEEP_INTERVAL_SECONDS", "default": "30", "validation": "正有限数", "envExampleLine": "DOCSENSE_REPORT_RESOURCE_SWEEP_INTERVAL_SECONDS=30"},
+        {"key": "DOCSENSE_REPORT_RESOURCE_SWEEP_LIMIT", "default": "50", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_REPORT_RESOURCE_SWEEP_LIMIT=50"},
+        {"key": "DOCSENSE_REPORT_RUNNING_SAMPLE_LIMIT", "default": "20", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_REPORT_RUNNING_SAMPLE_LIMIT=20"},
+        {"key": "DOCSENSE_REPORT_STOP_TIMEOUT_SECONDS", "default": "5", "validation": "正有限数", "envExampleLine": "DOCSENSE_REPORT_STOP_TIMEOUT_SECONDS=5"},
+        {"key": "DOCSENSE_REPORT_CLEANUP_HTTP_TIMEOUT_SECONDS", "default": "60", "validation": "正有限数", "envExampleLine": "DOCSENSE_REPORT_CLEANUP_HTTP_TIMEOUT_SECONDS=60"},
+        {"key": "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS", "default": "130", "validation": "正有限数且 >= required_http_lease_seconds(cleanup timeout)", "envExampleLine": "DOCSENSE_REPORT_CLEANUP_LEASE_SECONDS=130"},
+        {"key": "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES", "default": "536870912", "validation": "1 字节..10 TiB 整数", "envExampleLine": "DOCSENSE_REPORT_MAX_DOWNLOAD_BYTES=536870912"}
+      ]
+    },
+    {
+      "name": "analysis_runtime_and_execution_profile_current",
+      "currentOwner": "app/services/core/config.py::AnalysisInfrastructureConfig_and_AnalysisClassificationConfig",
+      "targetOwner": "app/modules/analysis/adapters/runtime_config.py",
+      "envExampleStatus": "present",
+      "logPolicy": "记录校验后模式/数值和聚合 fingerprint，不记录环境原值",
+      "entries": [
+        {"key": "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE", "default": "topk_two_stage", "validation": "topk_two_stage|topk_single|legacy", "envExampleLine": "DOCSENSE_ANALYSIS_CLASSIFICATION_MODE=topk_two_stage"},
+        {"key": "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE", "default": "scope_guard", "validation": "scope_guard|legacy", "envExampleLine": "DOCSENSE_ANALYSIS_FILENAME_CONSTRAINT_MODE=scope_guard"},
+        {"key": "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE", "default": "scope_guard", "validation": "scope_guard|legacy", "envExampleLine": "DOCSENSE_ANALYSIS_DATA_STANDARD_MODE=scope_guard"},
+        {"key": "DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE", "default": "enforce", "validation": "off|shadow|enforce", "envExampleLine": "DOCSENSE_ANALYSIS_IDENTITY_RESELECT_MODE=enforce"},
+        {"key": "DOCSENSE_ANALYSIS_RUNTIME_MODE", "default": "single_instance", "validation": "当前只允许 single_instance", "envExampleLine": "DOCSENSE_ANALYSIS_RUNTIME_MODE=single_instance"},
+        {"key": "DOCSENSE_ANALYSIS_DISPATCH_SCAN_INTERVAL_SECONDS", "default": "1", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_DISPATCH_SCAN_INTERVAL_SECONDS=1"},
+        {"key": "DOCSENSE_ANALYSIS_DISPATCH_BATCH_SIZE", "default": "50", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_ANALYSIS_DISPATCH_BATCH_SIZE=50"},
+        {"key": "DOCSENSE_ANALYSIS_DISPATCH_RETRY_BASE_SECONDS", "default": "5", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_DISPATCH_RETRY_BASE_SECONDS=5"},
+        {"key": "DOCSENSE_ANALYSIS_DISPATCH_RETRY_MAX_SECONDS", "default": "300", "validation": "大于 0 且不超过 604800 的有限数，并且 >= retry base", "envExampleLine": "DOCSENSE_ANALYSIS_DISPATCH_RETRY_MAX_SECONDS=300"},
+        {"key": "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_INTERVAL_SECONDS", "default": "30", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_INTERVAL_SECONDS=30"},
+        {"key": "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE", "default": "50", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_ANALYSIS_RESOURCE_SWEEP_BATCH_SIZE=50"},
+        {"key": "DOCSENSE_ANALYSIS_RESOURCE_CLOSE_RUNNING_GRACE_SECONDS", "default": "300", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_RESOURCE_CLOSE_RUNNING_GRACE_SECONDS=300"},
+        {"key": "DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS", "default": "30", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_RUNNING_ALERT_SECONDS=30"},
+        {"key": "DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS", "default": "5", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS=5"},
+        {"key": "DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS", "default": "10", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS=10"},
+        {"key": "DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS", "default": "30", "validation": "正有限数且 > required_http_lease_seconds(callback timeout)", "envExampleLine": "DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS=30"}
+      ]
+    },
+    {
+      "name": "weaponry_runtime_current",
+      "currentOwner": "app/modules/weaponry/adapters/infrastructure_config.py::WeaponryInfrastructureConfig",
+      "targetOwner": "app/modules/weaponry/adapters/runtime_config.py::WeaponryRuntimeConfig",
+      "envExampleStatus": "present_or_explicit_compat_comment",
+      "logPolicy": "数值/布尔门禁可记录；路径、workspace 和能力标识只进入聚合 fingerprint，不记录原值",
+      "entries": [
+        {"key": "WEAPONRY_ANALYSE_MODE", "default": "absent", "validation": "兼容期如存在只允许 2；1 或其他值 fail-fast；2-5 删除兼容读取", "envExampleLine": "# WEAPONRY_ANALYSE_MODE 已删除：新链固定 file_aggregate_v1，不再提供运行时模式选择。"},
+        {"key": "DOCSENSE_WEAPONRY_RUNTIME_MODE", "default": "single_instance", "validation": "当前只允许 single_instance", "envExampleLine": "DOCSENSE_WEAPONRY_RUNTIME_MODE=single_instance"},
+        {"key": "DOCSENSE_WEAPONRY_SCAN_INTERVAL_SECONDS", "default": "1", "validation": "正有限数", "envExampleLine": "DOCSENSE_WEAPONRY_SCAN_INTERVAL_SECONDS=1"},
+        {"key": "DOCSENSE_WEAPONRY_ACCEPTED_BATCH_SIZE", "default": "50", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_WEAPONRY_ACCEPTED_BATCH_SIZE=50"},
+        {"key": "DOCSENSE_WEAPONRY_DISPATCH_FAILURE_RETRY_SECONDS", "default": "30", "validation": "正有限数", "envExampleLine": "DOCSENSE_WEAPONRY_DISPATCH_FAILURE_RETRY_SECONDS=30"},
+        {"key": "DOCSENSE_WEAPONRY_MAINTENANCE_INTERVAL_SECONDS", "default": "30", "validation": "正有限数", "envExampleLine": "DOCSENSE_WEAPONRY_MAINTENANCE_INTERVAL_SECONDS=30"},
+        {"key": "DOCSENSE_WEAPONRY_MAINTENANCE_LIMIT", "default": "50", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_WEAPONRY_MAINTENANCE_LIMIT=50"},
+        {"key": "DOCSENSE_WEAPONRY_RUNNING_SAMPLE_LIMIT", "default": "20", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_WEAPONRY_RUNNING_SAMPLE_LIMIT=20"},
+        {"key": "DOCSENSE_WEAPONRY_STOP_TIMEOUT_SECONDS", "default": "5", "validation": "正有限数", "envExampleLine": "DOCSENSE_WEAPONRY_STOP_TIMEOUT_SECONDS=5"},
+        {"key": "DOCSENSE_WEAPONRY_CLEANUP_HTTP_TIMEOUT_SECONDS", "default": "60", "validation": "正有限数", "envExampleLine": "DOCSENSE_WEAPONRY_CLEANUP_HTTP_TIMEOUT_SECONDS=60"},
+        {"key": "DOCSENSE_WEAPONRY_CLEANUP_LEASE_SECONDS", "default": "130", "validation": "正有限数且 >= required_http_lease_seconds(cleanup timeout)", "envExampleLine": "DOCSENSE_WEAPONRY_CLEANUP_LEASE_SECONDS=130"},
+        {"key": "DOCSENSE_WEAPONRY_PROVIDER_FINGERPRINT", "default": "required", "validation": "非空文本并与已装载能力相符", "envExampleLine": "# DOCSENSE_WEAPONRY_PROVIDER_FINGERPRINT=anythingllm-api-v1:<deployment-id>"},
+        {"key": "DOCSENSE_WEAPONRY_EMBEDDING_FINGERPRINT", "default": "required", "validation": "非空文本并与已装载能力相符", "envExampleLine": "# DOCSENSE_WEAPONRY_EMBEDDING_FINGERPRINT=<embedding-provider-and-model>"},
+        {"key": "DOCSENSE_WEAPONRY_DOCUMENT_PROCESSING_FINGERPRINT", "default": "required", "validation": "非空文本并与已装载能力相符", "envExampleLine": "# DOCSENSE_WEAPONRY_DOCUMENT_PROCESSING_FINGERPRINT=<document-processing-profile>"},
+        {"key": "DOCSENSE_WEAPONRY_EXTRACTION_MODEL_FINGERPRINT", "default": "required", "validation": "非空文本并与已装载能力相符", "envExampleLine": "# DOCSENSE_WEAPONRY_EXTRACTION_MODEL_FINGERPRINT=<extraction-provider-and-model>"},
+        {"key": "DOCSENSE_WEAPONRY_PRODUCTION_ATTESTATION_PATH", "default": "absent", "validation": "可选非空路径；生产 Gate 开启时证明必须有效", "envExampleLine": "# DOCSENSE_WEAPONRY_PRODUCTION_ATTESTATION_PATH=runtime/weaponry-production-attestation.json"},
+        {"key": "DOCSENSE_WEAPONRY_REQUIRE_PRODUCTION_GATE", "default": "false", "validation": "严格 bool", "envExampleLine": "DOCSENSE_WEAPONRY_REQUIRE_PRODUCTION_GATE=false"},
+        {"key": "DOCSENSE_WEAPONRY_QUERY_VERSION", "default": "field-semantic-v2", "validation": "必须等于已安装常量", "envExampleLine": "DOCSENSE_WEAPONRY_QUERY_VERSION=field-semantic-v2"},
+        {"key": "DOCSENSE_WEAPONRY_SCORE_SEMANTICS", "default": "higher-is-more-relevant-in-unit-interval", "validation": "必须等于已安装常量", "envExampleLine": "DOCSENSE_WEAPONRY_SCORE_SEMANTICS=higher-is-more-relevant-in-unit-interval"},
+        {"key": "DOCSENSE_WEAPONRY_SCORE_PROTOCOL", "default": "explicit-unit-score-or-stable-rank-v2", "validation": "必须等于已安装常量", "envExampleLine": "DOCSENSE_WEAPONRY_SCORE_PROTOCOL=explicit-unit-score-or-stable-rank-v2"},
+        {"key": "DOCSENSE_WEAPONRY_RANKING_STRATEGY", "default": "score-desc-or-rank-asc-stable-v2", "validation": "必须等于已安装常量", "envExampleLine": "DOCSENSE_WEAPONRY_RANKING_STRATEGY=score-desc-or-rank-asc-stable-v2"},
+        {"key": "DOCSENSE_WEAPONRY_REFERENCE_FILTER_STRATEGY", "default": "reference-signals-structured-table-v2", "validation": "必须等于已安装常量", "envExampleLine": "DOCSENSE_WEAPONRY_REFERENCE_FILTER_STRATEGY=reference-signals-structured-table-v2"},
+        {"key": "DOCSENSE_WEAPONRY_EXTRACTION_CONTEXT_STRATEGY", "default": "provided_evidence_model_v1", "validation": "必须等于已安装常量", "envExampleLine": "DOCSENSE_WEAPONRY_EXTRACTION_CONTEXT_STRATEGY=provided_evidence_model_v1"},
+        {"key": "DOCSENSE_WEAPONRY_INPUT_CANDIDATE_TOP_N", "default": "8", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_WEAPONRY_INPUT_CANDIDATE_TOP_N=8"},
+        {"key": "DOCSENSE_WEAPONRY_TABLE_CANDIDATE_TOP_N", "default": "16", "validation": "1..1000 整数", "envExampleLine": "DOCSENSE_WEAPONRY_TABLE_CANDIDATE_TOP_N=16"},
+        {"key": "DOCSENSE_WEAPONRY_MAX_TABLE_ROWS", "default": "100", "validation": "当前必须固定为 100", "envExampleLine": "DOCSENSE_WEAPONRY_MAX_TABLE_ROWS=100"},
+        {"key": "DOCSENSE_WEAPONRY_EXTRACTION_MAX_ATTEMPTS", "default": "2", "validation": "当前必须固定为 2", "envExampleLine": "DOCSENSE_WEAPONRY_EXTRACTION_MAX_ATTEMPTS=2"},
+        {"key": "WEAPONRY_TERMS_RULE_CONTEXT_ENABLED", "default": "false", "validation": "严格 bool；false 时不得读取术语专属键", "envExampleLine": "WEAPONRY_TERMS_RULE_CONTEXT_ENABLED=false"},
+        {"key": "WEAPONRY_TERMS_WORKSPACE_NAME", "default": "weaponry-terms-rules_when_enabled", "validation": "启用时非空；关闭时不得读取", "envExampleLine": "# WEAPONRY_TERMS_WORKSPACE_NAME=weaponry-terms-rules"},
+        {"key": "WEAPONRY_TERMS_DIR", "default": "terms_when_enabled", "validation": "启用时非空；关闭时不得读取", "envExampleLine": "# WEAPONRY_TERMS_DIR=terms"},
+        {"key": "DOCSENSE_WEAPONRY_TERMS_CANDIDATE_TOP_N", "default": "5_when_enabled", "validation": "启用时 1..1000 整数；关闭时为内部 0 且不得读取", "envExampleLine": "# DOCSENSE_WEAPONRY_TERMS_CANDIDATE_TOP_N=5"},
+        {"key": "DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS", "default": "1200_when_enabled", "validation": "启用时正整数；关闭时为内部 0 且不得读取", "envExampleLine": "# DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS=1200"}
+      ]
+    },
+    {
+      "name": "document_processing_owned_analysis_prefixed_compatibility",
+      "currentOwner": "app/services/core/config.py::OCRConfig",
+      "targetOwner": "document_processing_later_runtime_config_stage",
+      "envExampleStatus": "present",
+      "logPolicy": "记录枚举模式，不记录外部 API/路径",
+      "entries": [
+        {"key": "DOCSENSE_ANALYSIS_SCANNED_PDF_ENGINE", "default": "mineru", "validation": "mineru|ocr", "envExampleLine": "DOCSENSE_ANALYSIS_SCANNED_PDF_ENGINE=mineru"}
+      ]
+    }
+  ]
+}
