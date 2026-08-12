@@ -7,11 +7,11 @@
 | 编写日期 | 2026-07-15 |
 | 所属计划 | 总计划阶段 1～2、专项计划波次 1A～1B |
 | 文档层级 | L3 跨阶段内部契约预设计 |
-| 文档状态 | 阶段 1A 的 Task/Progress 最小契约、1B-1 check-task 可靠命令边界与 **1B-2 Progress 当前运行路径迁移**已于 2026-07-16 落地；后续状态、共享存储、可靠队列和跨实例通知待对应门禁处理 |
+| 文档状态 | 阶段 1A 的 Task/Progress 最小契约、1B-1 check-task 可靠命令边界与 **1B-2 Progress 当前运行路径迁移**已落地；本文保留阶段 1 历史设计依据。阶段 2 的状态机、Attempt/Step/Event、SQLite 物理策略、Reaper、Analysis 顺序与 Chat 关系已由 `260809-阶段2统一任务执行内核文件级实施设计.md` 取代，实施以新 L3 为准 |
 | 接口影响 | 内部 ID、状态、事件序号和消息版本均不对外暴露；已确认三类受理成功与 check-task 成功为空响应体、report 活动任务 409、check-task/Progress 严格 `params` 元素校验，以及 Progress 显式 action 错误后保持连接且无 ack；参数集合、错误字段结构、回调和 chat 契约不变 |
 | check-task 队列决策 | **2026-07-17 修订**：甲方规定保留请求内同步恢复；可靠命令、Outbox 与 callback Worker 作为后台兜底，不替换同步入口。两种触发源必须共用 expected TaskId、latest-wins、lease/fencing 和同一 Callback Guard |
 
-本文只定义阶段 1 开始拆分业务时必须稳定的最小任务、查询、回调恢复和进度契约。完整 MySQL DDL、租约、fencing、Outbox 和 RabbitMQ 消息实现在后续阶段另行设计。
+本文只定义阶段 1 开始拆分业务时必须稳定的最小任务、查询、回调恢复和进度契约。阶段 2 的 SQLite lease/fencing/checkpoint/Reaper 已另行形成 L3；完整 MySQL DDL、Outbox 和 RabbitMQ 消息仍在后续阶段设计。
 
 ---
 
@@ -145,7 +145,7 @@ TaskSnapshot
 
 ## 3. 内部状态预设计
 
-### 3.1 候选统一状态
+### 3.1 阶段 1 历史候选与阶段 2 修订
 
 ```text
 accepted → queued → leased → running → succeeded
@@ -155,17 +155,26 @@ accepted → queued → leased → running → succeeded
                                └──────→ outcome_unknown
 ```
 
-阶段 1 只要求 DTO 能表达状态，阶段 2 才实现完整迁移、租约和 fencing。
+上图是阶段 1 拆分时的历史候选，不能用于阶段 2 实施。新 L3 已将其修订为三套状态机：
+
+```text
+Task:    accepted → running → succeeded / failed / recovery_required / stale
+Attempt: leased → running → succeeded / failed / expired / abandoned
+Step:    pending → running → succeeded / failed / outcome_unknown / compensated
+```
+
+其中 `queued` 后置到 Outbox/消息派发，`leased` 属于 Task Attempt，`outcome_unknown` 首先属于
+Step/Callback Delivery；当前无已批准的通用任务取消合同，阶段 2 不新增 `cancelled`。
 
 ### 3.2 公开状态映射
 
 | 内部状态 | file | report | weaponry |
 | --- | --- | --- | --- |
-| accepted/queued | 保持当前批量/提交语义，通常为 `0` 或 `1` | `0` | `1` |
-| leased/running | `1` | `0` | `1` |
+| accepted | 保持当前批量/提交语义，通常为 `0` 或 `1` | `0` | `1` |
+| running | `1` | `0` | `1` |
 | succeeded | `2` | `1` | `2` |
 | failed | `3` | `2` | `3` |
-| cancelled/superseded/outcome_unknown | **无现成公开值，不得自行映射** | **无现成公开值，不得自行映射** | **无现成公开值，不得自行映射** |
+| recovery_required/stale/Step outcome_unknown | **无新公开值；使用既有业务 Presenter/投影规则** | **无新公开值；使用既有业务 Presenter/投影规则** | **无新公开值；使用既有业务 Presenter/投影规则** |
 
 最后一行若需要对调用方可见，必须停止并确认。内部可以保存这些状态，但 Presenter 只能按已确认的兼容策略输出。
 
@@ -179,7 +188,8 @@ accepted → queued → leased → running → succeeded
 - 终态不可被普通进度更新重新打开。
 - callback attempt 必须关联 task ID，不能误补发另一轮执行的结果。
 
-阶段 2 在此基础上增加 attempt、lease owner、lease expiry、fencing token 和版本条件。
+阶段 2 在此基础上增加完整 Task/attempt/owner/lease/fencing Authority、版本和到期条件；Callback
+仍使用独立 Delivery Guard，不因“写入保护”而并入 Task Attempt。
 
 ---
 
@@ -387,21 +397,21 @@ Redis 通知丢失不影响任务事实；客户端重新建立连接并发送�
 - 返回 `tasks` 数组，顺序对应输入。
 - 当前后台流程顺序处理，第一项公开状态为处理中，后续项处于尚未开始状态。
 
-未来队列化不能简单把所有文件无序并行消费。阶段 2 需要在以下内部方案中选择，但公开行为保持：
-
-- 父 Batch + 有序子 Task；或
-- 单一 Batch Coordinator 按 sequence_no 派发子任务。
-
-具体表结构和调度算法后置，阶段 1 先在输入快照中保留 batch ID、sequence no 和每个 task ID。
+未来队列化不能简单把所有文件无序并行消费。本文在阶段 1 时曾把“父 Batch + 有序子 Task”和
+“Coordinator 派发子任务”列为候选；阶段 2 L3 已作废该待选项并冻结为：每个文件保持独立 Task，
+不建无公开业务价值的父 Task；`batch_id/batch_sequence` 加持久 runnable 资格保证请求内顺序，
+Analysis Executor 只扫描满足前序门禁的 Task。前序 `recovery_required` 阻止后序，且不得未经逐 Task
+证据把整批隐式 supersede。公开行为保持不变。
 
 ---
 
 ## 8. chat 与统一任务的关系
 
-chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行替代。阶段 2 前需要在以下方向中完成工程评审：
+chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行替代。阶段 2 L3 已完成工程评审并冻结以下方向：
 
-- 推荐方向：ChatRun 保持 chat 领域事实；通用 Task 只跟踪可调度执行、attempt、租约和队列状态，并持有 chat run 引用。
-- 不推荐方向：把 chat 所有消息、终态和中断语义直接塞入通用 tasks 表。
+- 当前阶段：ChatRun 保持唯一 chat 领域事实，不写通用 Task。
+- 阶段 9：需要队列化时，通用 Task 只跟踪可调度执行、attempt、租约和队列状态，并持有 chat run 引用。
+- 禁止方向：把 chat 消息、流终态和中断语义复制或直接塞入通用 tasks 表。
 
 任何选择都不能泄露内部 task/run ID，也不能改变 `/llm/chat*` 契约。
 
@@ -412,15 +422,19 @@ chat 已有独立 `ChatRun` 领域状态机，不应被通用任务状态强行�
 | ID | 问题 | 当前处理 |
 | --- | --- | --- |
 | TASK-01 | report 活动任务重复提交如何处理 | **已确认**：HTTP 409 拒绝；波次 1C 使用事务条件/唯一约束实现，不创建新任务或执行器 |
-| TASK-02 | cancelled/outcome_unknown 如何映射公开状态 | 当前无公开值；不得自行映射 |
-| TASK-03 | file 批量采用父子任务还是 Coordinator | 阶段 2 工程设计，必须保持顺序语义 |
-| TASK-04 | chat run 与通用 task 的确切表关系 | 阶段 2/9 联合设计 |
+| TASK-02 | cancelled/outcome_unknown 如何映射公开状态 | **阶段 2 已决策**：不新增通用取消状态；`outcome_unknown` 首先属于 Step/Callback Delivery，公开仍沿用各业务既有 Presenter，不增加新值。任何公开变更仍须另行确认 |
+| TASK-03 | file 批量采用父子任务还是 Coordinator | **阶段 2 已决策**：每个文件保持独立子 Task，不建父 Task；`batch_id/batch_sequence` 加持久 runnable 资格保证请求内顺序 |
+| TASK-04 | chat run 与通用 task 的确切表关系 | **阶段 2 已决策**：当前不写通用 Task，ChatRun 保持唯一权威；阶段 9 队列化时由 Task 引用 ChatRun，不复制消息/流终态 |
 | TASK-05 | 回调超时后能否自动重试 | **已决策**：请求发送后的超时不自动重试，标记内部 `delivery_outcome_unknown`；仅明确未送达错误有限重试，check-task 显式补发除外 |
 | TASK-06 | Progress 连接有界缓冲实现 | **1B-2 已接入**：每连接唯一缓冲、初始快照屏障、按 key 合并、慢连接隔离、丢弃计数和路由线程单写入已进入当前运行路径；容量值仍在阶段 7/8 结合 50 连接压测调优 |
 | TASK-07 | 显式 Progress action/ack 是否保留 | **已实现**：无甲方或生产前端需求证据；1B-2 已删除显式动作处理，只保留无 action 订阅与连接关闭清理；收到 action 时返回 error 消息、保持连接且无 ack |
 | TASK-08 | 混合 `params` 数组是否过滤非对象元素 | **契约已确认，Progress WebSocket 已实现，HTTP 目标待对应业务路由波次完成**：不兼容过滤；任一非对象元素必须使整次请求或消息报参数错误，不做部分处理。不得把 WebSocket 已完成错误地表述为所有 HTTP 路由均已切换 |
 | TASK-09 | 旧终态执行恢复回调期间，同一业务键已提交新执行时是否继续发送旧回调 | **完整语义已确认（2026-07-16）**：采用 latest-wins，判定旧执行回调过期并跳过。`fileName` 是前端唯一逻辑任务键；同名文件的不同 `execution_id` 只是该逻辑任务的不同执行代次。实现必须在外发前于同业务键串行化边界内复核最新 TaskId；不匹配时禁止网络调用，并持久化 stale/skipped 审计原因。旧 callback 已先取得发送权时，新提交最多等待当前 callback timeout；若进入 `delivery_outcome_unknown` 或等待到期仍被占用，新提交返回既有 409 并冻结同键，直至内部人工解除。冻结 Callback 载荷下仍无法撤回已发请求，因此不自动重试 |
 | TASK-10 | check-task 批量恢复采用同步串行、同步并行还是可靠队列 | **最终修订（2026-07-17）**：甲方要求永久保留请求内同步恢复。当前按请求顺序处理，每个实际发送都由共享 Guard 授权；不增加无界同步并行、本地线程或内存队列。阶段 4～5 建设可靠队列后台兜底，阶段 6 不删除同步入口 |
+| TASK-11 | 阶段 2 本地 Executor 采用一套还是三套实现 | **阶段 2 已决策**：一个共享 `LocalTaskExecutor` 内核按 Report/Weaponry/Analysis 分别实例化；业务内 FIFO，跨业务以公平共享容量保证无饥饿，不承诺严格全局 FIFO，初始真实重型总并发为 1 |
+| TASK-12 | 拆 Store 后事务由谁提交 | **阶段 2 已决策**：共享 SQLite Connection/Transaction Manager + Admission/Execution/Recovery 等窄 UoW；Store 不自行提交，未显式 commit 默认 rollback，禁止嵌套、跨线程连接和事务内网络 I/O |
+| TASK-13 | SQLite v2 如何升级 | **阶段 2 已决策**：使用独立 `task-control-v2.sqlite3` 新空库；旧库只读预检并保留完整文件集，不原地修改 CHECK、不迁移历史 Task 行；新库使用数据库级 generation/fingerprint fail closed |
+| TASK-14 | recovery generation 与 unknown 新受理 | **阶段 2 已决策**：generation 只在建立新 Recovery Case 时递增；核心业务 unknown 保持既有活动投影并复用同键冲突，终态 cleanup unknown 独立，Callback unknown 沿用 Guard/check-task，不同键不全局阻塞 |
 
 ---
 
