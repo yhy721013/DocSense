@@ -46,6 +46,12 @@ from .tasks import (
     FakeTaskReadPort,
 )
 from .task_execution import FakeClock, StrictTaskControlFake
+from .task_runtime import (
+    FakeLeaseHeartbeatSupervisor,
+    FixedTaskLeaseTokenFactory,
+    ManualLeaseHeartbeatPulse,
+    StrictTaskWorkflowRunnerFake,
+)
 from .weaponry import (
     FakeAuxiliaryGuidancePort,
     FakeEvidenceExtractionPort,
@@ -93,6 +99,8 @@ __all__ = [
     "FakeProgressSubscriptionPort",
     "FakeTaskReadPort",
     "FakeClock",
+    "FakeLeaseHeartbeatSupervisor",
+    "FixedTaskLeaseTokenFactory",
     "FakeAuxiliaryGuidancePort",
     "FakeEvidenceExtractionPort",
     "FakeTargetEvidenceRetrievalPort",
@@ -113,4 +121,6 @@ __all__ = [
     "StrictAnalysisFakeScript",
     "StrictAnalysisPortFake",
     "StrictTaskControlFake",
+    "StrictTaskWorkflowRunnerFake",
+    "ManualLeaseHeartbeatPulse",
 ]

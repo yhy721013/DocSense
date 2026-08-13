@@ -33,3 +33,7 @@
   Analysis 模块的 `RecoverAnalysisCallbackSynchronously`，缺少该链时明确失败并禁止回退到旧恢复器。
   `LegacyTaskReadAdapter` 只读取现有任务投影，不拥有业务回调恢复逻辑。未来 MySQL/Outbox 只增加
   后台可靠兜底，不替换同步入口。
+- 阶段 2-3 新增 `ThreadedLeaseHeartbeatSupervisor` 与
+  `SecureTaskLeaseTokenFactory`。前者只围绕 v2 Authority Session 周期执行独立短 heartbeat
+  UoW，成功后原子换入新 expiry，失权/时钟/基础设施异常请求 Workflow 协作停止；后者为
+  每次 claim 创建独立高熵 token。两者均未在生产组合根装配，日志禁止输出 token。

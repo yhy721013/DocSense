@@ -1,0 +1,87 @@
+{
+  "assetVersion": 1,
+  "frozenAt": "2026-08-13",
+  "scope": "stage-2-3-authority-runtime",
+  "publicContractChanged": false,
+  "productionWired": false,
+  "legacyRunnerChanged": false,
+  "callbackSemanticsChanged": false,
+  "authority": {
+    "source": "claim_result_attempt_authority_only",
+    "completeFields": [
+      "task_id",
+      "attempt_no",
+      "lease_token",
+      "fencing_token",
+      "lease_expires_at"
+    ],
+    "databaseHydrationForLegacyCallerForbidden": true,
+    "leaseTokenLogged": false,
+    "ownerIdIsAuthority": false
+  },
+  "runtimeSequence": [
+    "clock_and_lease_token",
+    "claim_uow_commit",
+    "start_uow_commit",
+    "create_authority_session",
+    "start_heartbeat_supervisor",
+    "run_v2_workflow",
+    "stop_heartbeat_in_finally"
+  ],
+  "leaseSettings": {
+    "type": "TaskLeaseRuntimeSettings",
+    "readsEnvironment": false,
+    "validatedBeforeThreadStart": true,
+    "taskLeaseInequality": "lease >= 3 * heartbeat + 2 * sqlite_busy + clock_jitter",
+    "stopGraceInequality": "stop_grace >= heartbeat + sqlite_busy"
+  },
+  "authoritySession": {
+    "implementation": "app/modules/tasks/application/authority_session.py:TaskExecutionAuthoritySession",
+    "shortConditionalWritesUseRunAuthorized": true,
+    "heartbeatUsesRenewAuthority": true,
+    "renewalCommitAndSnapshotSwapSerialized": true,
+    "externalIoInsideAuthorityGuardAllowed": false,
+    "currentAuthorityGrantsWrite": false,
+    "stopIsMonotonic": true,
+    "sqliteCasRemainsFinalAuthority": true,
+    "distributedLockClaimed": false
+  },
+  "heartbeat": {
+    "implementation": "app/modules/tasks/adapters/lease_heartbeat.py:ThreadedLeaseHeartbeatSupervisor",
+    "successfulRenewalReturnsNewAuthority": true,
+    "oldExpiryInvalidImmediately": true,
+    "clockAnomalyOutcome": "clock_unsafe",
+    "infrastructureFailureOutcome": "infrastructure_error",
+    "nonAppliedMutationOutcome": "authority_lost",
+    "failureRequestsWorkflowStop": true,
+    "failureResetsTask": false,
+    "fakeClockRequiredForLeaseTests": true,
+    "manualPulseRequiredForThreadTests": true,
+    "realSleepUsedToProveLease": false
+  },
+  "cooperativeStop": {
+    "pythonThreadForceKillAllowed": false,
+    "checkBeforeExternalStepIntent": true,
+    "checkAfterExternalIo": true,
+    "checkBeforeProgressStepAndTerminalWrite": true,
+    "staleAuthorityWriteRejectedByStore": true,
+    "runtimeSynthesizesBusinessTerminal": false,
+    "runtimeSendsCallback": false
+  },
+  "forbiddenChanges": [
+    "docs/interface-contracts",
+    "app/container.py",
+    "run.py",
+    "legacy-runner-signatures",
+    "v1-v2-dual-write",
+    "callback-semantics"
+  ],
+  "evidenceLimits": [
+    "temporary_sqlite_and_fake_only",
+    "single_process_thread_coordination_only",
+    "does_not_prove_multi_instance",
+    "does_not_prove_reliable_queue",
+    "does_not_prove_provider_cancellation",
+    "does_not_prove_production_capacity"
+  ]
+}

@@ -38,6 +38,12 @@
 
 这些记录职责不同，暂不合并，避免把公开契约、模块骨架、恢复命令和 Progress 控制面混为一体。
 
+## 阶段 2
+
+| 文件 | 用途 |
+| --- | --- |
+| `260813-阶段2-3ExecutionRuntime实施记录.md` | v2 Authority Session、claim/start/heartbeat、expiry 原子轮换与失权协作停止核心链路；尚未接生产 Runner/Container。 |
+
 ## 当前基线的独立专题记录
 
 | 主题 | 文件 |

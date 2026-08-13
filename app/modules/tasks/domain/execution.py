@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .models import TaskBusinessRef, TaskId
@@ -187,7 +187,7 @@ class TaskExecutionAuthority:
     task_id: TaskId
     attempt_no: int
     owner_id: str
-    lease_token: str
+    lease_token: str = field(repr=False)
     fencing_token: int
     lease_expires_at: str
 

@@ -28,3 +28,10 @@
 `/llm/progress` 运行路径。每个 WebSocket 连接独占一个 Registry/缓冲；初始快照成功
 发送后才放行并发通知，发送失败或断连时关闭缓冲并有限重试释放失败令牌。发布线程只
 提交类型化快照，不执行网络 I/O。该接入不改变 check-task 的上述生产边界。
+
+阶段 2-3 新增尚未接入生产的 `TaskExecutionRuntime` 与
+`TaskExecutionAuthoritySession`：Runtime 只使用阶段 2-2 Execution UoW 编排
+claim、start、heartbeat 和 v2 Workflow；Session 在同一个短能力门内串行化 heartbeat
+expiry 轮换与 Task 条件写，并在失权后单向拒绝继续取权。外部 I/O 禁止进入该临界区，
+SQLite 的完整 Authority CAS 仍是最终裁决。旧 Runner、生产 Container、Progress 与
+Callback 均未在本阶段切换。

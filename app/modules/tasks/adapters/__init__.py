@@ -11,6 +11,12 @@ from .legacy_task_read import LegacyTaskReadAdapter
 from .synchronous_callback_recovery import SynchronousCallbackRecoveryRouterAdapter
 from .execution_limiter import UploadTaskLimiter
 from .process_guard import FileProcessSingletonGuard
+from .lease_heartbeat import (
+    EventLeaseHeartbeatPulse,
+    LeaseHeartbeatPulse,
+    ThreadedLeaseHeartbeatSupervisor,
+)
+from .secure_lease_tokens import SecureTaskLeaseTokenFactory
 from .local_persistent_dispatcher import (
     LocalPersistentDispatcherSettings,
     LocalPersistentDispatcherSnapshot,
@@ -26,6 +32,7 @@ from app.modules.tasks.http_deadlines import required_http_lease_seconds
 
 __all__ = [
     "FileProcessSingletonGuard",
+    "EventLeaseHeartbeatPulse",
     "InMemoryProgressAdapter",
     "LocalPersistentDispatcherSettings",
     "LocalPersistentDispatcherSnapshot",
@@ -35,7 +42,10 @@ __all__ = [
     "LegacyTaskCommandAdapter",
     "LegacyTaskCommandAdapterError",
     "LegacyTaskReadAdapter",
+    "LeaseHeartbeatPulse",
     "SynchronousCallbackRecoveryRouterAdapter",
+    "SecureTaskLeaseTokenFactory",
+    "ThreadedLeaseHeartbeatSupervisor",
     "LatestTaskProgressPublisherAdapter",
     "UploadTaskLimiter",
     "required_http_lease_seconds",

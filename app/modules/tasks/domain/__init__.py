@@ -29,6 +29,8 @@ from .execution import (
     TaskStepAttempt,
     TaskStepCheckpoint,
 )
+from .lease_time import add_persisted_utc_seconds
+from .runtime_settings import TaskLeaseRuntimeSettings
 from .recovery import (
     RecoveryAuthority,
     RecoveryCaseState,
@@ -86,6 +88,7 @@ __all__ = [
     "TaskExecutionSnapshot",
     "TaskId",
     "TaskLookupItem",
+    "TaskLeaseRuntimeSettings",
     "TaskSnapshot",
     "ATTEMPT_TERMINAL_STATES",
     "STEP_TERMINAL_STATES",
@@ -125,6 +128,7 @@ __all__ = [
     "TaskTransition",
     "apply_recovery_decision",
     "apply_recovery_step_resolution",
+    "add_persisted_utc_seconds",
     "claim_recovery_case",
     "converge_recovery_operation",
     "create_recovery_case",

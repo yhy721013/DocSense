@@ -1,5 +1,7 @@
 """任务模块应用层：可靠恢复登记、同步检查原型与 Progress 的框架无关编排。"""
 
+from .authority_session import TaskExecutionAuthoritySession
+
 from .check_task_request import CheckTaskRequest
 from .check_status import (
     CallbackRecoveryConsistencyError,
@@ -38,6 +40,7 @@ from .progress_delivery import (
     ProgressInitialBatchStateError,
     ProgressInitialBatchToken,
 )
+from .execution_runtime import TaskExecutionRuntime
 
 __all__ = [
     "CallbackRecoveryCommandContractError",
@@ -66,6 +69,8 @@ __all__ = [
     "RequestCallbackRecoveryResult",
     "RequestCallbackRecoveryService",
     "TaskCheckItemResult",
+    "TaskExecutionAuthoritySession",
+    "TaskExecutionRuntime",
     "TaskReadContractError",
     "TaskSnapshotUnavailableError",
 ]

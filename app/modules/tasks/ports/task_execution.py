@@ -7,7 +7,7 @@ task_id、attempt_no、lease_token、fencing_token 与租约，不能把 owner_i
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -59,7 +59,7 @@ class TaskClaimRequest:
     task_id: TaskId
     task_type: str
     owner: TaskOwnerIdentity
-    lease_token: str
+    lease_token: str = field(repr=False)
     claimed_at: str
     lease_expires_at: str
 

@@ -28,3 +28,8 @@ create-if-allowed 必须原子提交 execution 与 latest 投影；`False` 条�
 Repository 不得执行 Progress 通知、Dispatcher、网络回调或任何业务 I/O。
 
 端口不得导入 Flask/FastAPI、Celery、SQLAlchemy、`sqlite3`、`requests` 或具体 Adapter；实现细节必须位于 `adapters/`。
+
+阶段 2-3 的 `runtime.py` 进一步冻结 v2 Authority Session、Workflow Runner、heartbeat
+supervisor、lease token factory 和 Runtime 结果。Workflow 的短 Task 条件写必须调用
+`run_authorized`；heartbeat 必须调用 `renew_authority`，从而让续租提交与内存 expiry
+替换不可被本实例的另一项写穿插。`current_authority` 只供观察，不能授予写权限。
