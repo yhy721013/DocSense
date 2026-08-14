@@ -1,0 +1,125 @@
+{
+  "stage": "2-5-completed",
+  "publicContractChanged": false,
+  "productionWired": true,
+  "input": {
+    "schema": "WeaponryInputSnapshot/v2",
+    "newWriteVersion": 2,
+    "versionBumpForbidden": true,
+    "specialtyReservedVersion": 3,
+    "encodedTopLevelFields": [
+      "schema_version",
+      "task_id",
+      "architecture_id",
+      "business_key",
+      "field_templates",
+      "document_scope",
+      "evidence_selection_policy",
+      "execution_policy",
+      "auxiliary_guidance_policy",
+      "accepted_at",
+      "trace_id"
+    ],
+    "frozenDecisionGroups": [
+      "document_scope",
+      "evidence_selection_policy",
+      "execution_policy",
+      "auxiliary_guidance_policy"
+    ],
+    "workerMayReadCurrentEnvironmentToBackfill": false,
+    "legacyV2ReadCompatibility": {
+      "missingField": "evidence_selection_policy.reference_filter_strategy",
+      "fixedSemantic": "legacy-reference-filter-v1",
+      "mayUseCurrentEnvironmentDefault": false
+    }
+  },
+  "codec": {
+    "implementation": "app/modules/weaponry/adapters/task_codec.py::WeaponryTaskCommandCodec",
+    "contractOwner": "app/modules/tasks/ports/task_codec.py::TaskCommandCodec",
+    "taskType": "weaponry",
+    "writeSchemaVersionPropertyRequired": true,
+    "importsTasksAdapter": false,
+    "importsLegacyTaskService": false,
+    "projectionIsWorkerInput": false,
+    "strictCanonicalRoundTripRequired": true
+  },
+  "runtimeConfigMigration": {
+    "path": "app/modules/weaponry/adapters/runtime_config.py",
+    "type": "WeaponryRuntimeConfig",
+    "loader": "load_weaponry_runtime_config",
+    "legacyModuleRemoved": true,
+    "legacyAliasesRetained": false,
+    "environmentKeysChanged": false,
+    "defaultsChanged": false,
+    "validationOrErrorSemanticsChanged": false,
+    "stage2RuntimeFieldsAdded": false
+  },
+  "componentStoreMigration": {
+    "componentManifest": "app/modules/weaponry/adapters/sqlite/weaponry_control_manifest.json",
+    "componentName": "weaponry_control",
+    "componentVersion": 1,
+    "snapshotStore": "app/modules/weaponry/adapters/sqlite/task_document_snapshot_store.py",
+    "snapshotIdentity": "task_id",
+    "resultSnapshotStore": "app/modules/weaponry/adapters/sqlite/result_snapshot_store.py",
+    "legacyProductionWriterUntilAtomicSwitch": false,
+    "dualWriteForbidden": true,
+    "callbackHistoryWriter": "app/infrastructure/observability/callback_history.py"
+  },
+  "stepRuntime": {
+    "registry": "app/modules/weaponry/application/execution_steps.py::WEAPONRY_STEP_REGISTRY",
+    "recoveryMatrices": "app/modules/weaponry/application/recovery_policy.py::WEAPONRY_RECOVERY_MATRICES",
+    "runtime": "app/modules/weaponry/application/step_runtime.py::WeaponryStepRuntime",
+    "uow": "app/modules/weaponry/application/execution_uow.py::WeaponryExecutionUnitOfWork",
+    "sqliteUow": "app/modules/weaponry/adapters/sqlite/unit_of_work.py::SQLiteWeaponryExecutionUnitOfWork",
+    "completeAuthorityRequired": true,
+    "externalIoInsideControlTransaction": false,
+    "unknownEffectAutoReplay": false,
+    "productionWired": true
+  },
+  "cleanupFencing": {
+    "store": "app/modules/weaponry/adapters/sqlite/resource_store.py",
+    "onlyTrackedOwnedResources": true,
+    "cleanupLeaseAndFencingRequired": true,
+    "staleOwnerCommitForbidden": true,
+    "deleteUsesPersistedExternalRef": true,
+    "genericReaperNameDeleteForbidden": true
+  },
+  "disconnectedClassification": {
+    "classifier": "app/modules/weaponry/application/recovery_facts.py::WeaponryDisconnectedTaskClassifier",
+    "factSources": [
+      "weaponry_resource_records",
+      "weaponry_creation_intents",
+      "weaponry_interaction_audits",
+      "task_steps"
+    ],
+    "truncatedFacts": "reconcile_required",
+    "unknownFacts": "reconcile_required",
+    "doesNotPersistRecoveryDecision": true,
+    "stage27CoordinatorRequiredForRecoveryWrite": true
+  },
+  "futureAtomicSwitch": {
+    "businessType": "weaponry",
+    "completed": true,
+    "submitRunProgressTerminalAndCallbackControlTogether": true,
+    "dualWriteForbidden": true,
+    "legacyAuthorityBackfillForbidden": true,
+    "scheduledAfterPrerequisiteSteps": 7
+  },
+  "executionRuntime": {
+    "workflow": "app/modules/weaponry/application/run_weaponry_v2.py::RunWeaponryV2Workflow",
+    "submit": "app/modules/weaponry/application/submit_weaponry_v2.py::SubmitWeaponryV2Task",
+    "dispatcher": "app/modules/weaponry/adapters/v2_runtime.py::WeaponryV2TaskDispatcher",
+    "callbackControl": "app/modules/weaponry/adapters/v2_callback.py::TaskControlWeaponryCallbackAdapter",
+    "callbackRecovery": "app/modules/weaponry/adapters/v2_callback_recovery.py::SQLiteWeaponryV2CallbackRecoverySource",
+    "completeAuthorityRequired": true,
+    "legacyAuthorityBackfillForbidden": true,
+    "resultTaskAttemptStepAndCallbackEligibilityOneTransaction": true,
+    "externalOutcomeUnknownStopsBeforeTerminal": true
+  },
+  "evidence": {
+    "temporarySQLiteAndFakesOnly": true,
+    "runPyExecuted": false,
+    "providerCalled": false,
+    "multiInstanceOrProductionClaimed": false
+  }
+}

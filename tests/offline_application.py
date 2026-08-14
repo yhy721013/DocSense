@@ -60,7 +60,7 @@ from app.modules.weaponry.adapters import (
     SQLiteWeaponryCallbackRecoverySource,
     SQLiteWeaponryInteractionAuditAdapter,
     SQLiteWeaponryResourceStoreAdapter,
-    WeaponryInfrastructureConfig,
+    WeaponryRuntimeConfig,
     WeaponryRuntimeCapabilities,
     WeaponryTaskCommandCodec,
 )
@@ -303,7 +303,7 @@ def build_offline_application_services(
         config=analysis_config,
         callback_url=callback_url or "",
     )
-    weaponry_config = WeaponryInfrastructureConfig(
+    weaponry_config = WeaponryRuntimeConfig(
         runtime_mode="single_instance",
         scan_interval_seconds=0.02,
         accepted_batch_size=50,

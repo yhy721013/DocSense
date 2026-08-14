@@ -996,37 +996,6 @@ class LLMTaskService:
                 )
                 """
             )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS weaponry_task_document_snapshots (
-                    business_key TEXT NOT NULL,
-                    execution_id TEXT NOT NULL,
-                    sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
-                    file_name TEXT NOT NULL,
-                    original_name TEXT NOT NULL,
-                    ingested_file_name TEXT NOT NULL DEFAULT '',
-                    source_architecture_id INTEGER NOT NULL
-                        CHECK (source_architecture_id >= 1),
-                    doc_path TEXT NOT NULL,
-                    anything_doc_id TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY (business_key, sequence_no),
-                    UNIQUE (business_key, file_name),
-                    UNIQUE (business_key, doc_path)
-                )
-                """
-            )
-            self._ensure_column(
-                conn,
-                table="weaponry_task_document_snapshots",
-                column="ingested_file_name",
-                definition="TEXT NOT NULL DEFAULT ''",
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_weaponry_task_document_snapshots_execution
-                ON weaponry_task_document_snapshots (execution_id, sequence_no)
-                """
-            )
             # 召回决策按 execution_id 独立留存，故意不关联 llm_tasks 外键。同一业务键
             # 重跑会替换 llm_tasks 当前 execution_id；若在此处使用 ON DELETE CASCADE，
             # 历史分类证据会随任务重跑丢失，无法用于 E2E 取证和线上复盘。
@@ -4907,124 +4876,12 @@ class LLMTaskService:
         )
         return result
 
-    @staticmethod
-    def _normalize_weaponry_selection_snapshot(
-        selected_documents: Sequence[Mapping[str, Any]] | None,
-    ) -> tuple[Dict[str, Any], ...]:
-        """校验并冻结 weaponry 显式选文的内部持久化快照。
-
-        该快照与外部请求参数隔离：它仅保存受理时已经唯一解析出的本地文件身份、来源
-        分类、AnythingLLM 文档位置和实际上传文件名。任务重跑会在同一事务中替换旧
-        快照，避免新旧执行共享一份可变选文范围。
-        """
-        if selected_documents is None:
-            return ()
-        if isinstance(selected_documents, (str, bytes)) or not isinstance(
-            selected_documents,
-            Sequence,
-        ):
-            raise TypeError("selected_documents必须是Mapping序列")
-
-        normalized: list[Dict[str, Any]] = []
-        seen_file_names: set[str] = set()
-        seen_doc_paths: set[str] = set()
-        for index, item in enumerate(selected_documents):
-            if not isinstance(item, Mapping):
-                raise TypeError("selected_documents只能包含Mapping")
-            file_name = str(item.get("file_name") or "").strip()
-            if not file_name:
-                raise ValueError("weaponry任务文档快照缺少file_name")
-            # 任务快照必须保留请求 originalFileName 的原值。只以 strip 判空，避免任务
-            # 异步执行时把业务展示名改写为标准化名称。
-            requested_original_name = str(item.get("original_name") or "")
-            original_name = (
-                requested_original_name
-                if requested_original_name.strip()
-                else file_name
-            )
-            ingested_file_name = (
-                str(item.get("ingested_file_name") or "")
-                .replace("\\", "/")
-                .rsplit("/", 1)[-1]
-                .strip()
-            )
-            if not ingested_file_name or ingested_file_name in {".", ".."}:
-                raise ValueError("weaponry任务文档快照的ingested_file_name无效")
-            raw_architecture_id = item.get("source_architecture_id")
-            if isinstance(raw_architecture_id, bool):
-                raise ValueError("weaponry任务文档快照的source_architecture_id无效")
-            try:
-                source_architecture_id = int(raw_architecture_id)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "weaponry任务文档快照的source_architecture_id无效"
-                ) from exc
-            if source_architecture_id < 1:
-                raise ValueError("weaponry任务文档快照的source_architecture_id无效")
-            doc_path = str(item.get("doc_path") or "").strip()
-            if not doc_path:
-                raise ValueError("weaponry任务文档快照缺少doc_path")
-            if file_name in seen_file_names:
-                raise ValueError("weaponry任务文档快照存在重复file_name")
-            if doc_path in seen_doc_paths:
-                raise ValueError("weaponry任务文档快照存在重复doc_path")
-            seen_file_names.add(file_name)
-            seen_doc_paths.add(doc_path)
-            normalized.append(
-                {
-                    "file_name": file_name,
-                    "original_name": original_name,
-                    "ingested_file_name": ingested_file_name,
-                    "source_architecture_id": source_architecture_id,
-                    "doc_path": doc_path,
-                    "anything_doc_id": str(item.get("anything_doc_id") or "").strip(),
-                }
-            )
-        return tuple(normalized)
-
-    @staticmethod
-    def _replace_weaponry_selection_snapshot(
-        conn: sqlite3.Connection,
-        *,
-        business_key: str,
-        execution_id: str,
-        selected_documents: Sequence[Mapping[str, Any]],
-    ) -> None:
-        """在任务写事务内替换同一类别上一轮执行的显式选文快照。"""
-        conn.execute(
-            "DELETE FROM weaponry_task_document_snapshots WHERE business_key = ?",
-            (business_key,),
-        )
-        for sequence_no, document in enumerate(selected_documents, start=1):
-            conn.execute(
-                """
-                INSERT INTO weaponry_task_document_snapshots (
-                    business_key, execution_id, sequence_no, file_name, original_name,
-                    ingested_file_name, source_architecture_id, doc_path, anything_doc_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    business_key,
-                    execution_id,
-                    sequence_no,
-                    document["file_name"],
-                    document["original_name"],
-                    document["ingested_file_name"],
-                    document["source_architecture_id"],
-                    document["doc_path"],
-                    document["anything_doc_id"],
-                ),
-            )
-
     def _upsert_task(
         self,
         business_type: str,
         business_key: str,
         request_payload: Dict[str, Any],
         status: str,
-        *,
-        weaponry_selection_snapshot: Sequence[Mapping[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         """创建一次新执行，并在同一事务内返回本次写入的任务快照。
 
@@ -5032,15 +4889,6 @@ class LLMTaskService:
         重置结果和回调状态。读取必须发生在写事务提交前；若提交后重新查询，并发重跑可能
         已经覆盖同一业务键，调用方会错误拿到另一执行的身份。
         """
-        if business_type == "weaponry":
-            normalized_weaponry_snapshot = self._normalize_weaponry_selection_snapshot(
-                weaponry_selection_snapshot,
-            )
-        elif weaponry_selection_snapshot is not None:
-            raise ValueError("仅weaponry任务允许保存选中文档快照")
-        else:
-            normalized_weaponry_snapshot = ()
-
         now = _utc_now_iso()
         execution_id = uuid4().hex
         with self._connection() as conn:
@@ -5087,13 +4935,6 @@ class LLMTaskService:
                     now,
                 ),
             )
-            if business_type == "weaponry":
-                self._replace_weaponry_selection_snapshot(
-                    conn,
-                    business_key=business_key,
-                    execution_id=execution_id,
-                    selected_documents=normalized_weaponry_snapshot,
-                )
             row = conn.execute(
                 """
                 SELECT business_type, business_key, execution_id, request_payload,
@@ -5114,32 +4955,23 @@ class LLMTaskService:
             execution_id,
             status,
         )
-        if business_type == "weaponry":
-            # 空快照表示 filePathList 缺省或为空，执行器会保持“当前类别全部文件”的
-            # 既有语义；非空快照才是跨分类显式选文的可恢复任务输入。
-            logger.info(
-                "weaponry任务文档范围快照已更新: architecture_id=%s "
-                "execution_id=%s explicit_file_count=%d",
-                business_key,
-                execution_id,
-                len(normalized_weaponry_snapshot),
-            )
         return task
 
     def create_weaponry_task(
         self,
         architecture_id: int,
         request_payload: Dict[str, Any],
-        *,
-        selected_documents: Sequence[Mapping[str, Any]] = (),
     ) -> Dict[str, Any]:
-        """创建 weaponry 任务，并原子保存非空 filePathList 的内部解析快照。"""
+        """仅保留旧公开投影测试所需的通用任务入口。
+
+        Weaponry 生产受理已由阶段 2-5 的专用 Admission UoW 接管；旧 Service 不再
+        创建或写入文档快照表，避免与 Task Control 组件形成第二 Writer。
+        """
         return self._upsert_task(
             "weaponry",
             str(architecture_id),
             request_payload,
             status="1",
-            weaponry_selection_snapshot=selected_documents,
         )
 
     def get_task(self, business_type: str, business_key: str) -> Optional[Dict[str, Any]]:
@@ -5603,52 +5435,6 @@ class LLMTaskService:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
-
-    def get_weaponry_task_document_snapshots(
-        self,
-        *,
-        architecture_id: int,
-        execution_id: str,
-    ) -> list[Dict[str, Any]]:
-        """读取指定执行身份的 weaponry 选中文档快照。
-
-        任务键会被同一 ``architectureId`` 的后续请求覆盖，因此查询必须同时限制
-        ``execution_id``。不匹配时返回空列表，由执行器按“任务快照丢失”失败收敛，
-        而不是误使用后一次请求的文档范围。
-        """
-        business_key = str(architecture_id)
-        normalized_execution_id = str(execution_id or "").strip()
-        if not normalized_execution_id:
-            raise ValueError("execution_id不能为空")
-        with self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT sequence_no, file_name, original_name, ingested_file_name,
-                       source_architecture_id, doc_path, anything_doc_id
-                FROM weaponry_task_document_snapshots
-                WHERE business_key = ? AND execution_id = ?
-                ORDER BY sequence_no ASC
-                """,
-                (business_key, normalized_execution_id),
-            ).fetchall()
-        snapshots = [
-            {
-                "file_name": row["file_name"],
-                "original_name": row["original_name"],
-                "ingested_file_name": row["ingested_file_name"],
-                "source_architecture_id": row["source_architecture_id"],
-                "doc_path": row["doc_path"],
-                "anything_doc_id": row["anything_doc_id"],
-            }
-            for row in rows
-        ]
-        logger.info(
-            "已读取weaponry任务选中文档快照: architecture_id=%s execution_id=%s file_count=%d",
-            architecture_id,
-            normalized_execution_id,
-            len(snapshots),
-        )
-        return snapshots
 
     def create_llm_interaction_with_trace(
         self,

@@ -14,6 +14,7 @@ import json
 import logging
 
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
+from app.modules.tasks.ports import TaskExecutionStopRequested
 from app.modules.weaponry.domain import (
     AuxiliaryGuidance,
     EvidenceSelectionResult,
@@ -78,6 +79,7 @@ from .errors import (
     WeaponryStaleExecutionError,
     WeaponryTaskPersistenceError,
 )
+from .field_step_observer import WeaponryFieldStepObserver
 
 
 logger = logging.getLogger(__name__)
@@ -178,12 +180,19 @@ class WeaponryFieldExecutor:
         guidance: AuxiliaryGuidancePort,
         translation: WeaponryTranslationPort,
         audit: WeaponryInteractionAuditPort,
+        step_observer: WeaponryFieldStepObserver | None = None,
     ) -> None:
         self._retrieval = retrieval
         self._extraction = extraction
         self._guidance = guidance
         self._translation = translation
         self._audit = audit
+        if step_observer is not None and not isinstance(
+            step_observer,
+            WeaponryFieldStepObserver,
+        ):
+            raise TypeError("step_observer 必须是 WeaponryFieldStepObserver 或 None")
+        self._step_observer = step_observer
 
     @property
     def retrieval(self) -> TargetEvidenceRetrievalPort:
@@ -249,7 +258,7 @@ class WeaponryFieldExecutor:
         # 每次字段执行独享一个诊断列表；它既不会跨字段共享，也不会进入公开结果，
         # 只用于 Dispatcher 区分业务空结果和外部能力降级。
         diagnostic_error_codes: list[str] = []
-        guidance = self._load_guidance(
+        guidance_operation = lambda: self._load_guidance(
             task_id=task_id,
             business_ref=business_ref,
             snapshot=snapshot,
@@ -258,7 +267,22 @@ class WeaponryFieldExecutor:
             is_current=is_current,
             diagnostics=diagnostic_error_codes,
         )
-        selection_execution = self._retrieve_and_select(
+        if self._step_observer is None:
+            guidance = guidance_operation()
+        else:
+            guidance = self._step_observer.execute(
+                step_key=f"auxiliary_guidance.load:{field_sequence}",
+                idempotency_key=(
+                    f"weaponry:{task_id.value}:guidance:{field_sequence}:"
+                    f"{snapshot.auxiliary_guidance_policy.catalog_fingerprint}"
+                ),
+                operation=guidance_operation,
+                checkpoint_code="weaponry_guidance_observed_v1",
+                result_identity=lambda result: tuple(
+                    (item.guidance_id, _sha256_text(item.text)) for item in result
+                ),
+            )
+        retrieval_operation = lambda: self._retrieve_and_select(
             task_id=task_id,
             business_ref=business_ref,
             snapshot=snapshot,
@@ -267,6 +291,22 @@ class WeaponryFieldExecutor:
             field_sequence=field_sequence,
             is_current=is_current,
         )
+        if self._step_observer is None:
+            selection_execution = retrieval_operation()
+        else:
+            selection_execution = self._step_observer.execute(
+                step_key=f"retrieval.execute:{field_sequence}",
+                idempotency_key=(
+                    f"weaponry:{task_id.value}:retrieval:{field_sequence}:"
+                    f"{scope.scope_ref}"
+                ),
+                operation=retrieval_operation,
+                checkpoint_code="weaponry_retrieval_observed_v1",
+                result_identity=lambda result: (
+                    tuple(item.candidate_id for item in result.selection.selected),
+                    result.diagnostic_error_codes,
+                ),
+            )
         selection = selection_execution.selection
         diagnostic_error_codes.extend(
             selection_execution.diagnostic_error_codes
@@ -558,6 +598,14 @@ class WeaponryFieldExecutor:
             self._complete_failed(reservation, error.error_code)
             diagnostics.append(error.error_code)
             self._ensure_current(is_current)
+            if (
+                self._step_observer is not None
+                and error.outcome is WeaponryExternalOutcome.OUTCOME_UNKNOWN
+            ):
+                raise WeaponryScenePreservationError(
+                    "武器谱辅助语境外部结果未知",
+                    error_code=error.error_code,
+                ) from error
             logger.warning(
                 "武器谱辅助语境降级为空: task_id=%s field_sequence=%d "
                 "error_code=%s outcome=%s",
@@ -673,6 +721,15 @@ class WeaponryFieldExecutor:
                 error_code=error_code,
             )
             self._ensure_current(is_current)
+            if (
+                self._step_observer is not None
+                and isinstance(error, WeaponryExternalOperationError)
+                and error.outcome is WeaponryExternalOutcome.OUTCOME_UNKNOWN
+            ):
+                raise WeaponryScenePreservationError(
+                    "武器谱目标检索外部结果未知",
+                    error_code=error.error_code,
+                ) from error
             logger.warning(
                 "武器谱目标检索按字段级空结果降级: task_id=%s "
                 "field_sequence=%d error_code=%s",
@@ -696,7 +753,7 @@ class WeaponryFieldExecutor:
             raise WeaponryPortContractError("Target Retrieval 结果身份不一致")
 
         try:
-            selection = select_evidence(
+            selection_operation = lambda: select_evidence(
                 search.candidates,
                 score_mode=search.score_mode,
                 query=query,
@@ -705,6 +762,27 @@ class WeaponryFieldExecutor:
                 embedding_fingerprint=search.embedding_fingerprint,
                 expected_document_keys=allowed_document_keys,
             )
+            if self._step_observer is None:
+                selection = selection_operation()
+            else:
+                selection = self._step_observer.execute(
+                    step_key=f"evidence.select:{field_sequence}",
+                    idempotency_key=(
+                        f"weaponry:{task_id.value}:selection:{field_sequence}:"
+                        f"{self._retrieval_output_digest(search, None)}"
+                    ),
+                    operation=selection_operation,
+                    checkpoint_code="weaponry_evidence_selected_v1",
+                    result_identity=lambda result: {
+                        "selected": tuple(
+                            item.candidate_id for item in result.selected
+                        ),
+                        "rejected": tuple(
+                            (item.candidate_id, item.reason)
+                            for item in result.rejected
+                        ),
+                    },
+                )
         except WeaponryRetrievalValidationError:
             # Profile/score/rank 契约异常属于已批准的字段级空结果语义，但必须完成一条
             # 可诊断的 rejected 审计，绝不能静默把非法分数改写成零。
@@ -814,7 +892,29 @@ class WeaponryFieldExecutor:
                 model_fingerprint=snapshot.execution_policy.extraction_model_fingerprint,
             )
             try:
-                answer = self._extraction.extract(request)
+                extraction_operation = lambda: self._extraction.extract(request)
+                if self._step_observer is None:
+                    answer = extraction_operation()
+                else:
+                    answer = self._step_observer.execute(
+                        step_key=(
+                            f"field_model.execute:{field_sequence}:"
+                            f"{document.sequence_no}:{attempt_no}"
+                        ),
+                        idempotency_key=(
+                            f"weaponry:{task_id.value}:model:{field_sequence}:"
+                            f"{document.sequence_no}:{attempt_no}:"
+                            f"{_sha256_text(prompt.text)}"
+                        ),
+                        operation=extraction_operation,
+                        checkpoint_code="weaponry_field_model_observed_v1",
+                        audit_call=call,
+                        result_identity=lambda result: {
+                            "call": result.call.attempt_key,
+                            "raw_response_digest": result.raw_response_digest,
+                            "validation": result.validation_outcome.value,
+                        },
+                    )
             except WeaponryExternalOperationError as error:
                 self._complete_non_success(
                     reservation,
@@ -981,17 +1081,45 @@ class WeaponryFieldExecutor:
             allowed_document_keys=(document.document_key,),
         )
         try:
-            result = self._translation.translate(
-                WeaponryTranslationRequest(
-                    call=call,
-                    text=text,
-                    target_language=_TRANSLATION_TARGET_LANGUAGE,
-                )
+            request = WeaponryTranslationRequest(
+                call=call,
+                text=text,
+                target_language=_TRANSLATION_TARGET_LANGUAGE,
             )
+            translation_operation = lambda: self._translation.translate(request)
+            if self._step_observer is None:
+                result = translation_operation()
+            else:
+                result = self._step_observer.execute(
+                    step_key=(
+                        f"translation.execute:{field_sequence}:"
+                        f"{document.sequence_no}:{item_sequence}"
+                    ),
+                    idempotency_key=(
+                        f"weaponry:{task_id.value}:translation:{field_sequence}:"
+                        f"{document.sequence_no}:{item_sequence}:{_sha256_text(text)}"
+                    ),
+                    operation=translation_operation,
+                    checkpoint_code="weaponry_translation_observed_v1",
+                    audit_call=call,
+                    result_identity=lambda value: {
+                        "call": value.call.attempt_key,
+                        "outcome": value.outcome.value,
+                        "text_digest": _sha256_text(value.text),
+                    },
+                )
         except WeaponryExternalOperationError as error:
             self._complete_failed(reservation, error.error_code)
             diagnostics.append(error.error_code)
             self._ensure_current(is_current)
+            if (
+                self._step_observer is not None
+                and error.outcome is WeaponryExternalOutcome.OUTCOME_UNKNOWN
+            ):
+                raise WeaponryScenePreservationError(
+                    "武器谱翻译外部结果未知",
+                    error_code=error.error_code,
+                ) from error
             logger.warning(
                 "武器谱翻译异常，按兼容语义返回空文本: task_id=%s "
                 "field_sequence=%d document_sequence=%d item_sequence=%d "
@@ -1041,6 +1169,8 @@ class WeaponryFieldExecutor:
         allowed_document_keys: tuple[str, ...] = (),
         source_marker_digests: tuple[str, ...] = (),
     ) -> WeaponryAuditReservation:
+        if self._step_observer is not None:
+            self._step_observer.begin_audit(call)
         try:
             reserve_result = self._audit.reserve(
                 ReserveWeaponryInteraction(
@@ -1053,6 +1183,11 @@ class WeaponryFieldExecutor:
                 )
             )
         except Exception as error:
+            if self._step_observer is not None:
+                self._step_observer.fail_audit(
+                    call,
+                    error_code="weaponry_audit_reserve_outcome_unknown",
+                )
             logger.critical(
                 "武器谱交互审计预留失败，禁止外部调用: task_id=%s "
                 "call_id=%s error_type=%s",
@@ -1063,12 +1198,22 @@ class WeaponryFieldExecutor:
             )
             raise WeaponryAuditError("武器谱交互审计预留失败") from error
         if not isinstance(reserve_result, WeaponryAuditReserveResult):
+            if self._step_observer is not None:
+                self._step_observer.fail_audit(
+                    call,
+                    error_code="weaponry_audit_reserve_contract_invalid",
+                )
             raise WeaponryAuditError("武器谱审计预留返回类型错误")
         reservation = reserve_result.reservation
         if (
             reservation.call != call
             or reservation.business_ref != business_ref
         ):
+            if self._step_observer is not None:
+                self._step_observer.fail_audit(
+                    call,
+                    error_code="weaponry_audit_reservation_identity_mismatch",
+                )
             raise WeaponryAuditError("武器谱审计预留身份不一致")
         if reserve_result.outcome is not WeaponryAuditReserveOutcome.RESERVED:
             # pending 表示此前外部请求可能已发送；completed 表示此前已经形成审计终态。
@@ -1086,6 +1231,8 @@ class WeaponryFieldExecutor:
                 call.call_id,
                 reserve_result.outcome.value,
             )
+            if self._step_observer is not None:
+                self._step_observer.fail_audit(call, error_code=error_code)
             raise WeaponryScenePreservationError(
                 "武器谱交互存在历史审计事实，禁止盲目重放",
                 error_code=error_code,
@@ -1167,6 +1314,11 @@ class WeaponryFieldExecutor:
             receipt = self._audit.complete(command)
         except Exception as error:
             call = command.reservation.call
+            if self._step_observer is not None:
+                self._step_observer.fail_audit(
+                    call,
+                    error_code="weaponry_audit_complete_outcome_unknown",
+                )
             logger.critical(
                 "武器谱交互审计完成失败，禁止成功终态并保留现场: "
                 "task_id=%s call_id=%s error_type=%s",
@@ -1182,12 +1334,22 @@ class WeaponryFieldExecutor:
             or receipt.attempt_key != command.reservation.call.attempt_key
             or receipt.reservation_id != command.reservation.reservation_id
         ):
+            if self._step_observer is not None:
+                self._step_observer.fail_audit(
+                    command.reservation.call,
+                    error_code="weaponry_audit_receipt_mismatch",
+                )
             raise WeaponryAuditError("武器谱审计完成凭据身份不一致")
+        if self._step_observer is not None:
+            self._step_observer.complete_audit(command.reservation.call, receipt)
 
     @staticmethod
     def _ensure_current(is_current: Callable[[], bool]) -> None:
         try:
             current = is_current()
+        except TaskExecutionStopRequested:
+            # 协作停止是 Runtime 的控制流，不得包装成业务持久化故障。
+            raise
         except Exception as error:
             raise WeaponryTaskPersistenceError("武器谱 latest 事实读取失败") from error
         if not isinstance(current, bool):

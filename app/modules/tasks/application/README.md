@@ -29,9 +29,17 @@
 发送后才放行并发通知，发送失败或断连时关闭缓冲并有限重试释放失败令牌。发布线程只
 提交类型化快照，不执行网络 I/O。该接入不改变 check-task 的上述生产边界。
 
-阶段 2-3 新增尚未接入生产的 `TaskExecutionRuntime` 与
-`TaskExecutionAuthoritySession`：Runtime 只使用阶段 2-2 Execution UoW 编排
-claim、start、heartbeat 和 v2 Workflow；Session 在同一个短能力门内串行化 heartbeat
-expiry 轮换与 Task 条件写，并在失权后单向拒绝继续取权。外部 I/O 禁止进入该临界区，
-SQLite 的完整 Authority CAS 仍是最终裁决。旧 Runner、生产 Container、Progress 与
-Callback 均未在本阶段切换。
+阶段 2-3 新增 `TaskExecutionRuntime` 与 `TaskExecutionAuthoritySession`：Runtime 只使用
+阶段 2-2 Execution UoW 编排 claim、start、heartbeat 和 v2 Workflow；Session 在同一个短能力门内
+串行化 heartbeat expiry 轮换与 Task 条件写，并在失权后单向拒绝继续取权。外部 I/O 禁止进入该
+临界区，SQLite 的完整 Authority CAS 仍是最终裁决。
+
+阶段 2-4、2-5 已分别把 Report、Weaponry 的受理、执行、Step、Progress、终态、Callback Control
+和读取路径一次切到 v2；Analysis 仍按确认决策使用 `file` 类型和旧业务执行链，不存在双写。生产
+组合根现已接入独立的保守 Reaper，只对过期 Attempt 持久化 `DEFER`，不会自行重放副作用；本地
+执行器遇到未分类 Worker 异常会持久化冷却并停止新领取。Report/Weaponry Workflow 在每个新 Step
+副作用前响应正常停机或 Authority 失权，已经返回的外部结果仍先按当前 Step 契约收敛。
+
+Report、Weaponry、file 的进程内重型容量由同一 `FairTaskExecutionPermitPool` 仲裁，各业务使用
+独立等待队列并按固定顺序轮转。该能力只是单进程公平许可，不是可靠队列、分布式信号量或生产
+容量证明。

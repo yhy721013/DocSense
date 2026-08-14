@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
+from app.modules.tasks.adapters.sqlite.transaction import SQLiteTransactionManager
 from app.modules.weaponry.ports import (
     AcquireWeaponryCleanupLease,
     CompleteWeaponryResourceCleanup,
@@ -48,14 +49,26 @@ class SQLiteWeaponryResourceStoreAdapter:
 
     def __init__(
         self,
-        db_path: str,
+        db_path: str | None = None,
         *,
+        transaction_manager: SQLiteTransactionManager | None = None,
+        connection: sqlite3.Connection | None = None,
         cleanup_lease_seconds: float = 120.0,
         retry_delay_seconds: float = 30.0,
         busy_timeout_ms: int = 30_000,
     ) -> None:
-        if not isinstance(db_path, str) or not db_path.strip():
+        modes = sum(value is not None for value in (db_path, transaction_manager, connection))
+        if modes != 1:
+            raise ValueError("db_path、transaction_manager 与 connection 必须且只能提供一个")
+        if db_path is not None and (not isinstance(db_path, str) or not db_path.strip()):
             raise ValueError("db_path 必须是非空 str")
+        if connection is not None and not isinstance(connection, sqlite3.Connection):
+            raise TypeError("connection 必须是 sqlite3.Connection")
+        if transaction_manager is not None and not isinstance(
+            transaction_manager,
+            SQLiteTransactionManager,
+        ):
+            raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
         for name, value in (
             ("cleanup_lease_seconds", cleanup_lease_seconds),
             ("retry_delay_seconds", retry_delay_seconds),
@@ -75,11 +88,29 @@ class SQLiteWeaponryResourceStoreAdapter:
             or busy_timeout_ms < 1
         ):
             raise ValueError("busy_timeout_ms 必须是正整数")
-        self._db_path = str(Path(db_path))
+        self._db_path = str(Path(db_path)) if db_path is not None else ""
+        self._borrowed_connection = connection
+        self._transactions = transaction_manager
+        self._strict_control_mode = db_path is None
         self._cleanup_lease_seconds = float(cleanup_lease_seconds)
         self._retry_delay_seconds = float(retry_delay_seconds)
         self._busy_timeout_ms = busy_timeout_ms
-        self._initialize_schema()
+        if db_path is not None:
+            self._initialize_schema()
+
+    @classmethod
+    def from_connection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        cleanup_lease_seconds: float = 120.0,
+        retry_delay_seconds: float = 30.0,
+    ) -> "SQLiteWeaponryResourceStoreAdapter":
+        return cls(
+            connection=connection,
+            cleanup_lease_seconds=cleanup_lease_seconds,
+            retry_delay_seconds=retry_delay_seconds,
+        )
 
     def create(self, record: WeaponryResourceRecord) -> WeaponryResourceRecord:
         if not isinstance(record, WeaponryResourceRecord):
@@ -88,6 +119,23 @@ class SQLiteWeaponryResourceStoreAdapter:
             raise ValueError("新资源记录必须从 tracking/version=0 开始")
         payload = self._encode_record(record)
         with self._transaction() as connection:
+            if self._strict_control_mode:
+                execution = connection.execute(
+                    """
+                    SELECT business_type, business_key FROM llm_task_executions
+                    WHERE execution_id = ?
+                    """,
+                    (record.task_id.value,),
+                ).fetchone()
+                if (
+                    execution is None
+                    or execution["business_type"] != "weaponry"
+                    or execution["business_key"] != record.business_ref.business_key
+                ):
+                    raise WeaponryPortStateError(
+                        "resource_execution_identity_mismatch",
+                        "资源记录与 Weaponry execution 身份不一致",
+                    )
             existing = self._select(connection, record.task_id)
             if existing is not None:
                 decoded = self._decode_row(existing)
@@ -121,7 +169,7 @@ class SQLiteWeaponryResourceStoreAdapter:
     def get(self, task_id: TaskId) -> WeaponryResourceRecord | None:
         if not isinstance(task_id, TaskId):
             raise TypeError("task_id 必须是 TaskId")
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             row = self._select(connection, task_id)
         return self._decode_row(row) if row is not None else None
 
@@ -432,7 +480,7 @@ class SQLiteWeaponryResourceStoreAdapter:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
         now = self._now_text()
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             # 资源 Store 在生产组合中与 ``llm_task_executions`` 共库。正常恢复扫描除了
             # cleanup_pending，还必须发现“业务终态已经提交、但进程在持久化清理意图前
             # 崩溃”的 tracking 记录。独立 Adapter 测试可以只建资源表，此时安全退化为
@@ -607,7 +655,7 @@ class SQLiteWeaponryResourceStoreAdapter:
             raise TypeError("task_id 必须是 TaskId")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT previous_version, new_version, action, resolved_at,
@@ -624,7 +672,7 @@ class SQLiteWeaponryResourceStoreAdapter:
 
     def _initialize_schema(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS weaponry_resource_records (
@@ -662,6 +710,16 @@ class SQLiteWeaponryResourceStoreAdapter:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._transactions is not None:
+            with self._transactions.begin(read_only=False) as transaction:
+                yield transaction.connection
+                transaction.commit()
+            return
+        if self._borrowed_connection is not None:
+            if not self._borrowed_connection.in_transaction:
+                raise RuntimeError("Weaponry Resource Store 借用连接必须处于活动事务")
+            yield self._borrowed_connection
+            return
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -672,6 +730,21 @@ class SQLiteWeaponryResourceStoreAdapter:
             raise
         finally:
             connection.close()
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        if self._transactions is not None:
+            with self._transactions.begin(read_only=True) as transaction:
+                yield transaction.connection
+                transaction.commit()
+            return
+        if self._borrowed_connection is not None:
+            if not self._borrowed_connection.in_transaction:
+                raise RuntimeError("Weaponry Resource Store 借用连接必须处于活动事务")
+            yield self._borrowed_connection
+            return
+        with closing(self._connect()) as connection:
+            yield connection
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -951,7 +1024,7 @@ class SQLiteWeaponryResourceStoreAdapter:
 
     @classmethod
     def _now_text(cls) -> str:
-        return cls._now().isoformat()
+        return cls._now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     @classmethod
     def _after_seconds_text(cls, seconds: float) -> str:

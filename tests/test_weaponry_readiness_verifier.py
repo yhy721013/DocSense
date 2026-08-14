@@ -16,7 +16,7 @@ from app.integrations.anythingllm.models import (
     AnythingLLMWorkspace,
 )
 from app.modules.weaponry.adapters import (
-    WeaponryInfrastructureConfig,
+    WeaponryRuntimeConfig,
     evaluate_weaponry_production_gate,
 )
 from scripts.verify_weaponry_production_readiness import (
@@ -26,8 +26,8 @@ from scripts.verify_weaponry_production_readiness import (
 from tests import workspace_tempdir
 
 
-def _config() -> WeaponryInfrastructureConfig:
-    return WeaponryInfrastructureConfig(
+def _config() -> WeaponryRuntimeConfig:
+    return WeaponryRuntimeConfig(
         runtime_mode="single_instance",
         scan_interval_seconds=0.1,
         accepted_batch_size=50,
@@ -132,7 +132,7 @@ class WeaponryReadinessVerifierTests(unittest.TestCase):
         )
         with patch(
             "scripts.verify_weaponry_production_readiness."
-            "load_weaponry_infrastructure_config",
+            "load_weaponry_runtime_config",
             return_value=_config(),
         ):
             attestation = verify_and_build_attestation(

@@ -9,7 +9,6 @@ SQL 时遗漏 fencing、活跃 Worker 检查或首次处置证据。
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -25,15 +24,35 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env", override=False)
 
+from app.modules.report.adapters.sqlite import (  # noqa: E402
+    REPORT_CONTROL_COMPONENT_NAME,
+    load_report_control_manifest,
+)
+from app.modules.tasks.adapters import (  # noqa: E402
+    SecureTaskLeaseTokenFactory,
+    SystemSafeClock,
+)
+from app.modules.tasks.adapters.sqlite import (  # noqa: E402
+    SQLiteConnectionFactory,
+    SQLiteTransactionManager,
+    build_sqlite_task_control_uow_factories,
+    validate_existing_task_control_database,
+)
 from app.modules.tasks.domain import TaskId  # noqa: E402
 from app.modules.weaponry.adapters import (  # noqa: E402
     SQLiteWeaponryResourceStoreAdapter,
+    TaskControlWeaponryCallbackAdapter,
+)
+from app.modules.weaponry.adapters.sqlite import (  # noqa: E402
+    WEAPONRY_CONTROL_COMPONENT_NAME,
+    WEAPONRY_CONTROL_COMPONENT_VERSION,
+    load_weaponry_control_manifest,
 )
 from app.modules.weaponry.domain import (  # noqa: E402
     WeaponryDomainValidationError,
     normalize_architecture_id_value,
 )
-from app.services.llm_service.task_service import LLMTaskService  # noqa: E402
+from app.modules.weaponry.ports import ReleaseUnknownWeaponryCallback  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -45,8 +64,8 @@ def _default_db_path() -> Path:
     ).expanduser()
     return Path(
         os.getenv(
-            "DOCSENSE_LLM_TASK_DB",
-            str(runtime_dir / "llm_tasks.sqlite3"),
+            "DOCSENSE_TASK_CONTROL_DB_PATH",
+            str(runtime_dir / "db" / "task-control-v2.sqlite3"),
         )
     ).expanduser()
 
@@ -65,23 +84,50 @@ def _architecture_business_key(value: str) -> str:
         raise ValueError("architecture-id 必须是合法正整数") from exc
 
 
+def _task_control_manager(database: Path) -> SQLiteTransactionManager:
+    """只读复核根 Schema/组件身份后构造短事务管理器，禁止运维脚本自愈 DDL。"""
+
+    report_manifest = load_report_control_manifest()
+    weaponry_manifest = load_weaponry_control_manifest()
+    bootstrap = validate_existing_task_control_database(
+        database,
+        known_components={
+            REPORT_CONTROL_COMPONENT_NAME: report_manifest,
+            WEAPONRY_CONTROL_COMPONENT_NAME: weaponry_manifest,
+        },
+        required_components={
+            WEAPONRY_CONTROL_COMPONENT_NAME: WEAPONRY_CONTROL_COMPONENT_VERSION,
+        },
+    )
+    return SQLiteTransactionManager(SQLiteConnectionFactory(bootstrap))
+
+
 def release_callback_guard(args: argparse.Namespace) -> dict[str, object]:
     """人工解除 outcome_unknown 门禁，但保留旧 execution 的未知投递事实。"""
 
     database = _existing_database(args.db_path)
     business_key = _architecture_business_key(args.architecture_id)
-    outcome = LLMTaskService(str(database)).release_callback_delivery_guard(
-        business_type="weaponry",
-        business_key=business_key,
-        released_by=args.operator,
-        release_reason=args.reason,
-        worker_stopped_confirmed=args.worker_stopped_confirmed,
-        released_at=datetime.now(timezone.utc).isoformat(),
+    manager = _task_control_manager(database)
+    callback = TaskControlWeaponryCallbackAdapter(
+        build_sqlite_task_control_uow_factories(manager).callback_delivery,
+        clock=SystemSafeClock(),
+        callback_url="",
+        callback_timeout=1.0,
+        lease_seconds=30.0,
+        token_factory=SecureTaskLeaseTokenFactory().new_token,
+    )
+    outcome = callback.release_unknown(
+        ReleaseUnknownWeaponryCallback(
+            architecture_id=int(business_key),
+            released_by=args.operator,
+            reason=args.reason,
+            worker_stopped_confirmed=args.worker_stopped_confirmed,
+        )
     )
     return {
         "action": "release-callback",
         "architectureId": business_key,
-        "outcome": outcome,
+        "outcome": outcome.outcome.value,
     }
 
 
@@ -89,7 +135,9 @@ def resolve_resources(args: argparse.Namespace) -> dict[str, object]:
     """在远端人工对账后解除资源隔离，由恢复循环继续清理或确认已清理。"""
 
     database = _existing_database(args.db_path)
-    store = SQLiteWeaponryResourceStoreAdapter(str(database))
+    store = SQLiteWeaponryResourceStoreAdapter(
+        transaction_manager=_task_control_manager(database)
+    )
     record = store.resolve_quarantine(
         TaskId(args.task_id),
         action=args.resolution,
@@ -110,7 +158,9 @@ def inspect_resources(args: argparse.Namespace) -> dict[str, object]:
     """输出不含供应商引用和业务正文的资源状态及人工处置审计。"""
 
     database = _existing_database(args.db_path)
-    store = SQLiteWeaponryResourceStoreAdapter(str(database))
+    store = SQLiteWeaponryResourceStoreAdapter(
+        transaction_manager=_task_control_manager(database)
+    )
     task_id = TaskId(args.task_id)
     record = store.get(task_id)
     if record is None:
@@ -146,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db-path",
         default=str(_default_db_path()),
-        help="任务 SQLite 路径；默认读取 DOCSENSE_LLM_TASK_DB。",
+        help="Task Control v2 SQLite 路径；默认读取 DOCSENSE_TASK_CONTROL_DB_PATH。",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

@@ -41,7 +41,7 @@ from app.modules.weaponry.adapters import (  # noqa: E402
     WeaponryAnythingLLMClients,
     build_weaponry_production_attestation,
     build_weaponry_runtime_policies,
-    load_weaponry_infrastructure_config,
+    load_weaponry_runtime_config,
     normalize_anythingllm_source_url_ref,
     resolve_anythingllm_source_document_key,
 )
@@ -238,7 +238,7 @@ def verify_and_build_attestation(
 ) -> dict[str, object]:
     """完成四项真实检查、清理临时资源并返回已绑定证据的 Schema v2 证明。"""
 
-    infrastructure = load_weaponry_infrastructure_config()
+    infrastructure = load_weaponry_runtime_config()
     policies = build_weaponry_runtime_policies(infrastructure)
     token = uuid.uuid4().hex
     retrieval_name = f"{_WORKSPACE_PREFIX}retrieval-{token}"

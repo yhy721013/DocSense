@@ -40,8 +40,17 @@ Bootstrap 成功前不得构造 Connection Factory、UoW、Store 或启动后台
 - 两个独立 SQLite 连接的离线测试已经验证单次 claim CAS、单调 Task/Recovery fencing、旧 owner
   拒绝，以及接管者沿稳定 operation ID 对账旧 Intent。
 
-这些结果只证明当前 Windows/临时 SQLite 下的单库协议与约束，不证明浏览器、真实供应商、多实例、
-可靠队列、容量或生产切换。现有生产 `LegacyTaskCommandAdapter/LLMTaskService` 尚未接入本 Store。
-经确认，阶段 2-3 先实现完整 Authority Runtime，阶段 2-4～2-6 再按业务原子切换 Task 全生命周期
-和 Callback Control；不得通过隐藏 token、进程内映射或双写方式提前切换。阶段 2-2 Control Store
-只读取 Callback Admission Guard，不写 Callback Delivery 表。
+阶段 2-4、2-5 已分别将 Report、Weaponry 的 Task 全生命周期与 Callback Control 一次切到本 Store；
+Analysis/file 尚未迁移，继续读取和写入旧控制面，禁止双写。Control Store 在 Admission DTO 之外，
+还会在 runnable 扫描、claim 和 Task 重建边界复核批次身份：`file` 必须且只能携带完整 batch_id 与
+正 batch_sequence，其他业务必须不携带批次。绕过正常受理写入的异常行会失败关闭，不会被 Worker
+领取。
+
+保守 Reaper 已接入生产组合根，但只写 `DEFER`。`MARK_STALE` 在 abandon 旧 Attempt 前必须确认
+latest 已不再指向当前 execution；拒绝路径不得产生部分写。阶段 2-7 若实现自动
+`FINALIZE_FROM_CHECKPOINT`，必须由业务组合 UoW 校验并收敛 Report Artifact/Weaponry Result 等业务
+事实，不能仅凭通用 Task 投影绕过业务 Store。
+
+这些结果只证明当前 Windows/临时 SQLite 下的单库协议与单进程线程协作，不证明浏览器、真实供应商、
+多实例、可靠队列、共享数据库一致性、容量或 exactly-once。阶段 2-2 Control Store 仍不写 Callback
+Delivery 表；该表由专用 Callback Control Store 独占。

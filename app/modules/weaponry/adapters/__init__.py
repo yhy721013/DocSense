@@ -15,17 +15,22 @@ from .anythingllm_resource_cleanup import (
 )
 from .callback_guard import SQLiteWeaponryCallbackAdapter
 from .callback_recovery import SQLiteWeaponryCallbackRecoverySource
-from .creation_intent_store import SQLiteWeaponryCreationIntentStoreAdapter
 from .creation_intent_recovery import (
     AnythingLLMWeaponryCreationIntentRecoveryAdapter,
     WeaponryCreationIntentRecoveryResult,
 )
-from .interaction_audit import SQLiteWeaponryInteractionAuditAdapter
 from .knowledge_documents import (
     DatabaseServiceWeaponryDocumentScopeAdapter,
     SQLiteWeaponryDocumentScopeAdapter,
 )
 from .task_codec import WeaponryTaskCommandCodec
+from .v2_callback import TaskControlWeaponryCallbackAdapter
+from .v2_callback_recovery import SQLiteWeaponryV2CallbackRecoverySource
+from .v2_runtime import (
+    WeaponryV2Maintenance,
+    WeaponryV2ResultMetrics,
+    WeaponryV2TaskDispatcher,
+)
 from .no_auxiliary_guidance import NoAuxiliaryGuidanceAdapter
 from .production_profile import (
     WeaponryProductionSelectionProfileConfig,
@@ -44,7 +49,11 @@ from .resource_registration import (
     StoreBackedWeaponryResourceRegistrar,
     WeaponryCreatedResourceRegistrarProtocol,
 )
-from .resource_store import SQLiteWeaponryResourceStoreAdapter
+from .sqlite import (
+    SQLiteWeaponryCreationIntentStoreAdapter,
+    SQLiteWeaponryInteractionAuditAdapter,
+    SQLiteWeaponryResourceStoreAdapter,
+)
 from .terms_rule_guidance import (
     AnythingLLMReadOnlyTermsRuleProvider,
     CatalogRoutingTermsRuleProviderProtocol,
@@ -70,14 +79,14 @@ from .translation import (
     TranslationEngineWeaponryAdapter,
     WeaponryTextTranslatorProtocol,
 )
-from .infrastructure_config import (
+from .runtime_config import (
     WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE,
-    WeaponryInfrastructureConfig,
-    WeaponryInfrastructureConfigurationError,
+    WeaponryRuntimeConfig,
+    WeaponryRuntimeConfigurationError,
     WeaponryRuntimeCapabilities,
     WeaponryRuntimePolicies,
     build_weaponry_runtime_policies,
-    load_weaponry_infrastructure_config,
+    load_weaponry_runtime_config,
     validate_weaponry_runtime_capabilities,
 )
 from .local_dispatcher import (
@@ -130,16 +139,21 @@ __all__ = [
     "WeaponryProductionGateSnapshot",
     "build_weaponry_production_attestation",
     "evaluate_weaponry_production_gate",
-    "WeaponryInfrastructureConfig",
-    "WeaponryInfrastructureConfigurationError",
+    "WeaponryRuntimeConfig",
+    "WeaponryRuntimeConfigurationError",
     "WeaponryRuntimeCapabilities",
     "WeaponryRuntimePolicies",
     "WeaponryTaskCommandCodec",
+    "TaskControlWeaponryCallbackAdapter",
+    "SQLiteWeaponryV2CallbackRecoverySource",
+    "WeaponryV2Maintenance",
+    "WeaponryV2ResultMetrics",
+    "WeaponryV2TaskDispatcher",
     "WeaponryTextTranslatorProtocol",
     "build_weaponry_production_selection_policy",
     "build_weaponry_runtime_policies",
     "build_terms_catalog_manifest",
-    "load_weaponry_infrastructure_config",
+    "load_weaponry_runtime_config",
     "validate_weaponry_runtime_capabilities",
     "workspace_name_for_fingerprint",
 ]

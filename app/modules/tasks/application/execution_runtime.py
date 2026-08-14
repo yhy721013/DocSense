@@ -244,7 +244,8 @@ class TaskExecutionRuntime:
         try:
             self._workflow_runner.run(context)
         except TaskExecutionStopRequested:
-            # 失权是预期协作停止路径；最终分类以 supervisor/session 的稳定结果为准。
+            # 失权或正常取消都是预期协作停止路径；最终分类以 supervisor/session
+            # 的稳定结果为准，不能在这里把正常停机误记为 Workflow 故障。
             pass
         except Exception as exc:
             workflow_failed = True

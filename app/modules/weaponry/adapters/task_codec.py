@@ -364,6 +364,17 @@ class WeaponryTaskCommandCodec:
 
     task_type = WEAPONRY_BUSINESS_TYPE
 
+    @property
+    def write_schema_version(self) -> int:
+        """返回新受理唯一允许写入的内部 Input 版本。
+
+        阶段 2-5 必须继续复用已经冻结的 Weaponry v2，不能仿照 Report 为统一
+        Runtime 擅自升版；版本 3 保留给直接父节点专项。未来 v2 Admission 用例会在
+        构造期读取本属性并失败关闭，避免错误 Codec 被接入生产控制面。
+        """
+
+        return WEAPONRY_INPUT_SCHEMA_VERSION
+
     def encode_submission(
         self,
         command: TaskSubmissionCommand[WeaponrySubmission],

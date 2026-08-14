@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 from app.modules.tasks.domain import TaskId
+from app.modules.tasks.adapters.sqlite.transaction import SQLiteTransactionManager
 from app.modules.weaponry.ports import (
     ClaimWeaponryCreationIntentRecovery,
     CompleteWeaponryCreationIntentRecovery,
@@ -31,18 +32,48 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
     每个方法都使用独立短事务，为阶段 3 平移到 MySQL Repository 保留清晰边界。
     """
 
-    def __init__(self, db_path: str, *, busy_timeout_ms: int = 30_000) -> None:
-        if not isinstance(db_path, str) or not db_path.strip():
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        transaction_manager: SQLiteTransactionManager | None = None,
+        connection: sqlite3.Connection | None = None,
+        busy_timeout_ms: int = 30_000,
+    ) -> None:
+        modes = sum(value is not None for value in (db_path, transaction_manager, connection))
+        if modes != 1:
+            raise ValueError("db_path、transaction_manager 与 connection 必须且只能提供一个")
+        if db_path is not None and (not isinstance(db_path, str) or not db_path.strip()):
             raise ValueError("db_path 必须是非空 str")
+        if connection is not None and not isinstance(connection, sqlite3.Connection):
+            raise TypeError("connection 必须是 sqlite3.Connection")
+        if transaction_manager is not None and not isinstance(
+            transaction_manager,
+            SQLiteTransactionManager,
+        ):
+            raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
         if (
             isinstance(busy_timeout_ms, bool)
             or not isinstance(busy_timeout_ms, int)
             or busy_timeout_ms < 1
         ):
             raise ValueError("busy_timeout_ms 必须是正整数")
-        self._db_path = str(Path(db_path))
+        self._db_path = str(Path(db_path)) if db_path is not None else ""
+        self._borrowed_connection = connection
+        self._transactions = transaction_manager
+        self._strict_control_mode = db_path is None
         self._busy_timeout_ms = busy_timeout_ms
-        self._initialize_schema()
+        if db_path is not None:
+            # 旧生产模式仍保持自建表行为；v2 借用连接模式只接受 Bootstrap 已验证的
+            # 组件 Schema，严禁运行期自愈 DDL。
+            self._initialize_schema()
+
+    @classmethod
+    def from_connection(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> "SQLiteWeaponryCreationIntentStoreAdapter":
+        return cls(connection=connection)
 
     def reserve(
         self, intent: WeaponryCreationIntent
@@ -52,6 +83,16 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         if intent.state is not WeaponryCreationIntentState.PENDING or intent.version != 0:
             raise ValueError("新建意图必须从 pending/version=0 开始")
         with self._transaction() as connection:
+            if self._strict_control_mode:
+                execution = connection.execute(
+                    "SELECT business_type FROM llm_task_executions WHERE execution_id = ?",
+                    (intent.task_id.value,),
+                ).fetchone()
+                if execution is None or execution["business_type"] != "weaponry":
+                    raise WeaponryPortStateError(
+                        "creation_intent_execution_identity_mismatch",
+                        "创建意图与 Weaponry execution 身份不一致",
+                    )
             existing = self._select(connection, intent.task_id, intent.intent_id)
             if existing is not None:
                 decoded = self._decode(existing)
@@ -80,7 +121,7 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         normalized_intent_id = str(intent_id or "").strip()
         if not normalized_intent_id:
             raise ValueError("intent_id 不能为空")
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             row = self._select(connection, task_id, normalized_intent_id)
         return None if row is None else self._decode(row)
 
@@ -273,7 +314,7 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
     def list_pending(self, *, limit: int) -> tuple[WeaponryCreationIntent, ...]:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM weaponry_creation_intents
@@ -282,6 +323,28 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
                 LIMIT ?
                 """,
                 (limit,),
+            ).fetchall()
+        return tuple(self._decode(row) for row in rows)
+
+    def list_for_task(
+        self,
+        task_id: TaskId,
+        *,
+        limit: int,
+    ) -> tuple[WeaponryCreationIntent, ...]:
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit 必须是正整数")
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM weaponry_creation_intents
+                WHERE task_id = ?
+                ORDER BY intent_id
+                LIMIT ?
+                """,
+                (task_id.value, limit),
             ).fetchall()
         return tuple(self._decode(row) for row in rows)
 
@@ -300,7 +363,7 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
         normalized_observed_at = self._parse_timestamp(observed_at).isoformat()
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM weaponry_creation_intents
@@ -331,7 +394,7 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
 
     def _initialize_schema(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS weaponry_creation_intents (
@@ -374,6 +437,17 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._transactions is not None:
+            with self._transactions.begin(read_only=False) as transaction:
+                yield transaction.connection
+                transaction.commit()
+            return
+        if self._borrowed_connection is not None:
+            if not self._borrowed_connection.in_transaction:
+                raise RuntimeError("Weaponry Creation Intent Store 借用连接必须处于活动事务")
+            # 提交和回滚只能由最外层 Weaponry UoW 执行。
+            yield self._borrowed_connection
+            return
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -384,6 +458,21 @@ class SQLiteWeaponryCreationIntentStoreAdapter:
             raise
         finally:
             connection.close()
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        if self._transactions is not None:
+            with self._transactions.begin(read_only=True) as transaction:
+                yield transaction.connection
+                transaction.commit()
+            return
+        if self._borrowed_connection is not None:
+            if not self._borrowed_connection.in_transaction:
+                raise RuntimeError("Weaponry Creation Intent Store 借用连接必须处于活动事务")
+            yield self._borrowed_connection
+            return
+        with closing(self._connect()) as connection:
+            yield connection
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

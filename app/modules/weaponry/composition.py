@@ -13,8 +13,8 @@ from app.modules.tasks.ports import (
     TaskExecutionPermitPort,
     TaskQueueInspectionPort,
 )
-from app.modules.weaponry.adapters.infrastructure_config import (
-    WeaponryInfrastructureConfig,
+from app.modules.weaponry.adapters.runtime_config import (
+    WeaponryRuntimeConfig,
     WeaponryRuntimeCapabilities,
     WeaponryRuntimePolicies,
     build_weaponry_runtime_policies,
@@ -24,6 +24,7 @@ from app.modules.weaponry.adapters.local_dispatcher import (
     LocalWeaponryDispatcherSnapshot,
     LocalWeaponryTaskDispatcher,
 )
+from app.modules.weaponry.adapters.v2_runtime import WeaponryV2TaskDispatcher
 from app.modules.weaponry.adapters.production_gate import (
     WeaponryProductionGateSnapshot,
     evaluate_weaponry_production_gate,
@@ -34,6 +35,7 @@ from app.modules.weaponry.application import (
     RunWeaponryTask,
     SubmitWeaponryRequest,
     SubmitWeaponryTask,
+    SubmitWeaponryV2Task,
     WeaponryFieldExecutor,
     WeaponryResourceRecoveryService,
 )
@@ -79,7 +81,7 @@ class WeaponryApplicationServices:
     progress_publisher: ProgressPublisherPort
     execution_limiter: TaskExecutionPermitPort
     policies: WeaponryRuntimePolicies
-    config: WeaponryInfrastructureConfig
+    config: WeaponryRuntimeConfig
     # 该用例完全由同一容器内的 Scope、策略和 Submit 派生，不允许调用方单独替换后
     # 留下半新半旧的实例链。``dataclasses.replace`` 替换任一基础依赖时也会安全重建。
     submit_request: SubmitWeaponryRequest = field(init=False)
@@ -114,8 +116,8 @@ class WeaponryApplicationServices:
             raise TypeError("execution_limiter 必须实现 TaskExecutionPermitPort")
         if not isinstance(self.policies, WeaponryRuntimePolicies):
             raise TypeError("policies 必须是 WeaponryRuntimePolicies")
-        if not isinstance(self.config, WeaponryInfrastructureConfig):
-            raise TypeError("config 必须是 WeaponryInfrastructureConfig")
+        if not isinstance(self.config, WeaponryRuntimeConfig):
+            raise TypeError("config 必须是 WeaponryRuntimeConfig")
 
         object.__setattr__(
             self,
@@ -242,7 +244,7 @@ def compose_weaponry_application_services(
     document_scope: WeaponryDocumentScopePort,
     execution_limiter: TaskExecutionPermitPort,
     process_guard: ProcessSingletonGuardPort,
-    config: WeaponryInfrastructureConfig,
+    config: WeaponryRuntimeConfig,
     capabilities: WeaponryRuntimeCapabilities,
     creation_intent_recovery: WeaponryBoundedMaintenancePort | None = None,
     startup_gate: Callable[[], None] | None = None,
@@ -330,7 +332,88 @@ def compose_weaponry_application_services(
     return services
 
 
+@dataclass(frozen=True)
+class WeaponryV2ApplicationServices:
+    """阶段 2-5 生产对象图；不暴露旧 TaskCommand/Runner Authority 入口。"""
+
+    submit: SubmitWeaponryV2Task
+    dispatcher: WeaponryV2TaskDispatcher
+    callbacks: WeaponryCallbackPort
+    callback_recovery: RecoverWeaponryCallbackSynchronously
+    resource_recovery: WeaponryResourceRecoveryService
+    document_scope: WeaponryDocumentScopePort
+    progress_publisher: ProgressPublisherPort
+    execution_limiter: TaskExecutionPermitPort
+    policies: WeaponryRuntimePolicies
+    config: WeaponryRuntimeConfig
+    submit_request: SubmitWeaponryRequest = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.submit, SubmitWeaponryV2Task):
+            raise TypeError("submit 必须是 SubmitWeaponryV2Task")
+        if not isinstance(self.dispatcher, WeaponryV2TaskDispatcher):
+            raise TypeError("dispatcher 必须是 WeaponryV2TaskDispatcher")
+        if not isinstance(self.callbacks, WeaponryCallbackPort):
+            raise TypeError("callbacks 必须实现 WeaponryCallbackPort")
+        if not isinstance(self.callback_recovery, RecoverWeaponryCallbackSynchronously):
+            raise TypeError("callback_recovery 类型错误")
+        if not isinstance(self.resource_recovery, WeaponryResourceRecoveryService):
+            raise TypeError("resource_recovery 类型错误")
+        if not isinstance(self.document_scope, WeaponryDocumentScopePort):
+            raise TypeError("document_scope 必须实现 WeaponryDocumentScopePort")
+        if not isinstance(self.progress_publisher, ProgressPublisherPort):
+            raise TypeError("progress_publisher 必须实现 ProgressPublisherPort")
+        if not isinstance(self.execution_limiter, TaskExecutionPermitPort):
+            raise TypeError("execution_limiter 必须实现 TaskExecutionPermitPort")
+        if self.submit.dispatcher is not self.dispatcher:
+            raise ValueError("Weaponry v2 Submit 与 Dispatcher 必须共享实例")
+        if not (
+            self.callback_recovery.callbacks
+            is self.dispatcher.callbacks
+            is self.callbacks
+        ):
+            raise ValueError("Weaponry Worker/check-task/维护必须共享 Callback Guard")
+        if self.dispatcher.resources is not self.resource_recovery:
+            raise ValueError("Weaponry Worker 与维护必须共享资源恢复状态机")
+        object.__setattr__(
+            self,
+            "submit_request",
+            SubmitWeaponryRequest(
+                document_scope=self.document_scope,
+                evidence_selection_policy=self.policies.evidence_selection,
+                execution_policy=self.policies.execution,
+                auxiliary_guidance_policy=self.policies.auxiliary_guidance,
+                submit=self.submit,
+            ),
+        )
+
+    def start(self) -> None:
+        self.dispatcher.start()
+
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
+        return self.dispatcher.stop(timeout_seconds=timeout_seconds)
+
+    def close(self) -> None:
+        self.dispatcher.close()
+
+    def snapshot(self) -> LocalWeaponryDispatcherSnapshot:
+        return self.dispatcher.snapshot()
+
+    def production_gate_snapshot(self) -> WeaponryProductionGateSnapshot:
+        return evaluate_weaponry_production_gate(
+            attestation_path=self.config.production_attestation_path,
+            profile_id=self.policies.evidence_selection.profile_id,
+            fingerprints={
+                "provider": self.config.provider_fingerprint,
+                "embedding": self.config.embedding_fingerprint,
+                "documentProcessing": self.config.document_processing_fingerprint,
+                "extractionModel": self.config.extraction_model_fingerprint,
+            },
+        )
+
+
 __all__ = [
     "WeaponryApplicationServices",
+    "WeaponryV2ApplicationServices",
     "compose_weaponry_application_services",
 ]

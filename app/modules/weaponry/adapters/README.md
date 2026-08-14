@@ -21,7 +21,8 @@
 - `no_auxiliary_guidance.py`、`terms_rule_guidance.py`：关闭路径真实零 I/O，开启路径通过可整体
   删除的只读术语 Provider 提供非事实辅助语境；
 - `translation.py`：把既有纯文本翻译能力收敛到来源级 Port，失败兼容为空文本；
-- `interaction_audit.py`、`resource_store.py`、`resource_registration.py`：SQLite 短事务完成
+- `sqlite/interaction_audit_store.py`、`sqlite/resource_store.py`、`resource_registration.py`：
+  SQLite 短事务完成
   reserve/complete 三态分类、资源 CAS、owned/shared、清理 lease/fencing 和创建后立即登记，
   不在事务中执行网络调用；终态 execution 的遗留 tracking 记录也能进入后续恢复候选。
 
@@ -31,7 +32,7 @@ Document Scope 与 Retrieval 使用同一完整文档位置规范化身份；创
 
 阶段 1D-5 另新增：
 
-- `infrastructure_config.py`：一次启动严格读取单实例扫描/维护参数、四类运行指纹和固定
+- `runtime_config.py`：一次启动严格读取单实例扫描/维护参数、四类运行指纹和固定
   Query/score/rank/Extraction Context；模式 1 明确拒绝，术语关闭分支不读取五个术语专属键，
   且不存在 Query/Selected Evidence 字符上限；
 - `local_dispatcher.py`：复用 tasks 通用持久扫描内核，装配一条 Weaponry 执行 Worker、资源与
@@ -47,10 +48,22 @@ Document Scope 与 Retrieval 使用同一完整文档位置规范化身份；创
   3xx 禁止跟随、unknown 冻结、过期 sweep、人工解除审计和公开投影无损重建；
 - `anythingllm_resource_cleanup.py`：按资源类型执行一次幂等删除，404 视为已清理，明确失败进入
   持久冷却，超时/断连等结果未知进入 quarantine；
-- `resource_store.py`：终态 tracking 候选扫描、立即清理水位、失败持久冷却，以及逐资源
+- `sqlite/resource_store.py`：终态 tracking 候选扫描、立即清理水位、失败持久冷却，以及逐资源
   cleanup lease/fencing 条件提交；资源恢复的 `limit` 按本轮逐项恢复尝试数计量，同批任务
   采用轮转推进，停止请求只在单项边界生效。持久 Store 始终是事实来源，线程 Event 只是
   可丢失提示，启动与固定周期扫描仍负责恢复历史积压。
+
+阶段 2-5 第 3 步新增 `sqlite/weaponry_control_manifest.json` 与
+`sqlite/task_document_snapshot_store.py`。新组件把文档快照按 `task_id` 隔离，并为 Creation
+Intent、Interaction Audit、资源记录及人工处置审计声明唯一 Schema 身份；组件 Bootstrap 必须在
+运行线程启动前完成，运行期禁止自愈 DDL。
+
+阶段 2-5 步骤 7～8 已完成生产源码的原子切换：`v2_runtime.py` 以通用持久 Executor 承接
+claim/start/heartbeat/失权停止，`v2_callback.py` 使用 Task Control Guard lease/fencing，
+`v2_callback_recovery.py` 从 latest Task 与完整 `weaponry_result_snapshots` 精确重建原 Callback。
+旧 Store 的数据库路径模式只服务历史离线回归，不再是生产 Writer；旧 `LLMTaskService` 的
+Weaponry 文档快照 DDL/读写已删除。术语目录 startup gate 仍早于任何线程启动，Provider/Profile
+门禁及既有环境键保持不变。
 
 当前开发分支已装配上述真实 Adapter 并切换 `/llm/weaponry`，但本轮自动验收没有连接真实模型、
 回调接收端或修改现有 AnythingLLM 资源；部署前的真实供应商能力与运行容量仍需在受控集成环境验证。

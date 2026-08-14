@@ -18,8 +18,8 @@ load_dotenv(ROOT / ".env", override=False)
 from app.modules.weaponry.adapters import (  # noqa: E402
     build_weaponry_runtime_policies,
     evaluate_weaponry_production_gate,
-    load_weaponry_infrastructure_config,
-    WeaponryInfrastructureConfigurationError,
+    load_weaponry_runtime_config,
+    WeaponryRuntimeConfigurationError,
 )
 
 
@@ -27,9 +27,9 @@ def main() -> int:
     """输出稳定 JSON；就绪返回 0，缺失或不匹配返回 1。"""
 
     try:
-        config = load_weaponry_infrastructure_config()
+        config = load_weaponry_runtime_config()
         policies = build_weaponry_runtime_policies(config)
-    except (TypeError, ValueError, WeaponryInfrastructureConfigurationError):
+    except (TypeError, ValueError, WeaponryRuntimeConfigurationError):
         # stdout 是发布系统消费的稳定协议。具体配置异常由部署日志和同一环境中的应用
         # 启动校验输出，避免把 API Key、路径或供应商细节意外写入流水线制品。
         sys.stdout.write(

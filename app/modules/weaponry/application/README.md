@@ -36,3 +36,8 @@
 Callback Client 或运行时环境变量。1D-6 已在生产组合根注入同一 Callback Adapter、同步恢复源、
 资源恢复和 Dispatcher，并完成公开路由切换；组合根构造仍不会启动线程或提前创建网络 Session，
 生命周期只由应用容器显式启动和关闭。
+
+阶段 2-5 新增 `SubmitWeaponryV2Task`、`RunWeaponryV2Workflow`、冻结 Step/Recovery Registry、
+`WeaponryStepRuntime` 与 Weaponry 组合 UoW。生产执行权现在只来自 Task Control 的完整 Attempt
+Authority；终态与完整 Callback 结果快照、terminal Step、Task/Attempt 以及 Callback eligibility
+同事务提交。外部结果未知必须在审计事实提交后隔离 Task，禁止继续生成终态或自动重放。

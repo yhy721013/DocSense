@@ -7,10 +7,11 @@ from app.modules.tasks.ports import TaskReadPort
 
 
 class RoutedTaskReadAdapter:
-    """Report 读取 v2；尚未迁移的业务继续读取旧库。
+    """按组合根显式声明的业务集合路由 v2；尚未迁移的业务继续读取旧库。
 
-    按 TaskId 无法预先知道业务类型，因此先查 v2，再回退旧库。v2 当前只接纳 Report，
-    不会把 Weaponry/Analysis 的旧执行误路由到新控制面。
+    按 TaskId 无法预先知道业务类型，因此先查 v2，再回退旧库。按业务键读取时禁止在
+    Adapter 内维护隐式默认集合：每个业务完成一次切换后，组合根必须同步更新显式集合，
+    否则构造阶段就会暴露遗漏，避免公开 check-task/Progress 静默读到遗留数据库。
     """
 
     def __init__(
@@ -18,7 +19,7 @@ class RoutedTaskReadAdapter:
         *,
         v2_reader: TaskReadPort,
         legacy_reader: TaskReadPort,
-        v2_business_types: frozenset[str] = frozenset({"report"}),
+        v2_business_types: frozenset[str],
     ) -> None:
         if not isinstance(v2_reader, TaskReadPort):
             raise TypeError("v2_reader 必须实现 TaskReadPort")

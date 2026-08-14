@@ -31,6 +31,16 @@ class _BusinessPermit:
     def release(self) -> None:
         self._pool._release()
 
+    @property
+    def max_concurrency(self) -> int:
+        """兼容现有容器诊断字段；容量事实仍由唯一 Pool 持有。"""
+
+        return self._pool.capacity
+
+    @property
+    def waiting_count(self) -> int:
+        return self._pool.waiting_counts[self._business]
+
 
 class FairTaskExecutionPermitPool:
     """对非空业务等待队列按固定顺序 round-robin，不承诺完成顺序。"""
@@ -60,6 +70,15 @@ class FairTaskExecutionPermitPool:
         if business not in self._waiters:
             raise ValueError("business 不在冻结轮转顺序中")
         return _BusinessPermit(self, business)
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    def owns(self, permit: object) -> bool:
+        """验证业务 Permit 是否由当前唯一容量池签发，供组合根 fail fast。"""
+
+        return isinstance(permit, _BusinessPermit) and permit._pool is self
 
     @property
     def waiting_counts(self) -> dict[str, int]:

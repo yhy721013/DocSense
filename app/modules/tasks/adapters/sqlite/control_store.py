@@ -168,7 +168,29 @@ class SQLiteTaskControlStore:
         ).fetchone()
 
     @staticmethod
+    def _require_valid_batch_identity(row: sqlite3.Row) -> None:
+        """对绕过 Admission DTO 的脏数据失败关闭。
+
+        根 Schema 当前只冻结批次列的成对空值关系；业务类型与批次身份的对应规则仍需
+        Store 在读取/领取边界重复校验，避免手工维护或未来迁移写入的异常行被执行。
+        """
+
+        is_file = str(row["business_type"]) == "file"
+        batch_id = row["batch_id"]
+        batch_sequence = row["batch_sequence"]
+        has_complete_batch = batch_id is not None and batch_sequence is not None
+        has_partial_batch = (batch_id is None) != (batch_sequence is None)
+        invalid_sequence = (
+            batch_sequence is not None and int(batch_sequence) <= 0
+        )
+        if has_partial_batch or invalid_sequence or is_file != has_complete_batch:
+            raise RuntimeError(
+                "Task Control 批次身份不变量损坏，已拒绝执行"
+            )
+
+    @staticmethod
     def _task_from_row(row: sqlite3.Row) -> TaskRecord:
+        SQLiteTaskControlStore._require_valid_batch_identity(row)
         return TaskRecord(
             task_id=TaskId(str(row["execution_id"])),
             task_type=str(row["business_type"]),
@@ -719,6 +741,7 @@ class SQLiteTaskControlStore:
         row = self._task_row(request.task_id)
         if row is None:
             return TaskExecutionClaimResult(TaskExecutionMutationOutcome.MISSING)
+        self._require_valid_batch_identity(row)
         if (
             str(row["business_type"]) != request.task_type
             or str(row["execution_state"]) != TaskState.ACCEPTED.value
@@ -923,7 +946,8 @@ class SQLiteTaskControlStore:
         cursor = self._connection.execute(
             """
             UPDATE llm_task_executions
-            SET next_dispatch_at = ?, last_dispatch_error = ?, updated_at = ?,
+            SET dispatch_failure_count = dispatch_failure_count + 1,
+                next_dispatch_at = ?, last_dispatch_error = ?, updated_at = ?,
                 row_version = row_version + 1
             WHERE execution_id = ? AND business_type = ?
               AND execution_state = 'accepted' AND row_version = ?
@@ -1525,6 +1549,25 @@ class SQLiteTaskControlStore:
             raise ValueError("task_type 必须是非空 str")
         not_after = require_persisted_utc(not_after, name="not_after")
         self._validate_limit(limit)
+        malformed = self._connection.execute(
+            """
+            SELECT * FROM llm_task_executions
+            WHERE business_type = ? AND execution_state = 'accepted'
+              AND (
+                (business_type = 'file'
+                  AND (batch_id IS NULL OR batch_sequence IS NULL))
+                OR
+                (business_type <> 'file'
+                  AND (batch_id IS NOT NULL OR batch_sequence IS NOT NULL))
+                OR batch_sequence <= 0
+              )
+            ORDER BY dispatch_sequence ASC LIMIT 1
+            """,
+            (task_type.strip(),),
+        ).fetchone()
+        if malformed is not None:
+            self._require_valid_batch_identity(malformed)
+            raise RuntimeError("Task Control 批次身份校验未能识别异常行")
         rows = self._connection.execute(
             """
             SELECT e.execution_id
@@ -1785,6 +1828,13 @@ class SQLiteTaskControlStore:
                 raise RuntimeError("retry_safe 未能与旧 Attempt 原子收敛")
             event_type = "task.retry_safe_classified"
         elif classification is RecoveryClassification.MARK_STALE:
+            if current.latest_is_current:
+                # latest 仍指向当前 execution 时，stale 会让公开有效任务凭空消失。
+                # 该保护必须早于 Attempt abandon，确保拒绝路径不产生部分写。
+                return TaskRecoveryClassificationResult(
+                    TaskRecoveryMutationOutcome.SOURCE_CHANGED,
+                    classification,
+                )
             if not self._abandon_expired_attempt(
                 current,
                 completed_at=command.classified_at,

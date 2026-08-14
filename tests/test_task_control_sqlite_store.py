@@ -24,6 +24,7 @@ from app.modules.tasks.domain import (
     StepEffectKind,
     StepReplayPolicy,
     TaskBusinessRef,
+    TaskBatchRef,
     TaskId,
     TaskOwnerIdentity,
     TaskRecoveryDecision,
@@ -86,6 +87,27 @@ def _request(task_id: str, business_key: str) -> TaskAdmissionRequest[tuple[str,
         initial_public_status="waiting",
         trace_id=f"trace-{task_id}",
         accepted_at=_T0,
+    )
+
+
+def _file_request(
+    task_id: str,
+    business_key: str,
+) -> TaskAdmissionRequest[tuple[str, ...]]:
+    """构造采用已确认 ``file`` 路由名的 Analysis 批次任务。"""
+
+    return TaskAdmissionRequest(
+        task_id=TaskId(task_id),
+        task_type="file",
+        business_ref=TaskBusinessRef("file", business_key),
+        input_schema_version=1,
+        input_snapshot=(business_key,),
+        input_payload={"file_id": business_key},
+        public_request_payload={"fileId": business_key},
+        initial_public_status="waiting",
+        trace_id=f"trace-{task_id}",
+        accepted_at=_T0,
+        batch=TaskBatchRef(batch_id=f"batch-{task_id}", sequence=1),
     )
 
 
@@ -156,6 +178,42 @@ class SQLiteTaskControlStoreTestCase(unittest.TestCase):
 
 
 class SQLiteAdmissionAndExecutionTests(SQLiteTaskControlStoreTestCase):
+    def test_malformed_analysis_batch_identity_fails_scan_and_claim_closed(self) -> None:
+        """即使维护操作绕过 DTO 写入脏行，Store 也不得领取该 Analysis Task。"""
+
+        request = _file_request("task-file-malformed", "file-malformed")
+        self._admit(request)
+        with self.transaction_manager.begin() as transaction:
+            transaction.connection.execute(
+                """
+                UPDATE llm_task_executions
+                SET batch_id = NULL, batch_sequence = NULL
+                WHERE execution_id = ?
+                """,
+                (request.task_id.value,),
+            )
+            transaction.commit()
+
+        with self.factories.queries() as unit_of_work:
+            with self.assertRaisesRegex(RuntimeError, "批次身份不变量损坏"):
+                unit_of_work.queries.scan_runnable(
+                    "file",
+                    not_after=_T1,
+                    limit=10,
+                )
+        with self.factories.execution() as unit_of_work:
+            with self.assertRaisesRegex(RuntimeError, "批次身份不变量损坏"):
+                unit_of_work.execution.claim(
+                    TaskClaimRequest(
+                        task_id=request.task_id,
+                        task_type="file",
+                        owner=_owner("worker-file"),
+                        lease_token="lease-file-malformed",
+                        claimed_at=_T1,
+                        lease_expires_at=_T30,
+                    )
+                )
+
     def test_uow_default_rollback_and_committed_admission_conflict(self) -> None:
         request = _request("task-sqlite-admission", "business-admission")
         with self.factories.admission() as unit_of_work:
@@ -271,6 +329,43 @@ class SQLiteAdmissionAndExecutionTests(SQLiteTaskControlStoreTestCase):
 
 
 class SQLiteRecoveryAndFencingTests(SQLiteTaskControlStoreTestCase):
+    def test_mark_stale_rejects_latest_before_abandoning_source_attempt(self) -> None:
+        """latest 保护必须先于 Attempt abandon，拒绝路径不得留下部分写。"""
+
+        request = _request("task-mark-stale-latest", "business-mark-stale")
+        self._admit(request)
+        authority = self._claim(request)
+
+        with self.factories.recovery() as unit_of_work:
+            candidate = unit_of_work.recovery.load_candidate(request.task_id)
+            assert candidate is not None
+            self.assertTrue(candidate.latest_is_current)
+            result = unit_of_work.recovery.classify_candidate_if_current(
+                TaskRecoveryClassificationCommand(
+                    candidate=candidate,
+                    classification=RecoveryClassification.MARK_STALE,
+                    policy_version="test-mark-stale-v1",
+                    classified_at=_T30,
+                )
+            )
+            self.assertIs(TaskRecoveryMutationOutcome.SOURCE_CHANGED, result.outcome)
+            unit_of_work.commit()
+
+        with self.factories.execution() as unit_of_work:
+            task = unit_of_work.execution.get_task(request.task_id)
+        with self.transaction_manager.begin(read_only=True) as transaction:
+            attempt_state = transaction.connection.execute(
+                """
+                SELECT state FROM task_attempts
+                WHERE task_id = ? AND attempt_no = ?
+                """,
+                (request.task_id.value, authority.attempt_no),
+            ).fetchone()[0]
+            transaction.commit()
+        assert task is not None
+        self.assertIs(TaskState.RUNNING, task.state)
+        self.assertEqual("leased", str(attempt_state))
+
     def test_two_independent_connections_allow_only_one_execution_claim(self) -> None:
         request = _request("task-sqlite-claim-cas", "business-claim-cas")
         self._admit(request)

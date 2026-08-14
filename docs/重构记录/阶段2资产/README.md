@@ -20,6 +20,9 @@
 | `260812-阶段2-1完成验收记录.md` | 汇总纯 Domain/Port/Fake、共享领域路径迁移、授权门禁修复、156 项聚合与 2255 项全量离线验收。 |
 | `260812-阶段2-2根Schema与组件Manifest设计.md` | 冻结根 fingerprint、组件注册/安装、实际 SQLite 精确核验、内部 Port 补全、Control Store 实施结果及已确认的按业务切换边界。 |
 | `260812-阶段2-2完成验收记录.md` | 汇总 Schema/Bootstrap、UoW、Control Store、双连接 fencing、方案 A 切换顺序、154 项聚合与 2314 项全量离线验收。 |
+| `260813-阶段2-3ExecutionRuntime与AuthoritySession设计.md` | 冻结完整 Authority、claim/start/heartbeat、协作停止、本地执行器、公平容量与保守 Reaper 边界。 |
+| `260813-阶段2-4Report试点设计.md` | 冻结 Report v2 Input/Profile/Step/UoW、Callback Control、资源维护和一次切换方案。 |
+| `260814-阶段2-5Weaponry迁移设计.md` | 冻结 Weaponry v2 快照、组件事实、字段 Step、结果/终态、Callback 与生产切换方案。 |
 
 机器可读内部契约位于 `tests/contracts/stage2_task_execution_contract.json`、
 `tests/contracts/stage2_interface_contract_hashes.json` 和

@@ -1,4 +1,4 @@
-"""Weaponry 外部交互 reserve/complete 的 SQLite 原子审计 Adapter。"""
+"""Weaponry 外部交互 reserve/complete 的 SQLite 原子审计 Store。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterator
 
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
+from app.modules.tasks.adapters.sqlite.transaction import SQLiteTransactionManager
 from app.modules.weaponry.ports import (
     CompleteWeaponryInteraction,
     ReserveWeaponryInteraction,
@@ -37,18 +38,46 @@ class SQLiteWeaponryInteractionAuditAdapter:
     调用模型、检索或翻译必须由 Application 在两个方法之间、事务之外执行。
     """
 
-    def __init__(self, db_path: str, *, busy_timeout_ms: int = 30_000) -> None:
-        if not isinstance(db_path, str) or not db_path.strip():
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        transaction_manager: SQLiteTransactionManager | None = None,
+        connection: sqlite3.Connection | None = None,
+        busy_timeout_ms: int = 30_000,
+    ) -> None:
+        modes = sum(value is not None for value in (db_path, transaction_manager, connection))
+        if modes != 1:
+            raise ValueError("db_path、transaction_manager 与 connection 必须且只能提供一个")
+        if db_path is not None and (not isinstance(db_path, str) or not db_path.strip()):
             raise ValueError("db_path 必须是非空 str")
+        if connection is not None and not isinstance(connection, sqlite3.Connection):
+            raise TypeError("connection 必须是 sqlite3.Connection")
+        if transaction_manager is not None and not isinstance(
+            transaction_manager,
+            SQLiteTransactionManager,
+        ):
+            raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
         if (
             isinstance(busy_timeout_ms, bool)
             or not isinstance(busy_timeout_ms, int)
             or busy_timeout_ms < 1
         ):
             raise ValueError("busy_timeout_ms 必须是正整数")
-        self._db_path = str(Path(db_path))
+        self._db_path = str(Path(db_path)) if db_path is not None else ""
+        self._borrowed_connection = connection
+        self._transactions = transaction_manager
+        self._strict_control_mode = db_path is None
         self._busy_timeout_ms = busy_timeout_ms
-        self._initialize_schema()
+        if db_path is not None:
+            self._initialize_schema()
+
+    @classmethod
+    def from_connection(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> "SQLiteWeaponryInteractionAuditAdapter":
+        return cls(connection=connection)
 
     def reserve(
         self,
@@ -61,6 +90,23 @@ class SQLiteWeaponryInteractionAuditAdapter:
         now = self._now()
         outcome = WeaponryAuditReserveOutcome.RESERVED
         with self._transaction() as connection:
+            if self._strict_control_mode:
+                execution = connection.execute(
+                    """
+                    SELECT business_type, business_key FROM llm_task_executions
+                    WHERE execution_id = ?
+                    """,
+                    (command.call.task_id.value,),
+                ).fetchone()
+                if (
+                    execution is None
+                    or execution["business_type"] != "weaponry"
+                    or execution["business_key"] != command.business_ref.business_key
+                ):
+                    raise WeaponryPortStateError(
+                        "interaction_audit_execution_identity_mismatch",
+                        "交互审计与 Weaponry execution 身份不一致",
+                    )
             existing = connection.execute(
                 """
                 SELECT reservation_id, reserve_payload_json, state
@@ -216,7 +262,7 @@ class SQLiteWeaponryInteractionAuditAdapter:
             raise TypeError("task_id 必须是 TaskId")
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM weaponry_interaction_audits
@@ -237,7 +283,7 @@ class SQLiteWeaponryInteractionAuditAdapter:
 
     def _initialize_schema(self) -> None:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as connection:
+        with self._read_connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS weaponry_interaction_audits (
@@ -281,6 +327,16 @@ class SQLiteWeaponryInteractionAuditAdapter:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._transactions is not None:
+            with self._transactions.begin(read_only=False) as transaction:
+                yield transaction.connection
+                transaction.commit()
+            return
+        if self._borrowed_connection is not None:
+            if not self._borrowed_connection.in_transaction:
+                raise RuntimeError("Weaponry Interaction Audit Store 借用连接必须处于活动事务")
+            yield self._borrowed_connection
+            return
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -291,6 +347,21 @@ class SQLiteWeaponryInteractionAuditAdapter:
             raise
         finally:
             connection.close()
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        if self._transactions is not None:
+            with self._transactions.begin(read_only=True) as transaction:
+                yield transaction.connection
+                transaction.commit()
+            return
+        if self._borrowed_connection is not None:
+            if not self._borrowed_connection.in_transaction:
+                raise RuntimeError("Weaponry Interaction Audit Store 借用连接必须处于活动事务")
+            yield self._borrowed_connection
+            return
+        with closing(self._connect()) as connection:
+            yield connection
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -414,7 +485,7 @@ class SQLiteWeaponryInteractionAuditAdapter:
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 __all__ = ["SQLiteWeaponryInteractionAuditAdapter"]

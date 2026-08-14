@@ -109,6 +109,7 @@ class LocalTaskExecutor:
             coordinator = self._coordinator
         self._stopping.set()
         self._wake.set()
+
         with self._lock:
             active_runtimes = tuple(self._active_runtimes.values())
         for runtime in active_runtimes:
@@ -149,6 +150,12 @@ class LocalTaskExecutor:
             )
             return False
         return True
+
+    @property
+    def execution_limiter(self) -> TaskExecutionPermitPort:
+        """暴露只读组合身份，便于组合根证明各业务共享同一容量池。"""
+
+        return self._permit
 
     def is_healthy(self) -> bool:
         with self._lock:
@@ -233,7 +240,11 @@ class LocalTaskExecutor:
             with self._lock:
                 self._active_runtimes[slot] = runtime
             if self._stopping.is_set():
+                # stop() 已经声明“停止新领取”。此处处于 permit 已取得、Runtime 尚未
+                # claim 的窄竞态窗口，只发送取消后立即返回；绝不能再调用 run() 让一个
+                # 新 Attempt 在停机信号之后成立。
                 runtime.request_cancellation()
+                return
             result = runtime.run(task_id)
             if result.outcome in {
                 TaskExecutionRuntimeOutcome.INPUT_ERROR,
@@ -252,14 +263,37 @@ class LocalTaskExecutor:
                 self._stopping.set()
                 self._wake.set()
         except Exception as exc:
+            # 未分类异常表示 Executor/Runtime 契约或冷却持久化链本身不可信。继续扫描会
+            # 立即重新命中同一 accepted Task，形成 CPU/日志热循环；因此先失败关闭整个
+            # Executor，再尽力为尚未 claim 的 Task 写入持久冷却。若 Task 已经 running，
+            # defer_dispatch 会条件拒绝，后续由 Task Reaper 根据过期 Authority 收敛。
+            with self._lock:
+                self._healthy = False
+            self._stopping.set()
+            self._wake.set()
             logger.error(
-                "LocalTaskExecutor Worker 异常: task_type=%s task_id=%s worker_slot=%d "
+                "LocalTaskExecutor Worker 异常并已停止新领取: "
+                "task_type=%s task_id=%s worker_slot=%d "
                 "reason_code=executor_worker_error error_type=%s",
                 self._task_type,
                 task_id,
                 slot,
                 type(exc).__name__,
             )
+            try:
+                self._persist_dispatch_cooldown(
+                    task_id,
+                    reason_code="executor_worker_error",
+                )
+            except Exception as cooldown_exc:
+                logger.error(
+                    "LocalTaskExecutor 异常后的派发冷却写入失败: "
+                    "task_type=%s task_id=%s reason_code=executor_cooldown_error "
+                    "error_type=%s",
+                    self._task_type,
+                    task_id,
+                    type(cooldown_exc).__name__,
+                )
         finally:
             with self._lock:
                 self._active_runtimes.pop(slot, None)

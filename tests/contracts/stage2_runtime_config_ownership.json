@@ -83,7 +83,7 @@
     },
     {
       "name": "weaponry_runtime_current",
-      "currentOwner": "app/modules/weaponry/adapters/infrastructure_config.py::WeaponryInfrastructureConfig",
+      "currentOwner": "app/modules/weaponry/adapters/runtime_config.py::WeaponryRuntimeConfig",
       "targetOwner": "app/modules/weaponry/adapters/runtime_config.py::WeaponryRuntimeConfig",
       "envExampleStatus": "present_or_explicit_compat_comment",
       "logPolicy": "数值/布尔门禁可记录；路径、workspace 和能力标识只进入聚合 fingerprint，不记录原值",

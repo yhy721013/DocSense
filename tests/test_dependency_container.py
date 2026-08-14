@@ -74,7 +74,7 @@ from app.modules.tasks.adapters import (
 )
 from app.modules.tasks.application import ProgressSubscriptionService
 from app.modules.weaponry.adapters import (
-    WeaponryInfrastructureConfig,
+    WeaponryRuntimeConfig,
     WeaponryRuntimeCapabilities,
 )
 from app.modules.weaponry.composition import (
@@ -136,6 +136,32 @@ class _NoopWeaponryMaintenance:
         return {"limit": limit}
 
 
+class _RecordingTaskControlMaintenance:
+    """根控制面维护生命周期替身，不创建线程或访问数据库。"""
+
+    def __init__(self) -> None:
+        self.start_count = 0
+        self.stop_count = 0
+        self.close_count = 0
+        self.healthy = True
+
+    def start(self) -> None:
+        self.start_count += 1
+
+    def wake_up(self) -> None:
+        return None
+
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
+        self.stop_count += 1
+        return True
+
+    def is_healthy(self) -> bool:
+        return self.healthy
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
 class _FailingAnalysisDispatcher:
     """显式离线 Dispatcher Fake：只验证容器回滚，不创建任何后台线程。"""
 
@@ -187,10 +213,10 @@ class _RecordingAnalysisDispatcher:
         self.close_count += 1
 
 
-def _weaponry_infrastructure_config() -> WeaponryInfrastructureConfig:
+def _weaponry_runtime_config() -> WeaponryRuntimeConfig:
     """构造不访问环境变量或外部服务的离线单实例配置。"""
 
-    return WeaponryInfrastructureConfig(
+    return WeaponryRuntimeConfig(
         runtime_mode="single_instance",
         scan_interval_seconds=0.02,
         accepted_batch_size=10,
@@ -209,7 +235,7 @@ def _weaponry_infrastructure_config() -> WeaponryInfrastructureConfig:
 
 
 def _weaponry_capabilities(
-    config: WeaponryInfrastructureConfig,
+    config: WeaponryRuntimeConfig,
 ) -> WeaponryRuntimeCapabilities:
     """由离线 Fake 明确声明能力，不能从生产期望配置自动推断。"""
 
@@ -689,7 +715,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         """构造不启动线程、不访问真实供应商的 1D-5 Weaponry 实例链。"""
 
         recorder = WeaponryInvocationRecorder()
-        config = _weaponry_infrastructure_config()
+        config = _weaponry_runtime_config()
         callbacks = FakeWeaponryCallbackPort(recorder)
         return compose_weaponry_application_services(
             task_commands=FakeWeaponryTaskCommandPort(recorder),
@@ -780,6 +806,26 @@ class ApplicationContainerRouteTests(unittest.TestCase):
 
         self.assertEqual("closed", weaponry.snapshot().lifecycle_state)
         self.assertEqual(1, services.report_dispatcher.close_count)
+
+    def test_task_control_maintenance_joins_container_lifecycle_and_readiness(self) -> None:
+        """Reaper 调度器必须统一启停，故障后 readiness 立即失败关闭。"""
+
+        maintenance = _RecordingTaskControlMaintenance()
+        services = replace(
+            self.services,
+            task_control_maintenance=maintenance,
+        )
+        services.start_background_services()
+        self.assertEqual(1, maintenance.start_count)
+        self.assertTrue(services.stop_background_services(timeout_seconds=0.5))
+        self.assertEqual(1, maintenance.stop_count)
+        services.close()
+        self.assertEqual(1, maintenance.close_count)
+
+        maintenance.healthy = False
+        snapshot = services.readiness_snapshot()
+        self.assertFalse(snapshot.lifecycle_ready)
+        self.assertIn("task_control_maintenance_unhealthy", snapshot.reasons)
 
     def test_analysis_start_failure_rolls_back_only_components_started_this_call(self) -> None:
         """Analysis 启动失败时，Report 必须逆序停机且不能留下半启动 Worker。"""

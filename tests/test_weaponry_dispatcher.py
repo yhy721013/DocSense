@@ -24,12 +24,12 @@ from app.modules.tasks.ports import (
 )
 from app.modules.weaponry.adapters import (
     LocalWeaponryTaskDispatcher,
-    WeaponryInfrastructureConfig,
-    WeaponryInfrastructureConfigurationError,
+    WeaponryRuntimeConfig,
+    WeaponryRuntimeConfigurationError,
     WeaponryRuntimeCapabilities,
     WeaponryTaskCommandCodec,
     build_weaponry_runtime_policies,
-    load_weaponry_infrastructure_config,
+    load_weaponry_runtime_config,
 )
 from app.modules.weaponry.application import (
     RunWeaponryOutcome,
@@ -64,7 +64,7 @@ from tests.fakes import (
 )
 
 
-def _config(**overrides: object) -> WeaponryInfrastructureConfig:
+def _config(**overrides: object) -> WeaponryRuntimeConfig:
     values: dict[str, object] = {
         "runtime_mode": "single_instance",
         "scan_interval_seconds": 0.02,
@@ -82,11 +82,11 @@ def _config(**overrides: object) -> WeaponryInfrastructureConfig:
         "extraction_model_fingerprint": "stage1d5-extraction-v1",
     }
     values.update(overrides)
-    return WeaponryInfrastructureConfig(**values)  # type: ignore[arg-type]
+    return WeaponryRuntimeConfig(**values)  # type: ignore[arg-type]
 
 
 def _capabilities(
-    config: WeaponryInfrastructureConfig,
+    config: WeaponryRuntimeConfig,
 ) -> WeaponryRuntimeCapabilities:
     """由测试 Fake 显式声明能力，禁止生产代码从期望配置反推真实能力。"""
 
@@ -106,7 +106,7 @@ def _capabilities(
     )
 
 
-def _submission(architecture_id: int, config: WeaponryInfrastructureConfig) -> WeaponrySubmission:
+def _submission(architecture_id: int, config: WeaponryRuntimeConfig) -> WeaponrySubmission:
     template = {
         "templateClassifyId": 1,
         "fieldName": "主要用途",
@@ -142,7 +142,7 @@ def _submission(architecture_id: int, config: WeaponryInfrastructureConfig) -> W
     )
 
 
-def _accept(task_commands, architecture_id: int, config: WeaponryInfrastructureConfig) -> TaskId:
+def _accept(task_commands, architecture_id: int, config: WeaponryRuntimeConfig) -> TaskId:
     submission = _submission(architecture_id, config)
     result = task_commands.create_if_allowed(
         TaskSubmissionCommand(
@@ -316,7 +316,7 @@ class _TrackingEnvironment(Mapping[str, str]):
         return len(self._values)
 
 
-class WeaponryInfrastructureConfigTests(unittest.TestCase):
+class WeaponryRuntimeConfigTests(unittest.TestCase):
     @staticmethod
     def _environment(**overrides: str) -> dict[str, str]:
         values = {
@@ -339,7 +339,7 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
                 DOCSENSE_WEAPONRY_TERMS_MAX_CONTEXT_CHARS="999",
             )
         )
-        config = load_weaponry_infrastructure_config(environment)
+        config = load_weaponry_runtime_config(environment)
         self.assertFalse(config.terms_rule_context_enabled)
         forbidden = {
             "WEAPONRY_TERMS_WORKSPACE_NAME",
@@ -353,7 +353,7 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
     def test_terms_enabled_defers_policy_until_automatic_fingerprint_is_frozen(
         self,
     ) -> None:
-        config = load_weaponry_infrastructure_config(
+        config = load_weaponry_runtime_config(
             self._environment(
                 WEAPONRY_TERMS_RULE_CONTEXT_ENABLED="true",
                 WEAPONRY_TERMS_WORKSPACE_NAME="terms-read-only",
@@ -382,11 +382,11 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
     def test_deprecated_mode_one_and_unknown_modes_fail_before_composition(self) -> None:
         for mode in ("1", "legacy", ""):
             with self.subTest(mode=mode):
-                with self.assertRaises(WeaponryInfrastructureConfigurationError):
-                    load_weaponry_infrastructure_config(
+                with self.assertRaises(WeaponryRuntimeConfigurationError):
+                    load_weaponry_runtime_config(
                         self._environment(WEAPONRY_ANALYSE_MODE=mode)
                     )
-        accepted = load_weaponry_infrastructure_config(
+        accepted = load_weaponry_runtime_config(
             self._environment(WEAPONRY_ANALYSE_MODE="2")
         )
         self.assertEqual("single_instance", accepted.runtime_mode)
@@ -407,8 +407,8 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
         )
         for overrides in cases:
             with self.subTest(overrides=overrides):
-                with self.assertRaises(WeaponryInfrastructureConfigurationError):
-                    load_weaponry_infrastructure_config(
+                with self.assertRaises(WeaponryRuntimeConfigurationError):
+                    load_weaponry_runtime_config(
                         self._environment(**overrides)
                     )
 
@@ -418,15 +418,15 @@ class WeaponryInfrastructureConfigTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "selected_evidence_max_chars"))
 
     def test_production_gate_requirement_is_strict_and_defaults_to_development(self) -> None:
-        development = load_weaponry_infrastructure_config(self._environment())
-        production = load_weaponry_infrastructure_config(
+        development = load_weaponry_runtime_config(self._environment())
+        production = load_weaponry_runtime_config(
             self._environment(DOCSENSE_WEAPONRY_REQUIRE_PRODUCTION_GATE="true")
         )
 
         self.assertFalse(development.production_gate_required)
         self.assertTrue(production.production_gate_required)
-        with self.assertRaises(WeaponryInfrastructureConfigurationError):
-            load_weaponry_infrastructure_config(
+        with self.assertRaises(WeaponryRuntimeConfigurationError):
+            load_weaponry_runtime_config(
                 self._environment(
                     DOCSENSE_WEAPONRY_REQUIRE_PRODUCTION_GATE="maybe"
                 )
@@ -456,7 +456,7 @@ class LocalWeaponryTaskDispatcherTests(unittest.TestCase):
         *,
         commands,
         runner,
-        config: WeaponryInfrastructureConfig,
+        config: WeaponryRuntimeConfig,
         lock_path: Path,
         resource: _BoundedMaintenanceStub | None = None,
         callback: _BoundedMaintenanceStub | None = None,
@@ -1177,7 +1177,7 @@ class WeaponryOfflineCompositionTests(unittest.TestCase):
         tasks = FakeWeaponryTaskCommandPort(recorder)
         with workspace_tempdir() as tmp:
             with self.assertRaisesRegex(
-                WeaponryInfrastructureConfigurationError,
+                WeaponryRuntimeConfigurationError,
                 "embedding_fingerprint",
             ):
                 compose_weaponry_application_services(

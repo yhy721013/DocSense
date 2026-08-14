@@ -129,7 +129,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
                 return_value=preparer,
             ),
             patch(
-                "app.container.load_weaponry_infrastructure_config",
+                "app.container.load_weaponry_runtime_config",
                 return_value=_weaponry_config_without_terms(),
             ),
             patch(
@@ -170,7 +170,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
                 return_value=preparer,
             ),
             patch(
-                "app.container.load_weaponry_infrastructure_config",
+                "app.container.load_weaponry_runtime_config",
                 return_value=_weaponry_config_without_terms(),
             ),
             patch(
@@ -222,7 +222,7 @@ class LegacyOfficeConfigTests(unittest.TestCase):
                         return_value=preparer,
                     ),
                     patch(
-                        "app.container.load_weaponry_infrastructure_config",
+                        "app.container.load_weaponry_runtime_config",
                         return_value=_weaponry_config_without_terms(),
                     ),
                     patch(

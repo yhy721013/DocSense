@@ -1,4 +1,4 @@
-"""武器谱本地运行基础设施的严格配置与固定策略构造。"""
+"""武器谱本地运行时的严格配置与固定策略构造。"""
 
 from __future__ import annotations
 
@@ -35,16 +35,16 @@ WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE = "single_instance"
 _INSTALLED_EXTRACTION_MAX_ATTEMPTS = 2
 
 
-class WeaponryInfrastructureConfigurationError(RuntimeError):
+class WeaponryRuntimeConfigurationError(RuntimeError):
     """武器谱运行配置与已安装适配器能力不一致。"""
 
 
 def _required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str):
-        raise WeaponryInfrastructureConfigurationError(f"{name} 必须是 str")
+        raise WeaponryRuntimeConfigurationError(f"{name} 必须是 str")
     normalized = value.strip()
     if not normalized:
-        raise WeaponryInfrastructureConfigurationError(f"{name} 不能为空")
+        raise WeaponryRuntimeConfigurationError(f"{name} 不能为空")
     return normalized
 
 
@@ -56,7 +56,7 @@ def _optional_text(value: object, *, name: str) -> str | None:
 
 def _positive_number(value: object, *, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是正有限数字"
         )
     normalized = float(value)
@@ -65,7 +65,7 @@ def _positive_number(value: object, *, name: str) -> float:
         or normalized in (float("inf"), float("-inf"))
         or normalized <= 0.0
     ):
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是正有限数字"
         )
     return normalized
@@ -78,18 +78,18 @@ def _positive_int(
     max_value: int = 1000,
 ) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是 1~{max_value} 的整数"
         )
     if value < 1 or value > max_value:
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是 1~{max_value} 的整数"
         )
     return value
 
 
 @dataclass(frozen=True)
-class WeaponryInfrastructureConfig:
+class WeaponryRuntimeConfig:
     """阶段 1D 的武器谱单实例运行清单。
 
     scan/batch/sweep 数值全部是每次轮询的有界工作量，不是业务积压上限。配置刻意没有
@@ -139,7 +139,7 @@ class WeaponryInfrastructureConfig:
     def __post_init__(self) -> None:
         mode = str(self.runtime_mode or "").strip().lower()
         if mode != WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE:
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "当前仅安装 single_instance 武器谱 Dispatcher；多实例必须等待"
                 "共享数据库、可靠队列和分布式执行租约完成"
             )
@@ -174,7 +174,7 @@ class WeaponryInfrastructureConfig:
             self.cleanup_http_timeout_seconds
         )
         if self.cleanup_lease_seconds < required_lease:
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "cleanup_lease_seconds 必须覆盖连接、响应读取和安全余量，"
                 f"当前至少需要 {required_lease:.3f} 秒"
             )
@@ -210,19 +210,19 @@ class WeaponryInfrastructureConfig:
         }
         for name, expected in expected_values.items():
             if getattr(self, name) != expected:
-                raise WeaponryInfrastructureConfigurationError(
+                raise WeaponryRuntimeConfigurationError(
                     f"{name} 与当前已安装策略不一致"
                 )
         if self.max_table_rows != MAX_TABLE_ROWS:
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 f"max_table_rows 当前必须固定为 {MAX_TABLE_ROWS}"
             )
         if self.extraction_max_attempts != _INSTALLED_EXTRACTION_MAX_ATTEMPTS:
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "extraction_max_attempts 与当前字段执行器固定重试策略不一致"
             )
         if not isinstance(self.terms_rule_context_enabled, bool):
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "terms_rule_context_enabled 必须是 bool"
             )
         object.__setattr__(
@@ -234,7 +234,7 @@ class WeaponryInfrastructureConfig:
             ),
         )
         if not isinstance(self.production_gate_required, bool):
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "production_gate_required 必须是 bool"
             )
 
@@ -249,7 +249,7 @@ class WeaponryInfrastructureConfig:
                     self.terms_catalog_fingerprint,
                 )
             ) or self.terms_candidate_top_n != 0 or self.terms_max_context_chars != 0:
-                raise WeaponryInfrastructureConfigurationError(
+                raise WeaponryRuntimeConfigurationError(
                     "术语辅助关闭时不得携带术语 workspace、目录、指纹或配额"
                 )
             return
@@ -261,7 +261,7 @@ class WeaponryInfrastructureConfig:
                 _optional_text(getattr(self, name), name=name),
             )
             if getattr(self, name) is None:
-                raise WeaponryInfrastructureConfigurationError(
+                raise WeaponryRuntimeConfigurationError(
                     f"术语辅助启用时 {name} 不能为空"
                 )
         object.__setattr__(
@@ -324,31 +324,31 @@ class WeaponryRuntimePolicies:
 
 
 def validate_weaponry_runtime_capabilities(
-    config: WeaponryInfrastructureConfig,
+    config: WeaponryRuntimeConfig,
     capabilities: WeaponryRuntimeCapabilities,
 ) -> None:
     """启动前逐项比对配置和真实/Fake Adapter 能力，漂移即 fail-fast。"""
 
-    if not isinstance(config, WeaponryInfrastructureConfig):
-        raise TypeError("config 必须是 WeaponryInfrastructureConfig")
+    if not isinstance(config, WeaponryRuntimeConfig):
+        raise TypeError("config 必须是 WeaponryRuntimeConfig")
     if not isinstance(capabilities, WeaponryRuntimeCapabilities):
         raise TypeError("capabilities 必须是 WeaponryRuntimeCapabilities")
     for name in capabilities.__dataclass_fields__:
         configured = getattr(config, name)
         installed = getattr(capabilities, name)
         if configured != installed:
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 f"武器谱运行能力不匹配: component={name}"
             )
 
 
 def build_weaponry_runtime_policies(
-    config: WeaponryInfrastructureConfig,
+    config: WeaponryRuntimeConfig,
 ) -> WeaponryRuntimePolicies:
     """从一次启动配置构造唯一策略；运行中不读取环境变量或切换 profile。"""
 
-    if not isinstance(config, WeaponryInfrastructureConfig):
-        raise TypeError("config 必须是 WeaponryInfrastructureConfig")
+    if not isinstance(config, WeaponryRuntimeConfig):
+        raise TypeError("config 必须是 WeaponryRuntimeConfig")
     selection = build_weaponry_production_selection_policy(
         WeaponryProductionSelectionProfileConfig(
             provider_fingerprint=config.provider_fingerprint,
@@ -372,7 +372,7 @@ def build_weaponry_runtime_policies(
     )
     if config.terms_rule_context_enabled:
         if not config.terms_catalog_fingerprint:
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "术语辅助策略只能在本地目录自动指纹冻结后构造"
             )
         auxiliary = AuxiliaryGuidancePolicySnapshot(
@@ -396,7 +396,7 @@ def _strict_float(environ: Mapping[str, str], name: str, default: float) -> floa
     try:
         return float(raw.strip())
     except (AttributeError, TypeError, ValueError) as exc:
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是正有限数字"
         ) from exc
 
@@ -406,7 +406,7 @@ def _strict_int(environ: Mapping[str, str], name: str, default: int) -> int:
     try:
         return int(raw.strip())
     except (AttributeError, TypeError, ValueError) as exc:
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是 1~1000 的整数"
         ) from exc
 
@@ -416,7 +416,7 @@ def _strict_bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
     if raw is None:
         return default
     if not isinstance(raw, str):
-        raise WeaponryInfrastructureConfigurationError(
+        raise WeaponryRuntimeConfigurationError(
             f"{name} 必须是 true 或 false"
         )
     normalized = raw.strip().lower()
@@ -424,7 +424,7 @@ def _strict_bool(environ: Mapping[str, str], name: str, default: bool) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise WeaponryInfrastructureConfigurationError(
+    raise WeaponryRuntimeConfigurationError(
         f"{name} 必须是 true 或 false"
     )
 
@@ -433,9 +433,9 @@ def _required_env(environ: Mapping[str, str], name: str) -> str:
     return _required_text(environ.get(name), name=name)
 
 
-def load_weaponry_infrastructure_config(
+def load_weaponry_runtime_config(
     environ: Mapping[str, str] | None = None,
-) -> WeaponryInfrastructureConfig:
+) -> WeaponryRuntimeConfig:
     """严格读取阶段 1D 配置；术语关闭时不读取任何术语专属键。
 
     ``environ`` 参数使离线测试可以注入带访问审计的 Mapping，直接证明 false 路径没有
@@ -450,11 +450,11 @@ def load_weaponry_infrastructure_config(
             name="WEAPONRY_ANALYSE_MODE",
         )
         if normalized_mode == "1":
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "WEAPONRY_ANALYSE_MODE=1 已废弃，只允许固定 file_aggregate_v1"
             )
         if normalized_mode != "2":
-            raise WeaponryInfrastructureConfigurationError(
+            raise WeaponryRuntimeConfigurationError(
                 "WEAPONRY_ANALYSE_MODE 已删除；迁移期只允许显式值 2"
             )
 
@@ -494,7 +494,7 @@ def load_weaponry_infrastructure_config(
             "terms_max_context_chars": 0,
         }
 
-    return WeaponryInfrastructureConfig(
+    return WeaponryRuntimeConfig(
         runtime_mode=source.get(
             "DOCSENSE_WEAPONRY_RUNTIME_MODE",
             WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE,
@@ -620,11 +620,11 @@ def load_weaponry_infrastructure_config(
 
 __all__ = [
     "WEAPONRY_RUNTIME_MODE_SINGLE_INSTANCE",
-    "WeaponryInfrastructureConfig",
-    "WeaponryInfrastructureConfigurationError",
+    "WeaponryRuntimeConfig",
+    "WeaponryRuntimeConfigurationError",
     "WeaponryRuntimeCapabilities",
     "WeaponryRuntimePolicies",
     "build_weaponry_runtime_policies",
-    "load_weaponry_infrastructure_config",
+    "load_weaponry_runtime_config",
     "validate_weaponry_runtime_capabilities",
 ]

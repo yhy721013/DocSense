@@ -118,6 +118,8 @@ from .translation import (
     WeaponryTranslationRequest,
     WeaponryTranslationResult,
 )
+from .task_snapshots import WeaponryTaskDocumentSnapshotStorePort
+from .results import WeaponryResultSnapshot, WeaponryResultSnapshotStorePort
 
 __all__ = [
     "ClaimWeaponryCreationIntentRecovery",
@@ -212,5 +214,8 @@ __all__ = [
     "WeaponryTranslationPort",
     "WeaponryTranslationRequest",
     "WeaponryTranslationResult",
+    "WeaponryTaskDocumentSnapshotStorePort",
+    "WeaponryResultSnapshot",
+    "WeaponryResultSnapshotStorePort",
     "validate_auxiliary_result_policy",
 ]

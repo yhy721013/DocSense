@@ -605,10 +605,11 @@ class LLMTaskServiceTests(unittest.TestCase):
 
             self.assertNotEqual(first["execution_id"], second["execution_id"])
 
-    def test_weaponry_task_persists_explicit_document_snapshot(self):
-        """显式选文快照必须与对外原始请求分离，并按执行身份读取。"""
+    def test_legacy_service_no_longer_owns_weaponry_document_snapshot_schema(self):
+        """阶段 2-5 切换后，旧 Service 不得创建 Weaponry 组件表。"""
         with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            database = f"{tmp}/tasks.sqlite3"
+            service = LLMTaskService(db_path=database)
             payload = {
                 "businessType": "weaponry",
                 "params": {
@@ -616,82 +617,15 @@ class LLMTaskServiceTests(unittest.TestCase):
                     "filePathList": ["https://host/download/cross-category.pdf"],
                 },
             }
-            task = service.create_weaponry_task(
-                1001,
-                payload,
-                selected_documents=(
-                    {
-                        "file_name": "cross-category.pdf",
-                        "original_name": "跨分类来源.pdf",
-                        "ingested_file_name": "cross-category.mhtml.normalized.pdf",
-                        "source_architecture_id": 2002,
-                        "doc_path": "custom-documents/cross-category.json",
-                        "anything_doc_id": "doc-2002",
-                    },
-                ),
-            )
+            task = service.create_weaponry_task(1001, payload)
+            with sqlite3.connect(database) as connection:
+                legacy_table = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='weaponry_task_document_snapshots'"
+                ).fetchone()
 
-            snapshots = service.get_weaponry_task_document_snapshots(
-                architecture_id=1001,
-                execution_id=task["execution_id"],
-            )
-
-        self.assertEqual(payload["params"]["filePathList"], ["https://host/download/cross-category.pdf"])
-        self.assertEqual(snapshots[0]["file_name"], "cross-category.pdf")
-        self.assertEqual(
-            snapshots[0]["ingested_file_name"],
-            "cross-category.mhtml.normalized.pdf",
-        )
-        self.assertEqual(snapshots[0]["source_architecture_id"], 2002)
-        self.assertEqual(snapshots[0]["doc_path"], "custom-documents/cross-category.json")
-
-    def test_weaponry_task_reissue_replaces_old_execution_document_snapshot(self):
-        """同一类别重跑不能让旧 execution_id 读取到新任务的选文范围。"""
-        with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_weaponry_task(
-                1001,
-                {"businessType": "weaponry"},
-                selected_documents=(
-                    {
-                        "file_name": "first.pdf",
-                        "original_name": "first.pdf",
-                        "ingested_file_name": "first.pdf",
-                        "source_architecture_id": 1001,
-                        "doc_path": "custom-documents/first.json",
-                    },
-                ),
-            )
-            second = service.create_weaponry_task(
-                1001,
-                {"businessType": "weaponry"},
-                selected_documents=(
-                    {
-                        "file_name": "second.pdf",
-                        "original_name": "second.pdf",
-                        "ingested_file_name": "second.pdf",
-                        "source_architecture_id": 2002,
-                        "doc_path": "custom-documents/second.json",
-                    },
-                ),
-            )
-
-            old_snapshots = service.get_weaponry_task_document_snapshots(
-                architecture_id=1001,
-                execution_id=first["execution_id"],
-            )
-            current_snapshots = service.get_weaponry_task_document_snapshots(
-                architecture_id=1001,
-                execution_id=second["execution_id"],
-            )
-
-        self.assertNotEqual(first["execution_id"], second["execution_id"])
-        self.assertEqual(old_snapshots, [])
-        self.assertEqual([item["file_name"] for item in current_snapshots], ["second.pdf"])
-        self.assertEqual(
-            [item["ingested_file_name"] for item in current_snapshots],
-            ["second.pdf"],
-        )
+        self.assertEqual("weaponry", task["business_type"])
+        self.assertIsNone(legacy_table)
 
     def test_legacy_task_database_is_migrated_with_audit_version_marker(self):
         """旧任务库升级后应为历史任务和交互补充可区分的执行与审计版本。"""
@@ -878,7 +812,6 @@ class LLMTaskServiceTests(unittest.TestCase):
             with sqlite3.connect(db_path) as conn:
                 conn.execute("PRAGMA foreign_keys = OFF")
                 for table in (
-                    "weaponry_task_document_snapshots",
                     "callback_guard_release_audits",
                     "callback_delivery_guards",
                     "llm_task_executions",
@@ -929,9 +862,9 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "llm_task_executions",
                 "callback_delivery_guards",
                 "callback_guard_release_audits",
-                "weaponry_task_document_snapshots",
             }.issubset(tables)
         )
+        self.assertNotIn("weaponry_task_document_snapshots", tables)
         self.assertEqual(first_task["execution_id"], second_task["execution_id"])
         self.assertEqual(first_claim, second_claim)
 
@@ -974,6 +907,24 @@ class LLMTaskServiceTests(unittest.TestCase):
                         last_recovery_reason TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                # 模拟阶段 2-5 切换前已存在的旧 Weaponry 表。新旧 Service 都只能
+                # 保留这份历史现场，不得继续创建、迁移或写入它。
+                conn.execute(
+                    """
+                    CREATE TABLE weaponry_task_document_snapshots (
+                        business_key TEXT NOT NULL,
+                        execution_id TEXT NOT NULL,
+                        sequence_no INTEGER NOT NULL,
+                        file_name TEXT NOT NULL,
+                        original_name TEXT NOT NULL,
+                        ingested_file_name TEXT NOT NULL,
+                        source_architecture_id INTEGER NOT NULL,
+                        doc_path TEXT NOT NULL,
+                        anything_doc_id TEXT NOT NULL DEFAULT '',
+                        PRIMARY KEY (business_key, sequence_no)
                     )
                     """
                 )

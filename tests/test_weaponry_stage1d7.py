@@ -13,8 +13,8 @@ import unittest
 from pathlib import Path
 
 from app.modules.weaponry.adapters import (
-    WeaponryInfrastructureConfigurationError,
-    load_weaponry_infrastructure_config,
+    WeaponryRuntimeConfigurationError,
+    load_weaponry_runtime_config,
 )
 
 
@@ -145,12 +145,12 @@ class WeaponryStage1D7ClosureTests(unittest.TestCase):
         }
         for invalid in ("1", "0", "3", "file_aggregate_v1"):
             with self.subTest(value=invalid), self.assertRaises(
-                WeaponryInfrastructureConfigurationError
+                WeaponryRuntimeConfigurationError
             ):
-                load_weaponry_infrastructure_config(
+                load_weaponry_runtime_config(
                     {**baseline, "WEAPONRY_ANALYSE_MODE": invalid}
                 )
-        config = load_weaponry_infrastructure_config(
+        config = load_weaponry_runtime_config(
             {**baseline, "WEAPONRY_ANALYSE_MODE": "2"}
         )
         self.assertFalse(hasattr(config, "analyse_mode"))

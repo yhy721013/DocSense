@@ -12,6 +12,7 @@ from app.modules.report.adapters.v2_maintenance import ReportV2Maintenance
 from app.modules.report.ports import ReportCallbackPort
 from app.modules.tasks.adapters import LocalTaskExecutor
 from app.modules.tasks.domain import TaskId
+from app.modules.tasks.ports import TaskExecutionPermitPort
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,12 @@ class ReportV2TaskDispatcher:
     @property
     def callbacks(self) -> ReportCallbackPort:
         return self._maintenance.callbacks
+
+    @property
+    def execution_limiter(self) -> TaskExecutionPermitPort:
+        """仅供组合根校验容量池归属，不允许调用方绕过 Executor 领取许可。"""
+
+        return self._executor.execution_limiter
 
     @property
     def resources(self):

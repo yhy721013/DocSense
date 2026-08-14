@@ -325,6 +325,15 @@ class WeaponryCreationIntentStorePort(Protocol):
     def list_pending(self, *, limit: int) -> tuple[WeaponryCreationIntent, ...]:
         ...
 
+    def list_for_task(
+        self,
+        task_id: TaskId,
+        *,
+        limit: int,
+    ) -> tuple[WeaponryCreationIntent, ...]:
+        """有界读取一个任务的全部 Intent 状态，供断联事实分类使用。"""
+        ...
+
     def list_recovery_candidates(
         self,
         *,

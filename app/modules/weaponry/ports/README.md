@@ -18,6 +18,8 @@ Dispatcher 的本地薄适配和离线组合；阶段 1D-6 已实现真实 Callb
 | `callbacks.py` | latest-wins、Guard lease/fencing、明确失败与 outcome unknown、显式恢复。 |
 | `resources.py` | owned/shared 资源、CAS、清理 lease/fencing、幂等清理、unknown 与 quarantine。 |
 | `dispatcher.py` | 持久任务提交后的常量空间唤醒、只按 TaskId 的 Runner、有界维护任务和显式 start/stop/close 生命周期。 |
+| `task_snapshots.py` | 按 TaskId 持久化冻结文档身份；不得按业务键覆盖历史 execution。 |
+| `results.py` | 保存摘要保护的完整终态 Callback payload，供同步恢复精确重建。 |
 | `errors.py` | 明确失败、结果未知、来源越界和端口状态错误的稳定分类。 |
 
 Port 只能使用武器谱领域 DTO、同层抽象和通用 Task 控制面 DTO，不得泄露 AnythingLLM、

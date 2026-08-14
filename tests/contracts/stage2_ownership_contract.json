@@ -1,6 +1,6 @@
 {
-  "assetVersion": 6,
-  "stage": "2-4-report-cutover-and-legacy-sql-cleanup-completed",
+  "assetVersion": 7,
+  "stage": "2-5-weaponry-cutover-and-legacy-sql-cleanup-completed",
   "frozenAt": "2026-08-14",
   "publicContractChanged": false,
   "serviceFiles": [
@@ -42,7 +42,7 @@
   "currentTableGroups": [
     {
       "tables": ["llm_tasks", "llm_task_executions"],
-      "currentWriter": "Analysis/Weaponry legacy production path: app/services/llm_service/task_service.py::LLMTaskService; Report v2 production path: app/modules/tasks/adapters/sqlite/control_store.py; no dual write",
+      "currentWriter": "Analysis legacy production path: app/services/llm_service/task_service.py::LLMTaskService; Report/Weaponry v2 production path: app/modules/tasks/adapters/sqlite/control_store.py; no dual write",
       "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
       "exitStage": "2-4_to_2-6_business_wave_then_2-8_cleanup",
       "lifecycle": "persistent"
@@ -56,14 +56,14 @@
     },
     {
       "tables": ["task_attempts", "task_steps", "task_step_attempts", "task_recovery_cases", "task_recovery_operations", "task_recovery_observations", "task_recovery_decisions", "task_events"],
-      "currentWriter": "app/modules/tasks/adapters/sqlite/control_store.py (Report production runtime wired; other business waves not yet cut over)",
+      "currentWriter": "app/modules/tasks/adapters/sqlite/control_store.py (Report and Weaponry production runtimes wired; Analysis not yet cut over)",
       "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
       "exitStage": "retained_stage2",
       "lifecycle": "persistent"
     },
     {
       "tables": ["callback_delivery_guards", "callback_guard_release_audits", "callback_delivery_attempt_events"],
-      "currentWriter": "Analysis/Weaponry legacy production path: app/services/llm_service/task_service.py::LLMTaskService; Report v2 production path: app/modules/tasks/adapters/sqlite/callback_control_store.py; no dual write",
+      "currentWriter": "Analysis legacy production path: app/services/llm_service/task_service.py::LLMTaskService; Report/Weaponry v2 production path: app/modules/tasks/adapters/sqlite/callback_control_store.py; no dual write",
       "targetWriter": "app/modules/tasks/adapters/sqlite/callback_control_store.py",
       "exitStage": "2-4_to_2-6_business_wave_then_2-8_cleanup",
       "lifecycle": "persistent"
@@ -83,8 +83,15 @@
       "lifecycle": "persistent"
     },
     {
+      "tables": ["weaponry_result_snapshots"],
+      "currentWriter": "app/modules/weaponry/adapters/sqlite/result_snapshot_store.py (production wired; terminal transaction stores complete Callback payload)",
+      "targetWriter": "app/modules/weaponry/adapters/sqlite/result_snapshot_store.py",
+      "exitStage": "2-5",
+      "lifecycle": "persistent"
+    },
+    {
       "tables": ["weaponry_task_document_snapshots"],
-      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "currentWriter": "app/modules/weaponry/adapters/sqlite/task_document_snapshot_store.py (production wired; LLMTaskService legacy DDL and writer entries removed)",
       "targetWriter": "app/modules/weaponry/adapters/sqlite/task_document_snapshot_store.py",
       "exitStage": "2-5",
       "lifecycle": "persistent"
@@ -105,21 +112,21 @@
     },
     {
       "tables": ["weaponry_creation_intents"],
-      "currentWriter": "app/modules/weaponry/adapters/creation_intent_store.py",
+      "currentWriter": "app/modules/weaponry/adapters/sqlite/creation_intent_store.py (Task Control component production writer)",
       "targetWriter": "app/modules/weaponry/adapters/sqlite/creation_intent_store.py",
       "exitStage": "2-5",
       "lifecycle": "persistent"
     },
     {
       "tables": ["weaponry_interaction_audits"],
-      "currentWriter": "app/modules/weaponry/adapters/interaction_audit.py",
+      "currentWriter": "app/modules/weaponry/adapters/sqlite/interaction_audit_store.py (Task Control component production writer)",
       "targetWriter": "app/modules/weaponry/adapters/sqlite/interaction_audit_store.py",
       "exitStage": "2-5",
       "lifecycle": "persistent"
     },
     {
       "tables": ["weaponry_resource_records", "weaponry_resource_operator_audits"],
-      "currentWriter": "app/modules/weaponry/adapters/resource_store.py",
+      "currentWriter": "app/modules/weaponry/adapters/sqlite/resource_store.py (Task Control component production writer)",
       "targetWriter": "app/modules/weaponry/adapters/sqlite/resource_store.py",
       "exitStage": "2-5",
       "lifecycle": "persistent"

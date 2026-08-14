@@ -1,0 +1,192 @@
+{
+  "manifestProfile": "canonical_json_v1",
+  "componentName": "weaponry_control",
+  "componentVersion": 1,
+  "schemaName": "docsense.task-control",
+  "rootSchemaGeneration": 2,
+  "semanticTypes": {
+    "persisted_utc": "UTC RFC3339 microseconds with literal Z; repository also performs calendar-valid parse",
+    "canonical_json": "SQLite json_valid and canonicalized by codec before persistence"
+  },
+  "indexTermDefaults": {"collation": "BINARY", "order": "ASC"},
+  "tables": [
+    {
+      "name": "weaponry_task_document_snapshots",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "sequence_no", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 2},
+        {"name": "document_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "file_name", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "original_name", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "ingested_file_name", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "source_architecture_id", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "external_document_ref", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "anything_document_id", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0}
+      ],
+      "uniqueConstraints": [
+        {"id": "weaponry_snapshot_document_key", "columns": ["task_id", "document_key"]},
+        {"id": "weaponry_snapshot_file_name", "columns": ["task_id", "file_name"]},
+        {"id": "weaponry_snapshot_external_ref", "columns": ["task_id", "external_document_ref"]}
+      ],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "weaponry_snapshot_business_key", "expression": "length(business_key) BETWEEN 1 AND 19 AND business_key NOT GLOB '*[^0-9]*'"},
+        {"id": "weaponry_snapshot_sequence", "expression": "sequence_no >= 1"},
+        {"id": "weaponry_snapshot_document_key_text", "expression": "length(document_key) BETWEEN 1 AND 256"},
+        {"id": "weaponry_snapshot_file_name_text", "expression": "length(file_name) BETWEEN 1 AND 1024"},
+        {"id": "weaponry_snapshot_original_name_text", "expression": "length(original_name) BETWEEN 1 AND 1024"},
+        {"id": "weaponry_snapshot_source_architecture", "expression": "source_architecture_id BETWEEN 1 AND 9223372036854775807"},
+        {"id": "weaponry_snapshot_external_ref_text", "expression": "length(external_document_ref) BETWEEN 1 AND 4096"}
+      ]
+    },
+    {
+      "name": "weaponry_creation_intents",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "intent_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 2},
+        {"name": "kind", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "expected_name", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "identity_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "parent_external_ref", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "document_key", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "call_id", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "owner_instance_id", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "state", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "external_ref", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "error_code", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "recovery_fencing_token", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0},
+        {"name": "recovery_lease_until", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "version", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "weaponry_intent_kind", "expression": "kind IN ('retrieval_workspace','extraction_workspace','source_thread')"},
+        {"id": "weaponry_intent_digest", "expression": "length(identity_digest) = 64 AND identity_digest NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "weaponry_intent_state", "expression": "state IN ('pending','recovering','resolved','quarantined')"},
+        {"id": "weaponry_intent_fencing", "expression": "recovery_fencing_token >= 0"},
+        {"id": "weaponry_intent_version", "expression": "version >= 0"}
+      ]
+    },
+    {
+      "name": "weaponry_interaction_audits",
+      "columns": [
+        {"name": "reservation_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "audit_id", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "attempt_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "call_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "operation", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "field_sequence", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "document_sequence", "type": "INTEGER", "notNull": false, "default": null, "primaryKeyPosition": 0},
+        {"name": "item_sequence", "type": "INTEGER", "notNull": false, "default": null, "primaryKeyPosition": 0},
+        {"name": "attempt_no", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "reserve_payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "state", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "outcome", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "complete_payload_json", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"},
+        {"name": "updated_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [
+        {"id": "weaponry_audit_attempt_key", "columns": ["attempt_key"]}
+      ],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "weaponry_audit_sequence", "expression": "field_sequence >= 1 AND attempt_no >= 1 AND (document_sequence IS NULL OR document_sequence >= 1) AND (item_sequence IS NULL OR item_sequence >= 1)"},
+        {"id": "weaponry_audit_state", "expression": "state IN ('pending','completed')"},
+        {"id": "weaponry_audit_reserve_json", "expression": "json_valid(reserve_payload_json)"},
+        {"id": "weaponry_audit_complete_json", "expression": "(state = 'pending' AND complete_payload_json = '') OR (state = 'completed' AND json_valid(complete_payload_json))"},
+        {"id": "weaponry_audit_created_at", "semanticExpression": "persisted_utc(created_at)"},
+        {"id": "weaponry_audit_updated_at", "semanticExpression": "persisted_utc(updated_at)"}
+      ]
+    },
+    {
+      "name": "weaponry_resource_records",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "state", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "version", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0},
+        {"name": "next_retry_at", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"},
+        {"name": "updated_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "weaponry_resource_state", "expression": "state IN ('tracking','cleanup_pending','cleaned','quarantined')"},
+        {"id": "weaponry_resource_version", "expression": "version >= 0"},
+        {"id": "weaponry_resource_payload_json", "expression": "json_valid(payload_json)"},
+        {"id": "weaponry_resource_created_at", "semanticExpression": "persisted_utc(created_at)"},
+        {"id": "weaponry_resource_updated_at", "semanticExpression": "persisted_utc(updated_at)"}
+      ]
+    },
+    {
+      "name": "weaponry_result_snapshots",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "result_schema_version", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "callback_payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "result_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "weaponry_result_business_key", "expression": "length(business_key) BETWEEN 1 AND 19 AND business_key NOT GLOB '*[^0-9]*'"},
+        {"id": "weaponry_result_schema_version", "expression": "result_schema_version = 1"},
+        {"id": "weaponry_result_payload_json", "expression": "json_valid(callback_payload_json)"},
+        {"id": "weaponry_result_digest", "expression": "length(result_digest) = 64 AND result_digest NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "weaponry_result_created_at", "semanticExpression": "persisted_utc(created_at)"}
+      ]
+    },
+    {
+      "name": "weaponry_resource_operator_audits",
+      "columns": [
+        {"name": "id", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "previous_version", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "new_version", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "action", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "resolved_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"},
+        {"name": "resolved_by", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "reason", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "external_state_confirmed", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "previous_error_code", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "weaponry_resource_operator_versions", "expression": "previous_version >= 0 AND new_version > previous_version"},
+        {"id": "weaponry_resource_operator_action", "expression": "action IN ('retry_cleanup','confirmed_absent')"},
+        {"id": "weaponry_resource_operator_confirmation", "expression": "external_state_confirmed = 1"},
+        {"id": "weaponry_resource_operator_resolved_at", "semanticExpression": "persisted_utc(resolved_at)"}
+      ]
+    }
+  ],
+  "indexes": [
+    {"name": "idx_weaponry_task_document_snapshots_business", "table": "weaponry_task_document_snapshots", "unique": false, "columns": ["business_key", "task_id", "sequence_no"], "where": null},
+    {"name": "idx_weaponry_creation_intents_pending", "table": "weaponry_creation_intents", "unique": false, "columns": ["state", "task_id", "intent_id"], "where": null},
+    {"name": "idx_weaponry_interaction_audits_pending", "table": "weaponry_interaction_audits", "unique": false, "columns": ["task_id", "state", "created_at", "attempt_key"], "where": null},
+    {"name": "idx_weaponry_resource_records_recovery", "table": "weaponry_resource_records", "unique": false, "columns": ["state", "next_retry_at", "updated_at", "task_id"], "where": null},
+    {"name": "idx_weaponry_result_snapshots_business", "table": "weaponry_result_snapshots", "unique": false, "columns": ["business_key", "task_id"], "where": null},
+    {"name": "idx_weaponry_resource_operator_audits_task", "table": "weaponry_resource_operator_audits", "unique": false, "columns": ["task_id", "id"], "where": null}
+  ]
+}

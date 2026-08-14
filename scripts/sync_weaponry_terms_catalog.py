@@ -26,7 +26,7 @@ from app.modules.weaponry.adapters import (  # noqa: E402
     SQLiteTermsCatalogStateStore,
     TermsCatalogWorkspaceResolver,
     build_terms_catalog_manifest,
-    load_weaponry_infrastructure_config,
+    load_weaponry_runtime_config,
 )
 from app.services.core.config import (  # noqa: E402
     load_anythingllm_config,
@@ -61,7 +61,7 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    config = load_weaponry_infrastructure_config()
+    config = load_weaponry_runtime_config()
     if not config.terms_rule_context_enabled:
         raise RuntimeError(
             "WEAPONRY_TERMS_RULE_CONTEXT_ENABLED=false，术语同步严格保持零 I/O"

@@ -482,7 +482,7 @@ class RunReportV2Workflow(TaskWorkflowRunnerPort):
             )
         except TaskExecutionStopRequested:
             logger.warning(
-                "Report v2 Workflow 已按 Authority 停止: task_id=%s",
+                "Report v2 Workflow 已按执行停止信号退出: task_id=%s",
                 task_id,
             )
             raise

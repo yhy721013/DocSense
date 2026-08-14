@@ -30,7 +30,9 @@ from app.modules.weaponry.ports import (
     WeaponryCallbackWaitResult,
 )
 from app.services.llm_service.task_service import LLMTaskService
-from app.services.utils.callback_client import save_callback_history_payload
+from app.infrastructure.observability.callback_history import (
+    save_callback_history_payload,
+)
 
 
 logger = logging.getLogger(__name__)

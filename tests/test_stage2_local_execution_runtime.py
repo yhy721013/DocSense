@@ -206,12 +206,14 @@ class Stage2ReadOnlySnapshotLoaderTests(unittest.TestCase):
                 )
             connection = sqlite3.connect(database_path)
             persisted = connection.execute(
-                "SELECT next_dispatch_at, last_dispatch_error FROM llm_task_executions WHERE execution_id = ?",
+                "SELECT dispatch_failure_count, next_dispatch_at, "
+                "last_dispatch_error FROM llm_task_executions "
+                "WHERE execution_id = ?",
                 (task_id.value,),
             ).fetchone()
             connection.close()
             self.assertEqual(
-                ("2026-08-13T00:00:30.000000Z", "runtime_input_error"),
+                (1, "2026-08-13T00:00:30.000000Z", "runtime_input_error"),
                 persisted,
             )
 
@@ -255,6 +257,22 @@ class Stage2SafeClockAndConfigTests(unittest.TestCase):
 
 
 class Stage2FairCapacityTests(unittest.TestCase):
+    def test_business_permits_are_distinct_but_share_one_capacity_fact(self) -> None:
+        """组合根按业务注入不同 Permit，同时必须能证明它们属于同一 Pool。"""
+
+        pool = FairTaskExecutionPermitPool(capacity=1)
+        report = pool.for_business("report")
+        weaponry = pool.for_business("weaponry")
+        analysis = pool.for_business("file")
+
+        self.assertIsNot(report, weaponry)
+        self.assertIsNot(weaponry, analysis)
+        self.assertTrue(pool.owns(report))
+        self.assertTrue(pool.owns(weaponry))
+        self.assertTrue(pool.owns(analysis))
+        self.assertFalse(FairTaskExecutionPermitPool().owns(report))
+        self.assertEqual(1, analysis.max_concurrency)
+
     def test_waiting_businesses_receive_round_robin_grants(self) -> None:
         pool = FairTaskExecutionPermitPool()
         report = pool.for_business("report")
@@ -321,6 +339,49 @@ class _Runtime:
         return True
 
 
+class _ExecutionPort:
+    """只记录派发冷却，避免 Executor 单测依赖真实 SQLite。"""
+
+    def __init__(self) -> None:
+        self.deferred: list[TaskDispatchDeferralCommand] = []
+
+    def defer_dispatch(self, command):
+        self.deferred.append(command)
+        return TaskExecutionMutationOutcome.APPLIED
+
+
+class _ExecutionUow:
+    def __init__(self, execution) -> None:
+        self.execution = execution
+        self.committed = False
+
+    def __enter__(self):
+        return self
+
+    def commit(self):
+        self.committed = True
+
+    def __exit__(self, *_args):
+        return False
+
+
+class _CancellationRecordingRuntime:
+    def __init__(self) -> None:
+        self.cancel_count = 0
+        self.run_count = 0
+
+    def request_cancellation(self):
+        self.cancel_count += 1
+        return self.cancel_count == 1
+
+    def run(self, task_id):
+        self.run_count += 1
+        return TaskExecutionRuntimeResult(
+            task_id,
+            TaskExecutionRuntimeOutcome.WORKFLOW_RETURNED,
+        )
+
+
 class Stage2LocalExecutorAndMaintenanceTests(unittest.TestCase):
     def test_executor_periodic_scan_drains_backlog_with_bounded_inflight(self) -> None:
         task_ids = [TaskId(f"task-{index}") for index in range(50)]
@@ -347,6 +408,90 @@ class Stage2LocalExecutorAndMaintenanceTests(unittest.TestCase):
         executor.stop()
         self.assertTrue(executor.is_healthy())
         self.assertEqual(50, len(completed))
+
+    def test_unclassified_worker_error_stops_executor_and_persists_cooldown(self) -> None:
+        """Runtime 构造持续失败时不得热循环，也不能继续报告 healthy。"""
+
+        task_id = TaskId("task-worker-contract-error")
+        queries = _QueryPort([task_id])
+        execution = _ExecutionPort()
+        uows: list[_ExecutionUow] = []
+        factory_calls = []
+        failed = Event()
+
+        def execution_uow_factory():
+            unit_of_work = _ExecutionUow(execution)
+            uows.append(unit_of_work)
+            return unit_of_work
+
+        def broken_runtime_factory(_slot):
+            factory_calls.append(1)
+            failed.set()
+            raise RuntimeError("simulated runtime factory failure")
+
+        executor = LocalTaskExecutor(
+            task_type="report",
+            worker_count=1,
+            scan_interval_seconds=0.01,
+            stop_grace_seconds=1,
+            clock=FakeClock(_T0),
+            query_uow_factory=lambda: _QueryUow(queries),
+            execution_uow_factory=execution_uow_factory,
+            permit=FairTaskExecutionPermitPool().for_business("report"),
+            runtime_factory=broken_runtime_factory,
+            thread_name_prefix="test-worker-contract-error",
+        )
+
+        executor.start()
+        self.assertTrue(failed.wait(timeout=2))
+        self.assertTrue(executor.stop(timeout_seconds=1))
+
+        self.assertEqual(1, len(factory_calls))
+        self.assertFalse(executor.is_healthy())
+        self.assertEqual(1, len(execution.deferred))
+        self.assertTrue(uows[0].committed)
+
+    def test_stop_race_cancels_constructed_runtime_without_running_it(self) -> None:
+        """permit 后、claim 前收到 stop 时，不得建立新的 Task Attempt。"""
+
+        task_id = TaskId("task-stop-before-runtime-run")
+        queries = _QueryPort([task_id])
+        factory_entered = Event()
+        allow_factory_return = Event()
+        runtime = _CancellationRecordingRuntime()
+
+        def blocking_runtime_factory(_slot):
+            factory_entered.set()
+            self.assertTrue(allow_factory_return.wait(timeout=2))
+            return runtime
+
+        executor = LocalTaskExecutor(
+            task_type="report",
+            worker_count=1,
+            scan_interval_seconds=0.01,
+            stop_grace_seconds=1,
+            clock=FakeClock(_T0),
+            query_uow_factory=lambda: _QueryUow(queries),
+            execution_uow_factory=lambda: None,
+            permit=FairTaskExecutionPermitPool().for_business("report"),
+            runtime_factory=blocking_runtime_factory,
+            thread_name_prefix="test-stop-before-runtime-run",
+        )
+        stopped: list[bool] = []
+        executor.start()
+        self.assertTrue(factory_entered.wait(timeout=2))
+        stop_thread = Thread(
+            target=lambda: stopped.append(executor.stop(timeout_seconds=1))
+        )
+        stop_thread.start()
+        self.assertTrue(executor._stopping.wait(timeout=2))
+        allow_factory_return.set()
+        stop_thread.join(timeout=2)
+
+        self.assertFalse(stop_thread.is_alive())
+        self.assertEqual([True], stopped)
+        self.assertEqual(1, runtime.cancel_count)
+        self.assertEqual(0, runtime.run_count)
 
     def test_maintenance_startup_scan_and_wakeup_are_independent(self) -> None:
         called = Event()

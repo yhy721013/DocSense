@@ -447,8 +447,61 @@ def bootstrap_task_control_database(
         lock.release()
 
 
+def validate_existing_task_control_database(
+    database_path: str | Path,
+    *,
+    busy_timeout_ms: int = 5_000,
+    known_components: Mapping[str, Mapping[str, object]] | None = None,
+    required_components: Mapping[str, int] | None = None,
+) -> TaskControlBootstrapResult:
+    """只读校验既有 Task Control，供内部运维命令安全构造短连接。
+
+    本入口不执行旧库预检、Schema 安装、自愈 DDL 或线程启动。运维工具只能连接已经由
+    应用 Bootstrap 发布并登记所需组件的数据库；缺表、漂移、未知组件或版本不匹配均
+    失败关闭。
+    """
+
+    if isinstance(busy_timeout_ms, bool) or not isinstance(busy_timeout_ms, int):
+        raise TypeError("busy_timeout_ms 必须是整数")
+    if busy_timeout_ms < 1 or busy_timeout_ms > 60_000:
+        raise ValueError("busy_timeout_ms 必须位于 1..60000")
+    known = dict(known_components or {})
+    required = dict(required_components or {})
+    for component_name, version in required.items():
+        manifest = known.get(component_name)
+        if manifest is None or manifest.get("componentVersion") != version:
+            raise TaskControlBootstrapError(
+                "bootstrap_required_component_unknown",
+                "必需组件版本必须与当前发布版本 Manifest 完全一致",
+            )
+    path = _resolve_database_path(database_path, must_exist=True)
+    try:
+        identity = _strict_validate(
+            path,
+            busy_timeout_ms=busy_timeout_ms,
+            known_components=known,
+            required_components=required,
+        )
+    except TaskControlSchemaError as exc:
+        raise TaskControlBootstrapError(exc.code, str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise TaskControlBootstrapError(
+            "bootstrap_sqlite_error",
+            f"SQLite 既有库校验失败: error_type={type(exc).__name__}",
+        ) from exc
+    logger.info(
+        "既有 Task Control 数据库只读校验通过: path_sha256=%s "
+        "db_instance_uuid_prefix=%s components=%d",
+        _path_digest(path),
+        identity.db_instance_uuid[:8],
+        len(identity.registered_components),
+    )
+    return TaskControlBootstrapResult(path, identity, created=False)
+
+
 __all__ = [
     "TaskControlBootstrapError",
     "TaskControlBootstrapResult",
     "bootstrap_task_control_database",
+    "validate_existing_task_control_database",
 ]

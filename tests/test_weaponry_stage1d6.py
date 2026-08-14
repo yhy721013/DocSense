@@ -37,7 +37,8 @@ from app.modules.weaponry.adapters import (
     SQLiteWeaponryCallbackAdapter,
     SQLiteWeaponryCallbackRecoverySource,
     SQLiteWeaponryResourceStoreAdapter,
-    WeaponryInfrastructureConfig,
+    TaskControlWeaponryCallbackAdapter,
+    WeaponryRuntimeConfig,
     WeaponryTaskCommandCodec,
 )
 from app.modules.weaponry.application import (
@@ -1368,7 +1369,7 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
 
         with workspace_tempdir() as runtime_directory:
             root = Path(runtime_directory)
-            weaponry_config = WeaponryInfrastructureConfig(
+            weaponry_config = WeaponryRuntimeConfig(
                 runtime_mode="single_instance",
                 scan_interval_seconds=0.05,
                 accepted_batch_size=50,
@@ -1406,7 +1407,7 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                     rag_model_fingerprint="2" * 64,
                 ),
             ), patch(
-                "app.container.load_weaponry_infrastructure_config",
+                "app.container.load_weaponry_runtime_config",
                 return_value=weaponry_config,
             ), patch(
                 "app.container.load_anythingllm_config",
@@ -1432,7 +1433,7 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                 assert weaponry is not None
                 self.assertIsInstance(
                     weaponry.callbacks,
-                    SQLiteWeaponryCallbackAdapter,
+                    TaskControlWeaponryCallbackAdapter,
                 )
                 self.assertIs(
                     weaponry.callbacks,
@@ -1444,11 +1445,24 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                 )
                 self.assertIs(
                     weaponry.resource_recovery,
-                    weaponry.dispatcher.resource_maintenance,
+                    weaponry.dispatcher.resources,
                 )
-                self.assertIs(
+                # 三业务使用不同等待队列，组合根以同一 Pool 的签发身份证明共享
+                # 容量；不能再用对象同一性误判为全局 FIFO limiter。
+                assert services.heavy_capacity_pool is not None
+                self.assertIsNot(
                     weaponry.execution_limiter,
                     services.upload_task_limiter,
+                )
+                self.assertTrue(
+                    services.heavy_capacity_pool.owns(
+                        weaponry.execution_limiter
+                    )
+                )
+                self.assertTrue(
+                    services.heavy_capacity_pool.owns(
+                        services.upload_task_limiter
+                    )
                 )
                 self.assertIsInstance(
                     weaponry.document_scope,

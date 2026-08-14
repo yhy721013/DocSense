@@ -218,7 +218,7 @@ class WeaponryProductionGateTests(unittest.TestCase):
         output = io.StringIO()
         with patch(
             "scripts.check_weaponry_production_gate."
-            "load_weaponry_infrastructure_config",
+            "load_weaponry_runtime_config",
             side_effect=ValueError("sensitive-provider-detail"),
         ), patch("sys.stdout", output):
             exit_code = check_gate_main()

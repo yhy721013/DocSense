@@ -25,6 +25,8 @@ from app.modules.tasks.ports import (
     CallbackControlMutationOutcome,
     CallbackEligibilityCommand,
     ClockPort,
+    LeaseSupervisorOutcome,
+    LeaseSupervisorResult,
     TaskExecutionMutationOutcome,
     TaskExecutionStopRequested,
     TaskProgressCommand,
@@ -72,6 +74,12 @@ class ReportStepRuntime:
         step_key: str,
         idempotency_key: str,
     ) -> ActiveReportStep:
+        # 停机取消只能在确定性边界生效：已经返回的外部结果仍由当前 Step 落盘，
+        # 但开始下一笔副作用前必须退出，避免 stop 与 Workflow 推进发生竞态。
+        if context.stop_requested():
+            raise TaskExecutionStopRequested(
+                LeaseSupervisorResult(LeaseSupervisorOutcome.STOPPED)
+            )
         definition = resolve_report_step(step_key)
         holder: dict[str, int] = {}
 

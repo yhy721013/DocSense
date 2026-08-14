@@ -120,6 +120,15 @@ class LocalMaintenanceScheduler:
         with self._lock:
             return self._healthy
 
+    def close(self) -> None:
+        """幂等释放调度线程；允许容器在未显式 start 的离线场景直接关闭。"""
+
+        with self._lock:
+            thread = self._thread
+        if thread is None or not thread.is_alive():
+            return
+        self.stop(timeout_seconds=self._stop_grace)
+
     @property
     def thread_count(self) -> int:
         """返回仍存活的调度线程数；仅用于内部 readiness/诊断快照。"""

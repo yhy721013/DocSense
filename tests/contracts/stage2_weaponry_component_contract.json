@@ -1,0 +1,24 @@
+{
+  "stage": "2-5-step-7",
+  "component": {
+    "name": "weaponry_control",
+    "version": 1,
+    "canonicalUtf8Bytes": 12930,
+    "fingerprint": "EEEC000736B12C249333B053E9ACB8AF9EE9B47E3F3A8BB09C2F101A8475587C",
+    "tables": [
+      "weaponry_task_document_snapshots",
+      "weaponry_creation_intents",
+      "weaponry_interaction_audits",
+      "weaponry_resource_records",
+      "weaponry_result_snapshots",
+      "weaponry_resource_operator_audits"
+    ]
+  },
+  "migration": {
+    "bootstrapBeforeRuntimeThreads": true,
+    "selfHealingDdlForbidden": true,
+    "legacyProductionWriterUntilAtomicSwitch": true,
+    "dualWriteForbidden": true,
+    "documentSnapshotIdentity": "task_id"
+  }
+}

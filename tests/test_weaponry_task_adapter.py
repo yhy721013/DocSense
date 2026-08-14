@@ -517,9 +517,10 @@ class WeaponryTaskAdapterPersistenceTests(unittest.TestCase):
             projection = service.get_task("weaponry", "42")
             raw_execution = service.get_task_execution(created.execution.task_id.value)
             with sqlite3.connect(database) as connection:
-                legacy_snapshot_count = connection.execute(
-                    "SELECT COUNT(*) FROM weaponry_task_document_snapshots"
-                ).fetchone()[0]
+                legacy_snapshot_table = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='weaponry_task_document_snapshots'"
+                ).fetchone()
 
         self.assertEqual(TaskSubmissionOutcome.ACCEPTED, created.outcome)
         self.assertEqual(created.execution, adapter.get_execution(created.execution.task_id))
@@ -531,7 +532,7 @@ class WeaponryTaskAdapterPersistenceTests(unittest.TestCase):
             "document-0001-a",
             raw_execution["input_payload"]["document_scope"]["documents"][0]["document_key"],
         )
-        self.assertEqual(0, legacy_snapshot_count)
+        self.assertIsNone(legacy_snapshot_table)
 
     def test_acceptance_transaction_does_not_requery_documents_or_read_environment(self) -> None:
         with workspace_tempdir() as runtime_directory:
@@ -585,12 +586,13 @@ class WeaponryTaskAdapterPersistenceTests(unittest.TestCase):
                 projection_count = connection.execute(
                     "SELECT COUNT(*) FROM llm_tasks WHERE business_type = 'weaponry'"
                 ).fetchone()[0]
-                legacy_snapshot_count = connection.execute(
-                    "SELECT COUNT(*) FROM weaponry_task_document_snapshots"
-                ).fetchone()[0]
+                legacy_snapshot_table = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='weaponry_task_document_snapshots'"
+                ).fetchone()
         self.assertEqual(0, execution_count)
         self.assertEqual(0, projection_count)
-        self.assertEqual(0, legacy_snapshot_count)
+        self.assertIsNone(legacy_snapshot_table)
 
     def test_new_same_key_execution_cannot_change_old_input_or_profile(self) -> None:
         with workspace_tempdir() as runtime_directory:
@@ -680,9 +682,10 @@ class WeaponryTaskAdapterConcurrencyTests(unittest.TestCase):
                 projection_count = connection.execute(
                     "SELECT COUNT(*) FROM llm_tasks WHERE business_type = 'weaponry'"
                 ).fetchone()[0]
-                legacy_snapshot_count = connection.execute(
-                    "SELECT COUNT(*) FROM weaponry_task_document_snapshots"
-                ).fetchone()[0]
+                legacy_snapshot_table = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='weaponry_task_document_snapshots'"
+                ).fetchone()
                 # 所有并发调用返回后必须能够立即取得新的写事务，显式证明没有连接或
                 # BEGIN IMMEDIATE 锁泄漏。
                 connection.execute("BEGIN IMMEDIATE")
@@ -692,7 +695,7 @@ class WeaponryTaskAdapterConcurrencyTests(unittest.TestCase):
         self.assertEqual(49, outcomes.count(TaskSubmissionOutcome.ACTIVE_CONFLICT))
         self.assertEqual(1, execution_count)
         self.assertEqual(1, projection_count)
-        self.assertEqual(0, legacy_snapshot_count)
+        self.assertIsNone(legacy_snapshot_table)
 
     def test_fifty_distinct_tasks_keep_fields_documents_and_profiles_isolated(self) -> None:
         with workspace_tempdir() as runtime_directory:
@@ -734,12 +737,16 @@ class WeaponryTaskAdapterConcurrencyTests(unittest.TestCase):
                     """
                     SELECT
                         (SELECT COUNT(*) FROM llm_task_executions WHERE business_type='weaponry'),
-                        (SELECT COUNT(*) FROM llm_tasks WHERE business_type='weaponry'),
-                        (SELECT COUNT(*) FROM weaponry_task_document_snapshots)
+                        (SELECT COUNT(*) FROM llm_tasks WHERE business_type='weaponry')
                     """
                 ).fetchone()
+                legacy_snapshot_table = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='weaponry_task_document_snapshots'"
+                ).fetchone()
 
-        self.assertEqual((50, 50, 0), counts)
+        self.assertEqual((50, 50), counts)
+        self.assertIsNone(legacy_snapshot_table)
 
 
 if __name__ == "__main__":

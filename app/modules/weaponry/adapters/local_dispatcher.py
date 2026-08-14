@@ -32,7 +32,7 @@ from app.modules.weaponry.ports import (
     WeaponryTaskRunnerPort,
 )
 
-from .infrastructure_config import WeaponryInfrastructureConfig
+from .runtime_config import WeaponryRuntimeConfig
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ class LocalWeaponryTaskDispatcher:
         runner: WeaponryTaskRunnerPort,
         resource_maintenance: WeaponryResourceMaintenancePort,
         callback_guard_maintenance: WeaponryBoundedMaintenancePort,
-        config: WeaponryInfrastructureConfig,
+        config: WeaponryRuntimeConfig,
         execution_limiter: TaskExecutionPermitPort | None = None,
         process_guard: ProcessSingletonGuardPort | None = None,
         startup_gate: Callable[[], None] | None = None,
@@ -134,8 +134,8 @@ class LocalWeaponryTaskDispatcher:
             raise TypeError(
                 "callback_guard_maintenance 必须实现 WeaponryBoundedMaintenancePort"
             )
-        if not isinstance(config, WeaponryInfrastructureConfig):
-            raise TypeError("config 必须是 WeaponryInfrastructureConfig")
+        if not isinstance(config, WeaponryRuntimeConfig):
+            raise TypeError("config 必须是 WeaponryRuntimeConfig")
         if config.runtime_mode != "single_instance":
             raise RuntimeError("本地武器谱 Dispatcher 只支持 single_instance")
 

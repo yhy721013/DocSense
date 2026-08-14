@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 
-from app.modules.tasks.domain import TaskExecutionSnapshot, TaskId
-from app.modules.tasks.ports import TaskCommandPort
+from app.modules.tasks.domain import TaskExecutionSnapshot, TaskId, TaskSnapshot
+from app.modules.tasks.ports import TaskCommandPort, TaskReadPort
 from app.modules.weaponry.domain import WeaponryInputSnapshot
 from app.modules.weaponry.ports import (
     AcquireWeaponryCleanupLease,
@@ -108,7 +108,8 @@ class WeaponryResourceRecoveryService:
         store: WeaponryResourceStorePort,
         cleaner: WeaponryExternalResourceCleanupPort,
         audit: WeaponryInteractionAuditPort,
-        task_commands: TaskCommandPort,
+        task_commands: TaskCommandPort | None = None,
+        task_reader: TaskReadPort | None = None,
         creation_intent_recovery: WeaponryBoundedMaintenancePort | None = None,
     ) -> None:
         if not isinstance(store, WeaponryResourceStorePort):
@@ -117,8 +118,12 @@ class WeaponryResourceRecoveryService:
             raise TypeError("cleaner 必须实现 WeaponryExternalResourceCleanupPort")
         if not isinstance(audit, WeaponryInteractionAuditPort):
             raise TypeError("audit 必须实现 WeaponryInteractionAuditPort")
-        if not isinstance(task_commands, TaskCommandPort):
+        if (task_commands is None) == (task_reader is None):
+            raise ValueError("task_commands 与 task_reader 必须且只能提供一个")
+        if task_commands is not None and not isinstance(task_commands, TaskCommandPort):
             raise TypeError("task_commands 必须实现 TaskCommandPort")
+        if task_reader is not None and not isinstance(task_reader, TaskReadPort):
+            raise TypeError("task_reader 必须实现 TaskReadPort")
         if creation_intent_recovery is not None and not isinstance(
             creation_intent_recovery,
             WeaponryBoundedMaintenancePort,
@@ -130,6 +135,7 @@ class WeaponryResourceRecoveryService:
         self._cleaner = cleaner
         self._audit = audit
         self._task_commands = task_commands
+        self._task_reader = task_reader
         self._creation_intent_recovery = creation_intent_recovery
 
     @property
@@ -385,7 +391,11 @@ class WeaponryResourceRecoveryService:
         self,
         record: WeaponryResourceRecord,
     ) -> WeaponryResourceRecord | WeaponryResourceRecoveryResult:
-        execution = self._task_commands.get_execution(record.task_id)
+        execution = (
+            self._task_commands.get_execution(record.task_id)
+            if self._task_commands is not None
+            else self._task_reader.get_by_id(record.task_id)
+        )
         if execution is None:
             # 资源记录存在而执行事实缺失，说明本地数据库已经失去证明资源是否仍被使用
             # 的依据。自动删除和继续轮询都不安全：前者可能误删，后者会制造永久热扫描。
@@ -395,7 +405,7 @@ class WeaponryResourceRecoveryService:
                 error_code="weaponry_execution_missing_for_resource",
                 reason="tracking 资源找不到对应 execution，禁止自动删除",
             )
-        if not isinstance(execution, TaskExecutionSnapshot):
+        if not isinstance(execution, (TaskExecutionSnapshot, TaskSnapshot)):
             return self._quarantine(
                 record,
                 error_code="weaponry_execution_snapshot_invalid",
@@ -406,15 +416,22 @@ class WeaponryResourceRecoveryService:
                 record.task_id,
                 WeaponryResourceRecoveryOutcome.NOT_READY,
             )
-        snapshot = execution.input_snapshot
-        if (
-            execution.execution_state not in _TERMINAL_EXECUTION_STATES
-            or execution.task_id != record.task_id
-            or execution.business_ref != record.business_ref
-            or not isinstance(snapshot, WeaponryInputSnapshot)
-            or snapshot.task_id != record.task_id.value
-            or str(snapshot.architecture_id) != record.business_ref.business_key
-        ):
+        identity_matches = (
+            execution.execution_state in _TERMINAL_EXECUTION_STATES
+            and execution.task_id == record.task_id
+            and execution.business_ref == record.business_ref
+        )
+        if isinstance(execution, TaskExecutionSnapshot):
+            snapshot = execution.input_snapshot
+            identity_matches = bool(
+                identity_matches
+                and isinstance(snapshot, WeaponryInputSnapshot)
+                and snapshot.task_id == record.task_id.value
+                and str(snapshot.architecture_id) == record.business_ref.business_key
+            )
+        elif execution.task_type != "weaponry":
+            identity_matches = False
+        if not identity_matches:
             return self._quarantine(
                 record,
                 error_code="weaponry_execution_resource_identity_mismatch",

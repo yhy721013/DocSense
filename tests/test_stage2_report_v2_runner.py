@@ -53,6 +53,7 @@ from app.modules.tasks.ports import (
     TaskAdmissionRequest,
     TaskClaimRequest,
     TaskExecutionMutationOutcome,
+    TaskExecutionStopRequested,
 )
 from tests import workspace_tempdir
 from tests.fakes import (
@@ -248,6 +249,28 @@ class ReportV2RunnerTests(unittest.TestCase):
             session=TaskExecutionAuthoritySession(authority),
             loaded_input=loaded,
         )
+
+    def test_stop_requested_exits_before_first_step_and_external_operation(self) -> None:
+        """正常停机应在首个 Step 边界退出，且不得把 Task 错误终态化。"""
+
+        self.assertTrue(self.context.request_cancellation())
+
+        with self.assertRaises(TaskExecutionStopRequested) as raised:
+            self.runner.run(self.context)
+
+        self.assertEqual("stopped", raised.exception.result.outcome.value)
+        with self.report_uow() as unit_of_work:
+            task = unit_of_work.execution.get_task(self.task_id)
+        with self.manager.begin(read_only=True) as transaction:
+            step_count = transaction.connection.execute(
+                "SELECT COUNT(*) FROM task_steps WHERE task_id = ?",
+                (self.task_id.value,),
+            ).fetchone()[0]
+            transaction.commit()
+        assert task is not None
+        self.assertEqual("running", task.state.value)
+        self.assertEqual(0, int(step_count))
+        self.assertEqual([], self.files.source_downloads)
 
     def test_success_runs_every_registered_step_and_commits_terminal(self) -> None:
         self.runner.run(self.context)

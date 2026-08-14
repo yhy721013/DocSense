@@ -125,7 +125,11 @@ class LeaseSupervisorResult:
 
 
 class TaskExecutionStopRequested(RuntimeError):
-    """Authority Session 已失权，v2 Workflow 必须停止继续推进。"""
+    """v2 Workflow 收到协作停止信号，必须停止继续推进。
+
+    该信号既可能来自 Authority 失权，也可能来自进程停机等正常取消。调用方应以
+    ``LeaseSupervisorResult.outcome`` 区分原因，不能把所有停止都误报为失权。
+    """
 
     def __init__(self, result: LeaseSupervisorResult) -> None:
         if not isinstance(result, LeaseSupervisorResult):

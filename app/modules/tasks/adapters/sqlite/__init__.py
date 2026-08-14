@@ -8,6 +8,7 @@ from .bootstrap import (
     TaskControlBootstrapError,
     TaskControlBootstrapResult,
     bootstrap_task_control_database,
+    validate_existing_task_control_database,
 )
 from .schema import (
     ROOT_MANIFEST_FINGERPRINT,
@@ -59,5 +60,6 @@ __all__ = [
     "component_schema_ddl",
     "install_component_schema",
     "bootstrap_task_control_database",
+    "validate_existing_task_control_database",
     "build_sqlite_task_control_uow_factories",
 ]

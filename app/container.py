@@ -92,9 +92,11 @@ from app.modules.report.adapters import (
     load_report_runtime_config,
 )
 from app.modules.report.adapters.sqlite import (
+    REPORT_CONTROL_COMPONENT_NAME,
+    REPORT_CONTROL_COMPONENT_VERSION,
     SQLiteReportExecutionUnitOfWorkFactory,
     SQLiteReportResourceStore,
-    bootstrap_report_task_control_database,
+    load_report_control_manifest,
 )
 from app.modules.report.adapters.local_dispatcher import LocalReportDispatcherSnapshot
 from app.modules.report.application import (
@@ -133,8 +135,10 @@ from app.modules.tasks.adapters import (
     FileProcessSingletonGuard as GenericFileProcessSingletonGuard,
     InMemoryProgressAdapter,
     CodecTaskExecutionSnapshotLoader,
+    FairTaskExecutionPermitPool,
+    LocalMaintenanceJob,
+    LocalMaintenanceScheduler,
     LocalTaskExecutor,
-    LegacyTaskCommandAdapter,
     LegacyTaskReadAdapter,
     RoutedTaskReadAdapter,
     SQLiteTaskControlReadAdapter,
@@ -153,15 +157,21 @@ from app.modules.tasks.adapters.sqlite import (
     SQLiteTaskControlStore,
     SQLiteTransactionManager,
     build_sqlite_task_control_uow_factories,
+    bootstrap_task_control_database,
 )
 from app.modules.tasks.application import (
     CheckTaskStatusService,
+    ConservativeTaskReaper,
     ExecuteCheckTask,
     ProgressSubscriptionService,
     TaskExecutionRuntime,
 )
 from app.modules.tasks.domain import TaskBusinessRef, TaskId, TaskOwnerIdentity
-from app.modules.tasks.ports import TaskReadPort
+from app.modules.tasks.ports import (
+    LocalMaintenanceSchedulerPort,
+    TaskExecutionPermitPort,
+    TaskReadPort,
+)
 from app.modules.weaponry.adapters import (
     AnythingLLMTermsCatalogCoordinator,
     AnythingLLMProvidedEvidenceExtractionAdapter,
@@ -173,8 +183,6 @@ from app.modules.weaponry.adapters import (
     DatabaseServiceWeaponryDocumentScopeAdapter,
     TranslationEngineWeaponryAdapter,
     NoAuxiliaryGuidanceAdapter,
-    SQLiteWeaponryCallbackAdapter,
-    SQLiteWeaponryCallbackRecoverySource,
     SQLiteWeaponryCreationIntentStoreAdapter,
     SQLiteWeaponryInteractionAuditAdapter,
     SQLiteWeaponryResourceStoreAdapter,
@@ -185,15 +193,22 @@ from app.modules.weaponry.adapters import (
     WeaponryRuntimeCapabilities,
     WeaponryProductionGateSnapshot,
     WeaponryTaskCommandCodec,
+    TaskControlWeaponryCallbackAdapter,
+    SQLiteWeaponryV2CallbackRecoverySource,
+    WeaponryV2Maintenance,
+    WeaponryV2ResultMetrics,
+    WeaponryV2TaskDispatcher,
+    build_weaponry_runtime_policies,
+    validate_weaponry_runtime_capabilities,
     build_terms_catalog_manifest,
-    load_weaponry_infrastructure_config,
+    load_weaponry_runtime_config,
 )
 from app.modules.weaponry.adapters.local_dispatcher import (
     LocalWeaponryDispatcherSnapshot,
 )
 from app.modules.weaponry.composition import (
     WeaponryApplicationServices,
-    compose_weaponry_application_services,
+    WeaponryV2ApplicationServices,
 )
 from app.ports import DocumentRagFactory, KnowledgeIndexFactory
 from app.modules.chat.ports import ChatConversationFactory
@@ -208,6 +223,23 @@ from app.modules.chat import (
     ChatRunDispatcher,
     ChatTitleService,
     SynchronousChatRunExecutor,
+)
+from app.modules.weaponry.adapters.sqlite import (
+    WEAPONRY_CONTROL_COMPONENT_NAME,
+    WEAPONRY_CONTROL_COMPONENT_VERSION,
+    SQLiteWeaponryAdmissionUnitOfWorkFactory,
+    SQLiteWeaponryExecutionUnitOfWorkFactory,
+    SQLiteWeaponryTaskDocumentSnapshotStore,
+    SQLiteWeaponryResultSnapshotStore,
+    load_weaponry_control_manifest,
+)
+from app.modules.weaponry.application import (
+    RecoverWeaponryCallbackSynchronously,
+    RunWeaponryV2Workflow,
+    SubmitWeaponryV2Task,
+    WeaponryFieldExecutor,
+    WeaponryResourceRecoveryService,
+    WeaponryStepRuntime,
 )
 from app.modules.chat.composition import (
     ChatApplicationServices,
@@ -323,7 +355,7 @@ class ApplicationServices:
     chat_cleanup_executor: ChatCleanupJobExecutor
     progress_hub: LLMProgressHub
     progress_subscription_service: ProgressSubscriptionService
-    upload_task_limiter: UploadTaskLimiter
+    upload_task_limiter: TaskExecutionPermitPort
     report_submit: SubmitReportTask | SubmitReportV2Task
     report_callback_recovery: RecoverReportCallbackSynchronously
     report_dispatcher: ReportTaskDispatcherLifecyclePort
@@ -355,13 +387,25 @@ class ApplicationServices:
     analysis_runtime_config: AnalysisInfrastructureConfig | None = None
     # 生产工厂在 1D-6 必须装配完整新链。``None`` 仅保留给不覆盖 weaponry 路由的旧式
     # 单元测试夹具；公开路由遇到 None 会明确失败，绝不会回退到遗留线程。
-    weaponry_services: WeaponryApplicationServices | None = None
+    weaponry_services: WeaponryApplicationServices | WeaponryV2ApplicationServices | None = None
     # 1E-6 的同步 Saga 生产链。None 仅用于不覆盖 reassign 路由的旧测试夹具；公开路由
     # 必须 fail fast，绝不能回退到已删除的蓝图数据库/AnythingLLM 编排。
     reassign_services: ReassignApplicationServices | None = None
     # Report 完成 2-4 一次切换后，公开 check-task 与 Progress 回退必须读取 v2；
     # 未迁移业务仍由路由适配器读取旧库。None 仅供历史夹具自动装配全旧只读路径。
     task_reader: TaskReadPort | None = field(default=None, repr=False)
+    # 根控制面的过期 Attempt 扫描独立于任何业务 Dispatcher。None 只保留给历史
+    # 单元测试夹具；生产组合根始终装配，并纳入统一启停与健康判断。
+    task_control_maintenance: LocalMaintenanceSchedulerPort | None = field(
+        default=None,
+        repr=False,
+    )
+    # 生产组合根通过该对象证明 Report、Weaponry、Analysis/file 的业务 Permit
+    # 来自同一容量事实。None 保留给仍使用旧 FIFO limiter 的离线/历史夹具。
+    heavy_capacity_pool: FairTaskExecutionPermitPool | None = field(
+        default=None,
+        repr=False,
+    )
     # 该入口由当前 Task Read 与三类同步恢复链派生。禁止外部单独注入半套实例，
     # ``dataclasses.replace`` 替换任一恢复器时会随容器重新构造并保持引用一致。
     check_task: ExecuteCheckTask = field(init=False, repr=False)
@@ -436,6 +480,20 @@ class ApplicationServices:
             raise TypeError("chat_run_executor must be SynchronousChatRunExecutor")
         if not isinstance(self.debug_services, DebugApplicationServices):
             raise TypeError("debug_services 必须是 DebugApplicationServices")
+        if self.task_control_maintenance is not None and not isinstance(
+            self.task_control_maintenance,
+            LocalMaintenanceSchedulerPort,
+        ):
+            raise TypeError(
+                "task_control_maintenance 必须实现 LocalMaintenanceSchedulerPort"
+            )
+        if self.heavy_capacity_pool is not None and not isinstance(
+            self.heavy_capacity_pool,
+            FairTaskExecutionPermitPool,
+        ):
+            raise TypeError("heavy_capacity_pool 必须是 FairTaskExecutionPermitPool")
+        if not isinstance(self.upload_task_limiter, TaskExecutionPermitPort):
+            raise TypeError("upload_task_limiter 必须实现 TaskExecutionPermitPort")
         if not isinstance(self.chat_dispatcher, ChatRunDispatcher):
             raise TypeError("chat_dispatcher must implement ChatRunDispatcher")
         if not isinstance(self.chat_history, ChatHistoryService):
@@ -560,15 +618,24 @@ class ApplicationServices:
         if self.weaponry_services is not None:
             if not isinstance(
                 self.weaponry_services,
-                WeaponryApplicationServices,
+                (WeaponryApplicationServices, WeaponryV2ApplicationServices),
             ):
                 raise TypeError(
-                    "weaponry_services 必须是 WeaponryApplicationServices 或 None"
+                    "weaponry_services 必须是 Weaponry ApplicationServices 或 None"
                 )
-            if (
-                self.weaponry_services.execution_limiter
-                is not self.upload_task_limiter
-            ):
+            shares_capacity = (
+                self.heavy_capacity_pool is not None
+                and self.heavy_capacity_pool.owns(self.upload_task_limiter)
+                and self.heavy_capacity_pool.owns(
+                    self.weaponry_services.execution_limiter
+                )
+            )
+            if self.heavy_capacity_pool is None:
+                shares_capacity = (
+                    self.weaponry_services.execution_limiter
+                    is self.upload_task_limiter
+                )
+            if not shares_capacity:
                 raise ValueError(
                     "Weaponry 必须与 Report/Analysis 共享同一重型任务 limiter"
                 )
@@ -604,7 +671,7 @@ class ApplicationServices:
         self._validate_chat_infrastructure_capabilities()
         self._validate_report_infrastructure_capabilities()
         self._validate_analysis_infrastructure_capabilities()
-        self._validate_weaponry_infrastructure_capabilities()
+        self._validate_weaponry_runtime_capabilities()
 
     def _recover_analysis_callback(
         self,
@@ -706,6 +773,16 @@ class ApplicationServices:
             raise RuntimeError(
                 "生产 LocalReportTaskDispatcher 必须装配跨进程单实例锁"
             )
+        if self.heavy_capacity_pool is not None:
+            report_limiter = getattr(
+                self.report_dispatcher,
+                "execution_limiter",
+                None,
+            )
+            if not self.heavy_capacity_pool.owns(report_limiter):
+                raise ValueError(
+                    "Report 必须与 Weaponry/Analysis 共享同一重型任务 limiter"
+                )
         logger.info(
             "报告基础设施能力校验通过: runtime_mode=%s dispatcher_type=%s "
             "cleanup_http_timeout_seconds=%.3f cleanup_lease_seconds=%.3f",
@@ -744,10 +821,19 @@ class ApplicationServices:
                 raise RuntimeError(
                     "生产 LocalAnalysisTaskDispatcher 必须装配跨进程单实例锁"
                 )
-            if (
-                self.analysis_dispatcher.execution_limiter
-                is not self.upload_task_limiter
-            ):
+            shares_capacity = (
+                self.heavy_capacity_pool is not None
+                and self.heavy_capacity_pool.owns(self.upload_task_limiter)
+                and self.heavy_capacity_pool.owns(
+                    self.analysis_dispatcher.execution_limiter
+                )
+            )
+            if self.heavy_capacity_pool is None:
+                shares_capacity = (
+                    self.analysis_dispatcher.execution_limiter
+                    is self.upload_task_limiter
+                )
+            if not shares_capacity:
                 raise ValueError(
                     "Analysis 必须与 Report/Weaponry 共享同一重型任务 limiter"
                 )
@@ -770,7 +856,7 @@ class ApplicationServices:
             self.analysis_runtime_config.resource_close_running_grace_seconds,
         )
 
-    def _validate_weaponry_infrastructure_capabilities(self) -> None:
+    def _validate_weaponry_runtime_capabilities(self) -> None:
         """只在显式装配时验证 Weaponry；缺省不能用隐式 no-op 伪装就绪。"""
 
         if self.weaponry_services is None:
@@ -779,9 +865,12 @@ class ApplicationServices:
             )
             return
         dispatcher = self.weaponry_services.dispatcher
-        if not dispatcher.has_process_guard:
+        uses_v2_authority = bool(
+            getattr(dispatcher, "uses_task_control_authority", False)
+        )
+        if not uses_v2_authority and not dispatcher.has_process_guard:
             raise RuntimeError(
-                "生产 LocalWeaponryTaskDispatcher 必须装配跨进程单实例锁"
+                "Weaponry Dispatcher 必须装配旧进程锁或 v2 lease/fencing Authority"
             )
         production_gate = self.weaponry_services.production_gate_snapshot()
         if not production_gate.ready:
@@ -840,6 +929,12 @@ class ApplicationServices:
             else None
         )
         reasons: list[str] = []
+        maintenance_ready = (
+            self.task_control_maintenance is None
+            or self.task_control_maintenance.is_healthy()
+        )
+        if not maintenance_ready:
+            reasons.append("task_control_maintenance_unhealthy")
         if report is None:
             reasons.append("report_dispatcher_snapshot_unavailable")
         elif not report.ready:
@@ -889,7 +984,8 @@ class ApplicationServices:
             )
         )
         lifecycle_ready = (
-            report is not None
+            maintenance_ready
+            and report is not None
             and report.ready
             and (
                 self.analysis_dispatcher is None
@@ -914,20 +1010,29 @@ class ApplicationServices:
     def start_background_services(self) -> None:
         """显式启动容器拥有的本地后台能力。
 
-        固定顺序为 Report、Weaponry、Analysis。任一组件启动失败时，只回滚本次调用中
+        固定顺序为根控制面维护、Report、Weaponry、Analysis。任一组件启动失败时，只回滚本次调用中
         实际从未运行变为启动的组件，并按逆序停止；绝不为了回滚把数据库里的 running
         execution 改回 accepted。构造容器本身不启动线程，离线 Fake 也只能在调用方显式
         调用本方法后才会收到 start。
         """
 
         logger.info("开始启动 DocSense 后台服务")
-        components: list[tuple[str, object, float]] = [
+        components: list[tuple[str, object, float]] = []
+        if self.task_control_maintenance is not None:
+            components.append(
+                (
+                    "TaskControlMaintenance",
+                    self.task_control_maintenance,
+                    self.report_infrastructure_config.stop_timeout_seconds,
+                )
+            )
+        components.append(
             (
                 "Report",
                 self.report_dispatcher,
                 self.report_infrastructure_config.stop_timeout_seconds,
-            ),
-        ]
+            )
+        )
         if self.weaponry_services is not None:
             components.append(
                 (
@@ -993,6 +1098,7 @@ class ApplicationServices:
 
         analysis_stopped = True
         weaponry_stopped = True
+        maintenance_stopped = True
         try:
             if self.analysis_dispatcher is not None:
                 analysis_stopped = self.analysis_dispatcher.stop(
@@ -1005,10 +1111,21 @@ class ApplicationServices:
                         timeout_seconds=timeout_seconds
                     )
             finally:
-                report_stopped = self.report_dispatcher.stop(
-                    timeout_seconds=timeout_seconds
-                )
-        return analysis_stopped and weaponry_stopped and report_stopped
+                try:
+                    report_stopped = self.report_dispatcher.stop(
+                        timeout_seconds=timeout_seconds
+                    )
+                finally:
+                    if self.task_control_maintenance is not None:
+                        maintenance_stopped = self.task_control_maintenance.stop(
+                            timeout_seconds=timeout_seconds
+                        )
+        return (
+            analysis_stopped
+            and weaponry_stopped
+            and report_stopped
+            and maintenance_stopped
+        )
 
     def close(self) -> None:
         """幂等关闭容器拥有的后台生命周期。"""
@@ -1021,7 +1138,13 @@ class ApplicationServices:
                 if self.weaponry_services is not None:
                     self.weaponry_services.close()
             finally:
-                self.report_dispatcher.close()
+                try:
+                    self.report_dispatcher.close()
+                finally:
+                    if self.task_control_maintenance is not None:
+                        close = getattr(self.task_control_maintenance, "close", None)
+                        if callable(close):
+                            close()
 
     @staticmethod
     def _background_component_is_running(component: object) -> bool:
@@ -1073,16 +1196,16 @@ def create_application_services() -> ApplicationServices:
     )
     # 阶段 2-4 后 Report 配置由业务模块唯一拥有；环境键、默认值和失败语义保持不变。
     report_infrastructure_config = load_report_runtime_config()
-    weaponry_infrastructure_config = load_weaponry_infrastructure_config()
+    weaponry_runtime_config = load_weaponry_runtime_config()
     # 术语开启时由本地真实内容自动生成唯一指纹，不再读取人工版本标签。这里只读取并
     # 冻结本地清单；AnythingLLM 写入仍延迟到 Weaponry 取得单实例锁后的启动门禁。
     weaponry_terms_manifest = None
-    if weaponry_infrastructure_config.terms_rule_context_enabled:
+    if weaponry_runtime_config.terms_rule_context_enabled:
         weaponry_terms_manifest = build_terms_catalog_manifest(
-            weaponry_infrastructure_config.terms_dir or ""
+            weaponry_runtime_config.terms_dir or ""
         )
-        weaponry_infrastructure_config = replace(
-            weaponry_infrastructure_config,
+        weaponry_runtime_config = replace(
+            weaponry_runtime_config,
             terms_catalog_fingerprint=weaponry_terms_manifest.fingerprint,
         )
     reassign_infrastructure_config = load_reassignment_infrastructure_config()
@@ -1123,7 +1246,7 @@ def create_application_services() -> ApplicationServices:
         chat_infrastructure_config.runtime_mode,
         report_infrastructure_config.runtime_mode,
         analysis_infrastructure_config.runtime_mode,
-        weaponry_infrastructure_config.runtime_mode,
+        weaponry_runtime_config.runtime_mode,
         reassign_infrastructure_config.runtime_mode,
         reassign_infrastructure_config.total_timeout_seconds,
     )
@@ -1145,10 +1268,20 @@ def create_application_services() -> ApplicationServices:
         1,
         int(task_runtime_config.lease.sqlite_busy_budget_seconds * 1000),
     )
-    report_task_control_bootstrap = bootstrap_report_task_control_database(
+    # Report 与 Weaponry 已同时切入根 Schema generation 2。启动必须一次声明全部
+    # 已知/必需组件，避免先安装一个组件后把另一个合法组件误判为未知漂移。
+    report_task_control_bootstrap = bootstrap_task_control_database(
         llm_config.task_db_path,
         task_runtime_config.database_path,
         busy_timeout_ms=task_control_busy_timeout_ms,
+        known_components={
+            REPORT_CONTROL_COMPONENT_NAME: load_report_control_manifest(),
+            WEAPONRY_CONTROL_COMPONENT_NAME: load_weaponry_control_manifest(),
+        },
+        required_components={
+            REPORT_CONTROL_COMPONENT_NAME: REPORT_CONTROL_COMPONENT_VERSION,
+            WEAPONRY_CONTROL_COMPONENT_NAME: WEAPONRY_CONTROL_COMPONENT_VERSION,
+        },
     )
     task_control_transactions = SQLiteTransactionManager(
         SQLiteConnectionFactory(
@@ -1159,12 +1292,35 @@ def create_application_services() -> ApplicationServices:
     task_control_uows = build_sqlite_task_control_uow_factories(
         task_control_transactions
     )
-    report_v2_task_reader = SQLiteTaskControlReadAdapter(
+    task_control_clock = SystemSafeClock(
+        max_jitter_seconds=task_runtime_config.lease.max_clock_jitter_seconds
+    )
+    task_reaper = ConservativeTaskReaper(
+        clock=task_control_clock,
+        query_uow_factory=task_control_uows.queries,
+        recovery_uow_factory=task_control_uows.recovery,
+        defer_seconds=task_runtime_config.reaper_scan_interval_seconds,
+    )
+    task_control_maintenance = LocalMaintenanceScheduler(
+        jobs=(
+            LocalMaintenanceJob(
+                name="conservative_task_reaper",
+                interval_seconds=task_runtime_config.reaper_scan_interval_seconds,
+                action=task_reaper.run_once,
+            ),
+        ),
+        stop_grace_seconds=task_runtime_config.lease.stop_grace_seconds,
+        thread_name="task-control-maintenance",
+    )
+    task_control_task_reader = SQLiteTaskControlReadAdapter(
         task_control_transactions
     )
     routed_task_reader = RoutedTaskReadAdapter(
-        v2_reader=report_v2_task_reader,
+        v2_reader=task_control_task_reader,
         legacy_reader=LegacyTaskReadAdapter(task_service),
+        # Report 与 Weaponry 已分别在 2-4、2-5 完成一次切换，按业务键的公开
+        # check-task/Progress 必须只读 v2。Analysis/file 尚未迁移，仍保留旧库读取。
+        v2_business_types=frozenset({"report", "weaponry"}),
     )
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_services = compose_chat_application_services(
@@ -1191,7 +1347,17 @@ def create_application_services() -> ApplicationServices:
         progress_subscriptions=progress_adapter,
         task_reader=routed_task_reader,
     )
-    upload_task_limiter = UploadTaskLimiter(max_concurrency=1)
+    # 三类业务各持有独立等待队列，但所有 Permit 都由同一个容量池签发。这样既保留
+    # Analysis/file 的旧业务名与执行链，又避免持续积压的单一业务抢占唯一重型资源。
+    heavy_capacity_pool = FairTaskExecutionPermitPool(
+        capacity=task_runtime_config.heavy_concurrency,
+        business_order=("report", "weaponry", "file"),
+    )
+    report_execution_permit = heavy_capacity_pool.for_business("report")
+    weaponry_execution_permit = heavy_capacity_pool.for_business("weaponry")
+    analysis_execution_permit = heavy_capacity_pool.for_business("file")
+    # 字段名为历史兼容名称；其值现在代表 Analysis/file 的业务 Permit，而非独立容量。
+    upload_task_limiter = analysis_execution_permit
     # DocumentProcessing 的重型许可只包围 MinerU/OCR 调用。当前是单实例 FIFO；
     # accepted 任务事实仍由各业务 Dispatcher/SQLite 持有，不能把它描述成可靠队列。
     document_processing_capacity = FIFOCapacityAdapter(
@@ -1306,7 +1472,7 @@ def create_application_services() -> ApplicationServices:
 
     # Report 2-4 一次切换：受理、claim/start/heartbeat、Progress、终态、Callback
     # Control 全部使用 v2；本区块不再构造 LegacyTaskCommandAdapter，也不向旧库写 Report。
-    # 尚未迁移的 Analysis/Weaponry 继续使用各自旧链，二者不共享 Report 控制写入口。
+    # 尚未迁移的 Analysis 继续使用旧链，不共享 Report 控制写入口。
     report_execution_profile = build_report_execution_profile(
         runtime_config=report_infrastructure_config,
         capabilities=load_report_execution_capability_config(),
@@ -1340,7 +1506,7 @@ def create_application_services() -> ApplicationServices:
     )
     report_audit = build_report_v2_interaction_audit_adapter(
         llm_config.task_db_path,
-        task_reader=report_v2_task_reader,
+        task_reader=task_control_task_reader,
     )
     report_resource_store = SQLiteReportResourceStoreAdapter(
         SQLiteReportResourceStore(task_control_transactions)
@@ -1392,7 +1558,7 @@ def create_application_services() -> ApplicationServices:
     )
     report_callback_recovery = RecoverReportCallbackSynchronously(
         source=SQLiteReportV2CallbackRecoverySource(
-            task_reader=report_v2_task_reader,
+            task_reader=task_control_task_reader,
             resources=report_resource_store,
             artifacts=report_artifacts,
         ),
@@ -1446,7 +1612,7 @@ def create_application_services() -> ApplicationServices:
         clock=report_clock,
         query_uow_factory=task_control_uows.queries,
         execution_uow_factory=task_control_uows.execution,
-        permit=upload_task_limiter,
+        permit=report_execution_permit,
         runtime_factory=build_report_execution_runtime,
         thread_name_prefix="report-v2",
         dispatch_failure_cooldown_seconds=(
@@ -1520,7 +1686,7 @@ def create_application_services() -> ApplicationServices:
             task_service
         ),
         resources=SQLiteAnalysisResourceStoreAdapter(task_service),
-        execution_limiter=upload_task_limiter,
+        execution_limiter=analysis_execution_permit,
         process_guard=GenericFileProcessSingletonGuard(
             RUNTIME_DIR / "locks" / "analysis-dispatcher.lock",
             component_name="文件分析本地 Dispatcher",
@@ -1532,28 +1698,22 @@ def create_application_services() -> ApplicationServices:
         ),
     )
 
-    # Weaponry 与 Report 共享任务数据库、进度 Hub 和重型任务 limiter，但拥有独立业务
-    # TaskCommand、Callback Guard、资源事实、进程锁和 Worker。所有 AnythingLLM 工厂只
-    # 保存不可变配置；真正的 HTTP Session 仍在单次任务/清理调用内创建并关闭。
-    weaponry_task_commands = LegacyTaskCommandAdapter(
-        task_service,
-        WeaponryTaskCommandCodec(),
-    )
-    weaponry_progress_publisher = LatestTaskProgressPublisherAdapter(
-        task_commands=weaponry_task_commands,
-        delegate=progress_adapter,
-    )
+    # Weaponry 2-5 一次切换：受理、Execution/Step、Progress、终态和 Callback
+    # Control 只写 Task Control v2。这里不再构造 LegacyTaskCommandAdapter，也不向旧库
+    # 双写；AnythingLLM 网络对象仍只在单次任务或维护调用内创建。
+    weaponry_task_codec = WeaponryTaskCommandCodec()
+    weaponry_progress_publisher = progress_adapter
     weaponry_resources = SQLiteWeaponryResourceStoreAdapter(
-        llm_config.task_db_path,
+        transaction_manager=task_control_transactions,
         cleanup_lease_seconds=(
-            weaponry_infrastructure_config.cleanup_lease_seconds
+            weaponry_runtime_config.cleanup_lease_seconds
         ),
         retry_delay_seconds=(
-            weaponry_infrastructure_config.maintenance_interval_seconds
+            weaponry_runtime_config.maintenance_interval_seconds
         ),
     )
     weaponry_creation_intents = SQLiteWeaponryCreationIntentStoreAdapter(
-        llm_config.task_db_path
+        transaction_manager=task_control_transactions
     )
     # 同一容器内的 Worker 与维护器共享运行实例标识。新 pending 意图带上该归属后，
     # 维护器会跳过本实例仍在执行的创建窗口；进程重启则生成新标识，遗留意图可被接管。
@@ -1567,41 +1727,41 @@ def create_application_services() -> ApplicationServices:
     weaponry_cleanup_client_factory = AnythingLLMWeaponryClientFactory(
         replace(
             anythingllm_config,
-            timeout=weaponry_infrastructure_config.cleanup_http_timeout_seconds,
+            timeout=weaponry_runtime_config.cleanup_http_timeout_seconds,
         )
     )
     weaponry_retrieval = AnythingLLMTargetEvidenceRetrievalAdapter(
         weaponry_client_factory,
         weaponry_resource_registrar,
         provider_fingerprint=(
-            weaponry_infrastructure_config.provider_fingerprint
+            weaponry_runtime_config.provider_fingerprint
         ),
         embedding_fingerprint=(
-            weaponry_infrastructure_config.embedding_fingerprint
+            weaponry_runtime_config.embedding_fingerprint
         ),
     )
     weaponry_extraction = AnythingLLMProvidedEvidenceExtractionAdapter(
         weaponry_client_factory,
         weaponry_resource_registrar,
         model_fingerprint=(
-            weaponry_infrastructure_config.extraction_model_fingerprint
+            weaponry_runtime_config.extraction_model_fingerprint
         ),
     )
     weaponry_terms_startup_gate = None
-    if weaponry_infrastructure_config.terms_rule_context_enabled:
+    if weaponry_runtime_config.terms_rule_context_enabled:
         if weaponry_terms_manifest is None:  # 防御性保护，上方启用分支必须已冻结清单。
             raise RuntimeError("术语辅助已启用但本地术语清单未构造")
         terms_workspace_resolver = TermsCatalogWorkspaceResolver(
             weaponry_client_factory,
             workspace_base_name=(
-                weaponry_infrastructure_config.terms_workspace_name or ""
+                weaponry_runtime_config.terms_workspace_name or ""
             ),
         )
         terms_catalog_coordinator = AnythingLLMTermsCatalogCoordinator(
             weaponry_client_factory,
             manifest=weaponry_terms_manifest,
             workspace_base_name=(
-                weaponry_infrastructure_config.terms_workspace_name or ""
+                weaponry_runtime_config.terms_workspace_name or ""
             ),
             state_store=SQLiteTermsCatalogStateStore(llm_config.task_db_path),
             resolver=terms_workspace_resolver,
@@ -1616,76 +1776,200 @@ def create_application_services() -> ApplicationServices:
     else:
         weaponry_guidance = NoAuxiliaryGuidanceAdapter()
     weaponry_audit = SQLiteWeaponryInteractionAuditAdapter(
-        llm_config.task_db_path
+        transaction_manager=task_control_transactions
     )
-    weaponry_callbacks = SQLiteWeaponryCallbackAdapter(
-        task_service,
+    weaponry_clock = SystemSafeClock(
+        max_jitter_seconds=task_runtime_config.lease.max_clock_jitter_seconds
+    )
+    weaponry_callbacks = TaskControlWeaponryCallbackAdapter(
+        task_control_uows.callback_delivery,
+        clock=weaponry_clock,
         callback_url=llm_config.callback_url or "",
         callback_timeout=llm_config.callback_timeout,
+        token_factory=SecureTaskLeaseTokenFactory().new_token,
         lease_seconds=max(
             30.0,
             required_http_lease_seconds(llm_config.callback_timeout),
         ),
     )
-    weaponry_services = compose_weaponry_application_services(
-        task_commands=weaponry_task_commands,
-        progress_publisher=weaponry_progress_publisher,
+    weaponry_capabilities = WeaponryRuntimeCapabilities(
+        provider_fingerprint=weaponry_runtime_config.provider_fingerprint,
+        embedding_fingerprint=weaponry_runtime_config.embedding_fingerprint,
+        document_processing_fingerprint=(
+            weaponry_runtime_config.document_processing_fingerprint
+        ),
+        extraction_model_fingerprint=(
+            weaponry_runtime_config.extraction_model_fingerprint
+        ),
+        query_version=weaponry_runtime_config.query_version,
+        score_semantics=weaponry_runtime_config.score_semantics,
+        score_protocol=weaponry_runtime_config.score_protocol,
+        ranking_strategy=weaponry_runtime_config.ranking_strategy,
+        reference_filter_strategy=weaponry_runtime_config.reference_filter_strategy,
+        extraction_context_strategy=(
+            weaponry_runtime_config.extraction_context_strategy
+        ),
+    )
+    validate_weaponry_runtime_capabilities(
+        weaponry_runtime_config,
+        weaponry_capabilities,
+    )
+    weaponry_policies = build_weaponry_runtime_policies(weaponry_runtime_config)
+    weaponry_document_snapshots = SQLiteWeaponryTaskDocumentSnapshotStore(
+        task_control_transactions
+    )
+    weaponry_results = SQLiteWeaponryResultSnapshotStore(task_control_transactions)
+    weaponry_admission_uows = SQLiteWeaponryAdmissionUnitOfWorkFactory(
+        task_control_transactions,
+        admission_builder=SQLiteTaskControlStore,
+        callback_conflict_builder=SQLiteTaskControlStore,
+        document_snapshot_builder=(
+            SQLiteWeaponryTaskDocumentSnapshotStore.from_connection
+        ),
+    )
+    weaponry_execution_uows = SQLiteWeaponryExecutionUnitOfWorkFactory(
+        task_control_transactions,
+        execution_builder=SQLiteTaskControlStore,
+        callback_delivery_builder=SQLiteCallbackControlStore,
+        document_snapshot_builder=(
+            SQLiteWeaponryTaskDocumentSnapshotStore.from_connection
+        ),
+        creation_intent_builder=(
+            SQLiteWeaponryCreationIntentStoreAdapter.from_connection
+        ),
+        interaction_audit_builder=(
+            SQLiteWeaponryInteractionAuditAdapter.from_connection
+        ),
+        resource_builder=SQLiteWeaponryResourceStoreAdapter.from_connection,
+        result_snapshot_builder=SQLiteWeaponryResultSnapshotStore.from_connection,
+    )
+    weaponry_steps = WeaponryStepRuntime(
+        uow_factory=weaponry_execution_uows,
+        clock=weaponry_clock,
+    )
+    creation_intent_recovery = AnythingLLMWeaponryCreationIntentRecoveryAdapter(
+        weaponry_cleanup_client_factory,
+        weaponry_creation_intents,
+        weaponry_resources,
+        instance_id=weaponry_instance_id,
+        lease_seconds=weaponry_runtime_config.cleanup_lease_seconds,
+    )
+    weaponry_resource_recovery = WeaponryResourceRecoveryService(
+        store=weaponry_resources,
+        cleaner=AnythingLLMWeaponryResourceCleanupAdapter(
+            weaponry_cleanup_client_factory
+        ),
+        audit=weaponry_audit,
+        task_reader=task_control_task_reader,
+        creation_intent_recovery=creation_intent_recovery,
+    )
+    weaponry_maintenance = WeaponryV2Maintenance(
+        callbacks=weaponry_callbacks,
+        resources=weaponry_resource_recovery,
+        config=weaponry_runtime_config,
+    )
+    weaponry_metrics = WeaponryV2ResultMetrics()
+    weaponry_field_executor = WeaponryFieldExecutor(
         retrieval=weaponry_retrieval,
         extraction=weaponry_extraction,
         guidance=weaponry_guidance,
         translation=TranslationEngineWeaponryAdapter(translation_engine),
         audit=weaponry_audit,
-        callbacks=weaponry_callbacks,
-        callback_recovery_source=SQLiteWeaponryCallbackRecoverySource(
-            task_service
+    )
+    weaponry_snapshot_loader = CodecTaskExecutionSnapshotLoader(
+        query_uow_factory=task_control_uows.queries,
+        codec=weaponry_task_codec,
+    )
+    weaponry_instance_start_id = str(uuid4())
+    weaponry_lease_token_factory = SecureTaskLeaseTokenFactory()
+
+    def observe_weaponry_result(result) -> None:
+        """业务结果只更新脱敏指标并发送可丢维护提示。"""
+
+        weaponry_metrics.observe(result)
+        weaponry_maintenance.wake_up()
+
+    def build_weaponry_execution_runtime(worker_slot: str) -> TaskExecutionRuntime:
+        workflow = RunWeaponryV2Workflow(
+            steps=weaponry_steps,
+            clock=weaponry_clock,
+            progress_publisher=weaponry_progress_publisher,
+            retrieval=weaponry_retrieval,
+            field_executor=weaponry_field_executor,
+            callbacks=weaponry_callbacks,
+            resources=weaponry_resources,
+            document_snapshots=weaponry_document_snapshots,
+            result_observer=observe_weaponry_result,
+        )
+        return TaskExecutionRuntime(
+            task_type="weaponry",
+            owner=TaskOwnerIdentity(
+                instance_start_id=weaponry_instance_start_id,
+                process_id=os.getpid(),
+                executor_name="WeaponryExecutor",
+                worker_slot=worker_slot,
+            ),
+            clock=weaponry_clock,
+            execution_uow_factory=task_control_uows.execution,
+            lease_token_factory=weaponry_lease_token_factory,
+            heartbeat_supervisor_factory=lambda: ThreadedLeaseHeartbeatSupervisor(
+                clock=weaponry_clock,
+                execution_uow_factory=task_control_uows.execution,
+                lease_settings=task_runtime_config.lease,
+                thread_name=f"weaponry-lease-{worker_slot}",
+            ),
+            workflow_runner=workflow,
+            snapshot_loader=weaponry_snapshot_loader,
+            lease_settings=task_runtime_config.lease,
+        )
+
+    weaponry_executor = LocalTaskExecutor(
+        task_type="weaponry",
+        worker_count=task_runtime_config.weaponry_worker_count,
+        scan_interval_seconds=task_runtime_config.executor_scan_interval_seconds,
+        stop_grace_seconds=task_runtime_config.lease.stop_grace_seconds,
+        clock=weaponry_clock,
+        query_uow_factory=task_control_uows.queries,
+        execution_uow_factory=task_control_uows.execution,
+        permit=weaponry_execution_permit,
+        runtime_factory=build_weaponry_execution_runtime,
+        thread_name_prefix="weaponry-v2",
+        dispatch_failure_cooldown_seconds=(
+            weaponry_runtime_config.dispatch_failure_retry_seconds
         ),
-        resources=weaponry_resources,
-        resource_cleaner=AnythingLLMWeaponryResourceCleanupAdapter(
-            weaponry_cleanup_client_factory
-        ),
-        document_scope=DatabaseServiceWeaponryDocumentScopeAdapter(kb_service),
-        execution_limiter=upload_task_limiter,
-        process_guard=GenericFileProcessSingletonGuard(
-            RUNTIME_DIR / "locks" / "weaponry-dispatcher.lock",
-            component_name="武器谱本地 Dispatcher",
-        ),
-        config=weaponry_infrastructure_config,
-        capabilities=WeaponryRuntimeCapabilities(
-            provider_fingerprint=(
-                weaponry_infrastructure_config.provider_fingerprint
-            ),
-            embedding_fingerprint=(
-                weaponry_infrastructure_config.embedding_fingerprint
-            ),
-            document_processing_fingerprint=(
-                weaponry_infrastructure_config.document_processing_fingerprint
-            ),
-            extraction_model_fingerprint=(
-                weaponry_infrastructure_config.extraction_model_fingerprint
-            ),
-            query_version=weaponry_infrastructure_config.query_version,
-            score_semantics=weaponry_infrastructure_config.score_semantics,
-            score_protocol=weaponry_infrastructure_config.score_protocol,
-            ranking_strategy=weaponry_infrastructure_config.ranking_strategy,
-            reference_filter_strategy=(
-                weaponry_infrastructure_config.reference_filter_strategy
-            ),
-            extraction_context_strategy=(
-                weaponry_infrastructure_config.extraction_context_strategy
-            ),
-        ),
-        creation_intent_recovery=(
-            AnythingLLMWeaponryCreationIntentRecoveryAdapter(
-                weaponry_cleanup_client_factory,
-                weaponry_creation_intents,
-                weaponry_resources,
-                instance_id=weaponry_instance_id,
-                lease_seconds=(
-                    weaponry_infrastructure_config.cleanup_lease_seconds
-                ),
-            )
-        ),
+    )
+    weaponry_dispatcher = WeaponryV2TaskDispatcher(
+        executor=weaponry_executor,
+        maintenance=weaponry_maintenance,
+        metrics=weaponry_metrics,
+        worker_count=task_runtime_config.weaponry_worker_count,
         startup_gate=weaponry_terms_startup_gate,
+    )
+    weaponry_callback_recovery = RecoverWeaponryCallbackSynchronously(
+        source=SQLiteWeaponryV2CallbackRecoverySource(
+            task_reader=task_control_task_reader,
+            results=weaponry_results,
+        ),
+        callbacks=weaponry_callbacks,
+    )
+    weaponry_submit = SubmitWeaponryV2Task(
+        admission_uow_factory=weaponry_admission_uows,
+        codec=weaponry_task_codec,
+        clock=weaponry_clock,
+        progress_publisher=weaponry_progress_publisher,
+        dispatcher=weaponry_dispatcher,
+    )
+    weaponry_services = WeaponryV2ApplicationServices(
+        submit=weaponry_submit,
+        dispatcher=weaponry_dispatcher,
+        callbacks=weaponry_callbacks,
+        callback_recovery=weaponry_callback_recovery,
+        resource_recovery=weaponry_resource_recovery,
+        document_scope=DatabaseServiceWeaponryDocumentScopeAdapter(kb_service),
+        progress_publisher=weaponry_progress_publisher,
+        execution_limiter=weaponry_execution_permit,
+        policies=weaponry_policies,
+        config=weaponry_runtime_config,
     )
     services = ApplicationServices(
         document_rag_factory=document_rag_factory,
@@ -1729,6 +2013,8 @@ def create_application_services() -> ApplicationServices:
         weaponry_services=weaponry_services,
         reassign_services=reassign_services,
         task_reader=routed_task_reader,
+        task_control_maintenance=task_control_maintenance,
+        heavy_capacity_pool=heavy_capacity_pool,
     )
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "

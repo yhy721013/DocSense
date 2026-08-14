@@ -55,6 +55,14 @@ extraction workspace/thread 的任务每个固定周期只清理一项。批次�
 未知和检查点不可靠的资源仍只隔离，禁止按名称前缀或记录年龄盲删。公开接口与数据库 Schema
 均未改变。
 
+2026-08-14 完成阶段 2-5 源码迁移：Weaponry 受理、执行、Progress、终态与 Callback Control 已
+作为一个业务波次切到 Task Control v2；Input 继续使用冻结 Schema v2。生产 Worker 通过统一
+Execution Runtime 携带完整 Attempt lease/fencing Authority，所有业务 Step 均来自冻结 Registry；
+完整 Callback 结果按 TaskId 保存，并与终态及 Callback eligibility 同事务提交。旧
+`LLMTaskService` 的 Weaponry 文档快照 SQL 已删除，旧 Runner/Dispatcher 仅保留为历史离线回归
+夹具，不再由生产组合根构造。该结论是源码接线与临时 SQLite/Fake 证据，不表示已经完成真实
+Provider、Callback 接收端、多实例、可靠队列或生产容量验收。
+
 1D-3B 的“生产 Adapter”表示可以在组合根注入的真实基础设施实现；1D-6 已完成源码装配，但不
 表示已经部署或完成真实模型/回调端联调。当前 1D-6 自动测试仍使用受控 Fake Transport、Mock HTTP
 和临时 SQLite，不修改现有 AnythingLLM workspace/文档。1D-5 的 50 个 SQLite accepted 任务只形成持久行、一条

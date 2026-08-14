@@ -92,6 +92,7 @@ class RunWeaponryOutcome(str, Enum):
     STALE = "stale"
     MISSING = "missing"
     NOT_CLAIMED = "not_claimed"
+    RECOVERY_REQUIRED = "recovery_required"
 
 
 @dataclass(frozen=True)
