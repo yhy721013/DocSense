@@ -49,6 +49,7 @@ from .rag import (
     ReportRagRequest,
     ReportRagResponse,
     ReportRagSource,
+    ReportRagStepObserverPort,
     ReportRagTrace,
 )
 from .resources import (
@@ -100,6 +101,7 @@ __all__ = [
     "ReportRagRequest",
     "ReportRagResponse",
     "ReportRagSource",
+    "ReportRagStepObserverPort",
     "ReportRagTrace",
     "ReportResourceCleanupOutcome",
     "ReportResourceCleanupResult",

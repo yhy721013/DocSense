@@ -1,0 +1,81 @@
+{
+  "assetVersion": 1,
+  "stage": "2-4-step-1",
+  "frozenAt": "2026-08-13",
+  "publicContractChanged": false,
+  "authority": {
+    "guardKey": ["business_type", "business_key"],
+    "leaseFields": [
+      "task_id",
+      "business_ref",
+      "lease_token",
+      "fencing_token",
+      "lease_expires_at"
+    ],
+    "leaseTokenSecret": true,
+    "fencingMonotonicPerBusinessKey": true,
+    "taskIdAloneCanSend": false,
+    "httpInsideTransactionForbidden": true
+  },
+  "states": {
+    "guard": ["idle", "sending", "outcome_unknown"],
+    "deliveryOutcomes": [
+      "success",
+      "rejected",
+      "definitely_not_sent",
+      "delivery_outcome_unknown",
+      "skipped",
+      "stale"
+    ],
+    "expiredSendingTransition": "outcome_unknown",
+    "expiredSendingMayAutoReacquire": false
+  },
+  "atomicGroups": {
+    "businessTerminal": [
+      "task_terminal",
+      "attempt_terminal",
+      "latest_projection",
+      "result_reference",
+      "task_event",
+      "callback_eligibility_guard"
+    ],
+    "acquire": [
+      "latest_owner_validation",
+      "guard_lease",
+      "execution_callback_sending",
+      "latest_callback_sending",
+      "callback_attempt_increment",
+      "authorized_event"
+    ],
+    "complete": [
+      "guard_outcome",
+      "execution_callback_outcome",
+      "latest_callback_outcome",
+      "completed_event"
+    ],
+    "manualRelease": [
+      "append_release_audit",
+      "guard_idle"
+    ]
+  },
+  "admission": {
+    "conflictAuthority": "callback_delivery_guards",
+    "sendingBlocks": true,
+    "outcomeUnknownBlocks": true,
+    "historicalProjectionIsNotConflictAuthority": true,
+    "manualReleasePreservesOldUnknownProjection": true,
+    "manualReleaseAllowsNewAdmission": true
+  },
+  "recovery": {
+    "explicitCheckTaskTrigger": "explicit_check_task_recovery",
+    "expectedCallbackAttemptsRequired": true,
+    "sharesSameGuardWithInitialDelivery": true,
+    "unknownRedeliveryIsAtLeastOnce": true,
+    "backgroundUnknownRetryForbidden": true
+  },
+  "history": {
+    "databaseEventsAuthoritative": true,
+    "localJsonAuthoritative": false,
+    "localJsonCanAffectRetry": false
+  }
+}

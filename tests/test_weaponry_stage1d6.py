@@ -21,6 +21,10 @@ from app.adapters.web.flask.weaponry_requests import parse_weaponry_request
 from app.integrations.anythingllm import AnythingLLMHTTPError, AnythingLLMTimeoutError
 from app.integrations.anythingllm.models import AnythingLLMWorkspace
 from app.modules.tasks.adapters import LegacyTaskCommandAdapter
+from app.modules.report.adapters import (
+    ReportExecutionCapabilityConfig,
+    ReportRuntimeConfig,
+)
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.modules.tasks.ports import (
     ExpectedTaskCompletion,
@@ -92,7 +96,6 @@ from app.services.core.config import (
     AnythingLLMConfig,
     ChatInfrastructureConfig,
     LLMIntegrationConfig,
-    ReportInfrastructureConfig,
 )
 from tests import workspace_tempdir
 from tests.fakes import (
@@ -1394,8 +1397,14 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                 "app.container.load_chat_infrastructure_config",
                 return_value=ChatInfrastructureConfig.single_instance(),
             ), patch(
-                "app.container.load_report_infrastructure_config",
-                return_value=ReportInfrastructureConfig.single_instance(),
+                "app.container.load_report_runtime_config",
+                return_value=ReportRuntimeConfig.single_instance(),
+            ), patch(
+                "app.container.load_report_execution_capability_config",
+                return_value=ReportExecutionCapabilityConfig(
+                    rag_provider_fingerprint="1" * 64,
+                    rag_model_fingerprint="2" * 64,
+                ),
             ), patch(
                 "app.container.load_weaponry_infrastructure_config",
                 return_value=weaponry_config,

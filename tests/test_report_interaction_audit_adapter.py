@@ -19,7 +19,9 @@ from app.modules.report.ports import (
 )
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.services.llm_service.task_service import LLMTaskService
+from app.infrastructure.observability import LLMInteractionStore
 from tests import workspace_tempdir
+from tests.task_service_fixtures import seed_legacy_report_task
 
 
 PROMPT = "根据全部文件生成报告"
@@ -73,10 +75,52 @@ def _trace(*, trace_id: str = "trace-report-audit") -> ReportRagTrace:
 
 
 class ReportInteractionAuditAdapterTests(unittest.TestCase):
+    def test_v2_task_identity_uses_injected_validator_without_old_task_dual_write(self) -> None:
+        """Report 切换后审计库不需要伪造旧 llm_tasks 投影。"""
+
+        with workspace_tempdir() as tmp:
+            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
+            task_id = TaskId("v2-report-execution-001")
+            observed: list[tuple[str, str, str]] = []
+
+            def validate_identity(
+                business_type: str,
+                business_key: str,
+                execution_id: str,
+            ) -> bool:
+                observed.append((business_type, business_key, execution_id))
+                return (
+                    business_type,
+                    business_key,
+                    execution_id,
+                ) == ("report", "132", task_id.value)
+
+            store = LLMInteractionStore(
+                lambda timeout: service._connect(timeout_seconds=timeout),
+                task_identity_validator=validate_identity,
+            )
+            adapter = SQLiteReportInteractionAuditAdapter(store)
+            command = PersistReportRagTrace(
+                task_id=task_id,
+                business_ref=TaskBusinessRef("report", "132"),
+                idempotency_key=f"report-rag:{task_id.value}",
+                prompt=PROMPT,
+                trace=_trace(trace_id="trace-v2-report"),
+                outcome=ReportRagAuditOutcome.SUCCEEDED,
+            )
+
+            first = adapter.persist_trace(command)
+            second = adapter.persist_trace(command)
+
+            self.assertEqual(first, second)
+            self.assertEqual(2, len(observed))
+            self.assertIsNone(service.get_task("report", "132"))
+            self.assertEqual(1, len(service.get_llm_interactions("report", "132")))
+
     def test_unknown_create_outcome_is_never_misreported_as_deleted(self) -> None:
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_report_task(132, {"params": []})
+            task = seed_legacy_report_task(service, 132, {"params": []})
             task_id = TaskId(task["execution_id"])
             adapter = SQLiteReportInteractionAuditAdapter(service)
             trace = ReportRagTrace(
@@ -122,7 +166,7 @@ class ReportInteractionAuditAdapterTests(unittest.TestCase):
     def test_persist_trace_saves_trace_and_call_identity_without_loss(self) -> None:
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_report_task(132, {"params": []})
+            task = seed_legacy_report_task(service, 132, {"params": []})
             task_id = TaskId(task["execution_id"])
             adapter = SQLiteReportInteractionAuditAdapter(service)
             command = PersistReportRagTrace(
@@ -149,7 +193,7 @@ class ReportInteractionAuditAdapterTests(unittest.TestCase):
     def test_cleanup_events_append_contiguously_and_update_cleanup_state(self) -> None:
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_report_task(132, {"params": []})
+            task = seed_legacy_report_task(service, 132, {"params": []})
             task_id = TaskId(task["execution_id"])
             adapter = SQLiteReportInteractionAuditAdapter(service)
             receipt = adapter.persist_trace(
@@ -195,7 +239,7 @@ class ReportInteractionAuditAdapterTests(unittest.TestCase):
 
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_report_task(132, {"params": []})
+            task = seed_legacy_report_task(service, 132, {"params": []})
             task_id = TaskId(task["execution_id"])
             adapter = SQLiteReportInteractionAuditAdapter(service)
             receipt = adapter.persist_trace(
@@ -243,9 +287,9 @@ class ReportInteractionAuditAdapterTests(unittest.TestCase):
     def test_old_execution_cannot_audit_after_business_key_has_new_owner(self) -> None:
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            old_task = service.create_report_task(132, {"params": ["old"]})
+            old_task = seed_legacy_report_task(service, 132, {"params": ["old"]})
             old_task_id = TaskId(old_task["execution_id"])
-            service.create_report_task(132, {"params": ["new"]})
+            seed_legacy_report_task(service, 132, {"params": ["new"]})
             adapter = SQLiteReportInteractionAuditAdapter(service)
 
             with self.assertRaises(ReportAuditError):
@@ -267,7 +311,7 @@ class ReportInteractionAuditAdapterTests(unittest.TestCase):
 
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_report_task(132, {"params": []})
+            task = seed_legacy_report_task(service, 132, {"params": []})
             task_id = TaskId(task["execution_id"])
             adapter = SQLiteReportInteractionAuditAdapter(service)
             receipt = adapter.persist_trace(
@@ -324,7 +368,7 @@ class ReportInteractionAuditAdapterTests(unittest.TestCase):
 
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_report_task(132, {"params": []})
+            task = seed_legacy_report_task(service, 132, {"params": []})
             task_id = TaskId(task["execution_id"])
             adapter = SQLiteReportInteractionAuditAdapter(service)
             receipt = adapter.persist_trace(

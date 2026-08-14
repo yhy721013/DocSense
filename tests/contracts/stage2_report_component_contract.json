@@ -1,0 +1,43 @@
+{
+  "stage": "2-4-step-3",
+  "publicContractChanged": false,
+  "component": {
+    "name": "report_control",
+    "version": 1,
+    "manifestPath": "app/modules/report/adapters/sqlite/report_control_manifest.json",
+    "manifestProfile": "canonical_json_v1",
+    "rootSchemaGeneration": 2,
+    "canonicalUtf8Bytes": 3346,
+    "fingerprint": "509A3274DFDA23E1C8DFBDC53380064B682E869E28E4D59A1B87D99323AAE8BC",
+    "tables": [
+      "report_resource_records"
+    ],
+    "indexes": [
+      "idx_report_resource_records_recovery",
+      "idx_report_resource_records_ready_recovery"
+    ]
+  },
+  "bootstrap": {
+    "freshDatabasePublishesRootAndRequiredComponentsTogether": true,
+    "existingRootInstallsRequiredComponentsBeforeRuntimeStart": true,
+    "partialUnregisteredObjectsFailClosed": true,
+    "componentRegistrationOccursAfterObjectVerification": true
+  },
+  "resourceOwnership": {
+    "onlySqlWriter": "app/modules/report/adapters/sqlite/resource_store.py::SQLiteReportResourceStore",
+    "rootTerminalPayload": "result_ref_only",
+    "fullArtifactMetadata": "report_resource_records.record_payload",
+    "oldTaskProjectionRequiredForV2Report": false
+  },
+  "interactionAuditOwnership": {
+    "database": "existing_legacy_audit_database",
+    "onlySqlWriter": "app/infrastructure/observability/llm_interaction_store.py::LLMInteractionStore",
+    "oldTaskProjectionRequiredForV2Report": false,
+    "crossDatabaseAtomicityClaimed": false,
+    "v2AuthorityGuard": "task-step-intent_then_audit_then_authority-conditioned-checkpoint"
+  },
+  "executionCapabilities": {
+    "DOCSENSE_REPORT_RAG_PROVIDER_FINGERPRINT": "required_internal_sha256",
+    "DOCSENSE_REPORT_RAG_MODEL_FINGERPRINT": "required_internal_sha256"
+  }
+}

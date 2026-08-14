@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
-from threading import Event, Lock
+from threading import Event, Lock, Thread
 import unittest
 
 from app.modules.tasks.adapters import ThreadedLeaseHeartbeatSupervisor
@@ -24,6 +24,7 @@ from app.modules.tasks.application import (
 from app.modules.tasks.domain import (
     TaskBusinessRef,
     TaskExecutionAuthority,
+    TaskExecutionSnapshot,
     TaskId,
     TaskLeaseRuntimeSettings,
     TaskOwnerIdentity,
@@ -39,6 +40,7 @@ from app.modules.tasks.ports import (
     TaskExecutionStopRequested,
     TaskHeartbeatResult,
     TaskProgressCommand,
+    LoadedTaskExecutionInput,
 )
 from tests.fakes import (
     FakeClock,
@@ -98,6 +100,28 @@ def _authority() -> TaskExecutionAuthority:
 
 def _lease_settings() -> TaskLeaseRuntimeSettings:
     return TaskLeaseRuntimeSettings()
+
+
+class _AnyReportSnapshotLoader:
+    """Runtime 编排测试只关心加载时点；业务 Codec 由独立 Adapter 用例覆盖。"""
+
+    def load(self, task_id: TaskId) -> LoadedTaskExecutionInput:
+        return LoadedTaskExecutionInput(
+            snapshot=TaskExecutionSnapshot(
+                task_id=task_id,
+                task_type="report",
+                business_ref=TaskBusinessRef("report", f"business-{task_id.value}"),
+                execution_state="accepted",
+                public_status="waiting",
+                progress=0,
+                message="",
+                input_snapshot=(task_id.value,),
+                accepted_at=_T0,
+                trace_id=f"trace-{task_id.value}",
+            ),
+            input_schema_version=1,
+            input_payload_fingerprint="a" * 64,
+        )
 
 
 class _FakeExecutionUnitOfWork:
@@ -253,6 +277,30 @@ class TaskExecutionAuthoritySessionTests(unittest.TestCase):
         with self.assertRaises(TaskExecutionStopRequested):
             session.run_authorized(lambda actual: actual)
 
+    def test_non_applied_task_mutation_cannot_be_ignored_by_workflow(self) -> None:
+        session = TaskExecutionAuthoritySession(_authority())
+
+        with self.assertRaises(TaskExecutionStopRequested) as captured:
+            session.run_mutation(
+                lambda _authority: TaskExecutionMutationOutcome.LEASE_EXPIRED
+            )
+
+        self.assertTrue(session.stop_requested())
+        self.assertIs(
+            TaskExecutionMutationOutcome.LEASE_EXPIRED,
+            captured.exception.result.last_mutation_outcome,
+        )
+
+    def test_duplicate_mutation_outcomes_remain_explicit_idempotency_facts(self) -> None:
+        session = TaskExecutionAuthoritySession(_authority())
+        self.assertIs(
+            TaskExecutionMutationOutcome.DUPLICATE_STEP_INTENT,
+            session.run_mutation(
+                lambda _authority: TaskExecutionMutationOutcome.DUPLICATE_STEP_INTENT
+            ),
+        )
+        self.assertFalse(session.stop_requested())
+
     def test_clock_and_contract_errors_fail_closed_inside_renewal_gate(self) -> None:
         clock_session = TaskExecutionAuthoritySession(_authority())
 
@@ -285,6 +333,93 @@ class TaskExecutionAuthoritySessionTests(unittest.TestCase):
         )
 
 
+class ThreadedLeaseHeartbeatSupervisorFailureTests(unittest.TestCase):
+    class _ExplodingPulse:
+        def wait_next(self, _interval_seconds: float) -> bool:
+            raise RuntimeError("pulse broken")
+
+        def stop(self) -> None:
+            pass
+
+    class _UnusedUowFactory:
+        def __call__(self):
+            raise AssertionError("时钟不安全时不应打开 UoW")
+
+    class _FakeAliveThread:
+        def __init__(self) -> None:
+            self.join_timeout = None
+
+        def join(self, timeout=None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return True
+
+    def test_pulse_exception_produces_result_and_requests_stop(self) -> None:
+        session = TaskExecutionAuthoritySession(_authority())
+        supervisor = ThreadedLeaseHeartbeatSupervisor(
+            clock=FakeClock(_T0),
+            execution_uow_factory=self._UnusedUowFactory(),
+            lease_settings=_lease_settings(),
+            pulse=self._ExplodingPulse(),
+            thread_name="test-exploding-pulse",
+        )
+        supervisor.start(session)
+
+        result = supervisor.stop()
+
+        self.assertIs(LeaseSupervisorOutcome.INFRASTRUCTURE_ERROR, result.outcome)
+        self.assertTrue(session.stop_requested())
+
+    def test_stop_uses_bounded_grace_and_fails_closed_on_timeout(self) -> None:
+        session = TaskExecutionAuthoritySession(_authority())
+        supervisor = ThreadedLeaseHeartbeatSupervisor(
+            clock=FakeClock(_T0),
+            execution_uow_factory=self._UnusedUowFactory(),
+            lease_settings=_lease_settings(),
+        )
+        fake_thread = self._FakeAliveThread()
+        # 用确定性线程替身验证 join 上限，避免测试真的等待 stop grace。
+        supervisor._started = True
+        supervisor._thread = fake_thread
+        supervisor._session = session
+
+        with self.assertRaisesRegex(RuntimeError, "停止超时"):
+            supervisor.stop()
+
+        self.assertEqual(_lease_settings().stop_grace_seconds, fake_thread.join_timeout)
+        self.assertTrue(session.stop_requested())
+
+    def test_non_increasing_heartbeat_is_classified_as_clock_unsafe(self) -> None:
+        class OneShotPulse:
+            def __init__(self) -> None:
+                self.used = False
+
+            def wait_next(self, _interval_seconds: float) -> bool:
+                if self.used:
+                    return False
+                self.used = True
+                return True
+
+            def stop(self) -> None:
+                pass
+
+        session = TaskExecutionAuthoritySession(_authority())
+        supervisor = ThreadedLeaseHeartbeatSupervisor(
+            clock=FakeClock(_T0),
+            execution_uow_factory=self._UnusedUowFactory(),
+            lease_settings=_lease_settings(),
+            pulse=OneShotPulse(),
+            thread_name="test-non-increasing-heartbeat",
+        )
+        supervisor.start(session)
+
+        result = supervisor.stop()
+
+        self.assertIs(LeaseSupervisorOutcome.CLOCK_UNSAFE, result.outcome)
+        self.assertTrue(session.stop_requested())
+
+
 class TaskExecutionRuntimeFakeTests(unittest.TestCase):
     def _runtime(
         self,
@@ -302,6 +437,7 @@ class TaskExecutionRuntimeFakeTests(unittest.TestCase):
             lease_token_factory=FixedTaskLeaseTokenFactory(("fake-secret-token",)),
             heartbeat_supervisor_factory=lambda: supervisor,
             workflow_runner=runner,
+            snapshot_loader=_AnyReportSnapshotLoader(),
             lease_settings=_lease_settings(),
         )
 
@@ -315,8 +451,8 @@ class TaskExecutionRuntimeFakeTests(unittest.TestCase):
         )
         observed: list[TaskExecutionAuthority] = []
         runner = StrictTaskWorkflowRunnerFake(
-            lambda session: observed.append(
-                session.run_authorized(lambda authority: authority)
+            lambda context: observed.append(
+                context.session.run_authorized(lambda authority: authority)
             )
         )
         supervisor = FakeLeaseHeartbeatSupervisor()
@@ -336,6 +472,42 @@ class TaskExecutionRuntimeFakeTests(unittest.TestCase):
         self.assertEqual(1, observed[0].attempt_no)
         self.assertEqual(1, observed[0].fencing_token)
         self.assertEqual(_T30, observed[0].lease_expires_at)
+        self.assertEqual(
+            (request.task_id.value,),
+            runner.contexts[0].loaded_input.snapshot.input_snapshot,
+        )
+        self.assertFalse(runner.contexts[0].cancellation_requested())
+
+    def test_runtime_normal_cancellation_is_independent_from_authority_loss(self) -> None:
+        clock = FakeClock(_T0)
+        control = StrictTaskControlFake(clock)
+        request = _admission("task-runtime-cancel")
+        control.admit_one(request)
+        entered = Event()
+        exited = Event()
+
+        def run_workflow(context) -> None:
+            entered.set()
+            while not context.stop_requested():
+                exited.wait(0.01)
+            exited.set()
+
+        runtime = self._runtime(
+            clock=clock,
+            control=control,
+            runner=StrictTaskWorkflowRunnerFake(run_workflow),
+            supervisor=FakeLeaseHeartbeatSupervisor(),
+        )
+        results = []
+        thread = Thread(target=lambda: results.append(runtime.run(request.task_id)))
+        thread.start()
+        self.assertTrue(entered.wait(timeout=2))
+        self.assertTrue(runtime.request_cancellation())
+        self.assertTrue(exited.wait(timeout=2))
+        thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertIs(TaskExecutionRuntimeOutcome.WORKFLOW_RETURNED, results[0].outcome)
 
     def test_runtime_maps_supervisor_loss_and_runner_cannot_write(self) -> None:
         clock = FakeClock(_T0)
@@ -347,7 +519,7 @@ class TaskExecutionRuntimeFakeTests(unittest.TestCase):
             TaskExecutionMutationOutcome.AUTHORITY_LOST,
         )
         runner = StrictTaskWorkflowRunnerFake(
-            lambda session: session.run_authorized(lambda _authority: None)
+            lambda context: context.session.run_authorized(lambda _authority: None)
         )
         supervisor = FakeLeaseHeartbeatSupervisor(start_result=loss)
 
@@ -397,6 +569,7 @@ class TaskExecutionRuntimeFakeTests(unittest.TestCase):
             lease_token_factory=FixedTaskLeaseTokenFactory(("fake-secret-token",)),
             heartbeat_supervisor_factory=lambda: supervisor,
             workflow_runner=runner,
+            snapshot_loader=_AnyReportSnapshotLoader(),
             lease_settings=_lease_settings(),
         )
         result = runtime.run(request.task_id)
@@ -450,6 +623,7 @@ class TaskExecutionRuntimeSQLiteTests(unittest.TestCase):
                 thread_name="test-task-lease-heartbeat",
             ),
             workflow_runner=runner,
+            snapshot_loader=_AnyReportSnapshotLoader(),
             lease_settings=_lease_settings(),
         )
 
@@ -461,7 +635,8 @@ class TaskExecutionRuntimeSQLiteTests(unittest.TestCase):
         notifying = _NotifyingExecutionUnitOfWorkFactory(self.factories.execution)
         observed: list[TaskExecutionAuthority] = []
 
-        def run_workflow(session) -> None:
+        def run_workflow(context) -> None:
+            session = context.session
             observed.append(session.current_authority())
             self.assertTrue(pulse.waiting.wait(timeout=2))
             clock.advance(seconds=5)
@@ -527,7 +702,8 @@ class TaskExecutionRuntimeSQLiteTests(unittest.TestCase):
         pulse = ManualLeaseHeartbeatPulse()
         notifying = _NotifyingExecutionUnitOfWorkFactory(self.factories.execution)
 
-        def run_workflow(session) -> None:
+        def run_workflow(context) -> None:
+            session = context.session
             self.assertTrue(pulse.waiting.wait(timeout=2))
             clock.advance(seconds=31)
             pulse.pulse()

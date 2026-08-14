@@ -32,7 +32,7 @@ from app.modules.report.ports import (
     ReportRagExecutionError,
     ReportRagRequest,
 )
-from app.modules.tasks.domain import TaskId
+from app.modules.tasks.domain import TaskId, TaskStepCheckpoint
 from app.services.core.config import AnythingLLMConfig
 from tests import workspace_tempdir
 
@@ -192,6 +192,30 @@ class _Factory:
             raise
 
 
+class _StepObserver:
+    """记录 Adapter Hook 次序并严格检查 begin/succeed 成对。"""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.active = ""
+
+    def begin(self, step_key: str, idempotency_key: str) -> None:
+        if self.active:
+            raise AssertionError("前一 RAG Step 尚未完成")
+        if not idempotency_key:
+            raise AssertionError("RAG Step 幂等键不能为空")
+        self.active = step_key
+        self.events.append(f"begin:{step_key}")
+
+    def succeed(self, step_key: str, checkpoint: TaskStepCheckpoint) -> None:
+        if self.active != step_key:
+            raise AssertionError("RAG Step 完成身份不一致")
+        if not isinstance(checkpoint, TaskStepCheckpoint):
+            raise AssertionError("RAG Step 必须返回 checkpoint")
+        self.events.append(f"succeed:{step_key}")
+        self.active = ""
+
+
 def _request(artifacts: LocalReportArtifactAdapter, root: Path) -> ReportRagRequest:
     task_id = TaskId("report-execution-001")
     scope = artifacts.begin(task_id)
@@ -324,6 +348,47 @@ class ReportRagAdapterTests(unittest.TestCase):
                 cleanup_events[0].sequence_no,
             )
             self.assertTrue(all(event.success for event in cleanup_events))
+
+    def test_step_observer_wraps_every_external_write_in_frozen_order(self) -> None:
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            artifacts = LocalReportArtifactAdapter(root / "artifacts")
+            base_request = _request(artifacts, root)
+            observer = _StepObserver()
+            request = ReportRagRequest(
+                task_id=base_request.task_id,
+                trace_id=base_request.trace_id,
+                ordered_source_files=base_request.ordered_source_files,
+                prompt=base_request.prompt,
+                context_name=base_request.context_name,
+                conversation_name=base_request.conversation_name,
+                step_observer=observer,
+            )
+            adapter = AnythingLLMReportRagAdapter(
+                _Factory(_Backend()),
+                artifact_path_resolver=artifacts.resolve_path,
+            )
+
+            adapter.generate(request)
+
+            self.assertEqual(
+                [
+                    "begin:rag.session.open",
+                    "succeed:rag.session.open",
+                    "begin:rag.document.upload:1",
+                    "succeed:rag.document.upload:1",
+                    "begin:rag.document.bind:1",
+                    "succeed:rag.document.bind:1",
+                    "begin:rag.document.upload:2",
+                    "succeed:rag.document.upload:2",
+                    "begin:rag.document.bind:2",
+                    "succeed:rag.document.bind:2",
+                    "begin:rag.generate",
+                    "succeed:rag.generate",
+                ],
+                observer.events,
+            )
+            self.assertEqual("", observer.active)
 
     def test_partial_upload_failure_carries_trace_and_only_created_resources(self) -> None:
         with workspace_tempdir() as tmp:

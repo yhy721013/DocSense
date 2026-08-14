@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from .execution import (
@@ -113,7 +113,7 @@ class RecoveryAuthority:
     case_id: str
     generation: int
     owner_id: str
-    lease_token: str
+    lease_token: str = field(repr=False)
     fencing_token: int
     lease_expires_at: str
 

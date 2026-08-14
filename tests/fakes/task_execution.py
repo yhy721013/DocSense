@@ -51,6 +51,7 @@ from app.modules.tasks.ports import (
     TaskClaimRequest,
     TaskExecutionClaimResult,
     TaskExecutionMutationOutcome,
+    TaskDispatchDeferralCommand,
     TaskHeartbeatCommand,
     TaskHeartbeatResult,
     TaskProgressCommand,
@@ -376,6 +377,8 @@ class StrictTaskControlFake:
         return TaskExecutionMutationOutcome.APPLIED
 
     def heartbeat(self, command: TaskHeartbeatCommand) -> TaskHeartbeatResult:
+        if command.lease_expires_at <= command.authority.lease_expires_at:
+            return TaskHeartbeatResult(TaskExecutionMutationOutcome.INVALID_STATE)
         outcome, _task, attempt = self._authority_outcome(command.authority)
         if outcome is not TaskExecutionMutationOutcome.APPLIED:
             return TaskHeartbeatResult(outcome)
@@ -387,6 +390,19 @@ class StrictTaskControlFake:
             heartbeat_at=command.heartbeat_at,
         )
         return TaskHeartbeatResult(TaskExecutionMutationOutcome.APPLIED, renewed)
+
+    def defer_dispatch(
+        self,
+        command: TaskDispatchDeferralCommand,
+    ) -> TaskExecutionMutationOutcome:
+        task = self._tasks.get(command.task_id)
+        if task is None:
+            return TaskExecutionMutationOutcome.MISSING
+        if task.task_type != command.task_type or task.state is not TaskState.ACCEPTED:
+            return TaskExecutionMutationOutcome.NOT_RUNNABLE
+        if self._latest.get(task.business_ref) != task.task_id:
+            return TaskExecutionMutationOutcome.STALE_LATEST
+        return TaskExecutionMutationOutcome.APPLIED
 
     def begin_step(self, command: TaskStepIntentCommand) -> TaskExecutionMutationOutcome:
         outcome, task, attempt = self._authority_outcome(command.authority)
@@ -623,6 +639,8 @@ class StrictTaskControlFake:
         self,
         command: TaskRecoveryHeartbeatCommand,
     ) -> TaskRecoveryHeartbeatResult:
+        if command.lease_expires_at <= command.authority.lease_expires_at:
+            return TaskRecoveryHeartbeatResult(TaskRecoveryMutationOutcome.INVALID_STATE)
         outcome, _case = self._recovery_authority_outcome(command.authority)
         if outcome is not TaskRecoveryMutationOutcome.APPLIED:
             return TaskRecoveryHeartbeatResult(outcome)

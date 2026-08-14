@@ -47,7 +47,10 @@ from app.integrations.anythingllm.policies import (
 from app.integrations.anythingllm.threads import AnythingLLMThreadClient
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
-from app.modules.report.domain.errors import ReportArtifactError
+from app.modules.report.domain.errors import (
+    ReportArtifactError,
+    ReportTaskPersistenceError,
+)
 from app.modules.report.ports import (
     CleanupReportRag,
     ReportArtifactRef,
@@ -60,6 +63,8 @@ from app.modules.report.ports import (
     ReportRagSource,
     ReportRagTrace,
 )
+from app.modules.tasks.domain import TaskStepCheckpoint
+from app.modules.tasks.ports import TaskExecutionStopRequested
 from app.ports.rag import normalize_rag_prompt
 from app.services.core.config import AnythingLLMConfig
 
@@ -202,6 +207,7 @@ class _ExecutionState:
     source_markers: dict[str, str] = field(default_factory=dict)
     operation_attempts: dict[str, int] = field(default_factory=dict)
     transport_opened: bool = False
+    active_step_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -272,15 +278,45 @@ class AnythingLLMReportRagAdapter:
                 leased_clients = clients
                 state.transport_opened = True
                 self._record_lifecycle(state, "transport_open", success=True)
+                self._begin_observed_step(
+                    state,
+                    "rag.session.open",
+                    f"report:{request.task_id.value}:rag-session",
+                )
                 self._create_context(state, clients)
                 self._create_conversation(state, clients)
+                session_digest = self._stable_digest(
+                    (state.context_ref or "", state.conversation_ref or "")
+                )
+                self._succeed_observed_step(
+                    state,
+                    "rag.session.open",
+                    TaskStepCheckpoint(
+                        code="rag_session_opened_v1",
+                        result_ref=f"report-rag-session:v1:{session_digest}",
+                        result_digest=session_digest,
+                        external_ref=(
+                            f"{state.context_ref or ''}:{state.conversation_ref or ''}"
+                        ),
+                    ),
+                )
                 self._upload_and_bind_documents(state, clients)
+                self._begin_observed_step(
+                    state,
+                    "rag.generate",
+                    "report:"
+                    f"{request.task_id.value}:generation:{prompt_digest}:"
+                    f"{self._ordered_document_digest(state)}",
+                )
                 raw_content = self._query(
                     state,
                     clients,
                     prompt=prompt,
                     prompt_digest=prompt_digest,
                 )
+        except (TaskExecutionStopRequested, ReportTaskPersistenceError):
+            # Authority/持久化失败不能被包装成供应商失败，否则旧 Worker 可能继续产生副作用。
+            raise
         except _StageFailure as exc:
             failure = exc
             self._record_deferred_close_failure(state, leased_clients)
@@ -328,7 +364,22 @@ class AnythingLLMReportRagAdapter:
                 trace=trace,
                 cleanup_ref=cleanup_ref,
                 external_outcome_unknown=failure.external_outcome_unknown,
+                active_step_key=state.active_step_key,
             )
+
+        raw_digest = hashlib.sha256((raw_content or "").encode("utf-8")).hexdigest()
+        final_call_id = state.attempts[-1].call_id if state.attempts else ""
+        self._succeed_observed_step(
+            state,
+            "rag.generate",
+            TaskStepCheckpoint(
+                code="rag_generated_v1",
+                result_ref=f"report-rag-response:v1:{raw_digest}",
+                result_digest=raw_digest,
+                external_ref=final_call_id,
+                observation_ref=f"report-rag-trace:{request.trace_id}",
+            ),
+        )
 
         trace = self._trace(state)
         logger.info(
@@ -621,7 +672,10 @@ class AnythingLLMReportRagAdapter:
     ) -> None:
         if not state.context_ref:
             raise _StageFailure("context_identity", "报告 RAG 缺少 Workspace 引用")
-        for artifact in state.request.ordered_source_files:
+        for artifact_sequence, artifact in enumerate(
+            state.request.ordered_source_files,
+            start=1,
+        ):
             try:
                 path = self._resolve_artifact_path(artifact)
                 if not isinstance(path, Path):
@@ -639,6 +693,20 @@ class AnythingLLMReportRagAdapter:
                 )
 
             source_marker = f"docsense_ref:{uuid4().hex}"
+            artifact_digest = artifact.checksum.strip().lower()
+            if len(artifact_digest) != 64:
+                raise _StageFailure(
+                    "artifact_identity",
+                    "报告 RAG 输入 Artifact 缺少 SHA-256 身份",
+                )
+            upload_step_key = f"rag.document.upload:{artifact_sequence}"
+            self._begin_observed_step(
+                state,
+                upload_step_key,
+                "report:"
+                f"{state.request.task_id.value}:rag-upload:{artifact_sequence}:"
+                f"{artifact_digest}",
+            )
             try:
                 document = clients.documents.upload_document(
                     str(path),
@@ -715,7 +783,37 @@ class AnythingLLMReportRagAdapter:
                 success=True,
                 external_ref=location,
             )
+            upload_digest = self._stable_digest((location, document_ref))
+            self._succeed_observed_step(
+                state,
+                upload_step_key,
+                TaskStepCheckpoint(
+                    code="rag_document_uploaded_v1",
+                    result_ref=document_ref,
+                    result_digest=upload_digest,
+                    external_ref=location,
+                ),
+            )
+            bind_step_key = f"rag.document.bind:{artifact_sequence}"
+            self._begin_observed_step(
+                state,
+                bind_step_key,
+                "report:"
+                f"{state.request.task_id.value}:rag-bind:{state.context_ref}:"
+                f"{artifact_sequence}:{location}",
+            )
             self._bind_document(state, clients, location)
+            bind_digest = self._stable_digest((state.context_ref or "", location))
+            self._succeed_observed_step(
+                state,
+                bind_step_key,
+                TaskStepCheckpoint(
+                    code="rag_document_bound_v1",
+                    result_ref=f"report-rag-bind:v1:{bind_digest}",
+                    result_digest=bind_digest,
+                    external_ref=location,
+                ),
+            )
 
     def _bind_document(
         self,
@@ -1253,6 +1351,52 @@ class AnythingLLMReportRagAdapter:
             )
         else:
             record(operation, success=True, external_ref=external_ref)
+
+    @staticmethod
+    def _stable_digest(parts: tuple[str, ...]) -> str:
+        """对不含凭据的稳定引用计算摘要，避免把供应商响应正文放入 Step。"""
+
+        canonical = json.dumps(
+            list(parts),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _ordered_document_digest(cls, state: _ExecutionState) -> str:
+        return cls._stable_digest(
+            tuple(
+                f"{document.id}:{document.location}:{document.document_ref}"
+                for document in state.documents
+            )
+        )
+
+    @staticmethod
+    def _begin_observed_step(
+        state: _ExecutionState,
+        step_key: str,
+        idempotency_key: str,
+    ) -> None:
+        """先写持久 intent，再把当前 Step 标记给失败 Trace。"""
+
+        observer = state.request.step_observer
+        if observer is not None:
+            observer.begin(step_key, idempotency_key)
+        state.active_step_key = step_key
+
+    @staticmethod
+    def _succeed_observed_step(
+        state: _ExecutionState,
+        step_key: str,
+        checkpoint: TaskStepCheckpoint,
+    ) -> None:
+        if state.active_step_key != step_key:
+            raise ReportTaskPersistenceError("报告 RAG Step 完成顺序发生漂移")
+        observer = state.request.step_observer
+        if observer is not None:
+            observer.succeed(step_key, checkpoint)
+        state.active_step_key = ""
 
     @staticmethod
     def _record_lifecycle(

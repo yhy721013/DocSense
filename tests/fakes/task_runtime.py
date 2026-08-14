@@ -6,10 +6,27 @@ from collections.abc import Callable
 from threading import Condition, Event
 
 from app.modules.tasks.ports import (
+    LoadedTaskExecutionInput,
     LeaseSupervisorOutcome,
     LeaseSupervisorResult,
-    TaskExecutionAuthoritySessionPort,
+    TaskWorkflowContextPort,
 )
+from app.modules.tasks.domain import TaskId
+
+
+class FixedTaskExecutionSnapshotLoader:
+    """按 TaskId 返回预制冻结输入；不读取数据库。"""
+
+    def __init__(self, inputs: dict[TaskId, LoadedTaskExecutionInput]) -> None:
+        self._inputs = dict(inputs)
+        self.loaded: list[TaskId] = []
+
+    def load(self, task_id: TaskId) -> LoadedTaskExecutionInput:
+        self.loaded.append(task_id)
+        try:
+            return self._inputs[task_id]
+        except KeyError as exc:
+            raise LookupError("Fake 冻结输入不存在") from exc
 
 
 class FixedTaskLeaseTokenFactory:
@@ -68,15 +85,21 @@ class StrictTaskWorkflowRunnerFake:
 
     def __init__(
         self,
-        action: Callable[[TaskExecutionAuthoritySessionPort], None] | None = None,
+        action: Callable[[TaskWorkflowContextPort], None] | None = None,
     ) -> None:
         self._action = action
-        self.sessions: list[TaskExecutionAuthoritySessionPort] = []
+        self.contexts: list[TaskWorkflowContextPort] = []
 
-    def run(self, session: TaskExecutionAuthoritySessionPort) -> None:
-        self.sessions.append(session)
+    @property
+    def sessions(self):
+        """兼容既有断言的只读视图；新测试应直接检查 contexts。"""
+
+        return [context.session for context in self.contexts]
+
+    def run(self, context: TaskWorkflowContextPort) -> None:
+        self.contexts.append(context)
         if self._action is not None:
-            self._action(session)
+            self._action(context)
 
 
 class FakeLeaseHeartbeatSupervisor:
@@ -89,11 +112,11 @@ class FakeLeaseHeartbeatSupervisor:
     ) -> None:
         self._start_result = start_result
         self._result = LeaseSupervisorResult(LeaseSupervisorOutcome.STOPPED)
-        self.session: TaskExecutionAuthoritySessionPort | None = None
+        self.session = None
         self.started = False
         self.stopped = False
 
-    def start(self, session: TaskExecutionAuthoritySessionPort) -> None:
+    def start(self, session) -> None:
         if self.started:
             raise RuntimeError("Fake supervisor 不可重复启动")
         self.started = True
@@ -111,6 +134,7 @@ class FakeLeaseHeartbeatSupervisor:
 
 __all__ = [
     "FakeLeaseHeartbeatSupervisor",
+    "FixedTaskExecutionSnapshotLoader",
     "FixedTaskLeaseTokenFactory",
     "ManualLeaseHeartbeatPulse",
     "StrictTaskWorkflowRunnerFake",

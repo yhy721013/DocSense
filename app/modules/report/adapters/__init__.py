@@ -10,8 +10,17 @@ from .anythingllm_rag import (
     ReportAnythingLLMClients,
 )
 from .callback_guard import SQLiteReportCallbackAdapter
+from .v2_callback import TaskControlReportCallbackAdapter
+from .v2_callback_recovery import SQLiteReportV2CallbackRecoverySource
+from .v2_dispatcher import ReportV2TaskDispatcher
+from .v2_maintenance import ReportV2Maintenance, ReportV2MaintenanceSnapshot
 from .callback_recovery import SQLiteReportCallbackRecoverySource
-from .interaction_audit import SQLiteReportInteractionAuditAdapter
+from .docx_template import extract_docx_template_text
+from .execution_profile_factory import build_report_execution_profile
+from .interaction_audit import (
+    SQLiteReportInteractionAuditAdapter,
+    build_report_v2_interaction_audit_adapter,
+)
 from .legacy_files import LegacyReportFileAdapter
 from .local_artifacts import LocalReportArtifactAdapter
 from .local_dispatcher import (
@@ -20,6 +29,13 @@ from .local_dispatcher import (
 )
 from .process_guard import FileProcessSingletonGuard
 from .resource_store import SQLiteReportResourceStoreAdapter
+from .runtime_config import (
+    ReportRuntimeConfig,
+    ReportRuntimeConfigurationError,
+    ReportExecutionCapabilityConfig,
+    load_report_execution_capability_config,
+    load_report_runtime_config,
+)
 from .task_codec import ReportTaskCommandCodec
 
 __all__ = [
@@ -31,9 +47,22 @@ __all__ = [
     "LocalReportDispatcherSnapshot",
     "LocalReportTaskDispatcher",
     "ReportAnythingLLMClients",
+    "ReportRuntimeConfig",
+    "ReportRuntimeConfigurationError",
+    "ReportExecutionCapabilityConfig",
     "ReportTaskCommandCodec",
     "SQLiteReportCallbackAdapter",
+    "TaskControlReportCallbackAdapter",
+    "SQLiteReportV2CallbackRecoverySource",
+    "ReportV2TaskDispatcher",
+    "ReportV2Maintenance",
+    "ReportV2MaintenanceSnapshot",
     "SQLiteReportCallbackRecoverySource",
     "SQLiteReportInteractionAuditAdapter",
+    "build_report_v2_interaction_audit_adapter",
     "SQLiteReportResourceStoreAdapter",
+    "extract_docx_template_text",
+    "build_report_execution_profile",
+    "load_report_execution_capability_config",
+    "load_report_runtime_config",
 ]

@@ -35,10 +35,12 @@ from app.modules.tasks.ports import (
     TaskAdmissionRequest,
     TaskClaimRequest,
     TaskExecutionPort,
+    TaskHeartbeatCommand,
     TaskRecoveryPort,
     TaskRecoveryClassificationCommand,
     TaskRecoveryClassificationResult,
     TaskRecoveryMutationOutcome,
+    TaskRecoveryClaimRequest,
     TaskRecoveryOperationIntentCommand,
     TaskRecoveryHeartbeatCommand,
     TaskRecoveryHeartbeatResult,
@@ -117,6 +119,41 @@ class TaskControlPortTests(unittest.TestCase):
                 claimed_at="2026-08-12T12:00:30.000000Z",
                 lease_expires_at="2026-08-12T12:00:30.000000Z",
             )
+
+        with self.assertRaisesRegex(ValueError, "business_ref.business_type"):
+            TaskAdmissionRequest(
+                task_id=task_id,
+                task_type="file",
+                business_ref=business_ref,
+                input_schema_version=1,
+                input_snapshot=object(),
+                input_payload={},
+                public_request_payload={},
+                initial_public_status="waiting",
+                trace_id="trace-101",
+                accepted_at="2026-08-12T12:00:00.000000Z",
+                batch=TaskBatchRef(batch_id="analysis-batch-1", sequence=1),
+            )
+
+    def test_recovery_lease_tokens_are_hidden_from_repr(self) -> None:
+        request = TaskRecoveryClaimRequest(
+            case_id="case-1",
+            generation=1,
+            owner_id="instance/recovery/worker-0",
+            lease_token="recovery-secret-token",
+            claimed_at="2026-08-12T12:00:00.000000Z",
+            lease_expires_at="2026-08-12T12:00:30.000000Z",
+        )
+        authority = RecoveryAuthority(
+            case_id="case-1",
+            generation=1,
+            owner_id="instance/recovery/worker-0",
+            lease_token="recovery-secret-token",
+            fencing_token=1,
+            lease_expires_at="2026-08-12T12:00:30.000000Z",
+        )
+        self.assertNotIn("recovery-secret-token", repr(request))
+        self.assertNotIn("recovery-secret-token", repr(authority))
 
     def test_file_admission_requires_explicit_batch_identity(self) -> None:
         common = {
@@ -234,6 +271,12 @@ class TaskControlPortTests(unittest.TestCase):
             completed_at="2026-08-12T12:00:20.000000Z",
         )
         self.assertEqual(command.transition, TaskTransition.BUSINESS_SUCCEEDED)
+        with self.assertRaisesRegex(ValueError, "严格晚于当前"):
+            TaskHeartbeatCommand(
+                authority=authority,
+                heartbeat_at="2026-08-12T12:00:10.000000Z",
+                lease_expires_at=authority.lease_expires_at,
+            )
         with self.assertRaises(ValueError):
             TaskTerminalCommand(
                 authority=authority,
@@ -330,6 +373,12 @@ class TaskControlPortTests(unittest.TestCase):
             heartbeat_at="2026-08-12T12:00:10.000000Z",
             lease_expires_at="2026-08-12T12:00:40.000000Z",
         )
+        with self.assertRaisesRegex(ValueError, "严格晚于当前"):
+            TaskRecoveryHeartbeatCommand(
+                authority=authority,
+                heartbeat_at="2026-08-12T12:00:10.000000Z",
+                lease_expires_at=authority.lease_expires_at,
+            )
         renewed = RecoveryAuthority(
             case_id=authority.case_id,
             generation=authority.generation,

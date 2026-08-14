@@ -1,7 +1,7 @@
 {
-  "assetVersion": 5,
-  "stage": "2-2-completed-business-wave-cutover-confirmed",
-  "frozenAt": "2026-08-12",
+  "assetVersion": 6,
+  "stage": "2-4-report-cutover-and-legacy-sql-cleanup-completed",
+  "frozenAt": "2026-08-14",
   "publicContractChanged": false,
   "serviceFiles": [
     "app/services/README.md",
@@ -42,7 +42,7 @@
   "currentTableGroups": [
     {
       "tables": ["llm_tasks", "llm_task_executions"],
-      "currentWriter": "legacy production path: app/services/llm_service/task_service.py::LLMTaskService; unconnected v2 path: app/modules/tasks/adapters/sqlite/control_store.py",
+      "currentWriter": "Analysis/Weaponry legacy production path: app/services/llm_service/task_service.py::LLMTaskService; Report v2 production path: app/modules/tasks/adapters/sqlite/control_store.py; no dual write",
       "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
       "exitStage": "2-4_to_2-6_business_wave_then_2-8_cleanup",
       "lifecycle": "persistent"
@@ -56,21 +56,21 @@
     },
     {
       "tables": ["task_attempts", "task_steps", "task_step_attempts", "task_recovery_cases", "task_recovery_operations", "task_recovery_observations", "task_recovery_decisions", "task_events"],
-      "currentWriter": "app/modules/tasks/adapters/sqlite/control_store.py (implemented; production runtime not wired)",
+      "currentWriter": "app/modules/tasks/adapters/sqlite/control_store.py (Report production runtime wired; other business waves not yet cut over)",
       "targetWriter": "app/modules/tasks/adapters/sqlite/control_store.py",
       "exitStage": "retained_stage2",
       "lifecycle": "persistent"
     },
     {
       "tables": ["callback_delivery_guards", "callback_guard_release_audits", "callback_delivery_attempt_events"],
-      "currentWriter": "legacy production path: app/services/llm_service/task_service.py::LLMTaskService; v2 path: root DDL only and Admission conflict reads, no Callback business row writer wired",
+      "currentWriter": "Analysis/Weaponry legacy production path: app/services/llm_service/task_service.py::LLMTaskService; Report v2 production path: app/modules/tasks/adapters/sqlite/callback_control_store.py; no dual write",
       "targetWriter": "app/modules/tasks/adapters/sqlite/callback_control_store.py",
       "exitStage": "2-4_to_2-6_business_wave_then_2-8_cleanup",
       "lifecycle": "persistent"
     },
     {
       "tables": ["report_resource_records"],
-      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "currentWriter": "app/modules/report/adapters/sqlite/resource_store.py::SQLiteReportResourceStore (production wired; LLMTaskService legacy DDL and writer entries removed)",
       "targetWriter": "app/modules/report/adapters/sqlite/resource_store.py",
       "exitStage": "2-4",
       "lifecycle": "persistent"
@@ -98,7 +98,7 @@
     },
     {
       "tables": ["llm_interactions", "llm_interaction_attempts", "llm_interaction_lifecycle_events"],
-      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService_and_SQLiteAuditExecutor",
+      "currentWriter": "app/infrastructure/observability/llm_interaction_store.py::LLMInteractionStore; legacy LLMTaskService delegates to this writer",
       "targetWriter": "app/infrastructure/observability/llm_interaction_store.py",
       "exitStage": "2-4_and_2-6",
       "lifecycle": "persistent"

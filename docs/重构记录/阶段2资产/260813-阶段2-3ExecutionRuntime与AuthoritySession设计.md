@@ -42,6 +42,9 @@ accepted Task
 
 - `run_authorized(operation)`：在一个短临界区内向 operation 传入完整当前 Authority；只允许
   claim 之后的短 UoW 条件写，禁止在其中执行网络、模型、转换、对象删除、阻塞等待或长计算；
+- `run_mutation(operation)`：所有执行期 Task 条件写的强制入口；`APPLIED` 和明确的
+  `DUPLICATE_STEP_INTENT/DUPLICATE_TERMINAL` 返回给 Workflow，其余有限结果必须先设置不可逆 stop，
+  再抛出协作停止异常，禁止调用方因漏判返回值而继续副作用；
 - `renew_authority(operation)`：heartbeat 在同一能力门内使用当前 Authority 执行续租，只有续租
   UoW 已提交且返回 `APPLIED + 新 Authority` 后，才在释放能力门前原子替换当前快照；
 - `current_authority()`：只供诊断和测试观察，不能据此执行写入；
@@ -83,7 +86,8 @@ start 都没有外部 I/O；从 start 提交到 supervisor 启动只允许本地
    请求 Workflow 停止；不把 `DUPLICATE_*` 或其他越界结果伪装为成功；
 6. `ClockAnomalyError` 映射为 `CLOCK_UNSAFE`，其他基础设施异常映射为
    `INFRASTRUCTURE_ERROR`，两者都请求停止且不自动重置 Task；
-7. 正常 `stop()` 只中断等待并回收线程，不修改 Task 状态。
+7. 正常 `stop()` 只中断等待并在 `stop_grace` 内回收线程，不修改 Task 状态；超时不强杀线程，
+   但必须使 Session/Executor 失败关闭并停止新领取；Pulse 等待器自身抛错也必须生成稳定结果。
 
 成功 heartbeat 只允许 DEBUG 采样日志；失权、时钟异常和基础设施异常记录稳定 reason code、
 `task_id/attempt_no/fencing_token`，禁止记录 lease token、业务正文、Callback 正文或未脱敏异常对象。
@@ -95,7 +99,7 @@ Python 线程不能安全强杀。阶段 2-3 冻结的是“协作停止 + 持�
 - supervisor 一旦失权，先原子设置 Session stop，再结束自身循环；
 - v2 Workflow 必须在每个外部 Step intent 之前、外部 I/O 返回之后、Progress/Step/terminal 条件写
   之前检查 Session；长上游调用应把 `stop_requested` 作为取消探针传给支持取消的 Adapter；
-- 所有执行期写入必须通过 `run_authorized`，stop 后不得再取得写能力；
+- 所有执行期 Task 条件写必须通过 `run_mutation`，stop 后不得再取得写能力；
 - 即使某个外部调用暂时不可中断，失权后的旧 Authority 仍会被 SQLite CAS 拒绝，Workflow 不得据此
   重读新 Authority 或继续下一项副作用；
 - Runtime 不在失权时伪造业务失败、发送 Callback、释放 Callback Guard 或把 Task 重置为 accepted。
@@ -103,8 +107,10 @@ Python 线程不能安全强杀。阶段 2-3 冻结的是“协作停止 + 持�
 
 ## 7. v2 Runner 接入契约
 
-新增 `TaskWorkflowRunnerPort.run(session)` 只服务 v2 Runtime。阶段 2-3 使用严格 Fake 证明 Authority
-传递与停止；不适配旧 Runner。阶段 2-4 起，每个业务以单独 Adapter 把冻结输入、Step、Progress、
+新增 `TaskWorkflowRunnerPort.run(context)` 只服务 v2 Runtime。Runtime 在 claim 前通过独立只读 Query
+UoW 和业务 Codec 加载冻结输入，`TaskWorkflowContext` 保存解码输入与可轮换 Authority Session，禁止
+冻结一份会随 heartbeat 过期的 Authority。阶段 2-3 使用严格 Fake 证明 Authority 传递与停止；不适配
+旧 Runner。阶段 2-4 起，每个业务以单独 Adapter 把冻结输入、Step、Progress、
 终态和 Callback Control 一次切换到 v2；如实际适配需要改变旧 Runner 签名、生产启动策略或 Callback
 语义，必须在相应阶段停止并重新确认，禁止在本步预埋双写兼容。
 

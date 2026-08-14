@@ -1,0 +1,61 @@
+"""迁移波次期间按业务类型路由新旧 Task 只读事实。"""
+
+from __future__ import annotations
+
+from app.modules.tasks.domain import TaskBusinessRef, TaskId, TaskSnapshot
+from app.modules.tasks.ports import TaskReadPort
+
+
+class RoutedTaskReadAdapter:
+    """Report 读取 v2；尚未迁移的业务继续读取旧库。
+
+    按 TaskId 无法预先知道业务类型，因此先查 v2，再回退旧库。v2 当前只接纳 Report，
+    不会把 Weaponry/Analysis 的旧执行误路由到新控制面。
+    """
+
+    def __init__(
+        self,
+        *,
+        v2_reader: TaskReadPort,
+        legacy_reader: TaskReadPort,
+        v2_business_types: frozenset[str] = frozenset({"report"}),
+    ) -> None:
+        if not isinstance(v2_reader, TaskReadPort):
+            raise TypeError("v2_reader 必须实现 TaskReadPort")
+        if not isinstance(legacy_reader, TaskReadPort):
+            raise TypeError("legacy_reader 必须实现 TaskReadPort")
+        normalized = frozenset(item.strip() for item in v2_business_types)
+        if not normalized or "" in normalized:
+            raise ValueError("v2_business_types 必须包含非空业务类型")
+        self._v2 = v2_reader
+        self._legacy = legacy_reader
+        self._v2_business_types = normalized
+
+    def get_by_id(self, task_id: TaskId) -> TaskSnapshot | None:
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        snapshot = self._v2.get_by_id(task_id)
+        return snapshot if snapshot is not None else self._legacy.get_by_id(task_id)
+
+    def get_latest(self, business_ref: TaskBusinessRef) -> TaskSnapshot | None:
+        if not isinstance(business_ref, TaskBusinessRef):
+            raise TypeError("business_ref 必须是 TaskBusinessRef")
+        reader = (
+            self._v2
+            if business_ref.business_type in self._v2_business_types
+            else self._legacy
+        )
+        return reader.get_latest(business_ref)
+
+    def get_latest_many(
+        self,
+        business_refs: tuple[TaskBusinessRef, ...],
+    ) -> tuple[TaskSnapshot | None, ...]:
+        refs = tuple(business_refs)
+        if any(not isinstance(item, TaskBusinessRef) for item in refs):
+            raise TypeError("business_refs 只能包含 TaskBusinessRef")
+        # check-task 的单个请求只含一种业务类型；逐项路由仍明确保序，并兼容内部混合调用。
+        return tuple(self.get_latest(item) for item in refs)
+
+
+__all__ = ["RoutedTaskReadAdapter"]

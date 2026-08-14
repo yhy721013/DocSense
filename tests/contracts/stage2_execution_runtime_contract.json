@@ -1,5 +1,5 @@
 {
-  "assetVersion": 1,
+  "assetVersion": 2,
   "frozenAt": "2026-08-13",
   "scope": "stage-2-3-authority-runtime",
   "publicContractChanged": false,
@@ -20,6 +20,7 @@
     "ownerIdIsAuthority": false
   },
   "runtimeSequence": [
+    "load_frozen_input_via_read_only_uow_and_codec",
     "clock_and_lease_token",
     "claim_uow_commit",
     "start_uow_commit",
@@ -30,7 +31,8 @@
   ],
   "leaseSettings": {
     "type": "TaskLeaseRuntimeSettings",
-    "readsEnvironment": false,
+    "valueObjectReadsEnvironment": false,
+    "runtimeConfigAdapter": "app/modules/tasks/adapters/runtime_config.py:TaskRuntimeConfig",
     "validatedBeforeThreadStart": true,
     "taskLeaseInequality": "lease >= 3 * heartbeat + 2 * sqlite_busy + clock_jitter",
     "stopGraceInequality": "stop_grace >= heartbeat + sqlite_busy"
@@ -38,6 +40,8 @@
   "authoritySession": {
     "implementation": "app/modules/tasks/application/authority_session.py:TaskExecutionAuthoritySession",
     "shortConditionalWritesUseRunAuthorized": true,
+    "taskMutationsUseRunMutation": true,
+    "nonAppliedMutationStopsBeforeReturn": true,
     "heartbeatUsesRenewAuthority": true,
     "renewalCommitAndSnapshotSwapSerialized": true,
     "externalIoInsideAuthorityGuardAllowed": false,
@@ -50,6 +54,9 @@
     "implementation": "app/modules/tasks/adapters/lease_heartbeat.py:ThreadedLeaseHeartbeatSupervisor",
     "successfulRenewalReturnsNewAuthority": true,
     "oldExpiryInvalidImmediately": true,
+    "renewalStrictlyIncreasesExpiry": true,
+    "stopJoinBoundedByGrace": true,
+    "pulseExceptionProducesStableResult": true,
     "clockAnomalyOutcome": "clock_unsafe",
     "infrastructureFailureOutcome": "infrastructure_error",
     "nonAppliedMutationOutcome": "authority_lost",
@@ -61,12 +68,21 @@
   },
   "cooperativeStop": {
     "pythonThreadForceKillAllowed": false,
+    "normalCancellationProbeIndependentFromAuthorityLoss": true,
+    "heartbeatContinuesDuringExecutorGrace": true,
     "checkBeforeExternalStepIntent": true,
     "checkAfterExternalIo": true,
     "checkBeforeProgressStepAndTerminalWrite": true,
     "staleAuthorityWriteRejectedByStore": true,
     "runtimeSynthesizesBusinessTerminal": false,
     "runtimeSendsCallback": false
+  },
+  "workflowContext": {
+    "implementation": "app/modules/tasks/application/workflow_context.py:TaskWorkflowContext",
+    "containsFrozenDecodedInput": true,
+    "containsAuthoritySessionNotFrozenAuthority": true,
+    "normalCancellationIndependentFromAuthorityLoss": true,
+    "legacyTaskExecutionContextDeprecated": true
   },
   "forbiddenChanges": [
     "docs/interface-contracts",

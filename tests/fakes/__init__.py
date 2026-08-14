@@ -49,6 +49,7 @@ from .task_execution import FakeClock, StrictTaskControlFake
 from .task_runtime import (
     FakeLeaseHeartbeatSupervisor,
     FixedTaskLeaseTokenFactory,
+    FixedTaskExecutionSnapshotLoader,
     ManualLeaseHeartbeatPulse,
     StrictTaskWorkflowRunnerFake,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "FakeClock",
     "FakeLeaseHeartbeatSupervisor",
     "FixedTaskLeaseTokenFactory",
+    "FixedTaskExecutionSnapshotLoader",
     "FakeAuxiliaryGuidancePort",
     "FakeEvidenceExtractionPort",
     "FakeTargetEvidenceRetrievalPort",

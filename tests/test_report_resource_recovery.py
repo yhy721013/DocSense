@@ -4,24 +4,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from pathlib import Path
-import sqlite3
 import threading
 from types import SimpleNamespace
 import unittest
 
-from app.modules.report.adapters import (
-    LocalReportArtifactAdapter,
-    ReportTaskCommandCodec,
-    SQLiteReportResourceStoreAdapter,
-)
 from app.modules.report.application import ReportResourceRecoveryService
 from app.modules.report.domain import (
-    ReportArtifactError,
-    ReportCleanupError,
-    ReportId,
     ReportResourceConcurrencyError,
-    ReportSubmission,
 )
 from app.modules.report.ports import (
     ReportArtifactCategory,
@@ -35,11 +24,7 @@ from app.modules.report.ports import (
     ReportResourceRecord,
     ReportResourceState,
 )
-from app.modules.tasks.adapters import LegacyTaskCommandAdapter
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
-from app.modules.tasks.ports import TaskSubmissionCommand
-from app.services.llm_service.task_service import LLMTaskService
-from tests import workspace_tempdir
 from tests.fakes import (
     FakeReportArtifactPort,
     FakeReportAuditPort,
@@ -202,70 +187,6 @@ class ReportResourceRecoveryTests(unittest.TestCase):
             ReportResourceState.CLEANED,
             store.records[second_task_id].state,
         )
-
-    def test_fifty_concurrent_resource_updates_have_one_cas_winner(self) -> None:
-        """同一版本的资源事实只能被一个恢复执行者推进。"""
-
-        with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task_id = TaskId("report-resource-cas")
-            tasks = LegacyTaskCommandAdapter(
-                service,
-                ReportTaskCommandCodec(),
-                task_id_factory=lambda: task_id,
-                clock=lambda: "2026-07-16T12:00:00+08:00",
-            )
-            submission = ReportSubmission(
-                report_id=ReportId.from_public_value(132),
-                source_urls=("http://files.local/source.pdf",),
-                template_outline_url="http://files.local/template.docx",
-                template_desc="模板",
-                requirement="生成报告",
-                trace_id="trace-resource-cas",
-            )
-            tasks.create_if_allowed(
-                TaskSubmissionCommand(
-                    task_type="report",
-                    business_ref=TaskBusinessRef("report", "132"),
-                    input_schema_version=1,
-                    submission=submission,
-                    trace_id=submission.trace_id,
-                )
-            )
-            store = SQLiteReportResourceStoreAdapter(service)
-            created = store.create(
-                ReportResourceRecord(
-                    task_id=task_id,
-                    business_ref=TaskBusinessRef("report", "132"),
-                    scope=ReportArtifactScope(task_id, "report/concurrency"),
-                )
-            )
-            barrier = threading.Barrier(50)
-
-            def update(index: int) -> bool:
-                barrier.wait(timeout=20)
-                try:
-                    store.save(
-                        replace(
-                            created,
-                            last_error_stage="cas_test",
-                            last_error_message=f"writer-{index}",
-                        ),
-                        expected_version=created.version,
-                    )
-                except ReportCleanupError:
-                    return False
-                return True
-
-            with ThreadPoolExecutor(max_workers=50) as executor:
-                results = list(executor.map(update, range(50)))
-
-            self.assertEqual(1, results.count(True))
-            self.assertEqual(49, results.count(False))
-            reloaded = store.get(task_id)
-            self.assertIsNotNone(reloaded)
-            assert reloaded is not None
-            self.assertEqual(2, reloaded.version)
 
     def test_audit_append_failure_replays_exact_events_without_second_delete(self) -> None:
         """外部删除成功但审计追加失败时，恢复只能重放事件，不能再次调用删除。"""
@@ -668,209 +589,6 @@ class ReportResourceRecoveryTests(unittest.TestCase):
         self.assertEqual(ReportResourceState.QUARANTINED, record.state)
         self.assertEqual("audit_gate", record.last_error_stage)
         self.assertEqual("first evidence is incomplete", record.last_error_message)
-
-    def test_sqlite_recovery_deferral_hides_record_until_retry_time(self) -> None:
-        """真实 Store 必须让损坏/等待记录暂时退出有界扫描首页。"""
-
-        with workspace_tempdir() as tmp:
-            database = Path(tmp) / "tasks.sqlite3"
-            task_service = LLMTaskService(str(database))
-            task_id = TaskId("report-recovery-deferral")
-            task_commands = LegacyTaskCommandAdapter(
-                task_service,
-                ReportTaskCommandCodec(),
-                task_id_factory=lambda: task_id,
-                clock=lambda: "2026-07-17T00:00:00+00:00",
-            )
-            submission = ReportSubmission(
-                report_id=ReportId.from_public_value(8080),
-                source_urls=("http://files.local/source.pdf",),
-                template_outline_url="http://files.local/template.docx",
-                template_desc="",
-                requirement="",
-                trace_id="trace-recovery-deferral",
-            )
-            task_commands.create_if_allowed(
-                TaskSubmissionCommand(
-                    task_type="report",
-                    business_ref=TaskBusinessRef("report", "8080"),
-                    input_schema_version=1,
-                    submission=submission,
-                    trace_id=submission.trace_id,
-                )
-            )
-            store = SQLiteReportResourceStoreAdapter(task_service)
-            created_record = store.create(
-                ReportResourceRecord(
-                    task_id=task_id,
-                    business_ref=TaskBusinessRef("report", "8080"),
-                    scope=ReportArtifactScope(
-                        task_id,
-                        "report/recovery-deferral",
-                    ),
-                )
-            )
-            # 操作级重试水位必须经过真实 JSON Store 往返，进程重启后不能从 1 开始。
-            persisted_attempts = store.save(
-                replace(
-                    created_record,
-                    operation_attempts=(
-                        ("context_delete", 2),
-                        ("global_document_delete", 1),
-                    ),
-                ),
-                expected_version=created_record.version,
-            )
-            self.assertEqual(
-                (
-                    ("context_delete", 2),
-                    ("global_document_delete", 1),
-                ),
-                store.get(task_id).operation_attempts,
-            )
-            self.assertGreater(persisted_attempts.version, created_record.version)
-            with sqlite3.connect(database) as connection:
-                connection.execute(
-                    """
-                    UPDATE llm_task_executions
-                    SET execution_state = 'stale'
-                    WHERE execution_id = ?
-                    """,
-                    (task_id.value,),
-                )
-
-            self.assertEqual((task_id,), store.list_recoverable(limit=10))
-            self.assertTrue(
-                store.defer_recovery(
-                    task_id,
-                    retry_at="2999-01-01T00:00:00+00:00",
-                    reason="exception:CorruptPayload",
-                )
-            )
-            self.assertEqual((), store.list_recoverable(limit=10))
-            self.assertEqual(
-                (task_id.value,),
-                task_service.list_recoverable_report_resource_ids(
-                    limit=10,
-                    ready_at="3000-01-01T00:00:00+00:00",
-                ),
-            )
-
-    def test_sqlite_store_deletes_unowned_stale_final_artifact(self) -> None:
-        """旧 execution 未提交成功终态所有权时，output/report.html 也必须被删除。"""
-
-        with workspace_tempdir() as tmp:
-            root = Path(tmp)
-            database = root / "tasks.sqlite3"
-            task_service = LLMTaskService(str(database))
-            task_id = TaskId("report-stale-artifact")
-            task_commands = LegacyTaskCommandAdapter(
-                task_service,
-                ReportTaskCommandCodec(),
-                task_id_factory=lambda: task_id,
-                clock=lambda: "2026-07-16T12:00:00+08:00",
-            )
-            submission = ReportSubmission(
-                report_id=ReportId.from_public_value(132),
-                source_urls=("http://files.local/source.pdf",),
-                template_outline_url="http://files.local/template.docx",
-                template_desc="模板",
-                requirement="生成报告",
-                trace_id="trace-stale-artifact",
-            )
-            task_commands.create_if_allowed(
-                TaskSubmissionCommand(
-                    task_type="report",
-                    business_ref=TaskBusinessRef("report", "132"),
-                    input_schema_version=1,
-                    submission=submission,
-                    trace_id=submission.trace_id,
-                )
-            )
-            task_commands.claim(task_id)
-            artifacts = LocalReportArtifactAdapter(root / "artifacts")
-            recorder = InvocationRecorder()
-            rag = FakeReportRagPort(recorder)
-            audit = FakeReportAuditPort(recorder)
-            store = SQLiteReportResourceStoreAdapter(task_service)
-            resources = ReportResourceRecoveryService(
-                store=store,
-                artifacts=artifacts,
-                rag=rag,
-                audit=audit,
-            )
-            scope = artifacts.begin(task_id)
-            resources.register(
-                task_id,
-                TaskBusinessRef("report", "132"),
-                scope,
-            )
-            # 非空外部调用占用也必须经过真实 JSON Store 往返；否则仅 Fake 通过会掩盖
-            # 崩溃期限字段的序列化错误。
-            tracked = store.get(task_id)
-            assert tracked is not None
-            attempt_started_at = 1_752_636_800.0
-            opened = store.save(
-                replace(
-                    tracked,
-                    external_attempt_open=True,
-                    external_attempt_token="round-trip-attempt",
-                    external_attempt_started_at=attempt_started_at,
-                    external_attempt_heartbeat_at=attempt_started_at + 1,
-                ),
-                expected_version=tracked.version,
-            )
-            round_tripped = store.get(task_id)
-            assert round_tripped is not None
-            self.assertEqual(
-                attempt_started_at,
-                round_tripped.external_attempt_started_at,
-            )
-            self.assertEqual(
-                attempt_started_at + 1,
-                round_tripped.external_attempt_heartbeat_at,
-            )
-            self.assertEqual(
-                "round-trip-attempt",
-                round_tripped.external_attempt_token,
-            )
-            store.save(
-                replace(
-                    opened,
-                    external_attempt_open=False,
-                    external_attempt_token="",
-                    external_attempt_started_at=None,
-                    external_attempt_heartbeat_at=None,
-                ),
-                expected_version=opened.version,
-            )
-            self.assertEqual((), store.list_recoverable(limit=10))
-            final_artifact = artifacts.persist_report_html(scope, "<div>old</div>")
-            resources.track_final_artifact(final_artifact)
-            # 构造“新 owner 已提交后，旧 Worker 才尝试终态写”的确定性落点。生产条件写
-            # 会把旧 execution 收敛为 stale；此处直接落该终态以隔离验证所有权规则。
-            with sqlite3.connect(database) as connection:
-                connection.execute(
-                    """
-                    UPDATE llm_task_executions
-                    SET execution_state = 'stale', updated_at = ?
-                    WHERE execution_id = ?
-                    """,
-                    ("2026-07-16T04:01:00+00:00", task_id.value),
-                )
-            self.assertEqual((task_id,), store.list_recoverable(limit=10))
-
-            result = resources.cleanup(task_id)
-            reloaded = SQLiteReportResourceStoreAdapter(task_service).get(task_id)
-
-            self.assertEqual(ReportResourceCleanupOutcome.CLEANED, result.outcome)
-            self.assertIsNotNone(reloaded)
-            assert reloaded is not None
-            self.assertEqual((), reloaded.retained)
-            self.assertEqual(ReportResourceState.CLEANED, reloaded.state)
-            with self.assertRaises(ReportArtifactError):
-                artifacts.resolve_path(final_artifact)
-
 
 if __name__ == "__main__":
     unittest.main()

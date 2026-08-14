@@ -258,6 +258,15 @@ class TaskExecutionDomainTests(unittest.TestCase):
                 fencing_token=1,
                 lease_expires_at="2026-08-12T09:02:33+08:00",
             )
+        with self.assertRaises(ValueError):
+            TaskExecutionAuthority(
+                task_id=TaskId("task-1"),
+                attempt_no=1,
+                owner_id="instance/pid/report/worker-0",
+                lease_token="token",
+                fencing_token=1,
+                lease_expires_at="2026-02-30T09:02:33.000000Z",
+            )
 
     def test_external_write_cannot_claim_unconditional_safe_replay(self) -> None:
         with self.assertRaises(ValueError):

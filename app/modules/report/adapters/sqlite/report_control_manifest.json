@@ -1,0 +1,75 @@
+{
+  "manifestProfile": "canonical_json_v1",
+  "componentName": "report_control",
+  "componentVersion": 1,
+  "schemaName": "docsense.task-control",
+  "rootSchemaGeneration": 2,
+  "semanticTypes": {
+    "persisted_utc": "UTC RFC3339 microseconds with literal Z; repository also performs calendar-valid parse",
+    "optional_persisted_utc": "NULL or persisted_utc",
+    "canonical_json": "SQLite json_valid and canonicalized by codec before persistence"
+  },
+  "indexTermDefaults": {
+    "collation": "BINARY",
+    "order": "ASC"
+  },
+  "tables": [
+    {
+      "name": "report_resource_records",
+      "columns": [
+        {"name": "execution_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_type", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "artifact_namespace", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "state", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "record_payload", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "version", "type": "INTEGER", "notNull": true, "default": "1", "primaryKeyPosition": 0},
+        {"name": "recovery_deferral_count", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0},
+        {"name": "next_recovery_at", "type": "TEXT", "notNull": false, "default": null, "primaryKeyPosition": 0, "semanticType": "optional_persisted_utc"},
+        {"name": "last_recovery_reason", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"},
+        {"name": "updated_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {
+          "columns": ["execution_id"],
+          "referencedTable": "llm_task_executions",
+          "referencedColumns": ["execution_id"],
+          "onUpdate": "RESTRICT",
+          "onDelete": "CASCADE",
+          "deferrable": false
+        }
+      ],
+      "checkConstraints": [
+        {"id": "report_resource_business_type", "expression": "business_type = 'report'"},
+        {"id": "report_resource_business_key", "expression": "length(business_key) BETWEEN 1 AND 256"},
+        {"id": "report_resource_artifact_namespace", "expression": "length(artifact_namespace) BETWEEN 1 AND 256"},
+        {"id": "report_resource_state", "expression": "state IN ('tracking', 'cleanup_pending', 'audit_pending', 'cleaned', 'quarantined')"},
+        {"id": "report_resource_payload_json", "expression": "json_valid(record_payload) = 1"},
+        {"id": "report_resource_version", "expression": "version >= 1"},
+        {"id": "report_resource_deferral_count", "expression": "recovery_deferral_count >= 0"},
+        {"id": "report_resource_next_recovery_at", "semanticExpression": "optional_persisted_utc(next_recovery_at)"},
+        {"id": "report_resource_reason", "expression": "length(last_recovery_reason) <= 256"},
+        {"id": "report_resource_created_at", "semanticExpression": "persisted_utc(created_at)"},
+        {"id": "report_resource_updated_at", "semanticExpression": "persisted_utc(updated_at)"}
+      ]
+    }
+  ],
+  "indexes": [
+    {
+      "name": "idx_report_resource_records_recovery",
+      "table": "report_resource_records",
+      "unique": false,
+      "columns": ["state", "updated_at", "execution_id"],
+      "where": null
+    },
+    {
+      "name": "idx_report_resource_records_ready_recovery",
+      "table": "report_resource_records",
+      "unique": false,
+      "columns": ["state", "next_recovery_at", "updated_at", "execution_id"],
+      "where": null
+    }
+  ]
+}

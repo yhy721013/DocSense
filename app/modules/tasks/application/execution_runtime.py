@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
+from threading import Event, Lock
 
 from app.modules.tasks.domain import (
     TaskExecutionAuthority,
@@ -29,10 +30,12 @@ from app.modules.tasks.ports import (
     TaskExecutionStopRequested,
     TaskExecutionUnitOfWorkFactory,
     TaskLeaseTokenFactoryPort,
+    TaskExecutionSnapshotLoaderPort,
     TaskWorkflowRunnerPort,
 )
 
 from .authority_session import TaskExecutionAuthoritySession
+from .workflow_context import TaskWorkflowContext
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ class TaskExecutionRuntime:
         lease_token_factory: TaskLeaseTokenFactoryPort,
         heartbeat_supervisor_factory: Callable[[], LeaseHeartbeatSupervisorPort],
         workflow_runner: TaskWorkflowRunnerPort,
+        snapshot_loader: TaskExecutionSnapshotLoaderPort,
         lease_settings: TaskLeaseRuntimeSettings,
     ) -> None:
         if not isinstance(task_type, str) or not task_type.strip():
@@ -67,6 +71,8 @@ class TaskExecutionRuntime:
             raise TypeError("heartbeat_supervisor_factory 必须可调用")
         if not isinstance(workflow_runner, TaskWorkflowRunnerPort):
             raise TypeError("workflow_runner 必须实现 TaskWorkflowRunnerPort")
+        if not isinstance(snapshot_loader, TaskExecutionSnapshotLoaderPort):
+            raise TypeError("snapshot_loader 必须实现 TaskExecutionSnapshotLoaderPort")
         if not isinstance(lease_settings, TaskLeaseRuntimeSettings):
             raise TypeError("lease_settings 必须是 TaskLeaseRuntimeSettings")
 
@@ -77,13 +83,49 @@ class TaskExecutionRuntime:
         self._lease_token_factory = lease_token_factory
         self._heartbeat_supervisor_factory = heartbeat_supervisor_factory
         self._workflow_runner = workflow_runner
+        self._snapshot_loader = snapshot_loader
         self._lease_settings = lease_settings
+        self._cancellation = Event()
+        self._context_lock = Lock()
+        self._active_context: TaskWorkflowContext | None = None
+
+    def request_cancellation(self) -> bool:
+        """向当前/即将创建的 Workflow Context 发送正常取消，不改变持久 Task 状态。"""
+
+        first = not self._cancellation.is_set()
+        self._cancellation.set()
+        with self._context_lock:
+            context = self._active_context
+        if context is not None:
+            context.request_cancellation()
+        return first
 
     def run(self, task_id: TaskId) -> TaskExecutionRuntimeResult:
         """执行一次可领取 Task；有限竞争结果不会启动业务 Workflow。"""
 
         if not isinstance(task_id, TaskId):
             raise TypeError("task_id 必须是 TaskId")
+        try:
+            # 冻结输入在 claim 前经独立只读 UoW + 业务 Codec 解码；失败时绝不先取得租约，
+            # 也不允许 Runner 在执行中回读当前环境补默认值。
+            loaded_input = self._snapshot_loader.load(task_id)
+            if (
+                loaded_input.snapshot.task_id != task_id
+                or loaded_input.snapshot.task_type != self._task_type
+            ):
+                raise ValueError("冻结输入身份与 Runtime 不一致")
+        except Exception as exc:
+            logger.error(
+                "Task Runtime 冻结输入加载失败: task_id=%s task_type=%s "
+                "reason_code=task_input_load_error error_type=%s",
+                task_id,
+                self._task_type,
+                type(exc).__name__,
+            )
+            return TaskExecutionRuntimeResult(
+                task_id,
+                TaskExecutionRuntimeOutcome.INPUT_ERROR,
+            )
         try:
             authority = self._claim(task_id)
         except ClockAnomalyError:
@@ -170,12 +212,19 @@ class TaskExecutionRuntime:
             )
 
         session = TaskExecutionAuthoritySession(authority)
+        context = TaskWorkflowContext(session=session, loaded_input=loaded_input)
+        if self._cancellation.is_set():
+            context.request_cancellation()
+        with self._context_lock:
+            self._active_context = context
         try:
             supervisor = self._heartbeat_supervisor_factory()
             if not isinstance(supervisor, LeaseHeartbeatSupervisorPort):
                 raise TypeError("heartbeat_supervisor_factory 返回值未实现 Port")
             supervisor.start(session)
         except Exception as exc:
+            with self._context_lock:
+                self._active_context = None
             logger.error(
                 "Task heartbeat 启动失败: task_id=%s task_type=%s attempt_no=%d "
                 "fencing=%d reason_code=heartbeat_start_error error_type=%s",
@@ -193,7 +242,7 @@ class TaskExecutionRuntime:
         workflow_failed = False
         supervisor_stop_failed = False
         try:
-            self._workflow_runner.run(session)
+            self._workflow_runner.run(context)
         except TaskExecutionStopRequested:
             # 失权是预期协作停止路径；最终分类以 supervisor/session 的稳定结果为准。
             pass
@@ -224,6 +273,9 @@ class TaskExecutionRuntime:
                     authority.fencing_token,
                     type(exc).__name__,
                 )
+            finally:
+                with self._context_lock:
+                    self._active_context = None
 
         if supervisor_stop_failed:
             return TaskExecutionRuntimeResult(

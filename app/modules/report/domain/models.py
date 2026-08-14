@@ -10,9 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import ReportDomainValidationError
+from .execution_profile import ReportExecutionProfile
 
 
 REPORT_INPUT_SCHEMA_VERSION = 1
+REPORT_INPUT_SCHEMA_VERSION_V2 = 2
+REPORT_SUPPORTED_INPUT_SCHEMA_VERSIONS = frozenset(
+    {REPORT_INPUT_SCHEMA_VERSION, REPORT_INPUT_SCHEMA_VERSION_V2}
+)
 REPORT_ID_MAX_DECIMAL_DIGITS = 128
 REPORT_ID_ABSOLUTE_UPPER_BOUND = 10**REPORT_ID_MAX_DECIMAL_DIGITS
 REPORT_STATUS_SUCCEEDED = "1"
@@ -169,12 +174,13 @@ class ReportInputSnapshot:
     requirement: str
     accepted_at: str
     trace_id: str
+    execution_profile: ReportExecutionProfile | None = None
 
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version <= 0
+            or self.schema_version not in REPORT_SUPPORTED_INPUT_SCHEMA_VERSIONS
         ):
             raise ReportDomainValidationError("schema_version 必须是正整数")
         object.__setattr__(
@@ -213,6 +219,11 @@ class ReportInputSnapshot:
             "trace_id",
             _required_text(self.trace_id, name="trace_id"),
         )
+        if self.schema_version == REPORT_INPUT_SCHEMA_VERSION:
+            if self.execution_profile is not None:
+                raise ReportDomainValidationError("Report Input v1 不得携带 execution_profile")
+        elif not isinstance(self.execution_profile, ReportExecutionProfile):
+            raise ReportDomainValidationError("Report Input v2 必须携带 execution_profile")
 
     @classmethod
     def from_submission(
@@ -222,6 +233,7 @@ class ReportInputSnapshot:
         task_id: str,
         accepted_at: str,
         schema_version: int = REPORT_INPUT_SCHEMA_VERSION,
+        execution_profile: ReportExecutionProfile | None = None,
     ) -> "ReportInputSnapshot":
         """把已校验命令冻结为可持久化快照，不引用调用方的可变容器。"""
 
@@ -237,6 +249,7 @@ class ReportInputSnapshot:
             requirement=submission.requirement,
             accepted_at=accepted_at,
             trace_id=submission.trace_id,
+            execution_profile=execution_profile,
         )
 
 
@@ -326,6 +339,8 @@ __all__ = [
     "REPORT_ID_ABSOLUTE_UPPER_BOUND",
     "REPORT_ID_MAX_DECIMAL_DIGITS",
     "REPORT_INPUT_SCHEMA_VERSION",
+    "REPORT_INPUT_SCHEMA_VERSION_V2",
+    "REPORT_SUPPORTED_INPUT_SCHEMA_VERSIONS",
     "REPORT_STATUS_FAILED",
     "REPORT_STATUS_SUCCEEDED",
     "REPORT_SUCCESS_MESSAGE",

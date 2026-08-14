@@ -6,7 +6,7 @@ Recovery Policy 只接收冻结领域事实，不能执行网络、文件或数�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -48,7 +48,7 @@ class TaskRecoveryClaimRequest:
     case_id: str
     generation: int
     owner_id: str
-    lease_token: str
+    lease_token: str = field(repr=False)
     claimed_at: str
     lease_expires_at: str
 
@@ -109,6 +109,8 @@ class TaskRecoveryHeartbeatCommand:
             )
         if self.lease_expires_at <= self.heartbeat_at:
             raise ValueError("Recovery 续租到期时间必须晚于 heartbeat_at")
+        if self.lease_expires_at <= self.authority.lease_expires_at:
+            raise ValueError("Recovery 续租到期时间必须严格晚于当前 Authority 到期时间")
 
 
 @dataclass(frozen=True, slots=True)

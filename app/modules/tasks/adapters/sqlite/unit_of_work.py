@@ -13,9 +13,11 @@ from typing import cast
 
 from app.modules.tasks.ports.callback_delivery_control import (
     CallbackAdmissionConflictPort,
+    CallbackDeliveryControlPort,
 )
 from app.modules.tasks.ports.task_admission import TaskAdmissionPort
 from app.modules.tasks.ports.task_execution import TaskExecutionPort
+from app.modules.tasks.ports.task_execution import TaskRunnableQueryPort
 from app.modules.tasks.ports.task_recovery import TaskRecoveryPort
 
 from .transaction import (
@@ -176,18 +178,22 @@ class SQLiteTaskExecutionUnitOfWork(_SQLiteUnitOfWorkBase):
         transaction_manager: SQLiteTransactionManager,
         *,
         execution_builder: StoreBuilder,
+        callback_delivery_builder: StoreBuilder,
     ) -> None:
         super().__init__(transaction_manager)
-        if not callable(execution_builder):
+        if not callable(execution_builder) or not callable(callback_delivery_builder):
             raise TypeError("Execution UoW Store Builder 必须可调用")
         self._execution_builder = execution_builder
+        self._callback_delivery_builder = callback_delivery_builder
         self._execution: object | None = None
+        self._callback_delivery: object | None = None
 
     def __enter__(self) -> "SQLiteTaskExecutionUnitOfWork":
         connection = self._enter_transaction()
         try:
             self._execution = self._execution_builder(connection)
-            if self._execution is None:
+            self._callback_delivery = self._callback_delivery_builder(connection)
+            if self._execution is None or self._callback_delivery is None:
                 raise TypeError("Execution UoW Store Builder 不得返回 None")
         except BaseException:
             self._rollback_failed_enter()
@@ -201,8 +207,59 @@ class SQLiteTaskExecutionUnitOfWork(_SQLiteUnitOfWorkBase):
             raise SQLiteTransactionError("unit_of_work_store_missing", "Execution Store 未装配")
         return cast(TaskExecutionPort, self._execution)
 
+    @property
+    def callback_delivery(self) -> CallbackDeliveryControlPort:
+        self._require_transaction()
+        if self._callback_delivery is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_store_missing",
+                "Callback Delivery Store 未装配",
+            )
+        return cast(CallbackDeliveryControlPort, self._callback_delivery)
+
     def _clear_stores(self) -> None:
         self._execution = None
+        self._callback_delivery = None
+
+
+class SQLiteCallbackDeliveryUnitOfWork(_SQLiteUnitOfWorkBase):
+    """Callback Control 独立短事务；不暴露 Task Execution 写入口。"""
+
+    def __init__(
+        self,
+        transaction_manager: SQLiteTransactionManager,
+        *,
+        callback_delivery_builder: StoreBuilder,
+    ) -> None:
+        super().__init__(transaction_manager)
+        if not callable(callback_delivery_builder):
+            raise TypeError("Callback Delivery UoW Store Builder 必须可调用")
+        self._callback_delivery_builder = callback_delivery_builder
+        self._callback_delivery: object | None = None
+
+    def __enter__(self) -> "SQLiteCallbackDeliveryUnitOfWork":
+        connection = self._enter_transaction()
+        try:
+            self._callback_delivery = self._callback_delivery_builder(connection)
+            if self._callback_delivery is None:
+                raise TypeError("Callback Delivery UoW Store Builder 不得返回 None")
+        except BaseException:
+            self._rollback_failed_enter()
+            raise
+        return self
+
+    @property
+    def callback_delivery(self) -> CallbackDeliveryControlPort:
+        self._require_transaction()
+        if self._callback_delivery is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_store_missing",
+                "Callback Delivery Store 未装配",
+            )
+        return cast(CallbackDeliveryControlPort, self._callback_delivery)
+
+    def _clear_stores(self) -> None:
+        self._callback_delivery = None
 
 
 class SQLiteTaskRecoveryUnitOfWork(_SQLiteUnitOfWorkBase):
@@ -242,6 +299,70 @@ class SQLiteTaskRecoveryUnitOfWork(_SQLiteUnitOfWorkBase):
         self._recovery = None
 
 
+class SQLiteTaskControlQueryUnitOfWork:
+    """独立短只读事务；不会获取 ``BEGIN IMMEDIATE`` 写锁。"""
+
+    def __init__(
+        self,
+        transaction_manager: SQLiteTransactionManager,
+        *,
+        query_builder: StoreBuilder,
+    ) -> None:
+        if not isinstance(transaction_manager, SQLiteTransactionManager):
+            raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
+        if not callable(query_builder):
+            raise TypeError("Query UoW Store Builder 必须可调用")
+        self._transaction_manager = transaction_manager
+        self._query_builder = query_builder
+        self._transaction: SQLiteTransaction | None = None
+        self._queries: object | None = None
+        self._entered_once = False
+
+    def __enter__(self) -> "SQLiteTaskControlQueryUnitOfWork":
+        if self._entered_once:
+            raise SQLiteTransactionError(
+                "unit_of_work_reentry_forbidden",
+                "Task Control Query UnitOfWork 只能进入一次",
+            )
+        self._entered_once = True
+        transaction = self._transaction_manager.begin(read_only=True)
+        transaction.__enter__()
+        self._transaction = transaction
+        try:
+            self._queries = self._query_builder(transaction.connection)
+            if self._queries is None:
+                raise TypeError("Query UoW Store Builder 不得返回 None")
+        except BaseException:
+            transaction.__exit__(*sys.exc_info())
+            self._transaction = None
+            self._queries = None
+            raise
+        return self
+
+    @property
+    def queries(self) -> TaskRunnableQueryPort:
+        transaction = self._transaction
+        if transaction is None or not transaction.active or self._queries is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_not_active",
+                "Task Control Query UnitOfWork 未处于活动事务",
+            )
+        return cast(TaskRunnableQueryPort, self._queries)
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        transaction = self._transaction
+        self._transaction = None
+        self._queries = None
+        if transaction is None:
+            return False
+        return transaction.__exit__(exc_type, exc_value, traceback)
+
+
 class SQLiteTaskAdmissionUnitOfWorkFactory:
     def __init__(
         self,
@@ -268,14 +389,34 @@ class SQLiteTaskExecutionUnitOfWorkFactory:
         transaction_manager: SQLiteTransactionManager,
         *,
         execution_builder: StoreBuilder,
+        callback_delivery_builder: StoreBuilder,
     ) -> None:
         self._transaction_manager = transaction_manager
         self._execution_builder = execution_builder
+        self._callback_delivery_builder = callback_delivery_builder
 
     def __call__(self) -> SQLiteTaskExecutionUnitOfWork:
         return SQLiteTaskExecutionUnitOfWork(
             self._transaction_manager,
             execution_builder=self._execution_builder,
+            callback_delivery_builder=self._callback_delivery_builder,
+        )
+
+
+class SQLiteCallbackDeliveryUnitOfWorkFactory:
+    def __init__(
+        self,
+        transaction_manager: SQLiteTransactionManager,
+        *,
+        callback_delivery_builder: StoreBuilder,
+    ) -> None:
+        self._transaction_manager = transaction_manager
+        self._callback_delivery_builder = callback_delivery_builder
+
+    def __call__(self) -> SQLiteCallbackDeliveryUnitOfWork:
+        return SQLiteCallbackDeliveryUnitOfWork(
+            self._transaction_manager,
+            callback_delivery_builder=self._callback_delivery_builder,
         )
 
 
@@ -296,11 +437,32 @@ class SQLiteTaskRecoveryUnitOfWorkFactory:
         )
 
 
+class SQLiteTaskControlQueryUnitOfWorkFactory:
+    def __init__(
+        self,
+        transaction_manager: SQLiteTransactionManager,
+        *,
+        query_builder: StoreBuilder,
+    ) -> None:
+        self._transaction_manager = transaction_manager
+        self._query_builder = query_builder
+
+    def __call__(self) -> SQLiteTaskControlQueryUnitOfWork:
+        return SQLiteTaskControlQueryUnitOfWork(
+            self._transaction_manager,
+            query_builder=self._query_builder,
+        )
+
+
 __all__ = [
     "SQLiteTaskAdmissionUnitOfWork",
     "SQLiteTaskAdmissionUnitOfWorkFactory",
     "SQLiteTaskExecutionUnitOfWork",
     "SQLiteTaskExecutionUnitOfWorkFactory",
+    "SQLiteCallbackDeliveryUnitOfWork",
+    "SQLiteCallbackDeliveryUnitOfWorkFactory",
     "SQLiteTaskRecoveryUnitOfWork",
     "SQLiteTaskRecoveryUnitOfWorkFactory",
+    "SQLiteTaskControlQueryUnitOfWork",
+    "SQLiteTaskControlQueryUnitOfWorkFactory",
 ]

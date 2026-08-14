@@ -123,6 +123,36 @@ class LocalReportArtifactAdapter:
         )
         return reference
 
+    def load_report_html(self, artifact: ReportArtifactRef) -> str:
+        """读取终态持有的 HTML，供同步 Callback 恢复重建原公开载荷。
+
+        恢复路径不能把内部 result_ref 当作公开正文，也不能在文件被篡改后继续发送。
+        因此这里在解码前同时复核类别、任务目录、大小与 SHA-256。
+        """
+
+        if not isinstance(artifact, ReportArtifactRef):
+            raise TypeError("artifact 必须是 ReportArtifactRef")
+        if artifact.category is not ReportArtifactCategory.REPORT_HTML:
+            raise ReportArtifactError("只允许读取最终报告 HTML Artifact")
+        path = self.resolve_path(artifact)
+        actual = self._output_reference(artifact.task_id, path)
+        if actual != artifact:
+            logger.error(
+                "读取报告 Artifact 时完整性复核失败: task_id=%s artifact_id=%s",
+                artifact.task_id,
+                artifact.artifact_id,
+            )
+            raise ReportArtifactError("最终报告 Artifact 完整性校验失败")
+        try:
+            return path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError) as exc:
+            logger.exception(
+                "读取报告 HTML Artifact 失败: task_id=%s artifact_id=%s",
+                artifact.task_id,
+                artifact.artifact_id,
+            )
+            raise ReportArtifactError("无法读取最终报告") from exc
+
     def cleanup_unretained(
         self,
         scope: ReportArtifactScope,

@@ -15,6 +15,7 @@ from app.modules.tasks.domain import (
     TaskBusinessRef,
     TaskExecutionSnapshot,
     TaskId,
+    TaskStepCheckpoint,
 )
 from app.modules.tasks.ports import (
     ExpectedProgressUpdate,
@@ -385,6 +386,7 @@ class FakeReportArtifactPort:
         self.cleanup_result: object | None = None
         self.scopes: list[ReportArtifactScope] = []
         self.persisted_html: list[str] = []
+        self.report_html_by_artifact: dict[ReportArtifactRef, str] = {}
         self.cleanup_calls: list[tuple[ReportArtifactScope, tuple[ReportArtifactRef, ...]]] = []
 
     def begin(self, task_id: TaskId) -> ReportArtifactScope:
@@ -407,14 +409,25 @@ class FakeReportArtifactPort:
             raise self.persist_error
         self.persisted_html.append(html_details)
         if self.forced_report_artifact is not None:
-            return self.forced_report_artifact  # type: ignore[return-value]
-        return ReportArtifactRef(
-            scope.task_id,
-            f"{scope.task_id.value}:report.html",
-            ReportArtifactCategory.REPORT_HTML,
-            size_bytes=len(html_details.encode("utf-8")),
-            checksum=hashlib.sha256(html_details.encode("utf-8")).hexdigest(),
-        )
+            artifact = self.forced_report_artifact
+        else:
+            artifact = ReportArtifactRef(
+                scope.task_id,
+                f"{scope.task_id.value}:report.html",
+                ReportArtifactCategory.REPORT_HTML,
+                size_bytes=len(html_details.encode("utf-8")),
+                checksum=hashlib.sha256(html_details.encode("utf-8")).hexdigest(),
+            )
+        if isinstance(artifact, ReportArtifactRef):
+            self.report_html_by_artifact[artifact] = html_details
+        return artifact  # type: ignore[return-value]
+
+    def load_report_html(self, artifact: ReportArtifactRef) -> str:
+        self.recorder.record("artifact.load_report")
+        try:
+            return self.report_html_by_artifact[artifact]
+        except KeyError as exc:
+            raise RuntimeError("Fake 中不存在最终报告 HTML") from exc
 
     def cleanup_unretained(
         self,
@@ -533,7 +546,63 @@ class FakeReportRagPort:
             raise self.generate_error
         if self.forced_response is not None:
             return self.forced_response  # type: ignore[return-value]
-        return ReportRagResponse(
+        observer = request.step_observer
+        if observer is not None:
+            observer.begin(
+                "rag.session.open",
+                f"report:{request.task_id.value}:rag-session",
+            )
+            observer.succeed(
+                "rag.session.open",
+                TaskStepCheckpoint(
+                    code="rag_session_opened_v1",
+                    result_ref=f"fake-session:{request.task_id.value}",
+                    result_digest="1" * 64,
+                    external_ref="fake-workspace:fake-conversation",
+                ),
+            )
+            for sequence_no, artifact in enumerate(
+                request.ordered_source_files,
+                start=1,
+            ):
+                artifact_digest = artifact.checksum or hashlib.sha256(
+                    artifact.artifact_id.encode("utf-8")
+                ).hexdigest()
+                upload_key = f"rag.document.upload:{sequence_no}"
+                observer.begin(
+                    upload_key,
+                    f"report:{request.task_id.value}:rag-upload:{sequence_no}:"
+                    f"{artifact_digest}",
+                )
+                observer.succeed(
+                    upload_key,
+                    TaskStepCheckpoint(
+                        code="rag_document_uploaded_v1",
+                        result_ref=f"fake-document:{sequence_no}",
+                        result_digest=artifact_digest,
+                        external_ref=f"fake-location:{sequence_no}",
+                    ),
+                )
+                bind_key = f"rag.document.bind:{sequence_no}"
+                observer.begin(
+                    bind_key,
+                    f"report:{request.task_id.value}:rag-bind:fake-workspace:"
+                    f"{sequence_no}:fake-location:{sequence_no}",
+                )
+                observer.succeed(
+                    bind_key,
+                    TaskStepCheckpoint(
+                        code="rag_document_bound_v1",
+                        result_ref=f"fake-bind:{sequence_no}",
+                        result_digest=artifact_digest,
+                        external_ref=f"fake-location:{sequence_no}",
+                    ),
+                )
+            observer.begin(
+                "rag.generate",
+                f"report:{request.task_id.value}:generation:fake",
+            )
+        response = ReportRagResponse(
             raw_content=self.raw_content,
             trace=sample_report_trace(
                 request.trace_id,
@@ -543,6 +612,20 @@ class FakeReportRagPort:
             ),
             cleanup_ref=ReportRagCleanupRef(f"cleanup:{request.task_id.value}"),
         )
+        if observer is not None:
+            raw_digest = hashlib.sha256(
+                (response.raw_content or "").encode("utf-8")
+            ).hexdigest()
+            observer.succeed(
+                "rag.generate",
+                TaskStepCheckpoint(
+                    code="rag_generated_v1",
+                    result_ref=f"fake-response:{raw_digest}",
+                    result_digest=raw_digest,
+                    observation_ref=f"fake-trace:{request.trace_id}",
+                ),
+            )
+        return response
 
     def cleanup(
         self,

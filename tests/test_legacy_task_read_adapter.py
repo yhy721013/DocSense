@@ -8,7 +8,7 @@ from app.modules.tasks.adapters import LegacyTaskReadAdapter
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
-from tests.task_service_fixtures import seed_legacy_file_task
+from tests.task_service_fixtures import seed_legacy_file_task, seed_legacy_report_task
 
 
 class LegacyTaskReadAdapterTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class LegacyTaskReadAdapterTests(unittest.TestCase):
     def test_many_preserves_duplicates_order_and_missing_positions(self) -> None:
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_report_task(132, {"businessType": "report"})
+            seed_legacy_report_task(service, 132, {"businessType": "report"})
             adapter = LegacyTaskReadAdapter(service)
             refs = (
                 TaskBusinessRef("report", "missing"),

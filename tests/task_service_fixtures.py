@@ -77,6 +77,37 @@ def seed_legacy_file_task(
     )
 
 
+def seed_legacy_report_task(
+    service: LLMTaskService,
+    report_id: int,
+    request_payload: Mapping[str, Any],
+    status: str = "0",
+) -> dict[str, Any]:
+    """仅为迁移兼容测试写入旧式 Report 公开投影。
+
+    阶段 2-4 第 8 步已经从生产 ``LLMTaskService`` 删除 Report 专用创建入口。
+    少量历史合同仍需构造旧库快照，以证明只读兼容、部署预检或旧 Guard 不会被
+    猜测性迁移；造数能力因此和文件任务夹具一样严格留在 ``tests``，不得被生产代码
+    导入，也不能用来证明当前 Report 受理链能力。
+    """
+
+    if not isinstance(service, LLMTaskService):
+        raise TypeError("service 必须是 LLMTaskService")
+    if isinstance(report_id, bool) or not isinstance(report_id, int) or report_id < 1:
+        raise ValueError("report_id 必须是正整数")
+    if not isinstance(request_payload, Mapping):
+        raise TypeError("request_payload 必须是 Mapping")
+    normalized_status = str(status)
+    if normalized_status not in {"0", "1", "2"}:
+        raise ValueError("历史 Report 状态必须属于 0/1/2")
+    return service._upsert_task(  # noqa: SLF001 - 测试专用历史数据构造边界
+        "report",
+        str(report_id),
+        dict(request_payload),
+        status=normalized_status,
+    )
+
+
 def admit_analysis_tasks(
     service: LLMTaskService,
     file_tasks: Sequence[tuple[str, Mapping[str, Any], str]],

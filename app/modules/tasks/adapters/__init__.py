@@ -8,6 +8,8 @@ MySQL/Outbox Adapter 仍由阶段 3～4 实现并在阶段 6 作为后台兜底�
 from .in_memory_progress import InMemoryProgressAdapter
 from .latest_progress import LatestTaskProgressPublisherAdapter
 from .legacy_task_read import LegacyTaskReadAdapter
+from .routed_task_read import RoutedTaskReadAdapter
+from .sqlite_task_read import SQLiteTaskControlReadAdapter
 from .synchronous_callback_recovery import SynchronousCallbackRecoveryRouterAdapter
 from .execution_limiter import UploadTaskLimiter
 from .process_guard import FileProcessSingletonGuard
@@ -17,6 +19,12 @@ from .lease_heartbeat import (
     ThreadedLeaseHeartbeatSupervisor,
 )
 from .secure_lease_tokens import SecureTaskLeaseTokenFactory
+from .snapshot_loader import CodecTaskExecutionSnapshotLoader
+from .safe_clock import SystemSafeClock
+from .runtime_config import TaskRuntimeConfig
+from .fair_capacity import FairTaskExecutionPermitPool
+from .local_executor import LocalTaskExecutor
+from .local_maintenance import LocalMaintenanceJob, LocalMaintenanceScheduler
 from .local_persistent_dispatcher import (
     LocalPersistentDispatcherSettings,
     LocalPersistentDispatcherSnapshot,
@@ -42,9 +50,18 @@ __all__ = [
     "LegacyTaskCommandAdapter",
     "LegacyTaskCommandAdapterError",
     "LegacyTaskReadAdapter",
+    "RoutedTaskReadAdapter",
+    "SQLiteTaskControlReadAdapter",
     "LeaseHeartbeatPulse",
     "SynchronousCallbackRecoveryRouterAdapter",
     "SecureTaskLeaseTokenFactory",
+    "CodecTaskExecutionSnapshotLoader",
+    "SystemSafeClock",
+    "TaskRuntimeConfig",
+    "FairTaskExecutionPermitPool",
+    "LocalTaskExecutor",
+    "LocalMaintenanceJob",
+    "LocalMaintenanceScheduler",
     "ThreadedLeaseHeartbeatSupervisor",
     "LatestTaskProgressPublisherAdapter",
     "UploadTaskLimiter",

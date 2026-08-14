@@ -29,7 +29,7 @@ from .execution import (
     TaskStepAttempt,
     TaskStepCheckpoint,
 )
-from .lease_time import add_persisted_utc_seconds
+from .lease_time import add_persisted_utc_seconds, require_persisted_utc
 from .runtime_settings import TaskLeaseRuntimeSettings
 from .recovery import (
     RecoveryAuthority,
@@ -129,6 +129,7 @@ __all__ = [
     "apply_recovery_decision",
     "apply_recovery_step_resolution",
     "add_persisted_utc_seconds",
+    "require_persisted_utc",
     "claim_recovery_case",
     "converge_recovery_operation",
     "create_recovery_case",

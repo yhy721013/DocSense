@@ -9,7 +9,7 @@ import unittest
 
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
-from tests.task_service_fixtures import seed_legacy_file_task
+from tests.task_service_fixtures import seed_legacy_file_task, seed_legacy_report_task
 
 
 _ACQUIRED_AT = "2030-01-01T00:00:00+00:00"
@@ -30,7 +30,7 @@ def _create_terminal_task(
     if business_type == "file":
         task = seed_legacy_file_task(service,business_key, request_payload)
     elif business_type == "report":
-        task = service.create_report_task(int(business_key), request_payload)
+        task = seed_legacy_report_task(service, int(business_key), request_payload)
     elif business_type == "weaponry":
         task = service.create_weaponry_task(int(business_key), request_payload)
     else:  # pragma: no cover - 测试帮助函数只接受固定矩阵。

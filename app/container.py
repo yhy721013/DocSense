@@ -81,13 +81,30 @@ from app.modules.report.adapters import (
     SQLiteReportCallbackRecoverySource,
     SQLiteReportInteractionAuditAdapter,
     SQLiteReportResourceStoreAdapter,
+    ReportRuntimeConfig,
+    ReportV2TaskDispatcher,
+    ReportV2Maintenance,
+    SQLiteReportV2CallbackRecoverySource,
+    TaskControlReportCallbackAdapter,
+    build_report_execution_profile,
+    build_report_v2_interaction_audit_adapter,
+    load_report_execution_capability_config,
+    load_report_runtime_config,
+)
+from app.modules.report.adapters.sqlite import (
+    SQLiteReportExecutionUnitOfWorkFactory,
+    SQLiteReportResourceStore,
+    bootstrap_report_task_control_database,
 )
 from app.modules.report.adapters.local_dispatcher import LocalReportDispatcherSnapshot
 from app.modules.report.application import (
     ReportResourceRecoveryService,
     RecoverReportCallbackSynchronously,
     RunReportTask,
+    RunReportV2Workflow,
+    ReportStepRuntime,
     SubmitReportTask,
+    SubmitReportV2Task,
 )
 from app.modules.report.domain import ReportId
 from app.modules.translation.adapters import (
@@ -115,19 +132,36 @@ from app.modules.reassign.composition import (
 from app.modules.tasks.adapters import (
     FileProcessSingletonGuard as GenericFileProcessSingletonGuard,
     InMemoryProgressAdapter,
+    CodecTaskExecutionSnapshotLoader,
+    LocalTaskExecutor,
     LegacyTaskCommandAdapter,
     LegacyTaskReadAdapter,
+    RoutedTaskReadAdapter,
+    SQLiteTaskControlReadAdapter,
+    SecureTaskLeaseTokenFactory,
+    SystemSafeClock,
+    TaskRuntimeConfig,
+    ThreadedLeaseHeartbeatSupervisor,
     LatestTaskProgressPublisherAdapter,
     SynchronousCallbackRecoveryRouterAdapter,
     UploadTaskLimiter,
     required_http_lease_seconds,
 )
+from app.modules.tasks.adapters.sqlite import (
+    SQLiteCallbackControlStore,
+    SQLiteConnectionFactory,
+    SQLiteTaskControlStore,
+    SQLiteTransactionManager,
+    build_sqlite_task_control_uow_factories,
+)
 from app.modules.tasks.application import (
     CheckTaskStatusService,
     ExecuteCheckTask,
     ProgressSubscriptionService,
+    TaskExecutionRuntime,
 )
-from app.modules.tasks.domain import TaskBusinessRef, TaskId
+from app.modules.tasks.domain import TaskBusinessRef, TaskId, TaskOwnerIdentity
+from app.modules.tasks.ports import TaskReadPort
 from app.modules.weaponry.adapters import (
     AnythingLLMTermsCatalogCoordinator,
     AnythingLLMProvidedEvidenceExtractionAdapter,
@@ -193,7 +227,6 @@ from app.services.core.config import (
     load_legacy_office_config,
     load_llm_integration_config,
     load_ocr_config,
-    load_report_infrastructure_config,
 )
 from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
@@ -291,12 +324,12 @@ class ApplicationServices:
     progress_hub: LLMProgressHub
     progress_subscription_service: ProgressSubscriptionService
     upload_task_limiter: UploadTaskLimiter
-    report_submit: SubmitReportTask
+    report_submit: SubmitReportTask | SubmitReportV2Task
     report_callback_recovery: RecoverReportCallbackSynchronously
     report_dispatcher: ReportTaskDispatcherLifecyclePort
     llm_config: LLMIntegrationConfig
     anythingllm_config: AnythingLLMConfig
-    report_infrastructure_config: ReportInfrastructureConfig
+    report_infrastructure_config: ReportInfrastructureConfig | ReportRuntimeConfig
     debug_services: DebugApplicationServices
     # Chat 模块的只读外观是 Web/Worker 新代码的唯一入口。单项字段
     # 暂保留给现有测试夹具；``__post_init__`` 会确保两者共享对象图。
@@ -326,6 +359,9 @@ class ApplicationServices:
     # 1E-6 的同步 Saga 生产链。None 仅用于不覆盖 reassign 路由的旧测试夹具；公开路由
     # 必须 fail fast，绝不能回退到已删除的蓝图数据库/AnythingLLM 编排。
     reassign_services: ReassignApplicationServices | None = None
+    # Report 完成 2-4 一次切换后，公开 check-task 与 Progress 回退必须读取 v2；
+    # 未迁移业务仍由路由适配器读取旧库。None 仅供历史夹具自动装配全旧只读路径。
+    task_reader: TaskReadPort | None = field(default=None, repr=False)
     # 该入口由当前 Task Read 与三类同步恢复链派生。禁止外部单独注入半套实例，
     # ``dataclasses.replace`` 替换任一恢复器时会随容器重新构造并保持引用一致。
     check_task: ExecuteCheckTask = field(init=False, repr=False)
@@ -441,8 +477,8 @@ class ApplicationServices:
             raise TypeError(
                 "progress_subscription_service 必须是 ProgressSubscriptionService"
             )
-        if not isinstance(self.report_submit, SubmitReportTask):
-            raise TypeError("report_submit 必须是 SubmitReportTask")
+        if not isinstance(self.report_submit, (SubmitReportTask, SubmitReportV2Task)):
+            raise TypeError("report_submit 必须是 Report Submit 应用用例")
         if not isinstance(
             self.report_callback_recovery,
             RecoverReportCallbackSynchronously,
@@ -465,10 +501,10 @@ class ApplicationServices:
             )
         if not isinstance(
             self.report_infrastructure_config,
-            ReportInfrastructureConfig,
+            (ReportInfrastructureConfig, ReportRuntimeConfig),
         ):
             raise TypeError(
-                "report_infrastructure_config 必须是 ReportInfrastructureConfig"
+                "report_infrastructure_config 必须是 Report 运行配置"
             )
         if not isinstance(self.chat_infrastructure_config, ChatInfrastructureConfig):
             raise TypeError(
@@ -543,7 +579,10 @@ class ApplicationServices:
             raise TypeError(
                 "reassign_services 必须是 ReassignApplicationServices 或 None"
             )
-        task_reader = LegacyTaskReadAdapter(self.task_service)
+        task_reader = self.task_reader or LegacyTaskReadAdapter(self.task_service)
+        if not isinstance(task_reader, TaskReadPort):
+            raise TypeError("task_reader 必须实现 TaskReadPort")
+        object.__setattr__(self, "task_reader", task_reader)
         callback_recovery = SynchronousCallbackRecoveryRouterAdapter(
             task_reader=task_reader,
             routes={
@@ -1032,7 +1071,8 @@ def create_application_services() -> ApplicationServices:
         analysis_classification_config.data_standard_mode,
         analysis_classification_config.identity_reselect_mode,
     )
-    report_infrastructure_config = load_report_infrastructure_config()
+    # 阶段 2-4 后 Report 配置由业务模块唯一拥有；环境键、默认值和失败语义保持不变。
+    report_infrastructure_config = load_report_runtime_config()
     weaponry_infrastructure_config = load_weaponry_infrastructure_config()
     # 术语开启时由本地真实内容自动生成唯一指纹，不再读取人工版本标签。这里只读取并
     # 冻结本地清单；AnythingLLM 写入仍延迟到 Weaponry 取得单实例锁后的启动门禁。
@@ -1095,6 +1135,37 @@ def create_application_services() -> ApplicationServices:
         tessdata_prefix=ocr_config.tessdata_prefix,
     )
     task_service = LLMTaskService(llm_config.task_db_path)
+    # Report 是第一个迁移单元：先完成旧库只读切换门禁、v2 根库与 Report 组件身份
+    # 校验，再构造任何 Executor。这里不复制旧任务，也不向两套控制面双写。
+    task_runtime_config = TaskRuntimeConfig.from_environment(
+        runtime_directory=RUNTIME_DIR,
+        legacy_task_database_path=llm_config.task_db_path,
+    )
+    task_control_busy_timeout_ms = max(
+        1,
+        int(task_runtime_config.lease.sqlite_busy_budget_seconds * 1000),
+    )
+    report_task_control_bootstrap = bootstrap_report_task_control_database(
+        llm_config.task_db_path,
+        task_runtime_config.database_path,
+        busy_timeout_ms=task_control_busy_timeout_ms,
+    )
+    task_control_transactions = SQLiteTransactionManager(
+        SQLiteConnectionFactory(
+            report_task_control_bootstrap,
+            busy_timeout_ms=task_control_busy_timeout_ms,
+        )
+    )
+    task_control_uows = build_sqlite_task_control_uow_factories(
+        task_control_transactions
+    )
+    report_v2_task_reader = SQLiteTaskControlReadAdapter(
+        task_control_transactions
+    )
+    routed_task_reader = RoutedTaskReadAdapter(
+        v2_reader=report_v2_task_reader,
+        legacy_reader=LegacyTaskReadAdapter(task_service),
+    )
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_services = compose_chat_application_services(
         db_path=str(CHAT_DB_PATH),
@@ -1118,7 +1189,7 @@ def create_application_services() -> ApplicationServices:
     progress_subscription_service = ProgressSubscriptionService(
         progress_snapshots=progress_adapter,
         progress_subscriptions=progress_adapter,
-        task_reader=LegacyTaskReadAdapter(task_service),
+        task_reader=routed_task_reader,
     )
     upload_task_limiter = UploadTaskLimiter(max_concurrency=1)
     # DocumentProcessing 的重型许可只包围 MinerU/OCR 调用。当前是单实例 FIFO；
@@ -1233,16 +1304,17 @@ def create_application_services() -> ApplicationServices:
         infrastructure_config=reassign_infrastructure_config,
     )
 
-    # Report 组合根只共享无网络 Session 的工厂、线程安全 Port 和 SQLite Service。
-    # 生成与清理使用两个独立 Client Factory：前者保留 ANYTHINGLLM_TIMEOUT 的既有
-    # 语义，后者强制有限 60 秒分阶段 HTTP 超时；130 秒租约覆盖连接、读取和提交余量。
-    report_task_commands = LegacyTaskCommandAdapter(
-        task_service,
-        ReportTaskCommandCodec(),
+    # Report 2-4 一次切换：受理、claim/start/heartbeat、Progress、终态、Callback
+    # Control 全部使用 v2；本区块不再构造 LegacyTaskCommandAdapter，也不向旧库写 Report。
+    # 尚未迁移的 Analysis/Weaponry 继续使用各自旧链，二者不共享 Report 控制写入口。
+    report_execution_profile = build_report_execution_profile(
+        runtime_config=report_infrastructure_config,
+        capabilities=load_report_execution_capability_config(),
+        document_preparer=document_preparer,
     )
-    report_progress_publisher = LatestTaskProgressPublisherAdapter(
-        task_commands=report_task_commands,
-        delegate=progress_adapter,
+    report_task_codec = ReportTaskCommandCodec.for_v2(report_execution_profile)
+    report_clock = SystemSafeClock(
+        max_jitter_seconds=task_runtime_config.lease.max_clock_jitter_seconds
     )
     report_artifacts = LocalReportArtifactAdapter(RUNTIME_DIR / "tasks")
     report_files = LegacyReportFileAdapter(
@@ -1266,9 +1338,15 @@ def create_application_services() -> ApplicationServices:
         ),
         artifact_path_resolver=report_artifacts.resolve_path,
     )
-    report_audit = SQLiteReportInteractionAuditAdapter(task_service)
+    report_audit = build_report_v2_interaction_audit_adapter(
+        llm_config.task_db_path,
+        task_reader=report_v2_task_reader,
+    )
+    report_resource_store = SQLiteReportResourceStoreAdapter(
+        SQLiteReportResourceStore(task_control_transactions)
+    )
     report_resources = ReportResourceRecoveryService(
-        store=SQLiteReportResourceStoreAdapter(task_service),
+        store=report_resource_store,
         artifacts=report_artifacts,
         rag=report_cleanup_rag,
         audit=report_audit,
@@ -1279,54 +1357,122 @@ def create_application_services() -> ApplicationServices:
             report_infrastructure_config.resource_sweep_interval_seconds
         ),
     )
-    report_callbacks = SQLiteReportCallbackAdapter(
-        task_service,
+    report_callback_token_factory = SecureTaskLeaseTokenFactory()
+    report_callbacks = TaskControlReportCallbackAdapter(
+        task_control_uows.callback_delivery,
+        clock=report_clock,
         callback_url=llm_config.callback_url or "",
         callback_timeout=llm_config.callback_timeout,
+        token_factory=report_callback_token_factory.new_token,
         lease_seconds=max(
             30.0,
             required_http_lease_seconds(llm_config.callback_timeout),
         ),
     )
-    report_runner = RunReportTask(
-        task_commands=report_task_commands,
-        progress_publisher=report_progress_publisher,
-        files=report_files,
-        artifacts=report_artifacts,
-        rag=report_rag,
-        audit=report_audit,
+    report_maintenance = ReportV2Maintenance(
         callbacks=report_callbacks,
         resources=report_resources,
+        config=report_infrastructure_config,
+    )
+    report_execution_uow_factory = SQLiteReportExecutionUnitOfWorkFactory(
+        task_control_transactions,
+        execution_builder=SQLiteTaskControlStore,
+        callback_delivery_builder=SQLiteCallbackControlStore,
+        resource_builder=lambda connection: SQLiteReportResourceStoreAdapter(
+            SQLiteReportResourceStore.from_connection(connection)
+        ),
+    )
+    report_steps = ReportStepRuntime(
+        uow_factory=report_execution_uow_factory,
+        clock=report_clock,
+    )
+    report_snapshot_loader = CodecTaskExecutionSnapshotLoader(
+        query_uow_factory=task_control_uows.queries,
+        codec=report_task_codec,
     )
     report_callback_recovery = RecoverReportCallbackSynchronously(
-        source=SQLiteReportCallbackRecoverySource(task_service),
+        source=SQLiteReportV2CallbackRecoverySource(
+            task_reader=report_v2_task_reader,
+            resources=report_resource_store,
+            artifacts=report_artifacts,
+        ),
         callbacks=report_callbacks,
     )
-    report_dispatcher = LocalReportTaskDispatcher(
-        task_commands=report_task_commands,
-        queue_inspector=report_task_commands,
-        resources=report_resources,
-        callbacks=report_callbacks,
-        execute=report_runner.execute,
-        config=report_infrastructure_config,
-        execution_limiter=upload_task_limiter,
-        process_guard=FileProcessSingletonGuard(
-            RUNTIME_DIR / "locks" / "report-dispatcher.lock"
+    report_instance_start_id = str(uuid4())
+    report_lease_token_factory = SecureTaskLeaseTokenFactory()
+
+    def build_report_execution_runtime(worker_slot: str) -> TaskExecutionRuntime:
+        """每个 worker/Task 创建独立 Workflow，避免可变运行结果跨线程共享。"""
+
+        workflow = RunReportV2Workflow(
+            steps=report_steps,
+            progress_publisher=progress_adapter,
+            files=report_files,
+            artifacts=report_artifacts,
+            rag=report_rag,
+            audit=report_audit,
+            callbacks=report_callbacks,
+            resources=report_resources,
+            execution_profile=report_execution_profile,
+            maintenance_wakeup=report_maintenance.wake_up,
+        )
+        return TaskExecutionRuntime(
+            task_type="report",
+            owner=TaskOwnerIdentity(
+                instance_start_id=report_instance_start_id,
+                process_id=os.getpid(),
+                executor_name="ReportExecutor",
+                worker_slot=worker_slot,
+            ),
+            clock=report_clock,
+            execution_uow_factory=task_control_uows.execution,
+            lease_token_factory=report_lease_token_factory,
+            heartbeat_supervisor_factory=lambda: ThreadedLeaseHeartbeatSupervisor(
+                clock=report_clock,
+                execution_uow_factory=task_control_uows.execution,
+                lease_settings=task_runtime_config.lease,
+                thread_name=f"report-lease-{worker_slot}",
+            ),
+            workflow_runner=workflow,
+            snapshot_loader=report_snapshot_loader,
+            lease_settings=task_runtime_config.lease,
+        )
+
+    report_executor = LocalTaskExecutor(
+        task_type="report",
+        worker_count=task_runtime_config.report_worker_count,
+        scan_interval_seconds=task_runtime_config.executor_scan_interval_seconds,
+        stop_grace_seconds=task_runtime_config.lease.stop_grace_seconds,
+        clock=report_clock,
+        query_uow_factory=task_control_uows.queries,
+        execution_uow_factory=task_control_uows.execution,
+        permit=upload_task_limiter,
+        runtime_factory=build_report_execution_runtime,
+        thread_name_prefix="report-v2",
+        dispatch_failure_cooldown_seconds=(
+            report_infrastructure_config.dispatch_failure_retry_seconds
         ),
+    )
+    report_dispatcher = ReportV2TaskDispatcher(
+        executor=report_executor,
+        maintenance=report_maintenance,
     )
     # 正常 Worker、同步 check-task 与过期 Guard 维护必须共用唯一 Callback Adapter。
     # 这项 fail-fast 校验阻止后续组合根重构意外创建第二套发送权；维护线程本身仍只会
     # 冻结过期 ``sending``，绝不会调用同步恢复用例或自动补发 unknown。
     if not (
-        report_runner.callbacks
-        is report_callback_recovery.callbacks
+        report_callback_recovery.callbacks
         is report_dispatcher.callbacks
         is report_callbacks
     ):
         raise RuntimeError("Report Worker/check-task/维护线程必须共享同一 Callback Guard")
-    report_submit = SubmitReportTask(
-        task_commands=report_task_commands,
-        progress_publisher=report_progress_publisher,
+    if report_dispatcher.resources is not report_resources:
+        raise RuntimeError("Report Worker 与维护线程必须共享同一资源恢复状态机")
+    report_submit = SubmitReportV2Task(
+        admission_uow_factory=task_control_uows.admission,
+        codec=report_task_codec,
+        clock=report_clock,
+        progress_publisher=progress_adapter,
         dispatcher=report_dispatcher,
     )
 
@@ -1582,6 +1728,7 @@ def create_application_services() -> ApplicationServices:
         analysis_runtime_config=analysis_infrastructure_config,
         weaponry_services=weaponry_services,
         reassign_services=reassign_services,
+        task_reader=routed_task_reader,
     )
     logger.info(
         "应用依赖容器创建完成: knowledge_index_enabled=%s "

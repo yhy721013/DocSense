@@ -7,6 +7,7 @@ Bootstrap 是构造 Connection Factory、UoW、Store 和后台执行器之前的
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -23,6 +24,7 @@ from .schema import (
     TaskControlDatabaseIdentity,
     TaskControlSchemaError,
     create_root_schema,
+    install_component_schema,
     validate_task_control_schema,
 )
 
@@ -97,10 +99,20 @@ def _connect_for_validation(path: Path, *, busy_timeout_ms: int) -> sqlite3.Conn
     return connection
 
 
-def _strict_validate(path: Path, *, busy_timeout_ms: int) -> TaskControlDatabaseIdentity:
+def _strict_validate(
+    path: Path,
+    *,
+    busy_timeout_ms: int,
+    known_components: Mapping[str, Mapping[str, object]] | None = None,
+    required_components: Mapping[str, int] | None = None,
+) -> TaskControlDatabaseIdentity:
     connection = _connect_for_validation(path, busy_timeout_ms=busy_timeout_ms)
     try:
-        return validate_task_control_schema(connection)
+        return validate_task_control_schema(
+            connection,
+            known_components=known_components,
+            required_components=required_components,
+        )
     finally:
         connection.close()
 
@@ -162,6 +174,8 @@ def _create_unpublished_database(
     target_path: Path,
     *,
     busy_timeout_ms: int,
+    known_components: Mapping[str, Mapping[str, object]],
+    required_components: Mapping[str, int],
 ) -> tuple[Path, TaskControlDatabaseIdentity]:
     """在目标同目录创建并验证随机临时库，尚不触碰目标文件名。"""
 
@@ -191,6 +205,21 @@ def _create_unpublished_database(
             db_instance_uuid=str(uuid4()),
             created_at=created_at,
         )
+        for component_name in sorted(required_components):
+            manifest = known_components.get(component_name)
+            if manifest is None:
+                raise TaskControlBootstrapError(
+                    "bootstrap_required_component_unknown",
+                    "必需组件缺少当前发布版本 Manifest",
+                )
+            install_component_schema(
+                connection,
+                manifest,
+                installed_at=datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%S.%fZ"
+                ),
+                known_components=known_components,
+            )
     except Exception:
         if connection is not None:
             connection.close()
@@ -207,7 +236,12 @@ def _create_unpublished_database(
             f"临时数据库关闭后仍有侧车文件: count={len(sidecars)}",
         )
     try:
-        identity = _strict_validate(temp_path, busy_timeout_ms=busy_timeout_ms)
+        identity = _strict_validate(
+            temp_path,
+            busy_timeout_ms=busy_timeout_ms,
+            known_components=known_components,
+            required_components=required_components,
+        )
     except Exception:
         _cleanup_owned_temp_file_set(temp_path)
         raise
@@ -246,6 +280,8 @@ def bootstrap_task_control_database(
     busy_timeout_ms: int = 5_000,
     immutable_offline_snapshot: bool = False,
     writers_stopped_confirmed: bool = False,
+    known_components: Mapping[str, Mapping[str, object]] | None = None,
+    required_components: Mapping[str, int] | None = None,
 ) -> TaskControlBootstrapResult:
     """预检旧库后创建或严格打开 v2 Task Control SQLite。
 
@@ -257,6 +293,16 @@ def bootstrap_task_control_database(
         raise TypeError("busy_timeout_ms 必须是整数")
     if busy_timeout_ms < 1 or busy_timeout_ms > 60_000:
         raise ValueError("busy_timeout_ms 必须位于 1..60000")
+
+    known = dict(known_components or {})
+    required = dict(required_components or {})
+    for component_name, version in required.items():
+        manifest = known.get(component_name)
+        if manifest is None or manifest.get("componentVersion") != version:
+            raise TaskControlBootstrapError(
+                "bootstrap_required_component_unknown",
+                "必需组件版本必须与当前发布版本 Manifest 完全一致",
+            )
 
     old_path = _resolve_database_path(old_database_path, must_exist=True)
     new_path = _resolve_database_path(new_database_path, must_exist=False)
@@ -280,14 +326,17 @@ def bootstrap_task_control_database(
         )
     created = False
     try:
-        _preflight_old_database(
-            old_path,
-            new_path,
-            immutable_offline_snapshot=immutable_offline_snapshot,
-            writers_stopped_confirmed=writers_stopped_confirmed,
-        )
         members = _existing_file_set_members(new_path)
         if new_path.exists():
+            # 旧库预检只属于“首次发布空 v2 控制面”的切换门禁。v2 已经发布后，尚未
+            # 迁移的业务会继续在旧库产生合法活动事实；若每次重启仍要求旧库全空，
+            # Report 试点会被 Weaponry/Analysis 的正常任务永久阻断。重开路径只严格
+            # 校验 v2 自身身份与组件，不从旧库迁移、补权或修复任何事实。
+            logger.info(
+                "Task Control 已存在，跳过仅首次发布使用的旧库空现场预检: "
+                "new_path_sha256=%s",
+                _path_digest(new_path),
+            )
             if not new_path.is_file():
                 raise TaskControlBootstrapError(
                     "target_file_set_conflict",
@@ -299,8 +348,43 @@ def bootstrap_task_control_database(
                     "target_hot_journal_present",
                     "目标数据库存在 journal，拒绝在启动路径中自动恢复或删除",
                 )
-            identity = _strict_validate(new_path, busy_timeout_ms=busy_timeout_ms)
+            # 已存在数据库只允许在应用后台线程尚未启动、仍持有 Schema 启动锁时安装缺失组件。
+            connection = sqlite3.connect(
+                f"{new_path.as_uri()}?mode=rw",
+                uri=True,
+                timeout=busy_timeout_ms / 1000,
+                isolation_level=None,
+            )
+            try:
+                connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+                connection.execute("PRAGMA foreign_keys = ON")
+                current = validate_task_control_schema(
+                    connection,
+                    known_components=known,
+                )
+                for component_name in sorted(set(required) - set(current.registered_components)):
+                    install_component_schema(
+                        connection,
+                        known[component_name],
+                        installed_at=datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S.%fZ"
+                        ),
+                        known_components=known,
+                    )
+                identity = validate_task_control_schema(
+                    connection,
+                    known_components=known,
+                    required_components=required,
+                )
+            finally:
+                connection.close()
         else:
+            _preflight_old_database(
+                old_path,
+                new_path,
+                immutable_offline_snapshot=immutable_offline_snapshot,
+                writers_stopped_confirmed=writers_stopped_confirmed,
+            )
             if members:
                 raise TaskControlBootstrapError(
                     "target_file_set_conflict",
@@ -309,6 +393,8 @@ def bootstrap_task_control_database(
             temp_path, _ = _create_unpublished_database(
                 new_path,
                 busy_timeout_ms=busy_timeout_ms,
+                known_components=known,
+                required_components=required,
             )
             try:
                 if _existing_file_set_members(new_path):
@@ -320,7 +406,12 @@ def bootstrap_task_control_database(
             finally:
                 _cleanup_owned_temp_file_set(temp_path)
             created = True
-            identity = _strict_validate(new_path, busy_timeout_ms=busy_timeout_ms)
+            identity = _strict_validate(
+                new_path,
+                busy_timeout_ms=busy_timeout_ms,
+                known_components=known,
+                required_components=required,
+            )
         logger.info(
             "Task Control 数据库 Bootstrap 通过: path_sha256=%s created=%s "
             "db_instance_uuid_prefix=%s root_fingerprint_prefix=%s components=%d",

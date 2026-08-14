@@ -351,6 +351,36 @@ class TaskControlBootstrapTests(unittest.TestCase):
             self.assertEqual("legacy_preflight_blocked", raised.exception.code)
             self.assertFalse(new_path.exists())
 
+    def test_reopen_does_not_require_unmigrated_legacy_businesses_to_be_idle(self) -> None:
+        """分业务切换后，既有 v2 库重启不能被旧库后续活动事实阻断。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = root / "old.sqlite3"
+            new_path = root / "new.sqlite3"
+            self._create_empty_old_database(old_path)
+            first = bootstrap_task_control_database(old_path, new_path)
+
+            connection = sqlite3.connect(old_path)
+            connection.execute(
+                """
+                CREATE TABLE llm_tasks (
+                    business_type TEXT,
+                    status TEXT,
+                    callback_status TEXT
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO llm_tasks VALUES ('weaponry', '0', 'pending')"
+            )
+            connection.commit()
+            connection.close()
+
+            reopened = bootstrap_task_control_database(old_path, new_path)
+            self.assertFalse(reopened.created)
+            self.assertEqual(first.identity, reopened.identity)
+
     def test_existing_identity_drift_is_rejected_and_not_repaired(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

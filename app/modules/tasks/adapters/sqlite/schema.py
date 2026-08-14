@@ -62,12 +62,27 @@ def _reject_float(_value: str) -> Any:
     raise TaskControlSchemaError("manifest_float_forbidden", "Manifest 禁止浮点数")
 
 
+def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """拒绝 JSON 对象重复键，避免解析器静默采用最后一个值掩盖契约漂移。"""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise TaskControlSchemaError(
+                "manifest_duplicate_key",
+                f"Manifest JSON 对象包含重复键: {key}",
+            )
+        result[key] = value
+    return result
+
+
 def _load_manifest(path: Path = _MANIFEST_PATH) -> dict[str, Any]:
     try:
         payload = json.loads(
             path.read_text(encoding="utf-8"),
             parse_float=_reject_float,
             parse_constant=_reject_float,
+            object_pairs_hook=_reject_duplicate_object_keys,
         )
     except (OSError, json.JSONDecodeError) as exc:
         raise TaskControlSchemaError(
@@ -319,6 +334,122 @@ def root_schema_ddl() -> tuple[str, ...]:
     tables = tuple(_create_table_sql(table) for table in manifest["tables"])
     indexes = tuple(_create_index_sql(index) for index in manifest["indexes"])
     return tables + indexes
+
+
+def component_schema_ddl(manifest: Mapping[str, Any]) -> tuple[str, ...]:
+    """根据冻结组件 Manifest 生成确定顺序的 DDL。
+
+    本函数只生成 SQL，不打开连接、不执行 DDL。组件安装必须由
+    :func:`install_component_schema` 在显式独占事务内完成，普通数据库打开严禁调用。
+    """
+
+    _validate_manifest_definition(manifest)
+    if manifest.get("componentName") == "core":
+        raise TaskControlSchemaError(
+            "component_manifest_invalid",
+            "业务组件 Manifest 不得声明为 core",
+        )
+    tables = tuple(_create_table_sql(table) for table in manifest.get("tables", []))
+    indexes = tuple(_create_index_sql(index) for index in manifest.get("indexes", []))
+    return tables + indexes
+
+
+def install_component_schema(
+    connection: sqlite3.Connection,
+    manifest: Mapping[str, Any],
+    *,
+    installed_at: str,
+    known_components: Mapping[str, Mapping[str, Any]],
+) -> TaskControlDatabaseIdentity:
+    """在独占事务中安装一个冻结业务组件，并在提交后执行完整结构复核。
+
+    安装顺序固定为：验证现有根/组件并集、创建全部新对象、验证对象并集、写组件注册行、
+    提交、再次完整验证。任何一步失败都会回滚，禁止 ``IF NOT EXISTS`` 或增量补列掩盖漂移。
+    已安装的同版本组件按严格幂等验证返回；跳版本、降级及未知组件一律失败关闭。
+    """
+
+    if connection.in_transaction:
+        raise TaskControlSchemaError(
+            "component_install_nested_transaction",
+            "禁止在已有事务内安装组件",
+        )
+    _validate_utc(installed_at)
+    component_name = str(manifest.get("componentName", ""))
+    _validate_manifest_definition(manifest, expected_component=component_name)
+    component_version = manifest.get("componentVersion")
+    if type(component_version) is not int or component_version < 1:
+        raise TaskControlSchemaError(
+            "component_version_invalid",
+            "组件版本必须是正整数",
+        )
+    known = dict(known_components)
+    if component_name not in known or dict(known[component_name]) != dict(manifest):
+        raise TaskControlSchemaError(
+            "component_not_declared",
+            "待安装组件必须与当前发布版本的已知 Manifest 完全一致",
+        )
+
+    # 先在无写事务状态下完整验证当前结构。若目标组件已经安装，只有完整身份一致才按幂等成功。
+    before = validate_task_control_schema(connection, known_components=known)
+    if component_name in before.registered_components:
+        return validate_task_control_schema(
+            connection,
+            known_components=known,
+            required_components={component_name: component_version},
+        )
+
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        # 独占锁取得后再次核对此前看到的数据库身份，阻止检查与安装之间的结构竞态。
+        validate_task_control_connection_identity(connection, before)
+        for statement in component_schema_ddl(manifest):
+            connection.execute(statement)
+
+        root_manifest = _load_manifest()
+        installed_manifests = [root_manifest]
+        for name in before.registered_components:
+            installed_manifests.append(known[name])
+        installed_manifests.append(manifest)
+        # 契约要求先证明对象集合精确，再发布组件注册事实。
+        _validate_manifest_objects(connection, installed_manifests)
+        connection.execute(
+            f"""
+            INSERT INTO {_quote_identifier(COMPONENT_REGISTRY_TABLE)} (
+                component_name, component_version, root_schema_generation,
+                schema_fingerprint, manifest_profile, installed_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                component_name,
+                component_version,
+                SCHEMA_GENERATION,
+                component_manifest_fingerprint(manifest),
+                MANIFEST_PROFILE,
+                installed_at,
+            ),
+        )
+        connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+    required = {
+        name: int(known[name]["componentVersion"])
+        for name in (*before.registered_components, component_name)
+    }
+    identity = validate_task_control_schema(
+        connection,
+        known_components=known,
+        required_components=required,
+    )
+    logger.info(
+        "Task Control 组件安装通过: component=%s version=%d fingerprint_prefix=%s",
+        component_name,
+        component_version,
+        component_manifest_fingerprint(manifest)[:12],
+    )
+    return identity
 
 
 def create_root_schema(
@@ -917,7 +1048,9 @@ __all__ = [
     "USER_VERSION",
     "canonical_manifest_json",
     "component_manifest_fingerprint",
+    "component_schema_ddl",
     "create_root_schema",
+    "install_component_schema",
     "root_manifest_fingerprint",
     "root_schema_ddl",
     "validate_task_control_schema",

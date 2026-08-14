@@ -5,7 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import tempfile
 import unittest
+
+from app.modules.tasks.adapters.sqlite.schema import (
+    TaskControlSchemaError,
+    _load_manifest,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +140,12 @@ class Stage2TaskControlSchemaContractTests(unittest.TestCase):
             {"collation": "BINARY", "order": "ASC"},
             self.root_manifest["indexTermDefaults"],
         )
+        self.assertEqual(
+            1,
+            self.root_manifest_path.read_text(encoding="utf-8").count(
+                '"indexTermDefaults"'
+            ),
+        )
 
         tables = self.root_manifest["tables"]
         indexes = self.root_manifest["indexes"]
@@ -202,6 +214,17 @@ class Stage2TaskControlSchemaContractTests(unittest.TestCase):
                 self.assertTrue(set(index["columns"]).issubset(columns))
                 self.assertIs(type(index["unique"]), bool)
                 self.assertTrue(index["where"] is None or isinstance(index["where"], str))
+
+    def test_manifest_loader_rejects_duplicate_json_keys_before_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate.json"
+            path.write_text(
+                '{"componentName":"core","componentName":"core"}',
+                encoding="utf-8",
+            )
+            with self.assertRaises(TaskControlSchemaError) as captured:
+                _load_manifest(path)
+        self.assertEqual("manifest_duplicate_key", captured.exception.code)
 
     def test_recovery_decision_manifest_persists_v3_convergence_inputs(self) -> None:
         """下一观察时间和 Terminal Projection 必须是受约束根事实，不能只存在内存中。"""

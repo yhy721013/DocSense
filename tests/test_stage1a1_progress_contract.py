@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from app import create_app
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
-from tests.task_service_fixtures import seed_legacy_file_task
+from tests.task_service_fixtures import seed_legacy_file_task, seed_legacy_report_task
 
 
 _TARGET_CONTRACT_PATH = (
@@ -194,7 +194,8 @@ class ProgressRouteContractTests(unittest.TestCase):
         """reportId 转换失败只拒绝当前帧，且不施加 64 位业务范围限制。"""
 
         report_id = 10**80 + 132
-        self.task_service.create_report_task(
+        seed_legacy_report_task(
+            self.task_service,
             report_id,
             {
                 "businessType": "report",
@@ -234,7 +235,8 @@ class ProgressRouteContractTests(unittest.TestCase):
         )
 
     def test_overlong_report_id_returns_error_and_keeps_connection(self) -> None:
-        self.task_service.create_report_task(
+        seed_legacy_report_task(
+            self.task_service,
             132,
             {"businessType": "report", "params": [{"reportId": 132}]},
         )
@@ -383,7 +385,11 @@ class ProgressRouteContractTests(unittest.TestCase):
             missing.sent_messages[0]["data"],
         )
 
-        self.task_service.create_report_task(132, {"businessType": "report"})
+        seed_legacy_report_task(
+            self.task_service,
+            132,
+            {"businessType": "report"},
+        )
         report = self._run_websocket(
             json.dumps(
                 {"businessType": "report", "params": [{"reportId": 132}]}

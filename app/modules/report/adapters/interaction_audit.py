@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+import sqlite3
+from typing import Protocol, runtime_checkable
 
 from app.modules.report.domain.errors import ReportAuditError
 from app.modules.report.ports import (
@@ -12,13 +15,23 @@ from app.modules.report.ports import (
     ReportRagAuditOutcome,
 )
 from app.ports.rag import RagAttempt, RagExecutionTrace, RagLifecycleEvent, RagSource
-from app.services.llm_service.interaction_audit_service import (
+from app.infrastructure.observability.llm_interaction_store import (
     AUDIT_STATUS_SUCCEEDED,
+    LLMInteractionStore,
 )
-from app.services.llm_service.task_service import LLMTaskService
+from app.modules.tasks.domain import TaskBusinessRef, TaskId
+from app.modules.tasks.ports import TaskReadPort
 
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _InteractionAuditBackend(Protocol):
+    """迁移期最小审计边界；旧 Service 只能单向委托到共享 Store。"""
+
+    def create_llm_interaction_with_trace(self, **kwargs): ...
+    def append_llm_interaction_lifecycle_events(self, *args, **kwargs): ...
 
 
 class SQLiteReportInteractionAuditAdapter:
@@ -29,9 +42,9 @@ class SQLiteReportInteractionAuditAdapter:
     进入成功终态或清理 AnythingLLM 现场。
     """
 
-    def __init__(self, task_service: LLMTaskService) -> None:
-        if not isinstance(task_service, LLMTaskService):
-            raise TypeError("task_service 必须是 LLMTaskService")
+    def __init__(self, task_service: _InteractionAuditBackend) -> None:
+        if not isinstance(task_service, _InteractionAuditBackend):
+            raise TypeError("task_service 必须实现共享交互审计边界")
         self._task_service = task_service
 
     def persist_trace(self, command: PersistReportRagTrace) -> ReportAuditReceipt:
@@ -222,4 +235,56 @@ class SQLiteReportInteractionAuditAdapter:
         )
 
 
-__all__ = ["SQLiteReportInteractionAuditAdapter"]
+def build_report_v2_interaction_audit_adapter(
+    database_path: str | Path,
+    *,
+    task_reader: TaskReadPort,
+) -> SQLiteReportInteractionAuditAdapter:
+    """构造共享审计 Writer，并用 v2 TaskId 精确校验 Report 身份。
+
+    审计与 Task Control 位于两个 SQLite 文件，因此这里只做执行前身份门禁；Runner
+    已用持久 Step intent/checkpoint 隔离跨库提交结果未知，不能把本检查描述成原子事务。
+    """
+
+    if not isinstance(task_reader, TaskReadPort):
+        raise TypeError("task_reader 必须实现 TaskReadPort")
+    resolved = Path(database_path).resolve()
+
+    def connection_factory(timeout_seconds: float) -> sqlite3.Connection:
+        connection = sqlite3.connect(resolved, timeout=max(0.0, timeout_seconds))
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute(
+            f"PRAGMA busy_timeout = {int(max(0.0, timeout_seconds) * 1000)}"
+        )
+        return connection
+
+    def validate_identity(
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+    ) -> bool:
+        if business_type != "report":
+            return False
+        try:
+            snapshot = task_reader.get_by_id(TaskId(execution_id))
+        except (TypeError, ValueError):
+            return False
+        return (
+            snapshot is not None
+            and snapshot.business_ref == TaskBusinessRef(business_type, business_key)
+        )
+
+    return SQLiteReportInteractionAuditAdapter(
+        LLMInteractionStore(
+            connection_factory,
+            task_identity_validator=validate_identity,
+        )
+    )
+
+
+__all__ = [
+    "SQLiteReportInteractionAuditAdapter",
+    "build_report_v2_interaction_audit_adapter",
+]

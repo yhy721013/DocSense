@@ -42,7 +42,7 @@ from app.modules.tasks.domain import TaskBusinessRef
 from app.modules.tasks.ports import ExpectedTaskCompletion
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
-from tests.task_service_fixtures import seed_legacy_file_task
+from tests.task_service_fixtures import seed_legacy_file_task, seed_legacy_report_task
 
 
 _TARGET_CONTRACT_PATH = (
@@ -268,7 +268,8 @@ class CheckTaskRouteContractTests(unittest.TestCase):
             {"businessType": "file", "params": [{"fileName": "demo.pdf"}]},
             status="1",
         )
-        self.task_service.create_report_task(
+        seed_legacy_report_task(
+            self.task_service,
             132,
             {"businessType": "report", "params": [{"reportId": 132}]},
         )
@@ -299,7 +300,8 @@ class CheckTaskRouteContractTests(unittest.TestCase):
         """超 64 位的兼容整数字符串可查找，但成功体仍严格为空。"""
 
         report_id = 10**80 + 132
-        self.task_service.create_report_task(
+        seed_legacy_report_task(
+            self.task_service,
             report_id,
             {
                 "businessType": "report",
@@ -446,7 +448,8 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_report_duplicate_normalized_ids_only_trigger_one_recovery(self) -> None:
         """一个请求中的等价 reportId 只能授权一轮同步回调恢复。"""
 
-        self.task_service.create_report_task(
+        seed_legacy_report_task(
+            self.task_service,
             132,
             {"businessType": "report", "params": [{"reportId": 132}]},
         )
@@ -503,7 +506,8 @@ class CheckTaskRouteContractTests(unittest.TestCase):
     def test_batch_is_fully_validated_before_report_recovery_side_effect(self) -> None:
         """后置非法项必须在任何 report Callback 恢复之前拒绝整次请求。"""
 
-        self.task_service.create_report_task(
+        seed_legacy_report_task(
+            self.task_service,
             132,
             {"businessType": "report", "params": [{"reportId": 132}]},
         )

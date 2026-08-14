@@ -12,13 +12,15 @@ from app.modules.tasks.ports import TaskSubmissionCommand
 from app.modules.report.application import ReportTaskCompletion
 from app.modules.report.domain import (
     REPORT_INPUT_SCHEMA_VERSION,
+    REPORT_INPUT_SCHEMA_VERSION_V2,
     ReportId,
+    ReportExecutionProfile,
     ReportInputSnapshot,
     ReportSubmission,
 )
 
 
-_REPORT_INPUT_KEYS = frozenset(
+_REPORT_INPUT_V1_KEYS = frozenset(
     {
         "schema_version",
         "task_id",
@@ -32,12 +34,38 @@ _REPORT_INPUT_KEYS = frozenset(
         "trace_id",
     }
 )
+_REPORT_INPUT_V2_KEYS = _REPORT_INPUT_V1_KEYS | {"execution_profile"}
 
 
 class ReportTaskCommandCodec:
-    """保存完整不可变报告输入，并生成兼容 ``llm_tasks`` 的请求投影。"""
+    """保存完整不可变报告输入，并生成兼容 ``llm_tasks`` 的请求投影。
+
+    无参构造继续服务尚未切换的 v1 生产链；阶段 2-4 一次切换时必须通过 ``for_v2``
+    注入受理时冻结的 Profile。两种实例都可严格解码 v1/v2，便于离线诊断；切换后的
+    新写只装配 v2 实例，不能用当前环境为历史 v1 补齐 Profile 后执行。
+    """
 
     task_type = "report"
+
+    def __init__(self, execution_profile: ReportExecutionProfile | None = None) -> None:
+        if execution_profile is not None and not isinstance(
+            execution_profile,
+            ReportExecutionProfile,
+        ):
+            raise TypeError("execution_profile 必须是 ReportExecutionProfile 或 None")
+        self._execution_profile = execution_profile
+
+    @classmethod
+    def for_v2(cls, execution_profile: ReportExecutionProfile) -> "ReportTaskCommandCodec":
+        return cls(execution_profile)
+
+    @property
+    def write_schema_version(self) -> int:
+        return (
+            REPORT_INPUT_SCHEMA_VERSION_V2
+            if self._execution_profile is not None
+            else REPORT_INPUT_SCHEMA_VERSION
+        )
 
     def encode_submission(
         self,
@@ -57,7 +85,7 @@ class ReportTaskCommandCodec:
             command.business_ref.business_type != self.task_type
             or command.business_ref.business_key
             != submission.report_id.business_key
-            or command.input_schema_version != REPORT_INPUT_SCHEMA_VERSION
+            or command.input_schema_version != self.write_schema_version
             or command.trace_id != submission.trace_id
         ):
             raise ValueError("报告命令身份、Schema 或 trace 不一致")
@@ -66,6 +94,7 @@ class ReportTaskCommandCodec:
             task_id=task_id.value,
             accepted_at=accepted_at,
             schema_version=command.input_schema_version,
+            execution_profile=self._execution_profile,
         )
         input_payload = {
             "schema_version": snapshot.schema_version,
@@ -79,6 +108,8 @@ class ReportTaskCommandCodec:
             "accepted_at": snapshot.accepted_at,
             "trace_id": snapshot.trace_id,
         }
+        if snapshot.execution_profile is not None:
+            input_payload["execution_profile"] = snapshot.execution_profile.to_dict()
         # llm_tasks 仍是旧查询/Progress 的最新投影，因此保留既有公开请求形状；该 JSON
         # 不作为 Worker 输入，Worker 只解码上面的 execution input_payload。
         projection_request = {
@@ -107,11 +138,19 @@ class ReportTaskCommandCodec:
         schema_version: int,
         payload: Mapping[str, Any],
     ) -> ReportInputSnapshot:
-        if schema_version != REPORT_INPUT_SCHEMA_VERSION:
+        if schema_version not in {
+            REPORT_INPUT_SCHEMA_VERSION,
+            REPORT_INPUT_SCHEMA_VERSION_V2,
+        }:
             raise ValueError("不支持的报告输入 Schema 版本")
         if not isinstance(payload, Mapping):
             raise TypeError("payload 必须是 Mapping")
-        if frozenset(payload.keys()) != _REPORT_INPUT_KEYS:
+        expected_keys = (
+            _REPORT_INPUT_V1_KEYS
+            if schema_version == REPORT_INPUT_SCHEMA_VERSION
+            else _REPORT_INPUT_V2_KEYS
+        )
+        if frozenset(payload.keys()) != expected_keys:
             raise ValueError("报告 input_payload 字段集合不完整或包含未知字段")
         payload_schema = payload.get("schema_version")
         if payload_schema != schema_version:
@@ -122,6 +161,12 @@ class ReportTaskCommandCodec:
             public_value=public_report_id,  # type: ignore[arg-type]
             business_key=report_id_key,  # type: ignore[arg-type]
         )
+        execution_profile = None
+        if schema_version == REPORT_INPUT_SCHEMA_VERSION_V2:
+            raw_profile = payload.get("execution_profile")
+            if not isinstance(raw_profile, Mapping):
+                raise ValueError("Report Input v2 execution_profile 必须是 Mapping")
+            execution_profile = ReportExecutionProfile.from_dict(raw_profile)
         return ReportInputSnapshot(
             schema_version=schema_version,
             task_id=payload.get("task_id"),  # type: ignore[arg-type]
@@ -132,6 +177,7 @@ class ReportTaskCommandCodec:
             requirement=payload.get("requirement"),  # type: ignore[arg-type]
             accepted_at=payload.get("accepted_at"),  # type: ignore[arg-type]
             trace_id=payload.get("trace_id"),  # type: ignore[arg-type]
+            execution_profile=execution_profile,
         )
 
     def encode_result(self, result: ReportTaskCompletion) -> EncodedTaskResult:

@@ -16,14 +16,6 @@
     "collation": "BINARY",
     "order": "ASC"
   },
-  "indexTermDefaults": {
-    "collation": "BINARY",
-    "order": "ASC"
-  },
-  "indexTermDefaults": {
-    "collation": "BINARY",
-    "order": "ASC"
-  },
   "tables": [
     {
       "name": "task_control_schema_metadata",

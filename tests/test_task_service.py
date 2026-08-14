@@ -32,6 +32,7 @@ from tests.task_service_fixtures import (
     build_analysis_callback_recovery,
     create_terminal_analysis_task,
     seed_legacy_file_task,
+    seed_legacy_report_task,
 )
 
 
@@ -878,7 +879,6 @@ class LLMTaskServiceTests(unittest.TestCase):
                 conn.execute("PRAGMA foreign_keys = OFF")
                 for table in (
                     "weaponry_task_document_snapshots",
-                    "report_resource_records",
                     "callback_guard_release_audits",
                     "callback_delivery_guards",
                     "llm_task_executions",
@@ -929,7 +929,6 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "llm_task_executions",
                 "callback_delivery_guards",
                 "callback_guard_release_audits",
-                "report_resource_records",
                 "weaponry_task_document_snapshots",
             }.issubset(tables)
         )
@@ -946,7 +945,8 @@ class LLMTaskServiceTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             db_path = f"{tmp}/tasks.sqlite3"
             source_service = LLMTaskService(db_path=db_path)
-            original_task = source_service.create_report_task(
+            original_task = seed_legacy_report_task(
+                source_service,
                 report_id=132,
                 request_payload={"businessType": "report"},
             )
@@ -956,6 +956,27 @@ class LLMTaskServiceTests(unittest.TestCase):
 
             with sqlite3.connect(db_path) as conn:
                 conn.execute("PRAGMA foreign_keys = OFF")
+                # 阶段 2-4 第 8 步后旧 Service 不再创建或迁移 Report 资源表。
+                # 这里显式模拟升级前已经存在的遗留表，用于证明初始化只是不再拥有它，
+                # 而不是破坏性 DROP 历史现场。
+                conn.execute(
+                    """
+                    CREATE TABLE report_resource_records (
+                        execution_id TEXT PRIMARY KEY,
+                        business_type TEXT NOT NULL,
+                        business_key TEXT NOT NULL,
+                        artifact_namespace TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        record_payload TEXT NOT NULL,
+                        version INTEGER NOT NULL,
+                        recovery_deferral_count INTEGER NOT NULL DEFAULT 0,
+                        next_recovery_at TEXT,
+                        last_recovery_reason TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
                 execution_rows = (
                     (
                         report_execution_id,
@@ -1462,35 +1483,14 @@ class LLMTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["business_key"] for item in tasks], ["a.pdf", "b.pdf"])
 
-    def test_llm_interaction_persists_content_and_cleanup_status(self):
-        with workspace_tempdir() as tmp:
-            service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-
-            interaction_id = service.create_llm_interaction(
-                business_type="file",
-                business_key="demo.pdf",
-                workspace_name="llm-file-1000",
-                workspace_slug="llm-file-1000",
-                thread_slug="analysis-demo",
-                prompt="提取文档字段",
-                response='{"summary":"摘要"}',
-                sources=[{"title": "demo.pdf", "text": "原文片段"}],
-                status="succeeded",
-            )
-            service.update_llm_interaction_cleanup(interaction_id, status="deleted")
-
-            interactions = service.get_llm_interactions("file", "demo.pdf")
-
-            self.assertEqual(len(interactions), 1)
-            self.assertEqual(interactions[0]["prompt"], "提取文档字段")
-            self.assertEqual(interactions[0]["response"], '{"summary":"摘要"}')
-            self.assertEqual(interactions[0]["sources"][0]["text"], "原文片段")
-            self.assertEqual(interactions[0]["workspace_cleanup_status"], "deleted")
-
     def test_completed_task_with_failed_callback_should_replay(self):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_report_task(report_id=7, request_payload={"businessType": "report"})
+            seed_legacy_report_task(
+                service,
+                report_id=7,
+                request_payload={"businessType": "report"},
+            )
             service.mark_business_completed("report", "7", {"details": "<div>ok</div>"}, status="1")
             service.mark_callback_failed("report", "7", "timeout")
             self.assertTrue(service.should_replay_callback("report", "7"))

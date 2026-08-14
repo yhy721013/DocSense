@@ -93,6 +93,7 @@ class TaskControlSQLiteInfrastructureTestCase(unittest.TestCase):
         return SQLiteTaskExecutionUnitOfWorkFactory(
             self.transaction_manager,
             execution_builder=_ConnectionProbeStore,
+            callback_delivery_builder=_ConnectionProbeStore,
         )
 
 
@@ -294,6 +295,7 @@ class SQLiteNarrowUnitOfWorkTests(TaskControlSQLiteInfrastructureTestCase):
         none_builder = SQLiteTaskExecutionUnitOfWorkFactory(
             self.transaction_manager,
             execution_builder=lambda _connection: None,
+            callback_delivery_builder=_ConnectionProbeStore,
         )
         with self.assertRaisesRegex(TypeError, "不得返回 None"):
             with none_builder():

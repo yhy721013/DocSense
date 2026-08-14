@@ -132,6 +132,10 @@ class ReportArtifactPort(Protocol):
     ) -> ReportArtifactRef:
         ...
 
+    def load_report_html(self, artifact: ReportArtifactRef) -> str:
+        """读取已持久化最终报告，并严格复核引用的大小与摘要。"""
+        ...
+
     def cleanup_unretained(
         self,
         scope: ReportArtifactScope,

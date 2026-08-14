@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import logging
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from app.modules.report.domain import (
     ReportCleanupError,
@@ -24,10 +24,26 @@ from app.modules.report.ports import (
     ReportResourceState,
 )
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
-from app.services.llm_service.task_service import LLMTaskService
 
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _ReportResourceRecordBackend(Protocol):
+    """资源 DTO 映射层所需的最小原始持久化边界。
+
+    阶段 2-4 完成后，该协议只由 Report 自有 SQLite Store 实现。映射层保留结构化
+    Protocol，是为了隔离领域 DTO 与物理行结构，并不表示可以重新接入巨型 Service 或双写。
+    """
+
+    def create_report_resource_record(self, **kwargs): ...
+    def get_report_resource_record(self, execution_id: str): ...
+    def save_report_resource_record(self, **kwargs): ...
+    def prepare_report_resource_cleanup(self, execution_id: str, **kwargs): ...
+    def list_recoverable_report_resource_ids(self, **kwargs): ...
+    def defer_report_resource_recovery(self, execution_id: str, **kwargs): ...
+    def get_task_execution(self, execution_id: str): ...
 
 _PAYLOAD_SCHEMA_VERSION = 4
 _PAYLOAD_FIELDS_V2 = frozenset(
@@ -66,25 +82,25 @@ def _clock_iso(clock: Callable[[], datetime]) -> str:
         raise TypeError("resource store clock 必须返回 datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("resource store clock 必须返回带时区 datetime")
-    return value.astimezone(timezone.utc).isoformat()
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 class SQLiteReportResourceStoreAdapter:
     """把资源恢复 DTO 映射到 ``report_resource_records``。
 
     本适配器只执行短数据库事务，不进行文件删除、AnythingLLM 调用或审计追加。最终
-    Artifact 所有权由 TaskService 在 ``prepare_cleanup`` 时读取不可变 execution 终态后
+    Artifact 所有权由专用持久化后端在 ``prepare_cleanup`` 时读取不可变 execution 终态后
     权威决定，避免 Application 或旧 Worker 自行声明 retain。
     """
 
     def __init__(
         self,
-        task_service: LLMTaskService,
+        task_service: _ReportResourceRecordBackend,
         *,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
-        if not isinstance(task_service, LLMTaskService):
-            raise TypeError("task_service 必须是 LLMTaskService")
+        if not isinstance(task_service, _ReportResourceRecordBackend):
+            raise TypeError("task_service 必须实现 Report Resource 原始持久化边界")
         if not callable(clock):
             raise TypeError("clock 必须可调用")
         self._task_service = task_service

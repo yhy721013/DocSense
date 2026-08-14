@@ -28,10 +28,10 @@ from app.modules.report.ports import (
     ReportSourceDownload,
     ReportTemplateDownload,
 )
-from app.services.utils.file_downloader import download_to_temp_file
-from app.services.utils.word_extractor import extract_text_from_word
+from app.infrastructure.http.source_download import download_source_to_temp_file
 
 from .local_artifacts import LocalReportArtifactAdapter
+from .docx_template import extract_docx_template_text
 
 
 logger = logging.getLogger(__name__)
@@ -58,8 +58,8 @@ class LegacyReportFileAdapter:
         document_preparer: LocalDocumentPreparationAdapter,
         download_timeout: float = 60.0,
         max_download_bytes: int = 512 * 1024 * 1024,
-        downloader: Downloader = download_to_temp_file,
-        word_extractor: WordExtractor = extract_text_from_word,
+        downloader: Downloader = download_source_to_temp_file,
+        word_extractor: WordExtractor = extract_docx_template_text,
     ) -> None:
         if not isinstance(artifacts, LocalReportArtifactAdapter):
             raise TypeError("artifacts 必须是 LocalReportArtifactAdapter")

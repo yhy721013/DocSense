@@ -22,6 +22,13 @@ from app.modules.tasks.ports import (
 
 TAuthorizedResult = TypeVar("TAuthorizedResult")
 
+_NON_STOPPING_MUTATION_OUTCOMES = {
+    TaskExecutionMutationOutcome.APPLIED,
+    # 这两个结果是幂等收敛事实，不等价于租约失权；业务 Workflow 负责决定是否返回。
+    TaskExecutionMutationOutcome.DUPLICATE_STEP_INTENT,
+    TaskExecutionMutationOutcome.DUPLICATE_TERMINAL,
+}
+
 
 class TaskExecutionAuthoritySession:
     """原子轮换 Authority，并把失权转换为单向协作停止信号。"""
@@ -54,6 +61,50 @@ class TaskExecutionAuthoritySession:
         with self._lock:
             self._raise_if_stopped()
             return operation(self._authority)
+
+    def run_mutation(
+        self,
+        operation: Callable[
+            [TaskExecutionAuthority],
+            TaskExecutionMutationOutcome,
+        ],
+    ) -> TaskExecutionMutationOutcome:
+        """执行短条件写，并确保调用方不能忽略失权后继续产生副作用。
+
+        ``run_authorized`` 仍用于读取有限内部结果或测试诊断；所有 Task 执行期条件写应
+        使用本方法。APPLIED 与两类明确幂等结果交还 Workflow 处理，其余有限结果会先
+        原子设置停止事实，再抛出 ``TaskExecutionStopRequested``，因此错误调用方无法
+        仅因忘记检查返回值而越过失权边界。
+        """
+
+        if not callable(operation):
+            raise TypeError("operation 必须可调用")
+        with self._lock:
+            self._raise_if_stopped()
+            try:
+                outcome = operation(self._authority)
+                if not isinstance(outcome, TaskExecutionMutationOutcome):
+                    raise TypeError("mutation operation 必须返回 TaskExecutionMutationOutcome")
+                if outcome in _NON_STOPPING_MUTATION_OUTCOMES:
+                    return outcome
+                stop_result = LeaseSupervisorResult(
+                    LeaseSupervisorOutcome.AUTHORITY_LOST,
+                    outcome,
+                )
+                self._set_stop_locked(stop_result)
+                raise TaskExecutionStopRequested(stop_result)
+            except TaskExecutionStopRequested:
+                raise
+            except ClockAnomalyError:
+                self._set_stop_locked(
+                    LeaseSupervisorResult(LeaseSupervisorOutcome.CLOCK_UNSAFE)
+                )
+                raise
+            except Exception:
+                self._set_stop_locked(
+                    LeaseSupervisorResult(LeaseSupervisorOutcome.INFRASTRUCTURE_ERROR)
+                )
+                raise
 
     def renew_authority(
         self,

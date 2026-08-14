@@ -297,41 +297,24 @@ class ReportRouteImplementedContractTests(unittest.TestCase):
 
 
 class ReportLegacyCompatibilityIsolationTests(unittest.TestCase):
-    """保留旧 API 风险证明，同时确认生产报告路由不再引用它。"""
+    """阶段 2-4 收口后，旧 Report 专用 SQL 入口不得重新出现。"""
 
-    def test_old_execution_result_can_mutate_new_latest_row(self) -> None:
+    def test_task_service_exposes_no_report_specific_write_entry(self) -> None:
         with workspace_tempdir() as runtime_directory:
             task_service = LLMTaskService(
                 db_path=f"{runtime_directory}/tasks.sqlite3"
             )
-            first = task_service.create_report_task(
-                132,
-                {"businessType": "report", "version": "old"},
-            )
-            second = task_service.create_report_task(
-                132,
-                {"businessType": "report", "version": "new"},
-            )
-
-            task_service.mark_business_result(
-                "report",
-                "132",
-                {
-                    "ownerExecutionId": first["execution_id"],
-                    "details": "旧执行结果",
-                },
-                status="1",
-            )
-            latest = task_service.get_task("report", "132")
-
-        self.assertIsNotNone(latest)
-        assert latest is not None
-        self.assertEqual(second["execution_id"], latest["execution_id"])
-        self.assertEqual("1", latest["status"])
-        self.assertEqual(
-            first["execution_id"],
-            latest["result_payload"]["ownerExecutionId"],
-        )
+        for method_name in (
+            "create_report_task",
+            "create_report_resource_record",
+            "get_report_resource_record",
+            "save_report_resource_record",
+            "prepare_report_resource_cleanup",
+            "defer_report_resource_recovery",
+            "list_recoverable_report_resource_ids",
+        ):
+            with self.subTest(method=method_name):
+                self.assertFalse(hasattr(task_service, method_name))
 
 
 class ReportStaticImplementedContractTests(unittest.TestCase):

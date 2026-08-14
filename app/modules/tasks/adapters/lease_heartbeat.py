@@ -114,9 +114,21 @@ class ThreadedLeaseHeartbeatSupervisor:
                 raise RuntimeError("LeaseHeartbeatSupervisor 尚未启动")
             thread = self._thread
         self._pulse.stop()
-        # Pulse 必须可中断；heartbeat UoW 自身则受 SQLite busy budget 约束。这里不使用
-        # 强杀线程，也不修改 Task 状态，外层 Executor 的 stop grace 另行治理。
-        thread.join()
+        # 不强杀 Python 线程。等待上限来自启动前已校验的 stop grace；超时意味着本
+        # Runtime 已无法证明 heartbeat 线程完成回收，必须失败关闭并由 Executor 降级。
+        thread.join(timeout=self._lease_settings.stop_grace_seconds)
+        if thread.is_alive():
+            assert self._session is not None
+            timeout_result = LeaseSupervisorResult(
+                LeaseSupervisorOutcome.INFRASTRUCTURE_ERROR
+            )
+            self._request_stop(self._session, timeout_result)
+            logger.critical(
+                "Task heartbeat 线程未在 stop grace 内退出: thread_name=%s "
+                "reason_code=heartbeat_stop_timeout",
+                self._thread_name,
+            )
+            raise RuntimeError("LeaseHeartbeatSupervisor 停止超时")
         with self._state_lock:
             if self._result is None:
                 raise RuntimeError("LeaseHeartbeatSupervisor 未产生结束结果")
@@ -126,76 +138,75 @@ class ThreadedLeaseHeartbeatSupervisor:
         assert self._session is not None
         session = self._session
         result = LeaseSupervisorResult(LeaseSupervisorOutcome.STOPPED)
-        while self._pulse.wait_next(
-            self._lease_settings.heartbeat_interval_seconds
-        ):
-            try:
+        try:
+            while self._pulse.wait_next(
+                self._lease_settings.heartbeat_interval_seconds
+            ):
                 heartbeat = session.renew_authority(self._renew_once)
-            except TaskExecutionStopRequested as exc:
-                result = exc.result
-                break
-            except ClockAnomalyError:
-                result = LeaseSupervisorResult(LeaseSupervisorOutcome.CLOCK_UNSAFE)
-                self._request_stop(session, result)
-                break
-            except Exception as exc:
+                if heartbeat.outcome is TaskExecutionMutationOutcome.APPLIED:
+                    renewed = heartbeat.authority
+                    assert renewed is not None
+                    logger.debug(
+                        "Task heartbeat 已续租: task_id=%s attempt_no=%d fencing=%d",
+                        renewed.task_id,
+                        renewed.attempt_no,
+                        renewed.fencing_token,
+                    )
+                    continue
+
                 result = LeaseSupervisorResult(
-                    LeaseSupervisorOutcome.INFRASTRUCTURE_ERROR
+                    LeaseSupervisorOutcome.AUTHORITY_LOST,
+                    heartbeat.outcome,
                 )
                 authority = session.current_authority()
-                logger.error(
-                    "Task heartbeat 基础设施异常: task_id=%s attempt_no=%d fencing=%d "
-                    "reason_code=heartbeat_infrastructure_error error_type=%s",
+                logger.warning(
+                    "Task heartbeat 失权: task_id=%s attempt_no=%d fencing=%d "
+                    "outcome=%s reason_code=heartbeat_authority_lost",
                     authority.task_id,
                     authority.attempt_no,
                     authority.fencing_token,
-                    type(exc).__name__,
+                    heartbeat.outcome.value,
                 )
                 self._request_stop(session, result)
                 break
-
-            if heartbeat.outcome is TaskExecutionMutationOutcome.APPLIED:
-                renewed = heartbeat.authority
-                assert renewed is not None
-                logger.debug(
-                    "Task heartbeat 已续租: task_id=%s attempt_no=%d fencing=%d",
-                    renewed.task_id,
-                    renewed.attempt_no,
-                    renewed.fencing_token,
-                )
-                continue
-
-            result = LeaseSupervisorResult(
-                LeaseSupervisorOutcome.AUTHORITY_LOST,
-                heartbeat.outcome,
-            )
+        except TaskExecutionStopRequested as exc:
+            result = exc.result
+        except ClockAnomalyError:
+            result = LeaseSupervisorResult(LeaseSupervisorOutcome.CLOCK_UNSAFE)
+            self._request_stop(session, result)
+        except Exception as exc:
+            # wait_next 与 heartbeat/UoW 均属于 Supervisor 基础设施；任何一个抛错都必须
+            # 产生稳定结果并请求 Workflow 停止，不能让后台线程静默死亡。
+            result = LeaseSupervisorResult(LeaseSupervisorOutcome.INFRASTRUCTURE_ERROR)
             authority = session.current_authority()
-            logger.warning(
-                "Task heartbeat 失权: task_id=%s attempt_no=%d fencing=%d "
-                "outcome=%s reason_code=heartbeat_authority_lost",
+            logger.error(
+                "Task heartbeat 基础设施异常: task_id=%s attempt_no=%d fencing=%d "
+                "reason_code=heartbeat_infrastructure_error error_type=%s",
                 authority.task_id,
                 authority.attempt_no,
                 authority.fencing_token,
-                heartbeat.outcome.value,
+                type(exc).__name__,
             )
             self._request_stop(session, result)
-            break
-
-        with self._state_lock:
-            self._result = result
+        finally:
+            with self._state_lock:
+                self._result = result
 
     def _renew_once(
         self,
         authority: TaskExecutionAuthority,
     ) -> TaskHeartbeatResult:
         heartbeat_at = self._clock.now_utc()
+        lease_expires_at = add_persisted_utc_seconds(
+            heartbeat_at,
+            seconds=self._lease_settings.lease_duration_seconds,
+        )
+        if lease_expires_at <= authority.lease_expires_at:
+            raise ClockAnomalyError("heartbeat 无法严格推进 lease_expires_at")
         command = TaskHeartbeatCommand(
             authority=authority,
             heartbeat_at=heartbeat_at,
-            lease_expires_at=add_persisted_utc_seconds(
-                heartbeat_at,
-                seconds=self._lease_settings.lease_duration_seconds,
-            ),
+            lease_expires_at=lease_expires_at,
         )
         with self._execution_uow_factory() as unit_of_work:
             result = unit_of_work.execution.heartbeat(command)

@@ -320,20 +320,20 @@ class Stage2OwnershipContractAssetTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     tables.update(pattern.findall(node.value))
-        # 阶段 2-2 根表由生产 Manifest 确定生成，不会以静态 CREATE TABLE 字符串出现。
-        # 所有权门禁必须把该 Manifest 当作同等权威输入，避免动态 DDL 绕过唯一 Writer 盘点。
-        root_manifest_path = (
+        # 阶段 2-2 根表与后续业务组件表都由生产 Manifest 动态生成，不会以静态
+        # CREATE TABLE 字符串出现。这里显式列出已经发布的 Manifest，既避免动态 DDL
+        # 绕过唯一 Writer 盘点，也避免无约束扫描其他 JSON 后误认非 Schema 资产。
+        manifest_paths = (
             PROJECT_ROOT
-            / "app"
-            / "modules"
-            / "tasks"
-            / "adapters"
-            / "sqlite"
-            / "root_schema_manifest.json"
+            / "app/modules/tasks/adapters/sqlite/root_schema_manifest.json",
+            PROJECT_ROOT
+            / "app/modules/report/adapters/sqlite/report_control_manifest.json",
         )
-        if root_manifest_path.is_file():
-            root_manifest = json.loads(root_manifest_path.read_text(encoding="utf-8"))
-            tables.update(str(table["name"]) for table in root_manifest["tables"])
+        for manifest_path in manifest_paths:
+            if not manifest_path.is_file():
+                continue
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            tables.update(str(table["name"]) for table in manifest["tables"])
         return tables
 
     def test_every_services_file_is_in_the_ownership_inventory(self) -> None:
@@ -421,12 +421,24 @@ class Stage2RuntimeConfigOwnershipAssetTests(unittest.TestCase):
             PROJECT_ROOT
             / "app"
             / "modules"
+            / "report"
+            / "adapters"
+            / "runtime_config.py",
+            PROJECT_ROOT
+            / "app"
+            / "modules"
+            / "tasks"
+            / "adapters"
+            / "runtime_config.py",
+            PROJECT_ROOT
+            / "app"
+            / "modules"
             / "weaponry"
             / "adapters"
             / "infrastructure_config.py",
         ]
         pattern = re.compile(
-            r"(?:DOCSENSE_(?:REPORT|ANALYSIS|WEAPONRY)_[A-Z0-9_]+|"
+            r"(?:DOCSENSE_(?:TASK|REPORT|ANALYSIS|WEAPONRY)_[A-Z0-9_]+|"
             r"WEAPONRY_(?:ANALYSE_MODE|TERMS_[A-Z0-9_]+))"
         )
         actual: set[str] = set()
@@ -442,14 +454,14 @@ class Stage2RuntimeConfigOwnershipAssetTests(unittest.TestCase):
         }
         self.assertEqual(actual, registered)
 
-    def test_task_keys_remain_planned_until_runtime_loader_exists(self) -> None:
-        """2-0 只冻结新键，不能把文档计划误报为已经实现。"""
+    def test_task_keys_have_one_runtime_loader_after_stage23(self) -> None:
+        """2-3 实现后，配置键必须由唯一 Task Runtime Config 装载。"""
 
         task_group = next(
-            group for group in self.contract["groups"] if group["name"] == "task_runtime_planned"
+            group for group in self.contract["groups"] if group["name"] == "task_runtime_current"
         )
-        self.assertEqual("planned_add_with_implementation", task_group["envExampleStatus"])
-        self.assertFalse(
+        self.assertEqual("present", task_group["envExampleStatus"])
+        self.assertTrue(
             (
                 PROJECT_ROOT
                 / "app"
@@ -825,7 +837,7 @@ class Stage2RuntimeTopologyContractAssetTests(unittest.TestCase):
         cls.task_config = {
             entry["key"]: entry
             for group in runtime_contract["groups"]
-            if group["name"] == "task_runtime_planned"
+            if group["name"] == "task_runtime_current"
             for entry in group["entries"]
         }
 
@@ -836,7 +848,7 @@ class Stage2RuntimeTopologyContractAssetTests(unittest.TestCase):
         instances = topology["instances"]
         self.assertEqual(3, len(instances))
         self.assertEqual(
-            {"report", "weaponry", "analysis"},
+            {"report", "weaponry", "file"},
             {item["taskType"] for item in instances},
         )
         self.assertEqual(3, len({item["name"] for item in instances}))
@@ -856,7 +868,7 @@ class Stage2RuntimeTopologyContractAssetTests(unittest.TestCase):
             "strict_round_robin_over_nonempty_business_queues_v1",
             fair["algorithm"],
         )
-        self.assertEqual(["report", "weaponry", "analysis"], fair["businessOrder"])
+        self.assertEqual(["report", "weaponry", "file"], fair["businessOrder"])
         self.assertEqual(1, fair["initialCapacity"])
         self.assertEqual(1, fair["maxConsecutiveGrantsWhenAnotherBusinessWaits"])
         self.assertEqual("worker_count", fair["boundedWaitersPerBusiness"])

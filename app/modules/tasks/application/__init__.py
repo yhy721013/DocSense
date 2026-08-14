@@ -41,6 +41,8 @@ from .progress_delivery import (
     ProgressInitialBatchToken,
 )
 from .execution_runtime import TaskExecutionRuntime
+from .workflow_context import TaskWorkflowContext
+from .conservative_reaper import ConservativeTaskReaper
 
 __all__ = [
     "CallbackRecoveryCommandContractError",
@@ -71,6 +73,8 @@ __all__ = [
     "TaskCheckItemResult",
     "TaskExecutionAuthoritySession",
     "TaskExecutionRuntime",
+    "TaskWorkflowContext",
+    "ConservativeTaskReaper",
     "TaskReadContractError",
     "TaskSnapshotUnavailableError",
 ]

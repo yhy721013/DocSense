@@ -46,7 +46,7 @@ from app.modules.tasks.ports import (
 )
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
-from tests.task_service_fixtures import seed_legacy_file_task
+from tests.task_service_fixtures import seed_legacy_file_task, seed_legacy_report_task
 from tests.fakes import (
     FakeProgressPublisherPort,
     FakeReportCallbackPort,
@@ -495,7 +495,8 @@ class ReportTaskAdapterPersistenceTests(unittest.TestCase):
             created = adapter.create_if_allowed(_command(_submission()))
             assert created.execution is not None
 
-            service.create_report_task(
+            seed_legacy_report_task(
+                service,
                 132,
                 {"businessType": "report", "source": "legacy-route"},
             )
@@ -590,7 +591,8 @@ class ReportTaskAdapterPersistenceTests(unittest.TestCase):
             adapter.claim(task_id)
 
             # 模拟切换窗口中仍存在的遗留路由覆盖 latest 投影。
-            service.create_report_task(
+            seed_legacy_report_task(
+                service,
                 132,
                 {"businessType": "report", "source": "legacy-route"},
             )

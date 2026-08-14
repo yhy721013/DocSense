@@ -1,0 +1,124 @@
+{
+  "stage": "2-4-step-8",
+  "publicContractChanged": false,
+  "productionWired": true,
+  "productionSwitch": {
+    "compositionRoot": "app/container.py",
+    "taskControl": "task-control-v2.sqlite3",
+    "reportLegacyControlWrites": false,
+    "dualWrite": false,
+    "submit": "SubmitReportV2Task",
+    "dispatcher": "ReportV2TaskDispatcher",
+    "executor": "LocalTaskExecutor",
+    "callbackControl": "SQLiteCallbackControlStore",
+    "checkTaskReader": "SQLiteTaskControlReadAdapter",
+    "progressHubCount": 1
+  },
+  "runner": "app/modules/report/application/run_report_v2.py::RunReportV2Workflow",
+  "stepRuntime": "app/modules/report/application/step_runtime.py::ReportStepRuntime",
+  "registry": "app/modules/report/application/execution_steps.py::REPORT_STEP_REGISTRY",
+  "inputGate": {
+    "schema": "ReportInputSnapshot/v2",
+    "frozenProfileEqualsWorkerProfile": true,
+    "checkedBeforeFirstExternalOperation": true,
+    "readsEnvironment": false,
+    "backfillsLegacyProfile": false
+  },
+  "authority": {
+    "source": "TaskWorkflowContextPort.session",
+    "completeFields": [
+      "task_id",
+      "attempt_no",
+      "lease_token",
+      "fencing_token",
+      "lease_expires_at"
+    ],
+    "allMutationsUseAuthoritySession": true,
+    "reloadsCurrentAuthorityFromDatabase": false,
+    "logsLeaseToken": false
+  },
+  "atomicTransactions": [
+    ["artifact.scope.begin", "report_resource_register"],
+    ["rag.generate.checkpoint", "rag_cleanup_ref"],
+    ["interaction_audit.commit.checkpoint", "audit_receipt_ref"],
+    ["artifact.publish.checkpoint", "final_artifact_ref"],
+    [
+      "terminal.commit.checkpoint",
+      "final_artifact_ref",
+      "task_attempt_terminal",
+      "latest_public_projection",
+      "result_ref",
+      "callback_eligibility"
+    ]
+  ],
+  "externalEffects": {
+    "stepIntentCommittedBeforeEffect": true,
+    "networkOrFileOperationInsideControlTransaction": false,
+    "ragAdapterObserver": "ReportRagStepObserverPort",
+    "unknownNeverAutoReplayed": true
+  },
+  "failurePolicy": {
+    "authorityLossStopsWithoutTerminal": true,
+    "ragDeclaredUnknown": "recovery_required_and_resource_quarantine",
+    "ragUnclassifiedAfterIntent": "recovery_required_and_resource_quarantine",
+    "auditCommitUnknown": "recovery_required_and_resource_quarantine",
+    "callbackHttpAfterTerminalTransaction": true,
+    "resourceCleanupAfterTerminalTransaction": true,
+    "terminalNeverWaitsForResourceCleanup": true
+  },
+  "maintenance": {
+    "scheduler": "LocalMaintenanceScheduler",
+    "dispatcherOwnedThreadCount": 1,
+    "sharesBusinessExecutorLoop": false,
+    "jobs": [
+      {
+        "name": "report_callback_guard_sweep",
+        "stateMachine": "SQLiteCallbackControlStore",
+        "bounded": true,
+        "freezesExpiredSendingOnly": true,
+        "sendsHttp": false,
+        "autoResendsUnknown": false
+      },
+      {
+        "name": "report_resource_recovery",
+        "stateMachine": "SQLiteReportResourceStore",
+        "bounded": true,
+        "terminalFactsDiscoveredByPersistentScan": true,
+        "reversesCommittedTerminal": false
+      }
+    ],
+    "startupScan": true,
+    "periodicScan": true,
+    "eventWakeupIsLossyHint": true,
+    "jobFailuresAreIsolated": true,
+    "sharedStopDeadline": true
+  },
+  "legacySqlCleanup": {
+    "service": "app/services/llm_service/task_service.py::LLMTaskService",
+    "dedicatedReportTaskEntryRemoved": true,
+    "reportResourceDdlRemoved": true,
+    "reportResourceMethodsRemoved": [
+      "create_report_resource_record",
+      "get_report_resource_record",
+      "save_report_resource_record",
+      "prepare_report_resource_cleanup",
+      "defer_report_resource_recovery",
+      "list_recoverable_report_resource_ids"
+    ],
+    "auditWriteMethodsDelegateTo": "app/infrastructure/observability/llm_interaction_store.py::LLMInteractionStore",
+    "deadInlineAuditSqlRemoved": true,
+    "legacySingleInteractionWriteEntriesRemoved": true,
+    "existingLegacyTablesDropped": false,
+    "retainedSharedCapabilities": [
+      "analysis_callback_guard",
+      "weaponry_callback_guard",
+      "analysis_resource_records",
+      "interaction_schema_and_read_compatibility"
+    ]
+  },
+  "evidence": {
+    "temporarySQLiteAndFakesOnly": true,
+    "runPyExecuted": false,
+    "multiInstanceOrProductionClaimed": false
+  }
+}

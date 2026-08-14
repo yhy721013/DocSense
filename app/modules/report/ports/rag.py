@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, runtime_checkable
 
-from app.modules.tasks.domain import TaskId
+from app.modules.tasks.domain import TaskId, TaskStepCheckpoint
 
 from app.modules.report.domain.errors import ReportRagError
 
@@ -378,6 +378,19 @@ class CleanupReportRag:
             raise TypeError("heartbeat 必须可调用或为 None")
 
 
+@runtime_checkable
+class ReportRagStepObserverPort(Protocol):
+    """AnythingLLM 细粒度操作与持久 Step 之间的内部桥接。
+
+    ``begin`` 必须在供应商 I/O 前返回；``succeed`` 必须在完整结果取得后写入检查点。
+    失败由 Adapter 携带当前 Step 和完整 Trace 交还 Runner 统一审计、分类。
+    """
+
+    def begin(self, step_key: str, idempotency_key: str) -> None: ...
+
+    def succeed(self, step_key: str, checkpoint: TaskStepCheckpoint) -> None: ...
+
+
 @dataclass(frozen=True)
 class ReportRagRequest:
     """一次按顺序上传多文档并生成报告的请求。"""
@@ -388,6 +401,11 @@ class ReportRagRequest:
     prompt: str
     context_name: str
     conversation_name: str
+    step_observer: ReportRagStepObserverPort | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, TaskId):
@@ -411,6 +429,11 @@ class ReportRagRequest:
                 name,
                 _required_text(getattr(self, name), name=name),
             )
+        if self.step_observer is not None and not isinstance(
+            self.step_observer,
+            ReportRagStepObserverPort,
+        ):
+            raise TypeError("step_observer 必须实现 ReportRagStepObserverPort 或为 None")
 
 
 @dataclass(frozen=True)
@@ -448,6 +471,7 @@ class ReportRagExecutionError(ReportRagError):
         trace: ReportRagTrace,
         cleanup_ref: ReportRagCleanupRef | None = None,
         external_outcome_unknown: bool = False,
+        active_step_key: str = "",
     ) -> None:
         super().__init__(message)
         if not isinstance(trace, ReportRagTrace):
@@ -458,11 +482,14 @@ class ReportRagExecutionError(ReportRagError):
             raise TypeError("cleanup_ref 必须是 ReportRagCleanupRef 或 None")
         if not isinstance(external_outcome_unknown, bool):
             raise TypeError("external_outcome_unknown 必须是 bool")
+        if not isinstance(active_step_key, str):
+            raise TypeError("active_step_key 必须是 str")
         self.trace = trace
         self.cleanup_ref = cleanup_ref
         # 写类请求超时或响应协议损坏时，上游可能已经产生资源，但本地尚未拿到可删除
         # 引用。该标志只在内部驱动隔离门禁，不进入公开 HTTP/回调契约。
         self.external_outcome_unknown = external_outcome_unknown
+        self.active_step_key = active_step_key.strip()
 
 
 @runtime_checkable
@@ -489,5 +516,6 @@ __all__ = [
     "ReportRagRequest",
     "ReportRagResponse",
     "ReportRagSource",
+    "ReportRagStepObserverPort",
     "ReportRagTrace",
 ]

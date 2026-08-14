@@ -43,6 +43,7 @@ from app.modules.tasks.domain import (
     TaskRecoveryOperation,
     TaskRecoveryStepResolution,
     TaskRecoveryTerminalProjection,
+    TaskSnapshot,
     TaskState,
     TaskStep,
     TaskStepAttempt,
@@ -66,9 +67,11 @@ from app.modules.tasks.ports import (
     TaskClaimRequest,
     TaskExecutionClaimResult,
     TaskExecutionMutationOutcome,
+    TaskDispatchDeferralCommand,
     TaskHeartbeatCommand,
     TaskHeartbeatResult,
     TaskProgressCommand,
+    PersistedTaskExecutionInput,
     TaskRecoveryClaimRequest,
     TaskRecoveryClaimResult,
     TaskRecoveryClassificationCommand,
@@ -110,6 +113,12 @@ def _canonical_json(value: object) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _reject_json_constant(value: str) -> None:
+    """拒绝 Python JSON 解码器默认接受的 NaN/Infinity 扩展值。"""
+
+    raise ValueError(f"input_payload 包含非法 JSON 常量: {value}")
 
 
 def _optional_checkpoint(row: sqlite3.Row) -> TaskStepCheckpoint | None:
@@ -182,6 +191,76 @@ class SQLiteTaskControlStore:
             raise TypeError("task_id 必须是 TaskId")
         row = self._task_row(task_id)
         return self._task_from_row(row) if row is not None else None
+
+    @staticmethod
+    def _snapshot_from_read_row(row: sqlite3.Row) -> TaskSnapshot:
+        """把 execution 与可选 latest 投影转换为只读快照。
+
+        ``llm_task_executions`` 保存每次执行自己的状态；Callback attempt 则按 execution
+        从追加审计事件恢复。这样即使同一业务键已经产生新的 latest，旧任务按 TaskId
+        回读时也不会把已发生的投递次数错误回落为 0，更不会借用其他 execution 的计数。
+        """
+
+        return TaskSnapshot(
+            task_id=TaskId(str(row["execution_id"])),
+            task_type=str(row["business_type"]),
+            business_ref=TaskBusinessRef(
+                str(row["business_type"]),
+                str(row["business_key"]),
+            ),
+            execution_state=str(row["execution_state"]),
+            public_status=str(row["public_status"]),
+            progress=float(row["progress"]),
+            message=str(row["message"]),
+            callback_status=str(row["callback_status"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            callback_attempts=int(row["callback_attempts"]),
+        )
+
+    def read_snapshot_by_id(self, task_id: TaskId) -> TaskSnapshot | None:
+        """按不可变 TaskId 读取同一次执行，不修改任何控制事实。"""
+
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        row = self._connection.execute(
+            """
+            SELECT e.execution_id, e.business_type, e.business_key,
+                   e.execution_state, e.public_status, e.progress, e.message,
+                   e.callback_status, e.created_at, e.updated_at,
+                   COALESCE((
+                       SELECT MAX(a.callback_attempt)
+                       FROM callback_delivery_attempt_events AS a
+                       WHERE a.owner_execution_id = e.execution_id
+                   ), 0) AS callback_attempts
+            FROM llm_task_executions AS e
+            WHERE e.execution_id = ?
+            """,
+            (task_id.value,),
+        ).fetchone()
+        return self._snapshot_from_read_row(row) if row is not None else None
+
+    def read_latest_snapshot(
+        self,
+        business_ref: TaskBusinessRef,
+    ) -> TaskSnapshot | None:
+        """按业务键读取 v2 latest；公开投影与 execution 身份必须来自同一行连接。"""
+
+        if not isinstance(business_ref, TaskBusinessRef):
+            raise TypeError("business_ref 必须是 TaskBusinessRef")
+        row = self._connection.execute(
+            """
+            SELECT e.execution_id, e.business_type, e.business_key,
+                   e.execution_state, l.status AS public_status,
+                   l.progress, l.message, l.callback_status,
+                   l.created_at, l.updated_at, l.callback_attempts
+            FROM llm_tasks AS l
+            JOIN llm_task_executions AS e ON e.execution_id = l.execution_id
+            WHERE l.business_type = ? AND l.business_key = ?
+            """,
+            (business_ref.business_type, business_ref.business_key),
+        ).fetchone()
+        return self._snapshot_from_read_row(row) if row is not None else None
 
     def _step_row(self, task_id: TaskId, step_key: str) -> sqlite3.Row | None:
         return self._connection.execute(
@@ -275,18 +354,9 @@ class SQLiteTaskControlStore:
             return CallbackAdmissionConflict.SENDING
         if state == "outcome_unknown":
             return CallbackAdmissionConflict.OUTCOME_UNKNOWN
-        latest = self._connection.execute(
-            """
-            SELECT callback_status FROM llm_tasks
-            WHERE business_type = ? AND business_key = ?
-            """,
-            (business_ref.business_type, business_ref.business_key),
-        ).fetchone()
-        callback_status = str(latest[0]) if latest is not None else ""
-        if callback_status == "sending":
-            return CallbackAdmissionConflict.SENDING
-        if callback_status == "outcome_unknown":
-            return CallbackAdmissionConflict.OUTCOME_UNKNOWN
+        # Guard 是受理冲突的唯一权威。人工解除只把 Guard 释放为 idle，旧 execution/latest
+        # 的 outcome_unknown 仍作为历史事实保留；若继续读取旧投影，新任务会被永久阻塞，
+        # 与既有 Report “保留 unknown 事实但允许重新受理”合同相冲突。
         return CallbackAdmissionConflict.NONE
 
     def _classify_admission(
@@ -793,6 +863,9 @@ class SQLiteTaskControlStore:
 
     def heartbeat(self, command: TaskHeartbeatCommand) -> TaskHeartbeatResult:
         self._require_write_transaction()
+        # DTO 已拒绝非单调续租；Store 仍做最后一道防御，避免被绕过构造器的对象缩短租约。
+        if command.lease_expires_at <= command.authority.lease_expires_at:
+            return TaskHeartbeatResult(TaskExecutionMutationOutcome.INVALID_STATE)
         outcome, task_row, attempt_row = self._execution_authority_outcome(
             command.authority,
             observed_at=command.heartbeat_at,
@@ -831,6 +904,48 @@ class SQLiteTaskControlStore:
             lease_expires_at=command.lease_expires_at,
         )
         return TaskHeartbeatResult(TaskExecutionMutationOutcome.APPLIED, renewed)
+
+    def defer_dispatch(
+        self,
+        command: TaskDispatchDeferralCommand,
+    ) -> TaskExecutionMutationOutcome:
+        self._require_write_transaction()
+        task_row = self._task_row(command.task_id)
+        if task_row is None:
+            return TaskExecutionMutationOutcome.MISSING
+        if str(task_row["business_type"]) != command.task_type:
+            return TaskExecutionMutationOutcome.NOT_RUNNABLE
+        if (
+            str(task_row["execution_state"]) != TaskState.ACCEPTED.value
+            or not self._is_latest(task_row)
+        ):
+            return TaskExecutionMutationOutcome.NOT_RUNNABLE
+        cursor = self._connection.execute(
+            """
+            UPDATE llm_task_executions
+            SET next_dispatch_at = ?, last_dispatch_error = ?, updated_at = ?,
+                row_version = row_version + 1
+            WHERE execution_id = ? AND business_type = ?
+              AND execution_state = 'accepted' AND row_version = ?
+            """,
+            (
+                command.next_dispatch_at,
+                command.reason_code[:512],
+                command.deferred_at,
+                command.task_id.value,
+                command.task_type,
+                int(task_row["row_version"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            return TaskExecutionMutationOutcome.STALE_LATEST
+        self._append_event(
+            command.task_id,
+            event_type="task.dispatch_deferred",
+            created_at=command.deferred_at,
+            reason_code=command.reason_code[:128],
+        )
+        return TaskExecutionMutationOutcome.APPLIED
 
     @staticmethod
     def _same_step_intent(
@@ -1436,6 +1551,54 @@ class SQLiteTaskControlStore:
         ).fetchall()
         return tuple(TaskId(str(row[0])) for row in rows)
 
+    def load_execution_input(
+        self,
+        task_id: TaskId,
+    ) -> PersistedTaskExecutionInput | None:
+        """在独立只读 UoW 中加载受理时冻结输入，不构造或补齐业务默认值。"""
+
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        row = self._connection.execute(
+            """
+            SELECT e.execution_id, e.business_type, e.business_key,
+                   e.execution_state, e.input_schema_version, e.input_payload,
+                   e.trace_id, e.created_at,
+                   l.status AS public_status, l.progress, l.message
+            FROM llm_task_executions AS e
+            JOIN llm_tasks AS l
+              ON l.business_type = e.business_type
+             AND l.business_key = e.business_key
+             AND l.execution_id = e.execution_id
+            WHERE e.execution_id = ?
+            """,
+            (task_id.value,),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(
+            str(row["input_payload"]),
+            parse_constant=_reject_json_constant,
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("持久化 input_payload 必须是 JSON 对象")
+        return PersistedTaskExecutionInput(
+            task_id=TaskId(str(row["execution_id"])),
+            task_type=str(row["business_type"]),
+            business_ref=TaskBusinessRef(
+                str(row["business_type"]),
+                str(row["business_key"]),
+            ),
+            execution_state=str(row["execution_state"]),
+            public_status=str(row["public_status"]),
+            progress=float(row["progress"]),
+            message=str(row["message"]),
+            input_schema_version=int(row["input_schema_version"]),
+            input_payload=payload,
+            accepted_at=str(row["created_at"]),
+            trace_id=str(row["trace_id"]),
+        )
+
     def scan_expired_attempts(
         self,
         *,
@@ -1876,6 +2039,8 @@ class SQLiteTaskControlStore:
         command: TaskRecoveryHeartbeatCommand,
     ) -> TaskRecoveryHeartbeatResult:
         self._require_write_transaction()
+        if command.lease_expires_at <= command.authority.lease_expires_at:
+            return TaskRecoveryHeartbeatResult(TaskRecoveryMutationOutcome.INVALID_STATE)
         outcome, _row = self._recovery_authority_outcome(
             command.authority,
             observed_at=command.heartbeat_at,

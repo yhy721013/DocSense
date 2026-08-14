@@ -4,8 +4,9 @@
   "frozenAt": "2026-08-12",
   "publicContractChanged": false,
   "callbackHistory": {
-    "currentWriter": "app/services/utils/callback_client.py::save_callback_history_payload",
+    "currentWriter": "app/infrastructure/observability/callback_history.py::save_callback_history_payload",
     "targetWriter": "app/infrastructure/observability/callback_history.py",
+    "legacyFacade": "app/services/utils/callback_client.py delegates without physical file writes",
     "currentConsumers": [
       "app/modules/analysis/adapters/callback_guard.py",
       "app/modules/report/adapters/callback_guard.py",

@@ -10,10 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .control_store import SQLiteTaskControlStore
+from .callback_control_store import SQLiteCallbackControlStore
 from .transaction import SQLiteTransactionManager
 from .unit_of_work import (
     SQLiteTaskAdmissionUnitOfWorkFactory,
+    SQLiteCallbackDeliveryUnitOfWorkFactory,
     SQLiteTaskExecutionUnitOfWorkFactory,
+    SQLiteTaskControlQueryUnitOfWorkFactory,
     SQLiteTaskRecoveryUnitOfWorkFactory,
 )
 
@@ -25,6 +28,8 @@ class SQLiteTaskControlUnitOfWorkFactories:
     admission: SQLiteTaskAdmissionUnitOfWorkFactory
     execution: SQLiteTaskExecutionUnitOfWorkFactory
     recovery: SQLiteTaskRecoveryUnitOfWorkFactory
+    queries: SQLiteTaskControlQueryUnitOfWorkFactory
+    callback_delivery: SQLiteCallbackDeliveryUnitOfWorkFactory
 
 
 def build_sqlite_task_control_uow_factories(
@@ -43,10 +48,19 @@ def build_sqlite_task_control_uow_factories(
         execution=SQLiteTaskExecutionUnitOfWorkFactory(
             transaction_manager,
             execution_builder=SQLiteTaskControlStore,
+            callback_delivery_builder=SQLiteCallbackControlStore,
         ),
         recovery=SQLiteTaskRecoveryUnitOfWorkFactory(
             transaction_manager,
             recovery_builder=SQLiteTaskControlStore,
+        ),
+        queries=SQLiteTaskControlQueryUnitOfWorkFactory(
+            transaction_manager,
+            query_builder=SQLiteTaskControlStore,
+        ),
+        callback_delivery=SQLiteCallbackDeliveryUnitOfWorkFactory(
+            transaction_manager,
+            callback_delivery_builder=SQLiteCallbackControlStore,
         ),
     )
 

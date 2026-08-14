@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol, TypeVar, runtime_checkable
 
-from app.modules.tasks.domain import TaskExecutionAuthority, TaskId
+from app.modules.tasks.domain import TaskExecutionAuthority, TaskExecutionSnapshot, TaskId
 
 from .task_execution import (
     TaskExecutionMutationOutcome,
@@ -15,6 +15,52 @@ from .task_execution import (
 
 
 TAuthorizedResult = TypeVar("TAuthorizedResult")
+TTaskInput = TypeVar("TTaskInput")
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedTaskExecutionInput:
+    """业务 Codec 已解码的冻结执行输入及其稳定身份。"""
+
+    snapshot: TaskExecutionSnapshot[object]
+    input_schema_version: int
+    input_payload_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot, TaskExecutionSnapshot):
+            raise TypeError("snapshot 必须是 TaskExecutionSnapshot")
+        if type(self.input_schema_version) is not int or self.input_schema_version <= 0:
+            raise ValueError("input_schema_version 必须是正整数")
+        fingerprint = self.input_payload_fingerprint.strip().lower()
+        if len(fingerprint) != 64 or any(ch not in "0123456789abcdef" for ch in fingerprint):
+            raise ValueError("input_payload_fingerprint 必须是 SHA-256 十六进制摘要")
+        object.__setattr__(self, "input_payload_fingerprint", fingerprint)
+
+
+@runtime_checkable
+class TaskExecutionSnapshotLoaderPort(Protocol):
+    def load(self, task_id: TaskId) -> LoadedTaskExecutionInput:
+        ...
+
+
+@runtime_checkable
+class TaskWorkflowContextPort(Protocol):
+    @property
+    def session(self) -> "TaskExecutionAuthoritySessionPort":
+        ...
+
+    @property
+    def loaded_input(self) -> LoadedTaskExecutionInput:
+        ...
+
+    def request_cancellation(self) -> bool:
+        ...
+
+    def cancellation_requested(self) -> bool:
+        ...
+
+    def stop_requested(self) -> bool:
+        ...
 
 
 @runtime_checkable
@@ -107,6 +153,16 @@ class TaskExecutionAuthoritySessionPort(Protocol):
     ) -> TAuthorizedResult:
         ...
 
+    def run_mutation(
+        self,
+        operation: Callable[
+            [TaskExecutionAuthority],
+            TaskExecutionMutationOutcome,
+        ],
+    ) -> TaskExecutionMutationOutcome:
+        """执行一次 Task 条件写，并对失权类结果立即关闭 Session。"""
+        ...
+
     def renew_authority(
         self,
         operation: Callable[[TaskExecutionAuthority], TaskHeartbeatResult],
@@ -149,7 +205,7 @@ class LocalTaskExecutorPort(Protocol):
         """发送可丢提示；持久扫描才是恢复真相。"""
         ...
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
         ...
 
     def is_healthy(self) -> bool:
@@ -163,12 +219,16 @@ class TaskExecutionRuntimePort(Protocol):
     def run(self, task_id: TaskId) -> "TaskExecutionRuntimeResult":
         ...
 
+    def request_cancellation(self) -> bool:
+        """请求当前 Workflow 正常协作停止；不得伪造 Authority 失权。"""
+        ...
+
 
 @runtime_checkable
 class TaskWorkflowRunnerPort(Protocol):
     """阶段 2 v2 Workflow 入口；旧业务 Runner 不实现本协议。"""
 
-    def run(self, session: TaskExecutionAuthoritySessionPort) -> None:
+    def run(self, context: TaskWorkflowContextPort) -> None:
         ...
 
 
@@ -190,6 +250,7 @@ class TaskExecutionRuntimeOutcome(str, Enum):
     CLOCK_UNSAFE = "clock_unsafe"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
     WORKFLOW_ERROR = "workflow_error"
+    INPUT_ERROR = "input_error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +283,7 @@ class LocalMaintenanceSchedulerPort(Protocol):
     def wake_up(self) -> None:
         ...
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
         ...
 
     def is_healthy(self) -> bool:
@@ -244,4 +305,7 @@ __all__ = [
     "TaskExecutionStopRequested",
     "TaskLeaseTokenFactoryPort",
     "TaskWorkflowRunnerPort",
+    "LoadedTaskExecutionInput",
+    "TaskExecutionSnapshotLoaderPort",
+    "TaskWorkflowContextPort",
 ]

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .models import TaskBusinessRef, TaskId
+from .lease_time import require_persisted_utc
 from .states import (
     StepEffectKind,
     StepReplayPolicy,
@@ -16,9 +17,6 @@ from .states import (
 )
 
 
-_UTC_TIMESTAMP = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$"
-)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -60,10 +58,7 @@ def _non_negative_int(value: object, *, name: str) -> int:
 
 
 def _utc_timestamp(value: object, *, name: str) -> str:
-    normalized = _required_text(value, name=name, maximum=32)
-    if _UTC_TIMESTAMP.fullmatch(normalized) is None:
-        raise ValueError(f"{name} 必须是 UTC RFC3339 微秒格式并以 Z 结尾")
-    return normalized
+    return require_persisted_utc(value, name=name)
 
 
 def _optional_utc_timestamp(value: object, *, name: str) -> str:
@@ -279,7 +274,11 @@ class TaskAttempt:
 
 @dataclass(frozen=True, slots=True)
 class TaskExecutionContext:
-    """业务 Workflow 可见的执行上下文；不暴露数据库或线程实现。"""
+    """阶段 2-0 设计期旧上下文，保留给资产兼容但不得用于 v2 Runtime。
+
+    该类型冻结 Authority，无法表达 heartbeat 后 expiry 轮换。阶段 2-3E 的实际 Workflow
+    必须使用 Application ``TaskWorkflowContext``，从其 Authority Session 获取写能力。
+    """
 
     authority: TaskExecutionAuthority
     task_type: str

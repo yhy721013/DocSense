@@ -70,6 +70,8 @@ class TaskAdmissionRequest(Generic[TTaskInput]):
             raise TypeError("public_request_payload 必须是 Mapping")
         for name in ("task_type", "initial_public_status", "trace_id"):
             object.__setattr__(self, name, _required_text(getattr(self, name), name=name))
+        if self.task_type != self.business_ref.business_type:
+            raise ValueError("task_type 必须与 business_ref.business_type 完全一致")
         has_batch = self.batch is not None
         if (self.task_type == "file") != has_batch:
             raise ValueError("阶段 2 的 file/Analysis Task 必须且只能携带批次身份")

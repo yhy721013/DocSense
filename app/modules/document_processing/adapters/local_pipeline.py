@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -316,6 +317,43 @@ class LocalDocumentPreparationAdapter:
         self._mhtml_text = self._application(
             MHTMLTextProcessorAdapter(source_store=self._store)
         )
+
+    @property
+    def execution_profile_id(self) -> str:
+        """返回 Report/Analysis Input 可冻结的共享路由策略版本。"""
+
+        return "local-document-preparation-router-v1"
+
+    @property
+    def execution_profile_fingerprint(self) -> str:
+        """返回不含路径、URL 原文和凭据的确定性能力摘要。
+
+        该摘要描述受理后可能采用的 Processor 路由及其安全参数；具体文件实际命中的
+        ProcessingProfile 仍由 DocumentProcessing 记录保存，两者共同用于恢复核验。
+        """
+
+        payload = {
+            "profileId": self.execution_profile_id,
+            "legacyPolicyFingerprint": self._legacy_policy_fingerprint,
+            "ocrLanguages": self._ocr_languages,
+            "ocrDpi": self._ocr_dpi,
+            "ocrEnabled": self._ocr_enabled,
+            "ocrSamplePages": self._ocr_sample_pages,
+            "ocrTextThreshold": self._ocr_text_threshold,
+            "mineruLanguage": self._mineru_lang,
+            "mineruEndpointFingerprint": mineru_endpoint_fingerprint(
+                self._mineru_api_url
+            ),
+            "maxTextBytes": self._max_text_bytes,
+        }
+        material = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
 
     @property
     def artifact_store(self) -> LocalArtifactStoreAdapter:

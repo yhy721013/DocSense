@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from app.modules.tasks.domain import (
     TaskAttempt,
@@ -17,7 +17,9 @@ from app.modules.tasks.domain import (
     TaskId,
     TaskOwnerIdentity,
     TaskRecord,
+    TaskBusinessRef,
     TaskRecoveryIsolation,
+    TaskRecoveryCandidate,
     TaskStep,
     TaskStepAttempt,
     TaskStepCheckpoint,
@@ -116,6 +118,8 @@ class TaskHeartbeatCommand:
             object.__setattr__(self, name, require_persisted_utc(getattr(self, name), name=name))
         if self.lease_expires_at <= self.heartbeat_at:
             raise ValueError("续租到期时间必须晚于 heartbeat_at")
+        if self.lease_expires_at <= self.authority.lease_expires_at:
+            raise ValueError("续租到期时间必须严格晚于当前 Authority 到期时间")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +137,75 @@ class TaskHeartbeatResult:
                 raise TypeError("heartbeat 成功必须返回更新后的 Authority")
         elif self.authority is not None:
             raise ValueError("heartbeat 未成功不得携带 Authority")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDispatchDeferralCommand:
+    """accepted Task 在本地派发失败后的持久冷却，避免内存毒任务自旋。"""
+
+    task_id: TaskId
+    task_type: str
+    reason_code: str
+    deferred_at: str
+    next_dispatch_at: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        for name in ("task_type", "reason_code"):
+            object.__setattr__(self, name, _required_text(getattr(self, name), name=name))
+        for name in ("deferred_at", "next_dispatch_at"):
+            object.__setattr__(self, name, require_persisted_utc(getattr(self, name), name=name))
+        if self.next_dispatch_at <= self.deferred_at:
+            raise ValueError("next_dispatch_at 必须晚于 deferred_at")
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedTaskExecutionInput:
+    """只读 Query 从控制库返回的冻结执行输入信封。
+
+    本 DTO 保存 canonical JSON 解码后的普通 Mapping，不在通用 Store 中调用任何业务
+    Codec。业务 Codec 的版本校验和领域快照构造由独立 Snapshot Loader 完成。
+    """
+
+    task_id: TaskId
+    task_type: str
+    business_ref: TaskBusinessRef
+    execution_state: str
+    public_status: str
+    progress: float
+    message: str
+    input_schema_version: int
+    input_payload: Mapping[str, Any]
+    accepted_at: str
+    trace_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        if not isinstance(self.business_ref, TaskBusinessRef):
+            raise TypeError("business_ref 必须是 TaskBusinessRef")
+        for name in ("task_type", "execution_state", "public_status", "trace_id"):
+            object.__setattr__(self, name, _required_text(getattr(self, name), name=name))
+        if self.task_type != self.business_ref.business_type:
+            raise ValueError("持久输入 task_type 与 business_ref 不一致")
+        if isinstance(self.progress, bool) or not isinstance(self.progress, (int, float)):
+            raise TypeError("progress 必须是数字")
+        progress = float(self.progress)
+        if progress < 0 or progress > 1 or progress != progress:
+            raise ValueError("progress 必须位于 0 到 1")
+        object.__setattr__(self, "progress", progress)
+        if not isinstance(self.message, str):
+            raise TypeError("message 必须是 str")
+        if type(self.input_schema_version) is not int or self.input_schema_version <= 0:
+            raise ValueError("input_schema_version 必须是正整数")
+        if not isinstance(self.input_payload, Mapping):
+            raise TypeError("input_payload 必须是 Mapping")
+        object.__setattr__(
+            self,
+            "accepted_at",
+            require_persisted_utc(self.accepted_at, name="accepted_at"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +389,12 @@ class TaskExecutionPort(Protocol):
     def heartbeat(self, command: TaskHeartbeatCommand) -> TaskHeartbeatResult:
         ...
 
+    def defer_dispatch(
+        self,
+        command: TaskDispatchDeferralCommand,
+    ) -> TaskExecutionMutationOutcome:
+        ...
+
     def begin_step(self, command: TaskStepIntentCommand) -> TaskExecutionMutationOutcome:
         ...
 
@@ -337,6 +416,23 @@ class TaskRunnableQueryPort(Protocol):
     """只读扫描某一业务类型的可领取 Task；不创建租约。"""
 
     def scan_runnable(self, task_type: str, *, not_after: str, limit: int) -> tuple[TaskId, ...]:
+        ...
+
+    def load_execution_input(
+        self,
+        task_id: TaskId,
+    ) -> PersistedTaskExecutionInput | None:
+        ...
+
+    def scan_expired_attempts(
+        self,
+        *,
+        expired_before: str,
+        limit: int,
+    ) -> tuple[TaskId, ...]:
+        ...
+
+    def load_candidate(self, task_id: TaskId) -> TaskRecoveryCandidate | None:
         ...
 
 
