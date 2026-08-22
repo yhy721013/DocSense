@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Protocol, Self, runtime_checkable
 
 from app.modules.report.ports import ReportResourceStorePort
-from app.modules.tasks.ports import CallbackDeliveryControlPort, TaskExecutionPort
+from app.modules.tasks.ports import (
+    CallbackDeliveryControlPort,
+    TaskExecutionPort,
+    TaskStepContinuationStorePort,
+)
 
 
 @runtime_checkable
@@ -32,6 +36,9 @@ class ReportExecutionUnitOfWork(Protocol):
 
     @property
     def resources(self) -> ReportResourceStorePort: ...
+
+    @property
+    def continuations(self) -> TaskStepContinuationStorePort: ...
 
 
 @runtime_checkable

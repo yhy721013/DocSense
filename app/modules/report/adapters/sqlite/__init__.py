@@ -7,6 +7,7 @@ from .schema import (
     load_report_control_manifest,
 )
 from .resource_store import SQLiteReportResourceStore, report_artifact_result_ref
+from .step_continuation_store import SQLiteReportStepContinuationStore
 from .unit_of_work import (
     SQLiteReportExecutionUnitOfWork,
     SQLiteReportExecutionUnitOfWorkFactory,
@@ -16,6 +17,7 @@ __all__ = [
     "REPORT_CONTROL_COMPONENT_NAME",
     "REPORT_CONTROL_COMPONENT_VERSION",
     "SQLiteReportResourceStore",
+    "SQLiteReportStepContinuationStore",
     "SQLiteReportExecutionUnitOfWork",
     "SQLiteReportExecutionUnitOfWorkFactory",
     "report_artifact_result_ref",

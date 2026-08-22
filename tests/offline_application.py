@@ -79,8 +79,8 @@ from app.modules.chat import (
     InlineChatRunDispatcher,
     SynchronousChatRunExecutor,
 )
+from app.modules.analysis.adapters.runtime_config import AnalysisInfrastructureConfig
 from app.services.core.config import (
-    AnalysisInfrastructureConfig,
     AnythingLLMConfig,
     LLMIntegrationConfig,
     ReportInfrastructureConfig,

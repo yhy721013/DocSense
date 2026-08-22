@@ -24,6 +24,7 @@ from app.modules.tasks.domain import TaskBusinessRef, TaskId
 from app.modules.tasks.ports import TaskAdmissionOutcome, TaskAdmissionRequest
 from app.modules.weaponry.adapters.sqlite import (
     WEAPONRY_CONTROL_COMPONENT_NAME,
+    WEAPONRY_CONTROL_COMPONENT_VERSION,
     SQLiteWeaponryTaskDocumentSnapshotStore,
     SQLiteWeaponryResultSnapshotStore,
     bootstrap_weaponry_task_control_database,
@@ -146,7 +147,9 @@ class WeaponryControlComponentSchemaTests(unittest.TestCase):
                     known_components={
                         WEAPONRY_CONTROL_COMPONENT_NAME: load_weaponry_control_manifest()
                     },
-                    required_components={WEAPONRY_CONTROL_COMPONENT_NAME: 1},
+                    required_components={
+                        WEAPONRY_CONTROL_COMPONENT_NAME: WEAPONRY_CONTROL_COMPONENT_VERSION
+                    },
                 )
                 self.assertEqual(result.identity, identity)
             finally:

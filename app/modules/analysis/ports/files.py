@@ -47,6 +47,10 @@ class AnalysisTaskWorkspacePort(Protocol):
     def create(self, execution: AnalysisExecutionRef) -> AnalysisTaskWorkspace:
         ...
 
+    def resolve(self, execution: AnalysisExecutionRef) -> AnalysisTaskWorkspace:
+        """只读解析已存在任务目录；缺失时失败，不能在恢复门禁前补建。"""
+        ...
+
 
 @dataclass(frozen=True)
 class AnalysisFilePreparationRequest:
@@ -76,6 +80,90 @@ class AnalysisFilePreparationRequest:
 
 
 @dataclass(frozen=True)
+class AnalysisSourceAcquisitionRequest:
+    """只描述受控 Source 获取；不得隐式启动 DocumentProcessing。"""
+
+    execution: AnalysisExecutionRef
+    source_url: str
+    task_root: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution, AnalysisExecutionRef):
+            raise TypeError("execution 必须是 AnalysisExecutionRef")
+        object.__setattr__(self, "source_url", _required_text(self.source_url, name="source_url"))
+        object.__setattr__(self, "task_root", _required_text(self.task_root, name="task_root"))
+
+
+@dataclass(frozen=True)
+class AcquiredAnalysisSource:
+    """已获取 Source 的任务内临时引用；持久快照只能保存 basename 与摘要。"""
+
+    execution: AnalysisExecutionRef
+    source_path: str
+    source_basename: str
+    source_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution, AnalysisExecutionRef):
+            raise TypeError("execution 必须是 AnalysisExecutionRef")
+        object.__setattr__(self, "source_path", _required_text(self.source_path, name="source_path"))
+        basename = _required_text(self.source_basename, name="source_basename")
+        if basename.replace("\\", "/").rsplit("/", 1)[-1] != basename:
+            raise ValueError("source_basename 必须是 basename")
+        object.__setattr__(self, "source_basename", basename)
+        digest = _required_text(self.source_sha256, name="source_sha256").lower()
+        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise ValueError("source_sha256 必须是 SHA-256")
+        object.__setattr__(self, "source_sha256", digest)
+
+
+@dataclass(frozen=True)
+class AnalysisSourceResolutionRequest:
+    """根据续跑快照恢复已存在 Source，不访问 Source URL。"""
+
+    execution: AnalysisExecutionRef
+    task_root: str
+    source_basename: str
+    source_sha256: str
+
+    def __post_init__(self) -> None:
+        # 复用 Acquired DTO 的严格 basename/摘要校验，避免两套规则漂移。
+        probe = AcquiredAnalysisSource(
+            execution=self.execution,
+            source_path=self.source_basename,
+            source_basename=self.source_basename,
+            source_sha256=self.source_sha256,
+        )
+        object.__setattr__(self, "task_root", _required_text(self.task_root, name="task_root"))
+        object.__setattr__(self, "source_basename", probe.source_basename)
+        object.__setattr__(self, "source_sha256", probe.source_sha256)
+
+
+@dataclass(frozen=True)
+class AnalysisDocumentPreparationRequest:
+    """只允许处理一个已经取得并校验过的 Source。"""
+
+    execution: AnalysisExecutionRef
+    task_root: str
+    source: AcquiredAnalysisSource
+    document_processing_policy: AnalysisDocumentProcessingPolicySnapshot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution, AnalysisExecutionRef):
+            raise TypeError("execution 必须是 AnalysisExecutionRef")
+        if not isinstance(self.source, AcquiredAnalysisSource):
+            raise TypeError("source 必须是 AcquiredAnalysisSource")
+        if self.source.execution != self.execution:
+            raise ValueError("source 不属于当前 execution")
+        object.__setattr__(self, "task_root", _required_text(self.task_root, name="task_root"))
+        if not isinstance(
+            self.document_processing_policy,
+            AnalysisDocumentProcessingPolicySnapshot,
+        ):
+            raise TypeError("document_processing_policy 类型错误")
+
+
+@dataclass(frozen=True)
 class PreparedAnalysisDocument:
     """准备完成后的任务级文档引用。
 
@@ -93,6 +181,9 @@ class PreparedAnalysisDocument:
     prepared_artifact: ArtifactRef | None = None
     rag_upload_artifact: ArtifactRef | None = None
     rag_projection_profile_id: str = ""
+    # v2 Workflow 用该摘要形成 ``source.download`` checkpoint。历史 Fake/夹具可暂不
+    # 提供；生产 v2 文件 Adapter 必须返回真实下载字节的 SHA-256。
+    source_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
@@ -138,6 +229,15 @@ class PreparedAnalysisDocument:
         if profile_id and self.rag_upload_artifact is None:
             raise ValueError("存在 RAG 投影 Profile 时必须提供 rag_upload_artifact")
         object.__setattr__(self, "rag_projection_profile_id", profile_id)
+        if not isinstance(self.source_sha256, str):
+            raise TypeError("source_sha256 必须是 str")
+        source_sha256 = self.source_sha256.strip().lower()
+        if source_sha256 and (
+            len(source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in source_sha256)
+        ):
+            raise ValueError("source_sha256 必须为空或 SHA-256")
+        object.__setattr__(self, "source_sha256", source_sha256)
 
 
 @runtime_checkable
@@ -151,8 +251,39 @@ class FilePreparationPort(Protocol):
         ...
 
 
+@runtime_checkable
+class AnalysisSourceAcquisitionPort(Protocol):
+    """只执行 Source 获取，不调用文档处理器。"""
+
+    def acquire_source(
+        self,
+        request: AnalysisSourceAcquisitionRequest,
+    ) -> AcquiredAnalysisSource: ...
+
+    def resolve_source(
+        self,
+        request: AnalysisSourceResolutionRequest,
+    ) -> AcquiredAnalysisSource: ...
+
+
+@runtime_checkable
+class AnalysisDocumentPreparationPort(Protocol):
+    """只处理已取得 Source，不访问原始 Source URL。"""
+
+    def prepare_document(
+        self,
+        request: AnalysisDocumentPreparationRequest,
+    ) -> PreparedAnalysisDocument: ...
+
+
 __all__ = (
+    "AcquiredAnalysisSource",
+    "AnalysisDocumentPreparationPort",
+    "AnalysisDocumentPreparationRequest",
     "AnalysisFilePreparationRequest",
+    "AnalysisSourceAcquisitionPort",
+    "AnalysisSourceAcquisitionRequest",
+    "AnalysisSourceResolutionRequest",
     "AnalysisTaskWorkspace",
     "AnalysisTaskWorkspacePort",
     "FilePreparationPort",

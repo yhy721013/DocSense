@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "stage": "2-7-confirmed",
+  "publicContractChanged": false,
+  "taskTypes": ["report", "weaponry", "file"],
+  "reaper": {
+    "role": "business_policy_classifier",
+    "candidate": "running_current_attempt_lease_expired",
+    "leaseExpiryAloneAllowsRetry": false,
+    "automaticRetrySafeRequiresNoPersistedStep": true,
+    "existingStepRequiresRecoveryCase": true,
+    "currentSourceStepConvergesToOutcomeUnknown": true,
+    "networkIoInsideTransactionForbidden": true
+  },
+  "coordinator": {
+    "taskAndRecoveryAuthoritySeparated": true,
+    "operationIntentCommittedBeforeIo": true,
+    "observationAndOperationConvergeAtomically": true,
+    "authorityLossStopsFurtherActions": true,
+    "unregisteredProbeKeepsQuarantined": true,
+    "providerNotFoundDoesNotMeanDefinitelyNotSent": true
+  },
+  "resume": {
+    "decision": "retry_authorized",
+    "taskReturnsTo": "accepted",
+    "runnerStartedByDecision": false,
+    "ordinaryClaimCreatesNewTaskAttempt": true,
+    "targetCreatesNewStepAttempt": true,
+    "oldStepAttemptImmutable": true,
+    "frozenInputAndProfileReused": true,
+    "predecessorCheckpointHydrationRequired": true,
+    "checkpointDriftReisolates": true,
+    "publicProgressMonotonic": true,
+    "businessOwnedContinuationStores": true,
+    "continuationPayloadProfile": "bounded_canonical_json_object_v1",
+    "continuationPayloadMaxBytes": 16384,
+    "rootTaskControlStoresBusinessPayload": false,
+    "resumePreflightAtomicWithDecision": true,
+    "unimplementedResolverKeepsQuarantined": true,
+    "authorizedResolvers": {
+      "report": ["artifact.scope.begin"],
+      "weaponry": ["resource.record.begin"],
+      "file": ["source.download", "document.prepare"]
+    },
+    "analysisSourceAndDocumentPortsSplit": true
+  },
+  "finalize": {
+    "decision": "finalize_from_checkpoint",
+    "businessResultPreflightRequired": true,
+    "taskLatestDecisionAndCallbackEligibilityAtomic": true,
+    "recoveryAuthorityRequired": true,
+    "taskExecutionAuthorityCannotAuthorizeRecoveryFinalize": true,
+    "checkTaskSemanticsChanged": false
+  },
+  "operations": {
+    "defaultMode": "dry_run",
+    "publicHttpRouteForbidden": true,
+    "directSqlForbidden": true,
+    "requiredWriteInputs": [
+      "task_id",
+      "case_id",
+      "generation",
+      "expected_task_row_version",
+      "source_attempt_no",
+      "source_fencing_token",
+      "expected_recovery_fencing_token",
+      "operator",
+      "reason_code",
+      "evidence_digest"
+    ]
+  },
+  "topology": {
+    "existingMaintenanceSchedulerReused": true,
+    "newThreadAdded": false,
+    "newRouteAdded": false,
+    "legacyDoubleWriteForbidden": true,
+    "sqliteSingleInstanceEvidenceOnly": true
+  }
+}

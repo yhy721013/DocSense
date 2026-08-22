@@ -21,7 +21,7 @@ from app.modules.analysis.ports import (
 )
 from app.modules.tasks.domain import TaskId
 from app.modules.tasks.ports import TaskQueueSnapshot
-from app.services.core.config import AnalysisInfrastructureConfig
+from app.modules.analysis.adapters.runtime_config import AnalysisInfrastructureConfig
 
 
 class _AnalysisTaskCommandsFake:

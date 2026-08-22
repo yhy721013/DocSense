@@ -56,7 +56,10 @@ class ReportResourceStoreV2Tests(unittest.TestCase):
             root / "task-control-v2.sqlite3",
         )
         self.manager = SQLiteTransactionManager(
-            SQLiteConnectionFactory(bootstrap, busy_timeout_ms=100)
+            # 本集合验证资源 Store 的业务 CAS，而不是 SQLite busy 分类。并发用例
+            # 应在一个有界生产默认窗口内依次取得短写锁，随后由版本条件决出唯一胜者；
+            # 100ms 在全仓高负载下会把调度抖动误报成 CAS 失败。
+            SQLiteConnectionFactory(bootstrap, busy_timeout_ms=5_000)
         )
         self.factories = build_sqlite_task_control_uow_factories(self.manager)
         self.backend = SQLiteReportResourceStore(self.manager)

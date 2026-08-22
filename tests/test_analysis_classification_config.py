@@ -5,7 +5,7 @@ import unittest
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch
 
-from app.services.core.config import (
+from app.modules.analysis.adapters.runtime_config import (
     ANALYSIS_CLASSIFICATION_MODE_LEGACY,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,

@@ -269,7 +269,15 @@ def inspect_old_database(
 
     after = _file_set_snapshot(old_path)
     if before != after:
-        schema_errors.append({"code": "source_file_set_changed_during_preflight"})
+        schema_errors.append(
+            {
+                "code": "source_file_set_changed_during_preflight",
+                # 仅暴露固定的文件成员类别，不返回路径、时间戳或大小。
+                "members": sorted(
+                    name for name in before if before[name] != after[name]
+                ),
+            }
+        )
 
     blocker_count = sum(item["count"] for item in rule_results)
     if schema_errors:

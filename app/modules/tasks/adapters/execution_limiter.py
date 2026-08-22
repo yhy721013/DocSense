@@ -30,10 +30,10 @@ def _positive_interval(value: object) -> float:
 class UploadTaskLimiter:
     """限制共享 Document Processor 的上传类任务并发数。
 
-    普通 ``run`` 保留给尚未迁移的 analysis 后台线程；新的 Dispatcher 使用
+    普通 ``run`` 仅保留给离线旧链回归夹具；三个 v2 Dispatcher 使用
     ``acquire_interruptibly``，从而能够在停机期间撤销尚未取得许可的等待。两条路径
     共享同一组许可，因此不会在迁移窗口中绕过原有单并发资源边界。等待者使用严格 FIFO
-    队列；Report、Weaponry 和迁移期 analysis 即使刚归还许可，也必须排到已经等待的任务
+    队列；Report、Weaponry 和 Analysis 即使刚归还许可，也必须排到已经等待的任务
     后面，避免某一业务 Dispatcher 在持续积压时反复抢占唯一重型资源。
     """
 

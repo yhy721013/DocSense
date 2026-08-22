@@ -43,6 +43,9 @@
 | 文件 | 用途 |
 | --- | --- |
 | `260813-阶段2-3ExecutionRuntime实施记录.md` | v2 Authority Session、claim/start/heartbeat、expiry 原子轮换与失权协作停止核心链路；尚未接生产 Runner/Container。 |
+| `260813-阶段2-4Report试点实施记录.md` | Report v2 首个生产试点、一次切换、Callback/资源维护及旧 Report SQL 收口。 |
+| `260820-阶段2-6Analysis迁移实施记录.md` | Analysis v5、批量严格顺序、Authority-aware Step/UoW、生产一次切换与全新部署 fresh bootstrap。 |
+| `260821-阶段2-7业务恢复策略与有限Reaper实施记录.md` | 三业务过期 Attempt 分类、Recovery Authority/Coordinator、有限检查点续跑、恢复终态与严格运维入口。 |
 
 ## 当前基线的独立专题记录
 

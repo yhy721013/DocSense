@@ -53,6 +53,11 @@
       "checkpoint": ["audit_id", "audit_version", "committed_at"],
       "externalRef": []
     },
+    "result_snapshot.v1": {
+      "intent": ["input_profile_fingerprint", "business_ref", "result_digest"],
+      "checkpoint": ["result_schema_version", "callback_payload_digest", "created_at"],
+      "externalRef": []
+    },
     "terminal.v1": {
       "intent": ["result_checkpoint_digest", "expected_latest_task_id", "expected_attempt_no", "expected_fencing_token"],
       "checkpoint": ["execution_state", "public_status", "result_ref", "committed_at"],
@@ -179,6 +184,7 @@
         {"stepKey": "knowledge.workspace.ensure", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "document:v1:{sha256(file_name+NUL+storage_architecture_id+NUL+content_sha256)}:workspace", "inputProfileFields": ["file_name", "execution_profile.knowledge_provider_fingerprint", "execution_profile.knowledge_protocol_version"], "successResultRef": "permanent_workspace_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/adapters/legacy_knowledge.py:persist"]},
         {"stepKey": "knowledge.document.bind", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "external_write.v1", "idempotencyKey": "document:v1:{sha256(file_name+NUL+storage_architecture_id+NUL+content_sha256)}", "inputProfileFields": ["file_name", "original_file_name", "effective_ranges", "execution_profile.knowledge_provider_fingerprint", "execution_profile.knowledge_protocol_version"], "successResultRef": "AnalysisKnowledgeWriteResult/external_ref", "recoveryMatrixRef": "external_write_reconcile.v1", "currentCallSites": ["app/modules/analysis/application/knowledge_handoff.py:persist_knowledge", "app/modules/analysis/adapters/legacy_knowledge.py:persist"]},
         {"stepKey": "translation.execute", "definitionVersion": 1, "effectKind": "external_write", "replayPolicy": "never_auto", "schemaRef": "external_write.v1", "idempotencyKey": "{TranslationRequest.translation_key}", "inputProfileFields": ["translation_profile"], "successResultRef": "translation_result_digest+degrade_decision", "recoveryMatrixRef": "optional_degrade.v1", "currentCallSites": ["app/modules/analysis/application/knowledge_handoff.py:enrich_translations", "app/modules/translation/application/translate_prepared.py:TranslatePreparedDocument"]},
+        {"stepKey": "result.snapshot", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "result_snapshot.v1", "idempotencyKey": "analysis:{task_id}:result-snapshot:{callback_payload_digest}", "inputProfileFields": ["file_name", "batch_id", "batch_sequence"], "successResultRef": "AnalysisResultSnapshot", "recoveryMatrixRef": "local_idempotent.v1", "currentCallSites": ["app/modules/analysis/application/run_analysis_v2.py:_finish_terminal"]},
         {"stepKey": "terminal.commit", "definitionVersion": 1, "effectKind": "local_write", "replayPolicy": "idempotent_after_probe", "schemaRef": "terminal.v1", "idempotencyKey": "analysis:{task_id}:terminal:{result_checkpoint_digest}", "inputProfileFields": ["file_name", "batch_id", "batch_sequence"], "successResultRef": "TaskExecution terminal projection", "recoveryMatrixRef": "terminal.v1", "currentCallSites": ["app/modules/analysis/application/run_analysis.py:failure_convergence.finish_success"]}
       ]
     }

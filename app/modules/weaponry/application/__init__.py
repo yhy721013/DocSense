@@ -26,6 +26,7 @@ from .execution_uow import (
 from .recovery_policy import (
     WEAPONRY_RECOVERY_MATRICES,
     WeaponryRecoveryMatrixDefinition,
+    WeaponryTaskRecoveryPolicy,
     weaponry_recovery_matrix,
 )
 from .step_runtime import ActiveWeaponryStep, WeaponryStepRuntime
@@ -98,6 +99,7 @@ __all__ = [
     "WeaponryAdmissionUnitOfWorkFactory",
     "WEAPONRY_RECOVERY_MATRICES",
     "WeaponryRecoveryMatrixDefinition",
+    "WeaponryTaskRecoveryPolicy",
     "weaponry_recovery_matrix",
     "ActiveWeaponryStep",
     "WeaponryStepRuntime",

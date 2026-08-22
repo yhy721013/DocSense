@@ -1,6 +1,6 @@
 """文件分析 Worker 输入的严格 JSON Codec。
 
-此 Codec 在持久化边界写入 ``AnalysisTaskInputV4``，并严格兼容读取历史 V1/V2/V3；它不读取
+此 Codec 在阶段 2 持久化边界写入 ``AnalysisTaskInputV5``，并严格兼容读取历史 V1–V4；它不读取
 数据库、不生成任务身份，也不尝试修复历史脏数据。未知 schema、缺少字段、额外字段以及
 任务身份不一致都必须失败关闭，避免错误 payload 被错误的 Worker 重放。
 """
@@ -19,14 +19,22 @@ from app.modules.analysis.domain.task_inputs import (
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
     ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4,
+    ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5,
     AnalysisDocumentProcessingPolicySnapshot,
     AnalysisPolicySnapshot,
+    AnalysisSubmissionSnapshot,
     AnalysisTaskInputV1,
     AnalysisTaskInputV2,
     AnalysisTaskInputV3,
     AnalysisTaskInputV4,
+    AnalysisTaskInputV5,
+    AnalysisTranslationProfile,
     FrozenJsonObject,
 )
+from app.modules.analysis.domain.execution_profile import AnalysisExecutionProfile
+from app.modules.tasks.domain import TaskId
+from app.modules.tasks.ports import EncodedTaskSubmission
 from app.modules.analysis.domain.rag_naming import (
     AnalysisRagNamingSnapshot,
     AnalysisRagNamingSnapshotV3,
@@ -43,7 +51,7 @@ class AnalysisTaskInputCodecError(ValueError):
 
 
 class AnalysisTaskInputCodec:
-    """严格编解码 V1–V4 输入，保持公开 ``params`` 的未知字段和值语义。"""
+    """严格编解码 V1–V5 输入，保持公开 ``params`` 的未知字段和值语义。"""
 
     _V1_ENVELOPE_KEYS = (
         "schema_version",
@@ -63,6 +71,10 @@ class AnalysisTaskInputCodec:
     _V2_ENVELOPE_KEYS = _V1_ENVELOPE_KEYS + ("document_processing_policy",)
     _V3_ENVELOPE_KEYS = _V2_ENVELOPE_KEYS + ("rag_naming",)
     _V4_ENVELOPE_KEYS = _V3_ENVELOPE_KEYS
+    _V5_ENVELOPE_KEYS = _V4_ENVELOPE_KEYS + (
+        "execution_profile",
+        "translation_profile",
+    )
     # 保留历史私有测试入口；各版本合同使用上方显式 Envelope 字段集合。
     _ENVELOPE_KEYS = _V1_ENVELOPE_KEYS
 
@@ -103,6 +115,9 @@ class AnalysisTaskInputCodec:
             )
         if isinstance(task_input, AnalysisTaskInputV3):
             payload["rag_naming"] = task_input.rag_naming.to_dict()
+        if isinstance(task_input, AnalysisTaskInputV5):
+            payload["execution_profile"] = task_input.execution_profile.to_dict()
+            payload["translation_profile"] = task_input.translation_profile.to_dict()
         logger.debug(
             "文件分析任务输入已编码: task_id=%s batch_id=%s batch_sequence=%d "
             "compacted_range_count=%d",
@@ -192,7 +207,8 @@ class AnalysisTaskInputCodec:
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1,
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2,
                 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3,
-                ANALYSIS_TASK_INPUT_SCHEMA_VERSION,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4,
+                ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5,
             }
         ):
             raise AnalysisTaskInputCodecError("不支持的文件分析任务输入 schema_version")
@@ -278,7 +294,7 @@ class AnalysisTaskInputCodec:
                         )
                     ),
                 )
-            else:
+            elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4:
                 task_input = AnalysisTaskInputV4(
                     **common_fields,  # type: ignore[arg-type]
                     document_processing_policy=(
@@ -293,6 +309,33 @@ class AnalysisTaskInputCodec:
                         cls._require_mapping(
                             payload["rag_naming"],
                             "rag_naming",
+                        )
+                    ),
+                )
+            elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5:
+                task_input = AnalysisTaskInputV5(
+                    **common_fields,  # type: ignore[arg-type]
+                    document_processing_policy=(
+                        AnalysisDocumentProcessingPolicySnapshot.from_mapping(
+                            cls._require_mapping(
+                                payload["document_processing_policy"],
+                                "document_processing_policy",
+                            )
+                        )
+                    ),
+                    rag_naming=AnalysisRagNamingSnapshot.from_mapping(
+                        cls._require_mapping(payload["rag_naming"], "rag_naming")
+                    ),
+                    execution_profile=AnalysisExecutionProfile.from_dict(
+                        cls._require_mapping(
+                            payload["execution_profile"],
+                            "execution_profile",
+                        )
+                    ),
+                    translation_profile=AnalysisTranslationProfile.from_dict(
+                        cls._require_mapping(
+                            payload["translation_profile"],
+                            "translation_profile",
                         )
                     ),
                 )
@@ -331,8 +374,12 @@ class AnalysisTaskInputCodec:
             version_keys = cls._V2_ENVELOPE_KEYS
         elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3:
             version_keys = cls._V3_ENVELOPE_KEYS
-        else:
+        elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4:
             version_keys = cls._V4_ENVELOPE_KEYS
+        elif schema_version == ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5:
+            version_keys = cls._V5_ENVELOPE_KEYS
+        else:  # 上方版本白名单已拒绝；防止未来新增版本被旧 Codec 静默误读。
+            raise AnalysisTaskInputCodecError("不支持的文件分析任务输入 schema_version")
         expected_keys = frozenset(version_keys)
         if actual_keys == expected_keys:
             return
@@ -376,4 +423,90 @@ class AnalysisTaskInputCodec:
                 )
 
 
-__all__ = ("AnalysisTaskInputCodec", "AnalysisTaskInputCodecError")
+class AnalysisV5TaskCommandCodec:
+    """受理期专用 v5 Codec，Profile 由组合根一次注入并完整写入每项快照。"""
+
+    task_type = "file"
+
+    def __init__(
+        self,
+        *,
+        execution_profile: AnalysisExecutionProfile,
+        translation_profile: AnalysisTranslationProfile,
+    ) -> None:
+        if not isinstance(execution_profile, AnalysisExecutionProfile):
+            raise TypeError("execution_profile 必须是 AnalysisExecutionProfile")
+        if not isinstance(translation_profile, AnalysisTranslationProfile):
+            raise TypeError("translation_profile 必须是 TranslationProfile")
+        self._execution_profile = execution_profile
+        self._translation_profile = translation_profile
+
+    @property
+    def write_schema_version(self) -> int:
+        return ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5
+
+    def encode_batch_item(
+        self,
+        submission: AnalysisSubmissionSnapshot,
+        *,
+        task_id: TaskId,
+        batch_id: str,
+        batch_sequence: int,
+        accepted_at: str,
+        trace_id: str,
+    ) -> EncodedTaskSubmission[AnalysisTaskInputV5]:
+        """生成一个批次成员的完整内部输入与旧公开投影。"""
+
+        if not isinstance(submission, AnalysisSubmissionSnapshot):
+            raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        snapshot = AnalysisTaskInputV5.from_submission(
+            submission,
+            task_id=task_id.value,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
+            accepted_at=accepted_at,
+            trace_id=trace_id,
+            execution_profile=self._execution_profile,
+            translation_profile=self._translation_profile,
+        )
+        payload = AnalysisTaskInputCodec.encode(snapshot)
+        roundtrip = AnalysisTaskInputCodec.decode(
+            payload,
+            expected_task_id=task_id.value,
+            expected_business_key=submission.file_name,
+            expected_batch_id=batch_id,
+        )
+        if roundtrip != snapshot:
+            raise AnalysisTaskInputCodecError("Analysis v5 受理快照往返不一致")
+        return EncodedTaskSubmission(
+            input_snapshot=snapshot,
+            input_payload=payload,
+            projection_request_payload={
+                "businessType": "file",
+                "params": [submission.raw_params.to_dict()],
+            },
+            initial_public_status="1" if batch_sequence == 1 else "0",
+            active_public_statuses=("0", "1"),
+        )
+
+    def decode_input(
+        self,
+        *,
+        schema_version: int,
+        payload: Mapping[str, Any],
+    ) -> AnalysisTaskInputV1:
+        """Worker 只按行上版本解码；不使用当前 Profile 回填历史输入。"""
+
+        decoded = AnalysisTaskInputCodec.decode(payload)
+        if decoded.schema_version != schema_version:
+            raise AnalysisTaskInputCodecError("Analysis 行 Schema 与 payload 不一致")
+        return decoded
+
+
+__all__ = (
+    "AnalysisTaskInputCodec",
+    "AnalysisTaskInputCodecError",
+    "AnalysisV5TaskCommandCodec",
+)

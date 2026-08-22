@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import hashlib
 from typing import Callable
 from urllib.parse import unquote, urlsplit
 
@@ -29,7 +30,11 @@ from app.modules.document_processing.domain import (
     ProcessingOutcome,
 )
 from app.modules.analysis.ports.files import (
+    AcquiredAnalysisSource,
+    AnalysisDocumentPreparationRequest,
     AnalysisFilePreparationRequest,
+    AnalysisSourceAcquisitionRequest,
+    AnalysisSourceResolutionRequest,
     AnalysisTaskWorkspace,
     AnalysisTaskWorkspacePort,
     PreparedAnalysisDocument,
@@ -89,6 +94,24 @@ class LocalAnalysisTaskWorkspaceAdapter(AnalysisTaskWorkspacePort):
             task_id,
             task_root,
         )
+        return AnalysisTaskWorkspace(execution=execution, root_path=str(task_root))
+
+    def resolve(self, execution) -> AnalysisTaskWorkspace:  # type: ignore[no-untyped-def]
+        """只读复核既有任务目录，恢复时不得把缺失目录补造为成功事实。"""
+
+        task_id = str(getattr(execution, "task_id", "") or "").strip()
+        if not task_id or Path(task_id).name != task_id or any(
+            character in task_id for character in ("/", "\\")
+        ):
+            raise AnalysisFilePreparationError("task_id 不能用于任务目录")
+        task_root = self._canonical_resolved(self._root_directory / task_id)
+        try:
+            task_root.relative_to(self._root_directory)
+        except ValueError as exc:
+            raise AnalysisFilePreparationError("任务目录越出受控根目录") from exc
+        if not task_root.is_dir():
+            raise AnalysisFilePreparationError("续跑任务目录不存在")
+        logger.info("已复核文件分析续跑任务目录: task_id=%s", task_id)
         return AnalysisTaskWorkspace(execution=execution, root_path=str(task_root))
 
     @staticmethod
@@ -165,19 +188,62 @@ class LegacyAnalysisFilePreparationAdapter:
         self._rag_projector = rag_projector
         self._document_scanned_pdf_engine = document_scanned_pdf_engine
 
+    @property
+    def source_transport_profile_id(self) -> str:
+        """返回下载 Adapter 的稳定语义身份，不泄露 Source URL。"""
+
+        return "http-source-atomic-download-v1"
+
+    @property
+    def max_download_bytes(self) -> int:
+        """返回本实例实际执行的下载字节上限。"""
+
+        return self._max_download_bytes
+
+    @property
+    def rag_projection_profile_id(self) -> str:
+        """返回实际注入 Markdown RAG 投影器的 Canonical ProfileId。"""
+
+        return self._rag_projector.profile_id
+
     def prepare(
         self,
         request: AnalysisFilePreparationRequest,
     ) -> PreparedAnalysisDocument:
-        """下载、规范化、OCR 并只返回当前任务根目录内的文件引用。"""
+        """保留 v1 内部兼容外观；v2 必须分别调用 acquire/prepare_document。"""
 
         if not isinstance(request, AnalysisFilePreparationRequest):
             raise TypeError("request 必须是 AnalysisFilePreparationRequest")
+        source = self.acquire_source(
+            AnalysisSourceAcquisitionRequest(
+                execution=request.execution,
+                source_url=request.source_url,
+                task_root=request.task_root,
+            )
+        )
+        policy = request.document_processing_policy
+        if policy is None:  # pragma: no cover - DTO 已保证
+            raise AnalysisFilePreparationError("文件处理策略缺失")
+        return self.prepare_document(
+            AnalysisDocumentPreparationRequest(
+                execution=request.execution,
+                task_root=request.task_root,
+                source=source,
+                document_processing_policy=policy,
+            )
+        )
+
+    def acquire_source(
+        self,
+        request: AnalysisSourceAcquisitionRequest,
+    ) -> AcquiredAnalysisSource:
+        """只执行受控下载并形成摘要，不调用 DocumentProcessing。"""
+
+        if not isinstance(request, AnalysisSourceAcquisitionRequest):
+            raise TypeError("request 必须是 AnalysisSourceAcquisitionRequest")
         task_root = self._task_root(request.task_root)
         download_dir = task_root / "download"
-        normalized_dir = task_root / "normalized"
         download_dir.mkdir(parents=True, exist_ok=True)
-        normalized_dir.mkdir(parents=True, exist_ok=True)
 
         url_suffix = self._suffix_from_url(request.source_url)
         business_suffix = self._safe_suffix(
@@ -201,10 +267,18 @@ class LegacyAnalysisFilePreparationAdapter:
                 file_name=source_name,
                 download_dir=download_dir,
             )
-            return self._prepare_shared_artifact(
-                request,
-                downloaded_path=downloaded_path,
-                normalized_dir=normalized_dir,
+            digest = self._sha256_file(downloaded_path)
+            logger.info(
+                "文件分析 Source 已受控获取: task_id=%s basename=%s checksum=%s",
+                request.execution.task_id,
+                downloaded_path.name,
+                digest[:12],
+            )
+            return AcquiredAnalysisSource(
+                execution=request.execution,
+                source_path=str(downloaded_path),
+                source_basename=downloaded_path.name,
+                source_sha256=digest,
             )
         except AnalysisFilePreparationError:
             raise
@@ -217,9 +291,68 @@ class LegacyAnalysisFilePreparationAdapter:
             )
             raise AnalysisFilePreparationError("文件分析文件准备失败") from exc
 
+    def prepare_document(
+        self,
+        request: AnalysisDocumentPreparationRequest,
+    ) -> PreparedAnalysisDocument:
+        """只处理已取得 Source；先复核任务目录、basename 与内容摘要。"""
+
+        if not isinstance(request, AnalysisDocumentPreparationRequest):
+            raise TypeError("request 必须是 AnalysisDocumentPreparationRequest")
+        task_root = self._task_root(request.task_root)
+        download_dir = task_root / "download"
+        normalized_dir = task_root / "normalized"
+        normalized_dir.mkdir(parents=True, exist_ok=True)
+        source_path = self._require_file_within(
+            request.source.source_path,
+            root=download_dir,
+            label="已取得 Source",
+        )
+        if source_path.name != request.source.source_basename:
+            raise AnalysisFilePreparationError("Source basename 与冻结引用不一致")
+        actual_digest = self._sha256_file(source_path)
+        if actual_digest != request.source.source_sha256:
+            raise AnalysisFilePreparationError("Source 内容摘要与冻结引用不一致")
+        return self._prepare_shared_artifact(
+            request,
+            downloaded_path=source_path,
+            normalized_dir=normalized_dir,
+        )
+
+    def resolve_source(
+        self,
+        request: AnalysisSourceResolutionRequest,
+    ) -> AcquiredAnalysisSource:
+        """只读复核续跑快照引用的任务内 Source；绝不重新下载。"""
+
+        if not isinstance(request, AnalysisSourceResolutionRequest):
+            raise TypeError("request 必须是 AnalysisSourceResolutionRequest")
+        task_root = self._task_root(request.task_root)
+        download_dir = task_root / "download"
+        source_path = self._require_file_within(
+            download_dir / request.source_basename,
+            root=download_dir,
+            label="续跑 Source",
+        )
+        actual_digest = self._sha256_file(source_path)
+        if actual_digest != request.source_sha256:
+            raise AnalysisFilePreparationError("续跑 Source 内容摘要漂移")
+        logger.info(
+            "已复核 Analysis 续跑 Source: task_id=%s basename=%s checksum=%s",
+            request.execution.task_id,
+            request.source_basename,
+            actual_digest[:12],
+        )
+        return AcquiredAnalysisSource(
+            execution=request.execution,
+            source_path=str(source_path),
+            source_basename=request.source_basename,
+            source_sha256=actual_digest,
+        )
+
     def _prepare_shared_artifact(
         self,
-        request: AnalysisFilePreparationRequest,
+        request: AnalysisDocumentPreparationRequest,
         *,
         downloaded_path: Path,
         normalized_dir: Path,
@@ -232,8 +365,6 @@ class LegacyAnalysisFilePreparationAdapter:
 
         preparer = self._document_preparer
         policy = request.document_processing_policy
-        if policy is None:  # pragma: no cover - DTO 已保证
-            raise AnalysisFilePreparationError("文件处理策略缺失")
         legacy_source = is_legacy_office_path(downloaded_path)
         if legacy_source != policy.legacy_office_required:
             logger.error(
@@ -357,7 +488,18 @@ class LegacyAnalysisFilePreparationAdapter:
             prepared_artifact=prepared.prepared_artifact,
             rag_upload_artifact=rag_artifact,
             rag_projection_profile_id=projection_profile_id,
+            source_sha256=self._sha256_file(downloaded_path),
         )
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        """流式计算已受控下载文件摘要，避免大文件一次性进入内存。"""
+
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
 
     def _download(
         self,

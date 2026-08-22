@@ -28,7 +28,7 @@ from app.modules.analysis.domain.architecture_tree import (
     architecture_tree_fingerprint,
     build_architecture_tree_index,
 )
-from app.services.core.config import load_analysis_classification_config
+from app.modules.analysis.adapters.runtime_config import load_analysis_classification_config
 from app.modules.analysis.domain.prompts import (
     build_architecture_classification_prompt,
     build_architecture_reselect_prompt,

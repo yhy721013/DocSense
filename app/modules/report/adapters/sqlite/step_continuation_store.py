@@ -1,0 +1,20 @@
+"""Report 组件自有 Step 续跑快照 Store。"""
+
+from __future__ import annotations
+
+import sqlite3
+
+from app.modules.tasks.adapters.sqlite.step_continuation_store import (
+    SQLiteTaskStepContinuationStore,
+)
+
+
+class SQLiteReportStepContinuationStore(SQLiteTaskStepContinuationStore):
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        super().__init__(
+            connection,
+            table_name="report_step_continuation_snapshots",
+        )
+
+
+__all__ = ["SQLiteReportStepContinuationStore"]

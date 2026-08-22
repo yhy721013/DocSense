@@ -266,6 +266,45 @@ class AnalysisResourceLifecycle:
 
         return self._record
 
+    @classmethod
+    def attach(
+        cls,
+        *,
+        store: AnalysisResourcePort,
+        execution: AnalysisExecutionRef,
+        record: AnalysisResourceRecord,
+        clock: Callable[[], datetime] = _utc_now,
+        close_running_grace_seconds: float = _DEFAULT_CLOSE_RUNNING_GRACE_SECONDS,
+    ) -> "AnalysisResourceLifecycle":
+        """在新的短 UoW 中恢复协作器，不复用上一事务的连接或可变 Store。
+
+        v2 Workflow 每次条件写都创建新 UoW，因此不能把借用连接的 Store 缓存在跨步骤
+        对象中。该工厂只接纳调用方刚从同一 Store 读取且身份完全一致的不可变记录。
+        """
+
+        lifecycle = cls(
+            store=store,
+            execution=execution,
+            clock=clock,
+            close_running_grace_seconds=close_running_grace_seconds,
+        )
+        lifecycle._require_record_identity(record, operation="attach")
+        lifecycle._record = record
+        return lifecycle
+
+    def _require_record_identity(
+        self,
+        record: AnalysisResourceRecord,
+        *,
+        operation: str,
+    ) -> None:
+        if not isinstance(record, AnalysisResourceRecord):
+            raise TypeError("record 必须是 AnalysisResourceRecord")
+        if record.execution != self._execution:
+            raise AnalysisResourceLifecycleError(
+                f"资源记录不属于当前 execution: operation={operation}"
+            )
+
     def begin_worker(self) -> None:
         """登记当前 Worker 正在推进资源生命周期；必须在资源记录可见前调用。"""
 

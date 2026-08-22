@@ -8,6 +8,7 @@ Store 只使用调用方 Unit of Work 提供的活动 Connection，不自行提�
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 
 from app.modules.tasks.domain import TaskBusinessRef, TaskId
@@ -31,6 +32,7 @@ from app.modules.tasks.ports.callback_delivery_control import (
     CallbackReleaseUnknownCommand,
     CallbackValidationCommand,
     CallbackValidationOutcome,
+    RecoveryCallbackEligibilityCommand,
 )
 from app.modules.tasks.ports.clock import require_persisted_utc
 
@@ -347,6 +349,124 @@ class SQLiteCallbackControlStore:
         )
         if cursor.rowcount != 1:
             raise RuntimeError("Callback eligibility fencing 条件写未命中")
+        return CallbackControlMutationOutcome.APPLIED
+
+    def mark_recovery_eligible(
+        self,
+        command: RecoveryCallbackEligibilityCommand,
+    ) -> CallbackControlMutationOutcome:
+        """复核刚提交的 Recovery Decision，并登记同事务 Callback 资格。
+
+        Recovery 终态发生时来源 Task Attempt 已经 ``abandoned``，因此这里不能复用
+        ``mark_eligible`` 的 Task Execution Authority 门禁。权限来自同一事务内已经写入、
+        且与 Recovery fencing 和来源 Checkpoint 完整绑定的关闭 Decision。
+        """
+
+        self._require_write_transaction()
+        if not isinstance(command, RecoveryCallbackEligibilityCommand):
+            raise TypeError("command 必须是 RecoveryCallbackEligibilityCommand")
+        row = self._execution_view(command.task_id, command.business_ref)
+        if row is None:
+            return CallbackControlMutationOutcome.MISSING
+        if not self._is_latest(row):
+            return CallbackControlMutationOutcome.STALE
+        if (
+            str(row["execution_state"]) not in _TERMINAL_TASK_STATES
+            or str(row["execution_callback_status"]) != "pending"
+            or str(row["latest_callback_status"]) != "pending"
+        ):
+            return CallbackControlMutationOutcome.INVALID_STATE
+
+        authority = command.authority
+        decision = self._connection.execute(
+            """
+            SELECT d.task_id, d.case_id, d.recovery_generation,
+                   d.recovery_fencing_token, d.decision_kind, d.closes_case,
+                   d.terminal_projection_payload, d.terminal_state,
+                   c.state AS case_state, c.current_decision_id,
+                   s.current_step_attempt_no, s.checkpoint_code,
+                   s.result_digest
+            FROM task_recovery_decisions AS d
+            JOIN task_recovery_cases AS c ON c.case_id = d.case_id
+            JOIN task_steps AS s
+              ON s.task_id = d.task_id AND s.step_key = ?
+            WHERE d.decision_id = ?
+            """,
+            (command.source_step_key, command.decision_id),
+        ).fetchone()
+        if decision is None:
+            return CallbackControlMutationOutcome.MISSING
+        try:
+            projection = json.loads(str(decision["terminal_projection_payload"]))
+        except (TypeError, ValueError):
+            return CallbackControlMutationOutcome.INVALID_STATE
+        if not isinstance(projection, dict):
+            return CallbackControlMutationOutcome.INVALID_STATE
+        if (
+            str(decision["task_id"]) != command.task_id.value
+            or str(decision["case_id"]) != authority.case_id
+            or int(decision["recovery_generation"]) != authority.generation
+            or int(decision["recovery_fencing_token"]) != authority.fencing_token
+            or str(decision["decision_kind"]) != "finalize_from_checkpoint"
+            or int(decision["closes_case"]) != 1
+            or str(decision["case_state"]) != "resolved"
+            or str(decision["current_decision_id"]) != command.decision_id
+            or int(decision["current_step_attempt_no"])
+            != command.source_step_attempt_no
+            or str(decision["checkpoint_code"]) != command.checkpoint_code
+            or str(decision["result_digest"]) != command.checkpoint_digest
+            or projection.get("source_step_key") != command.source_step_key
+            or projection.get("source_step_attempt_no")
+            != command.source_step_attempt_no
+            or projection.get("checkpoint_code") != command.checkpoint_code
+            or projection.get("checkpoint_digest") != command.checkpoint_digest
+        ):
+            return CallbackControlMutationOutcome.AUTHORITY_LOST
+
+        guard = self._guard(command.business_ref)
+        if guard is None:
+            self._connection.execute(
+                """
+                INSERT INTO callback_delivery_guards (
+                    business_type, business_key, owner_execution_id, state,
+                    lease_token, lease_version, lease_started_at, deadline_at,
+                    last_outcome, error_stage, released_at, released_by,
+                    release_reason, updated_at
+                ) VALUES (?, ?, ?, 'idle', '', 0, NULL, NULL, '', '',
+                          NULL, '', '', ?)
+                """,
+                (
+                    command.business_ref.business_type,
+                    command.business_ref.business_key,
+                    command.task_id.value,
+                    command.eligible_at,
+                ),
+            )
+            return CallbackControlMutationOutcome.APPLIED
+        if str(guard["state"]) != CallbackGuardState.IDLE.value:
+            return CallbackControlMutationOutcome.INVALID_STATE
+        if str(guard["owner_execution_id"] or "") == command.task_id.value:
+            return CallbackControlMutationOutcome.DUPLICATE
+        cursor = self._connection.execute(
+            """
+            UPDATE callback_delivery_guards
+            SET owner_execution_id = ?, lease_token = '',
+                lease_started_at = NULL, deadline_at = NULL,
+                last_outcome = '', error_stage = '', released_at = NULL,
+                released_by = '', release_reason = '', updated_at = ?
+            WHERE business_type = ? AND business_key = ? AND state = 'idle'
+              AND lease_version = ?
+            """,
+            (
+                command.task_id.value,
+                command.eligible_at,
+                command.business_ref.business_type,
+                command.business_ref.business_key,
+                int(guard["lease_version"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Recovery Callback eligibility fencing 条件写未命中")
         return CallbackControlMutationOutcome.APPLIED
 
     def acquire(self, command: CallbackAcquireCommand) -> CallbackAcquireResult:

@@ -11,6 +11,7 @@ import json
 import logging
 import secrets
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,7 +127,10 @@ class KnowledgeIndexOperationService:
 
     def _init_db(self) -> None:
         """创建协调表及业务查询索引，不改写任何既有任务数据。"""
-        with self._connect() as connection:
+        # ``sqlite3.Connection`` 的上下文协议只负责提交/回滚，并不会关闭连接。
+        # 构造期若把关闭交给 GC，稍后的 Task Control 只读预检可能观察到延迟
+        # checkpoint 造成的 WAL/SHM 变化并正确地 fail-closed。
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS knowledge_index_operations (

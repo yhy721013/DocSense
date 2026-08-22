@@ -21,6 +21,7 @@ from .execution_steps import (
 from .recovery_policy import (
     REPORT_RECOVERY_MATRICES,
     ReportRecoveryMatrixDefinition,
+    ReportTaskRecoveryPolicy,
     recovery_matrix,
 )
 
@@ -44,5 +45,6 @@ __all__ = [
     "resolve_report_step",
     "REPORT_RECOVERY_MATRICES",
     "ReportRecoveryMatrixDefinition",
+    "ReportTaskRecoveryPolicy",
     "recovery_matrix",
 ]

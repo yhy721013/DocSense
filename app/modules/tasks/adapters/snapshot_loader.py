@@ -38,6 +38,7 @@ class CodecTaskExecutionSnapshotLoader:
             raise TypeError("task_id 必须是 TaskId")
         with self._query_uow_factory() as unit_of_work:
             persisted = unit_of_work.queries.load_execution_input(task_id)
+            recovery_steps = unit_of_work.queries.list_steps(task_id)
         if persisted is None:
             raise LookupError("Task 冻结输入不存在")
         if persisted.task_type != self._task_type:
@@ -71,6 +72,10 @@ class CodecTaskExecutionSnapshotLoader:
             snapshot=snapshot,
             input_schema_version=persisted.input_schema_version,
             input_payload_fingerprint=hashlib.sha256(canonical).hexdigest(),
+            retry_from_step_key=persisted.retry_from_step_key,
+            recovery_steps=(
+                recovery_steps if persisted.retry_from_step_key else ()
+            ),
         )
 
 

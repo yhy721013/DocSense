@@ -76,10 +76,38 @@
       "lifecycle": "persistent"
     },
     {
+      "tables": ["report_step_continuation_snapshots"],
+      "currentWriter": "app/modules/report/adapters/sqlite/step_continuation_store.py (production wired; append-only business resume facts)",
+      "targetWriter": "app/modules/report/adapters/sqlite/step_continuation_store.py",
+      "exitStage": "retained_stage2_7",
+      "lifecycle": "persistent"
+    },
+    {
       "tables": ["analysis_resource_records"],
-      "currentWriter": "app/services/llm_service/task_service.py::LLMTaskService",
+      "currentWriter": "app/modules/analysis/adapters/sqlite/resource_store.py (production wired; no v2 dual write)",
       "targetWriter": "app/modules/analysis/adapters/sqlite/resource_store.py",
       "exitStage": "2-6",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["analysis_recall_decisions", "analysis_interaction_audit_refs"],
+      "currentWriter": "app/modules/analysis/adapters/sqlite/audit_persistence.py (production wired)",
+      "targetWriter": "app/modules/analysis/adapters/sqlite/audit_persistence.py",
+      "exitStage": "2-6",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["analysis_result_snapshots"],
+      "currentWriter": "app/modules/analysis/adapters/sqlite/result_snapshot_store.py (production wired; terminal preflight source)",
+      "targetWriter": "app/modules/analysis/adapters/sqlite/result_snapshot_store.py",
+      "exitStage": "2-6",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["analysis_step_continuation_snapshots"],
+      "currentWriter": "app/modules/analysis/adapters/sqlite/step_continuation_store.py (production wired; append-only business resume facts)",
+      "targetWriter": "app/modules/analysis/adapters/sqlite/step_continuation_store.py",
+      "exitStage": "retained_stage2_7",
       "lifecycle": "persistent"
     },
     {
@@ -87,6 +115,13 @@
       "currentWriter": "app/modules/weaponry/adapters/sqlite/result_snapshot_store.py (production wired; terminal transaction stores complete Callback payload)",
       "targetWriter": "app/modules/weaponry/adapters/sqlite/result_snapshot_store.py",
       "exitStage": "2-5",
+      "lifecycle": "persistent"
+    },
+    {
+      "tables": ["weaponry_step_continuation_snapshots"],
+      "currentWriter": "app/modules/weaponry/adapters/sqlite/step_continuation_store.py (production wired; append-only business resume facts)",
+      "targetWriter": "app/modules/weaponry/adapters/sqlite/step_continuation_store.py",
+      "exitStage": "retained_stage2_7",
       "lifecycle": "persistent"
     },
     {

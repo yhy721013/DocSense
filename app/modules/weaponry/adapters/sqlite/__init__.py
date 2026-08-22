@@ -11,6 +11,7 @@ from .schema import (
     load_weaponry_control_manifest,
 )
 from .task_document_snapshot_store import SQLiteWeaponryTaskDocumentSnapshotStore
+from .step_continuation_store import SQLiteWeaponryStepContinuationStore
 from .unit_of_work import (
     SQLiteWeaponryAdmissionUnitOfWork,
     SQLiteWeaponryAdmissionUnitOfWorkFactory,
@@ -25,6 +26,7 @@ __all__ = [
     "SQLiteWeaponryResourceStoreAdapter",
     "SQLiteWeaponryResultSnapshotStore",
     "SQLiteWeaponryTaskDocumentSnapshotStore",
+    "SQLiteWeaponryStepContinuationStore",
     "SQLiteWeaponryExecutionUnitOfWork",
     "SQLiteWeaponryExecutionUnitOfWorkFactory",
     "SQLiteWeaponryAdmissionUnitOfWork",

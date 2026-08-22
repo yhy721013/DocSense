@@ -17,6 +17,7 @@ from typing import Protocol, runtime_checkable
 from app.modules.tasks.domain import TaskBusinessRef, TaskExecutionAuthority, TaskId
 
 from .clock import require_persisted_utc
+from .recovery_finalization import RecoveryCallbackEligibilityCommand
 
 
 def _required_text(value: object, *, name: str, maximum: int = 512) -> str:
@@ -427,6 +428,12 @@ class CallbackDeliveryControlPort(Protocol):
     ) -> CallbackControlMutationOutcome:
         ...
 
+    def mark_recovery_eligible(
+        self,
+        command: RecoveryCallbackEligibilityCommand,
+    ) -> CallbackControlMutationOutcome:
+        ...
+
     def acquire(self, command: CallbackAcquireCommand) -> CallbackAcquireResult:
         ...
 
@@ -473,6 +480,7 @@ __all__ = [
     "CallbackDeliveryOutcome",
     "CallbackDeliveryTrigger",
     "CallbackEligibilityCommand",
+    "RecoveryCallbackEligibilityCommand",
     "CallbackGuardObservation",
     "CallbackGuardState",
     "CallbackGuardSweepCommand",

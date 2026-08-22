@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from app.modules.tasks.domain import RecoveryClassification
+from app.modules.tasks.application.recovery_policies import RegistryTaskRecoveryPolicy
 from app.modules.weaponry.domain import WeaponryDomainValidationError
 
 
@@ -61,8 +62,24 @@ def weaponry_recovery_matrix(matrix_ref: str) -> WeaponryRecoveryMatrixDefinitio
         raise WeaponryDomainValidationError("Weaponry recovery matrix 未登记") from exc
 
 
+class WeaponryTaskRecoveryPolicy(RegistryTaskRecoveryPolicy):
+    """Weaponry Step Registry 的唯一过期 Attempt 分类策略。"""
+
+    def __init__(self) -> None:
+        from .execution_steps import resolve_weaponry_step
+
+        super().__init__(
+            task_type="weaponry",
+            policy_version="weaponry-task-recovery.v1",
+            resolve_step=resolve_weaponry_step,
+            finalization_step_key="result.map",
+            resumable_step=lambda step_key: step_key == "resource.record.begin",
+        )
+
+
 __all__ = [
     "WEAPONRY_RECOVERY_MATRICES",
     "WeaponryRecoveryMatrixDefinition",
+    "WeaponryTaskRecoveryPolicy",
     "weaponry_recovery_matrix",
 ]

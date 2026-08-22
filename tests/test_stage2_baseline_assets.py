@@ -330,6 +330,8 @@ class Stage2OwnershipContractAssetTests(unittest.TestCase):
             / "app/modules/report/adapters/sqlite/report_control_manifest.json",
             PROJECT_ROOT
             / "app/modules/weaponry/adapters/sqlite/weaponry_control_manifest.json",
+            PROJECT_ROOT
+            / "app/modules/analysis/adapters/sqlite/analysis_control_manifest.json",
         )
         for manifest_path in manifest_paths:
             if not manifest_path.is_file():
@@ -424,6 +426,12 @@ class Stage2RuntimeConfigOwnershipAssetTests(unittest.TestCase):
             / "app"
             / "modules"
             / "report"
+            / "adapters"
+            / "runtime_config.py",
+            PROJECT_ROOT
+            / "app"
+            / "modules"
+            / "analysis"
             / "adapters"
             / "runtime_config.py",
             PROJECT_ROOT

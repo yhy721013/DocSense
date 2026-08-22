@@ -1,0 +1,110 @@
+{
+  "stage": "2-6-completed",
+  "publicContractChanged": false,
+  "productionWired": true,
+  "taskIdentity": {
+    "businessType": "file",
+    "executorName": "file",
+    "futureQueueRoute": "file"
+  },
+  "input": {
+    "targetSchema": "AnalysisTaskInput/v5",
+    "newWriteVersion": 5,
+    "legacyReadVersions": [1, 2, 3, 4],
+    "workerMayBackfillFromCurrentEnvironment": false,
+    "profileCheckedBeforeFirstExternalEffect": true,
+    "topLevelFields": [
+      "schema_version", "task_id", "batch_id", "batch_sequence",
+      "file_name", "original_file_name", "original_file_name_present",
+      "file_path", "raw_params", "effective_ranges", "policy_snapshot",
+      "document_processing_policy", "rag_naming", "execution_profile",
+      "translation_profile", "accepted_at", "trace_id"
+    ],
+    "executionProfileFields": [
+      "schema_name", "schema_version", "source_transport_profile_id",
+      "max_download_bytes", "rag_provider_id", "rag_provider_fingerprint",
+      "rag_model_fingerprint", "rag_workspace_profile_id",
+      "rag_projection_profile_id", "prompt_profile_id",
+      "knowledge_provider_id", "knowledge_provider_fingerprint",
+      "knowledge_protocol_version"
+    ],
+    "translationProfileReused": "app/modules/translation/domain/models.py::TranslationProfile"
+  },
+  "admissionAndOrdering": {
+    "adapter": "app/modules/analysis/adapters/v2_batch_admission.py::SQLiteAnalysisV2BatchAdmissionAdapter",
+    "batchSizeRange": [1, 32],
+    "allOrNothingBeginImmediate": true,
+    "persistentDispatchSequenceFifo": true,
+    "strictBatchPredecessorGate": true,
+    "recoveryRequiredPredecessorBlocks": true,
+    "callbackHandoffPredecessorBlocks": true,
+    "eventWakeupIsLossyHint": true,
+    "startupAndPeriodicScanAreRecoveryTruth": true
+  },
+  "executionRuntime": {
+    "workflow": "app/modules/analysis/application/run_analysis_v2.py::RunAnalysisV2Workflow",
+    "stepRuntime": "app/modules/analysis/application/step_runtime.py::AnalysisStepRuntime",
+    "registry": "app/modules/analysis/application/execution_steps.py::ANALYSIS_STEP_REGISTRY",
+    "dispatcher": "app/modules/analysis/adapters/v2_runtime.py::AnalysisV2TaskDispatcher",
+    "executor": "app/modules/tasks/adapters/local_executor.py::LocalTaskExecutor",
+    "callbackControl": "app/modules/analysis/adapters/v2_callback.py::TaskControlAnalysisCallbackAdapter",
+    "callbackRecovery": "app/modules/analysis/adapters/v2_callback_recovery.py::SQLiteAnalysisV2CallbackRecoverySource",
+    "completeAuthorityRequired": true,
+    "legacyAuthorityBackfillForbidden": true,
+    "externalIoInsideControlTransaction": false,
+    "resultTaskAttemptStepAndCallbackEligibilityOneTransaction": true
+  },
+  "authority": {
+    "source": "TaskWorkflowContextPort.session",
+    "completeFields": [
+      "task_id", "attempt_no", "lease_token", "fencing_token", "lease_expires_at"
+    ],
+    "allConditionalMutationsUseAuthoritySession": true,
+    "reloadsCurrentAuthorityFromDatabase": false,
+    "logsLeaseToken": false,
+    "authorityLossStopsWithoutTerminal": true
+  },
+  "failureAndRecovery": {
+    "poisonInputFailsBeforeClaim": true,
+    "unknownExternalEffect": "recovery_required_and_resource_quarantine",
+    "unknownEffectAutoReplay": false,
+    "callbackHttpAfterTerminalTransaction": true,
+    "failedCallbackHandoffUsesFrozenResultSnapshot": true,
+    "synchronousRecoveryRerunsAnalysis": false,
+    "resourceRecoveryUsesPersistentScan": true,
+    "resourceAuditFailureDoesNotRepeatExternalClose": true,
+    "terminalNeverWaitsForResourceCleanup": true
+  },
+  "maintenance": {
+    "owner": "app/modules/analysis/adapters/v2_runtime.py::AnalysisV2Maintenance",
+    "callbackGuardFreezeAndResourceRecoveryAreSeparateJobs": true,
+    "startupScan": true,
+    "periodicScan": true,
+    "eventWakeupIsLossyHint": true,
+    "callbackUnknownAutoResend": false,
+    "boundedStop": true
+  },
+  "atomicSwitch": {
+    "completedStep": 7,
+    "compositionRoot": "app/container.py",
+    "submitRunProgressTerminalAndCallbackTogether": true,
+    "dualWriteForbidden": true,
+    "legacyAuthorityBackfillForbidden": true,
+    "legacyAnalysisProductionChainConstructed": false,
+    "publicReadUsesV2ForFile": true,
+    "processSingletonLockRemovedFromV2Dispatcher": true
+  },
+  "freshBootstrap": {
+    "oneShotCommand": "scripts/bootstrap_fresh_task_control.py",
+    "ordinaryApplicationAutoFreshForbidden": true,
+    "legacyAndTargetFileSetsMustBeAbsent": true,
+    "allRequiredComponentsPublishedTogether": true,
+    "repeatInvocationFailsClosed": true
+  },
+  "evidence": {
+    "temporarySQLiteAndFakesOnly": true,
+    "runPyExecuted": false,
+    "providerCalled": false,
+    "multiInstanceOrProductionClaimed": false
+  }
+}

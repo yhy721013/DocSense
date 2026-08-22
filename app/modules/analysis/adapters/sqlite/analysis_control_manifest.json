@@ -1,0 +1,165 @@
+{
+  "manifestProfile": "canonical_json_v1",
+  "componentName": "analysis_control",
+  "componentVersion": 2,
+  "schemaName": "docsense.task-control",
+  "rootSchemaGeneration": 2,
+  "semanticTypes": {
+    "persisted_utc": "UTC RFC3339 microseconds with literal Z; repository also performs calendar-valid parse",
+    "optional_persisted_utc": "NULL or persisted_utc",
+    "canonical_json": "SQLite json_valid and canonicalized by codec before persistence"
+  },
+  "indexTermDefaults": {"collation": "BINARY", "order": "ASC"},
+  "tables": [
+    {
+      "name": "analysis_resource_records",
+      "columns": [
+        {"name": "execution_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_type", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "state", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "record_payload", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "version", "type": "INTEGER", "notNull": true, "default": "1", "primaryKeyPosition": 0},
+        {"name": "recovery_deferral_count", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0},
+        {"name": "next_recovery_at", "type": "TEXT", "notNull": false, "default": null, "primaryKeyPosition": 0, "semanticType": "optional_persisted_utc"},
+        {"name": "last_recovery_reason", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"},
+        {"name": "updated_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["execution_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "analysis_resource_business_type", "expression": "business_type = 'file'"},
+        {"id": "analysis_resource_business_key", "expression": "length(business_key) BETWEEN 1 AND 1024"},
+        {"id": "analysis_resource_state", "expression": "state IN ('tracking','cleanup_pending','audit_pending','cleaned','quarantined')"},
+        {"id": "analysis_resource_payload", "expression": "json_valid(record_payload) = 1"},
+        {"id": "analysis_resource_version", "expression": "version >= 1 AND recovery_deferral_count >= 0"},
+        {"id": "analysis_resource_next_recovery", "semanticExpression": "optional_persisted_utc(next_recovery_at)"},
+        {"id": "analysis_resource_reason", "expression": "length(last_recovery_reason) <= 256"},
+        {"id": "analysis_resource_created_at", "semanticExpression": "persisted_utc(created_at)"},
+        {"id": "analysis_resource_updated_at", "semanticExpression": "persisted_utc(updated_at)"}
+      ]
+    },
+    {
+      "name": "analysis_recall_decisions",
+      "columns": [
+        {"name": "execution_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "idempotency_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "tree_fingerprint", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "query_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "decision_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "reserve_payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "finalize_payload_json", "type": "TEXT", "notNull": false, "default": null, "primaryKeyPosition": 0},
+        {"name": "outcome", "type": "TEXT", "notNull": false, "default": null, "primaryKeyPosition": 0},
+        {"name": "error_code", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "version", "type": "INTEGER", "notNull": true, "default": "1", "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"},
+        {"name": "finalized_at", "type": "TEXT", "notNull": false, "default": null, "primaryKeyPosition": 0, "semanticType": "optional_persisted_utc"}
+      ],
+      "uniqueConstraints": [{"id": "analysis_recall_idempotency", "columns": ["idempotency_key"]}],
+      "foreignKeys": [
+        {"columns": ["execution_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "analysis_recall_business_key", "expression": "length(business_key) BETWEEN 1 AND 1024"},
+        {"id": "analysis_recall_digests", "expression": "length(tree_fingerprint) IN (0,64) AND length(query_digest) = 64 AND length(decision_digest) = 64"},
+        {"id": "analysis_recall_reserve_payload", "expression": "json_valid(reserve_payload_json) = 1"},
+        {"id": "analysis_recall_finalize_payload", "expression": "finalize_payload_json IS NULL OR json_valid(finalize_payload_json) = 1"},
+        {"id": "analysis_recall_outcome", "expression": "outcome IS NULL OR outcome IN ('succeeded','failed')"},
+        {"id": "analysis_recall_finalization", "expression": "(outcome IS NULL AND finalize_payload_json IS NULL AND finalized_at IS NULL) OR (outcome IS NOT NULL AND finalize_payload_json IS NOT NULL AND finalized_at IS NOT NULL)"},
+        {"id": "analysis_recall_version", "expression": "version >= 1"},
+        {"id": "analysis_recall_created_at", "semanticExpression": "persisted_utc(created_at)"},
+        {"id": "analysis_recall_finalized_at", "semanticExpression": "optional_persisted_utc(finalized_at)"}
+      ]
+    },
+    {
+      "name": "analysis_interaction_audit_refs",
+      "columns": [
+        {"name": "execution_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "idempotency_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "audit_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "outcome", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "evidence_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [
+        {"id": "analysis_interaction_audit_key", "columns": ["idempotency_key"]},
+        {"id": "analysis_interaction_audit_id", "columns": ["audit_id"]}
+      ],
+      "foreignKeys": [
+        {"columns": ["execution_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "analysis_interaction_business_key", "expression": "length(business_key) BETWEEN 1 AND 1024"},
+        {"id": "analysis_interaction_outcome", "expression": "outcome IN ('succeeded','failed')"},
+        {"id": "analysis_interaction_digest", "expression": "length(evidence_digest) = 64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "analysis_interaction_created_at", "semanticExpression": "persisted_utc(created_at)"}
+      ]
+    },
+    {
+      "name": "analysis_result_snapshots",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "business_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "result_schema_version", "type": "INTEGER", "notNull": true, "default": "1", "primaryKeyPosition": 0},
+        {"name": "callback_payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "result_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id"], "referencedTable": "llm_task_executions", "referencedColumns": ["execution_id"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "analysis_result_business_key", "expression": "length(business_key) BETWEEN 1 AND 1024"},
+        {"id": "analysis_result_schema_version", "expression": "result_schema_version = 1"},
+        {"id": "analysis_result_payload", "expression": "json_valid(callback_payload_json) = 1"},
+        {"id": "analysis_result_digest", "expression": "length(result_digest) = 64 AND result_digest NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "analysis_result_created_at", "semanticExpression": "persisted_utc(created_at)"}
+      ]
+    },
+    {
+      "name": "analysis_step_continuation_snapshots",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "step_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 2},
+        {"name": "step_attempt_no", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 3},
+        {"name": "task_attempt_no", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "task_fencing_token", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "source_step_attempt_no", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0},
+        {"name": "snapshot_schema_version", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "input_payload_fingerprint", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "execution_profile_fingerprint", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "predecessor_checkpoint_digest", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "payload_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id", "step_key", "step_attempt_no"], "referencedTable": "task_step_attempts", "referencedColumns": ["task_id", "step_key", "step_attempt_no"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "analysis_continuation_attempts", "expression": "step_attempt_no >= 1 AND task_attempt_no >= 1 AND task_fencing_token >= 1 AND source_step_attempt_no >= 0 AND source_step_attempt_no < step_attempt_no"},
+        {"id": "analysis_continuation_schema", "expression": "snapshot_schema_version >= 1"},
+        {"id": "analysis_continuation_input_digest", "expression": "length(input_payload_fingerprint) = 64 AND input_payload_fingerprint NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "analysis_continuation_profile_digest", "expression": "length(execution_profile_fingerprint) = 64 AND execution_profile_fingerprint NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "analysis_continuation_predecessor_digest", "expression": "predecessor_checkpoint_digest = '' OR (length(predecessor_checkpoint_digest) = 64 AND predecessor_checkpoint_digest NOT GLOB '*[^0-9a-f]*')"},
+        {"id": "analysis_continuation_payload_json", "expression": "json_valid(payload_json) = 1 AND json_type(payload_json) = 'object' AND length(CAST(payload_json AS BLOB)) <= 16384"},
+        {"id": "analysis_continuation_payload_digest", "expression": "length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "analysis_continuation_created_at", "semanticExpression": "persisted_utc(created_at)"}
+      ]
+    }
+  ],
+  "indexes": [
+    {"name": "idx_analysis_resource_records_recovery", "table": "analysis_resource_records", "unique": false, "columns": ["state", "next_recovery_at", "updated_at", "execution_id"], "where": null},
+    {"name": "idx_analysis_recall_decisions_created", "table": "analysis_recall_decisions", "unique": false, "columns": ["created_at", "execution_id"], "where": null},
+    {"name": "idx_analysis_interaction_audit_refs_created", "table": "analysis_interaction_audit_refs", "unique": false, "columns": ["created_at", "execution_id"], "where": null},
+    {"name": "idx_analysis_result_snapshots_business", "table": "analysis_result_snapshots", "unique": false, "columns": ["business_key", "task_id"], "where": null},
+    {"name": "idx_analysis_step_continuations_created", "table": "analysis_step_continuation_snapshots", "unique": false, "columns": ["created_at", "task_id", "step_key"], "where": null}
+  ]
+}

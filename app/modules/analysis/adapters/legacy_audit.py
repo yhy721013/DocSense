@@ -8,7 +8,7 @@ Analysis Application 只看到不可变 DTO，不知道 SQLite 表、旧 Trace �
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from app.modules.analysis.ports.audit import (
     AnalysisAuditOutcome,
@@ -29,10 +29,20 @@ from app.modules.analysis.ports.rag import (
 )
 from app.ports import RagAttempt, RagExecutionTrace, RagLifecycleEvent, RagPromptKind, RagSource
 from app.services.llm_service.interaction_audit_service import AUDIT_STATUS_SUCCEEDED
-from app.services.llm_service.task_service import LLMTaskService
 
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class AnalysisAuditPersistence(Protocol):
+    """旧 Service 与 v2 专用 Store 共同满足的最小持久化能力。"""
+
+    def upsert_architecture_recall_decision(self, **kwargs): ...
+    def finalize_architecture_recall_decision(self, **kwargs): ...
+    def create_llm_interaction_with_trace(self, **kwargs): ...
+    def get_llm_interaction_by_execution(self, *args): ...
+    def append_llm_interaction_lifecycle_events(self, *args, **kwargs): ...
 
 
 class LegacyAnalysisAuditAdapterError(RuntimeError):
@@ -70,9 +80,9 @@ class LegacyAnalysisAuditAdapter(AnalysisAuditPort):
         }
     )
 
-    def __init__(self, task_service: LLMTaskService) -> None:
-        if not isinstance(task_service, LLMTaskService):
-            raise TypeError("task_service 必须是 LLMTaskService")
+    def __init__(self, task_service: AnalysisAuditPersistence) -> None:
+        if not isinstance(task_service, AnalysisAuditPersistence):
+            raise TypeError("task_service 必须实现 AnalysisAuditPersistence")
         self._task_service = task_service
 
     def reserve_recall(

@@ -7,7 +7,9 @@
 from .bootstrap import (
     TaskControlBootstrapError,
     TaskControlBootstrapResult,
+    bootstrap_fresh_task_control_database,
     bootstrap_task_control_database,
+    require_explicit_fresh_bootstrap_when_uninitialized,
     validate_existing_task_control_database,
 )
 from .schema import (
@@ -59,7 +61,9 @@ __all__ = [
     "TaskControlSchemaError",
     "component_schema_ddl",
     "install_component_schema",
+    "bootstrap_fresh_task_control_database",
     "bootstrap_task_control_database",
+    "require_explicit_fresh_bootstrap_when_uninitialized",
     "validate_existing_task_control_database",
     "build_sqlite_task_control_uow_factories",
 ]

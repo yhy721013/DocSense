@@ -534,6 +534,42 @@ class LLMInteractionStore:
         )
         return inserted
 
+    def get_llm_interaction_by_execution(
+        self,
+        business_type: str,
+        business_key: str,
+        execution_id: str,
+        audit_idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """按完整业务与 execution 身份查回交互，不允许仅凭全局 ID 串读。"""
+
+        normalized_type = _required_text(business_type, name="business_type")
+        normalized_key = _required_text(business_key, name="business_key")
+        normalized_execution = _required_text(execution_id, name="execution_id")
+        normalized_audit_key = _required_text(
+            audit_idempotency_key,
+            name="audit_idempotency_key",
+        )
+        connection = self._connection_factory(5.0)
+        try:
+            row = connection.execute(
+                """
+                SELECT id, execution_id, audit_idempotency_key
+                FROM llm_interactions
+                WHERE business_type = ? AND business_key = ?
+                  AND execution_id = ? AND audit_idempotency_key = ?
+                """,
+                (
+                    normalized_type,
+                    normalized_key,
+                    normalized_execution,
+                    normalized_audit_key,
+                ),
+            ).fetchone()
+        finally:
+            connection.close()
+        return dict(row) if row is not None else None
+
 
 __all__ = [
     "AUDIT_STATUS_SUCCEEDED",

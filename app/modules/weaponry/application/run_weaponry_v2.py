@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import asdict
 
 from app.modules.tasks.domain import (
     ProgressKey,
@@ -19,6 +20,7 @@ from app.modules.tasks.ports import (
     ProgressPublication,
     ProgressPublisherPort,
     TaskExecutionStopRequested,
+    TaskStepContinuationDraft,
     TaskWorkflowContextPort,
     TaskWorkflowRunnerPort,
 )
@@ -162,11 +164,47 @@ class RunWeaponryV2Workflow(RunWeaponryTask, TaskWorkflowRunnerPort):
         selected_evidence_count = 0
         model_call_count = 0
         diagnostic_error_codes: list[str] = []
+        profile_fingerprint = _digest(
+            {
+                "auxiliary_guidance_policy": asdict(
+                    snapshot.auxiliary_guidance_policy
+                ),
+                "evidence_selection_policy": asdict(
+                    snapshot.evidence_selection_policy
+                ),
+                "execution_policy": asdict(snapshot.execution_policy),
+            }
+        )
+        initial_continuation = TaskStepContinuationDraft(
+            schema_version=1,
+            input_payload_fingerprint=context.loaded_input.input_payload_fingerprint,
+            execution_profile_fingerprint=profile_fingerprint,
+            payload={
+                "business_key": snapshot.business_key,
+                "resolver": "weaponry.resource_record.v1",
+                "step_key": "resource.record.begin",
+                "task_id": task_id.value,
+            },
+        )
+        restored = self._steps.load_resume_continuation(
+            context,
+            execution_profile_fingerprint=profile_fingerprint,
+        )
+        if restored is not None:
+            if (
+                restored.step_key != "resource.record.begin"
+                or restored.draft != initial_continuation
+            ):
+                raise WeaponryTaskPersistenceError(
+                    "Weaponry 初始续跑快照解析结果不一致"
+                )
+            initial_continuation = restored.draft
         try:
             current_step = self._steps.begin(
                 context,
                 step_key="resource.record.begin",
                 idempotency_key=f"weaponry:{task_id.value}:resource-record",
+                continuation=initial_continuation,
                 component_mutation=lambda unit_of_work: unit_of_work.resources.create(
                     WeaponryResourceRecord(task_id, execution.business_ref)
                 ),
@@ -420,6 +458,12 @@ class RunWeaponryV2Workflow(RunWeaponryTask, TaskWorkflowRunnerPort):
                 result_ref=f"weaponry-result:v1:{result_digest}",
                 result_digest=result_digest,
             ),
+            component_mutation=lambda unit_of_work: unit_of_work.results.save(
+                task_id=execution.task_id,
+                business_ref=execution.business_ref,
+                payload=payload,
+                created_at=self._clock.now_utc(),
+            ),
         )
         terminal = self._steps.begin(
             context,
@@ -438,12 +482,6 @@ class RunWeaponryV2Workflow(RunWeaponryTask, TaskWorkflowRunnerPort):
                 code="weaponry_terminal_committed_v1",
                 result_ref=f"weaponry-result:v1:{result_digest}",
                 result_digest=result_digest,
-            ),
-            component_mutation=lambda unit_of_work: unit_of_work.results.save(
-                task_id=execution.task_id,
-                business_ref=execution.business_ref,
-                payload=payload,
-                created_at=self._clock.now_utc(),
             ),
         )
 

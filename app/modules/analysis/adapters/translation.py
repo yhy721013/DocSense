@@ -22,6 +22,7 @@ from app.modules.translation.domain import (
     TranslationFailurePolicy,
     TranslationMode,
     TranslationRequest,
+    TranslationProfile,
 )
 from app.modules.translation.ports import (
     TranslationEnginePort,
@@ -198,6 +199,21 @@ class ArtifactAnalysisTranslationAdapter(AnalysisTranslationPort):
         self._engine = engine
         self._renderer = renderer
         self._mode_resolver = mode_resolver
+        # 受理与 Worker 必须比较同一不可变 Profile。若每次访问属性都重读环境，
+        # 长任务期间的进程级配置漂移会让 Admission、Workflow 门禁和真正翻译看到
+        # 三份不同事实，也不适用于未来可靠队列重启后执行。
+        self._execution_profile = build_translation_profile(
+            engine=self._engine,
+            renderer=self._renderer,
+            mode=self._resolve_mode(),
+            failure_policy=TranslationFailurePolicy.PLACEHOLDER,
+        )
+
+    @property
+    def execution_profile(self) -> TranslationProfile:
+        """按当前已装配 Engine/Renderer 与严格模式构造受理冻结 Profile。"""
+
+        return self._execution_profile
 
     def translate(
         self,
@@ -218,12 +234,7 @@ class ArtifactAnalysisTranslationAdapter(AnalysisTranslationPort):
                 "document_translation_artifact_missing",
             )
         try:
-            profile = build_translation_profile(
-                engine=self._engine,
-                renderer=self._renderer,
-                mode=self._resolve_mode(),
-                failure_policy=TranslationFailurePolicy.PLACEHOLDER,
-            )
+            profile = self.execution_profile
             result = self._document_translation.execute(
                 TranslationRequest(
                     task_id=request.execution.task_id,

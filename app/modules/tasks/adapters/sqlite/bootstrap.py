@@ -51,6 +51,31 @@ class TaskControlBootstrapResult:
     created: bool
 
 
+def _validate_bootstrap_inputs(
+    *,
+    busy_timeout_ms: int,
+    known_components: Mapping[str, Mapping[str, object]] | None,
+    required_components: Mapping[str, int] | None,
+) -> tuple[dict[str, Mapping[str, object]], dict[str, int]]:
+    """统一校验两类 Bootstrap 的超时和组件身份，避免入口间出现宽松分支。"""
+
+    if isinstance(busy_timeout_ms, bool) or not isinstance(busy_timeout_ms, int):
+        raise TypeError("busy_timeout_ms 必须是整数")
+    if busy_timeout_ms < 1 or busy_timeout_ms > 60_000:
+        raise ValueError("busy_timeout_ms 必须位于 1..60000")
+
+    known = dict(known_components or {})
+    required = dict(required_components or {})
+    for component_name, version in required.items():
+        manifest = known.get(component_name)
+        if manifest is None or manifest.get("componentVersion") != version:
+            raise TaskControlBootstrapError(
+                "bootstrap_required_component_unknown",
+                "必需组件版本必须与当前发布版本 Manifest 完全一致",
+            )
+    return known, required
+
+
 def _resolve_database_path(value: str | Path, *, must_exist: bool) -> Path:
     """解析文件身份；存在分支必须是普通文件，禁止把目录当成 SQLite。"""
 
@@ -82,6 +107,40 @@ def _file_set(path: Path) -> tuple[Path, ...]:
 
 def _existing_file_set_members(path: Path) -> tuple[Path, ...]:
     return tuple(candidate for candidate in _file_set(path) if candidate.exists())
+
+
+def require_explicit_fresh_bootstrap_when_uninitialized(
+    legacy_database_path: str | Path,
+    new_database_path: str | Path,
+) -> None:
+    """在普通应用构造旧 Store 前，阻止其把全新环境误判成迁移现场。
+
+    只要旧文件集存在，后续仍由迁移预检判断是否安全；只要 v2 文件集存在，后续仍由
+    严格打开判断身份和漂移。本门禁只处理“两边完全不存在”这一无权推断的场景。
+    """
+
+    legacy_path = _resolve_database_path(legacy_database_path, must_exist=False)
+    new_path = _resolve_database_path(new_database_path, must_exist=False)
+    if os.path.normcase(os.path.realpath(legacy_path)) == os.path.normcase(
+        os.path.realpath(new_path)
+    ):
+        raise TaskControlBootstrapError(
+            "database_path_conflict",
+            "旧 Task 数据库与 v2 Task Control 数据库解析后路径相同",
+        )
+    if not _existing_file_set_members(legacy_path) and not _existing_file_set_members(
+        new_path
+    ):
+        logger.error(
+            "Task Control 尚未初始化，普通应用拒绝自动 fresh: "
+            "legacy_path_sha256=%s new_path_sha256=%s",
+            _path_digest(legacy_path),
+            _path_digest(new_path),
+        )
+        raise TaskControlBootstrapError(
+            "fresh_bootstrap_required",
+            "旧/v2 Task Control 文件集均不存在，请先执行显式 fresh bootstrap",
+        )
 
 
 def _connect_for_validation(path: Path, *, busy_timeout_ms: int) -> sqlite3.Connection:
@@ -157,6 +216,32 @@ def _preflight_old_database(
         ) from exc
     status = str(result["status"])
     if status != "safe_for_empty_v2_initialization":
+        # 只记录有限、无行身份的契约错误码，便于定位启动门禁失败；路径、业务主键与
+        # 具体行内容仍然禁止进入日志。阻塞事实仅输出聚合数量。
+        schema_error_codes = sorted(
+            {
+                str(item.get("code", "unknown"))
+                for item in result["schemaErrors"]
+                if isinstance(item, Mapping)
+            }
+        )
+        changed_members = sorted(
+            {
+                str(member)
+                for item in result["schemaErrors"]
+                if isinstance(item, Mapping)
+                for member in item.get("members", ())
+                if str(member) in {"sqlite3", "wal", "shm", "journal"}
+            }
+        )
+        logger.error(
+            "旧 Task 数据库只读预检未通过: status=%s blocker_count=%d "
+            "schema_error_codes=%s changed_members=%s",
+            status,
+            int(result["blockerCount"]),
+            ",".join(schema_error_codes) or "none",
+            ",".join(changed_members) or "none",
+        )
         raise TaskControlBootstrapError(
             "legacy_preflight_blocked",
             "旧 Task 数据库仍有阻塞事实或不兼容结构: "
@@ -289,20 +374,11 @@ def bootstrap_task_control_database(
     Connection Factory 与 UoW 构造。
     """
 
-    if isinstance(busy_timeout_ms, bool) or not isinstance(busy_timeout_ms, int):
-        raise TypeError("busy_timeout_ms 必须是整数")
-    if busy_timeout_ms < 1 or busy_timeout_ms > 60_000:
-        raise ValueError("busy_timeout_ms 必须位于 1..60000")
-
-    known = dict(known_components or {})
-    required = dict(required_components or {})
-    for component_name, version in required.items():
-        manifest = known.get(component_name)
-        if manifest is None or manifest.get("componentVersion") != version:
-            raise TaskControlBootstrapError(
-                "bootstrap_required_component_unknown",
-                "必需组件版本必须与当前发布版本 Manifest 完全一致",
-            )
+    known, required = _validate_bootstrap_inputs(
+        busy_timeout_ms=busy_timeout_ms,
+        known_components=known_components,
+        required_components=required_components,
+    )
 
     old_path = _resolve_database_path(old_database_path, must_exist=True)
     new_path = _resolve_database_path(new_database_path, must_exist=False)
@@ -442,6 +518,155 @@ def bootstrap_task_control_database(
         raise TaskControlBootstrapError(
             "bootstrap_sqlite_error",
             f"SQLite Bootstrap 失败: error_type={type(exc).__name__}",
+        ) from exc
+    finally:
+        lock.release()
+
+
+def bootstrap_fresh_task_control_database(
+    legacy_database_path: str | Path,
+    new_database_path: str | Path,
+    *,
+    fresh_install_confirmed: bool,
+    busy_timeout_ms: int = 5_000,
+    known_components: Mapping[str, Mapping[str, object]] | None = None,
+    required_components: Mapping[str, int] | None = None,
+) -> TaskControlBootstrapResult:
+    """在旧/新文件集均不存在时，一次性原子发布全新 v2 控制面。
+
+    该入口只供受控部署命令使用。它不读取、不创建也不删除旧数据库，不接受既有 v2 作为
+    “重复成功”，更不会根据路径缺失自动推断运维已经放弃历史事实。普通应用重启必须继续
+    使用 :func:`bootstrap_task_control_database` 的严格打开分支。
+    """
+
+    if not isinstance(fresh_install_confirmed, bool):
+        raise TypeError("fresh_install_confirmed 必须是布尔值")
+    if not fresh_install_confirmed:
+        raise TaskControlBootstrapError(
+            "fresh_install_confirmation_required",
+            "全新初始化必须显式确认已放弃旧 Task Control 事实",
+        )
+    known, required = _validate_bootstrap_inputs(
+        busy_timeout_ms=busy_timeout_ms,
+        known_components=known_components,
+        required_components=required_components,
+    )
+    if not required:
+        # 运维 fresh 必须建立“当前发布完整控制面”，不能发布只有根对象、随后依赖
+        # 普通应用启动补装组件的中间态。
+        raise TaskControlBootstrapError(
+            "fresh_required_components_empty",
+            "全新初始化必须声明当前发布的全部必需组件",
+        )
+
+    legacy_path = _resolve_database_path(legacy_database_path, must_exist=False)
+    new_path = _resolve_database_path(new_database_path, must_exist=False)
+    if os.path.normcase(os.path.realpath(legacy_path)) == os.path.normcase(
+        os.path.realpath(new_path)
+    ):
+        raise TaskControlBootstrapError(
+            "database_path_conflict",
+            "旧 Task 数据库与 v2 Task Control 数据库解析后路径相同",
+        )
+
+    lock = FileProcessSingletonGuard(
+        new_path.with_name(f"{new_path.name}.schema.lock"),
+        component_name="Task Control Fresh Bootstrap",
+        event_logger=logger,
+        path_log_value=f"sha256:{_path_digest(new_path)}",
+    )
+    if not lock.acquire():
+        raise TaskControlBootstrapError(
+            "bootstrap_schema_lock_busy",
+            "Task Control Fresh Bootstrap 锁已被占用",
+        )
+    try:
+        legacy_members = _existing_file_set_members(legacy_path)
+        if legacy_members:
+            logger.error(
+                "Task Control fresh 初始化拒绝旧文件残留: "
+                "legacy_path_sha256=%s member_count=%d",
+                _path_digest(legacy_path),
+                len(legacy_members),
+            )
+            raise TaskControlBootstrapError(
+                "fresh_legacy_file_set_present",
+                f"旧 Task 数据库文件集仍有残留: count={len(legacy_members)}",
+            )
+        target_members = _existing_file_set_members(new_path)
+        if target_members:
+            logger.error(
+                "Task Control fresh 初始化拒绝目标残留: "
+                "new_path_sha256=%s member_count=%d",
+                _path_digest(new_path),
+                len(target_members),
+            )
+            raise TaskControlBootstrapError(
+                "fresh_target_file_set_present",
+                f"v2 Task Control 目标文件集已存在: count={len(target_members)}",
+            )
+
+        temp_path, _ = _create_unpublished_database(
+            new_path,
+            busy_timeout_ms=busy_timeout_ms,
+            known_components=known,
+            required_components=required,
+        )
+        try:
+            # 临时库构建期间再次检查两个权威文件集，避免并发旧进程恢复写入或其他
+            # 部署参与者发布目标。任何竞态都保留现场并失败关闭。
+            if _existing_file_set_members(legacy_path):
+                raise TaskControlBootstrapError(
+                    "fresh_legacy_file_set_race",
+                    "全新初始化期间旧 Task 数据库文件集重新出现",
+                )
+            if _existing_file_set_members(new_path):
+                raise TaskControlBootstrapError(
+                    "bootstrap_publish_race",
+                    "全新初始化期间 v2 目标文件集出现",
+                )
+            _publish_without_overwrite(temp_path, new_path)
+        finally:
+            _cleanup_owned_temp_file_set(temp_path)
+
+        identity = _strict_validate(
+            new_path,
+            busy_timeout_ms=busy_timeout_ms,
+            known_components=known,
+            required_components=required,
+        )
+        logger.info(
+            "Task Control fresh 初始化通过: new_path_sha256=%s "
+            "db_instance_uuid_prefix=%s root_fingerprint_prefix=%s components=%d",
+            _path_digest(new_path),
+            identity.db_instance_uuid[:8],
+            identity.root_fingerprint[:12],
+            len(identity.registered_components),
+        )
+        return TaskControlBootstrapResult(
+            database_path=new_path,
+            identity=identity,
+            created=True,
+        )
+    except TaskControlBootstrapError:
+        raise
+    except TaskControlSchemaError as exc:
+        raise TaskControlBootstrapError(exc.code, str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        code = (
+            "bootstrap_sqlite_busy"
+            if "busy" in message or "locked" in message
+            else "bootstrap_sqlite_operational_error"
+        )
+        raise TaskControlBootstrapError(
+            code,
+            f"SQLite fresh Bootstrap 失败: error_type={type(exc).__name__}",
+        ) from exc
+    except sqlite3.Error as exc:
+        raise TaskControlBootstrapError(
+            "bootstrap_sqlite_error",
+            f"SQLite fresh Bootstrap 失败: error_type={type(exc).__name__}",
         ) from exc
     finally:
         lock.release()

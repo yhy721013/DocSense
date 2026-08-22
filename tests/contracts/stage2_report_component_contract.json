@@ -3,18 +3,20 @@
   "publicContractChanged": false,
   "component": {
     "name": "report_control",
-    "version": 1,
+    "version": 2,
     "manifestPath": "app/modules/report/adapters/sqlite/report_control_manifest.json",
     "manifestProfile": "canonical_json_v1",
     "rootSchemaGeneration": 2,
-    "canonicalUtf8Bytes": 3346,
-    "fingerprint": "509A3274DFDA23E1C8DFBDC53380064B682E869E28E4D59A1B87D99323AAE8BC",
+    "canonicalUtf8Bytes": 6364,
+    "fingerprint": "63C43F90C66746F4DB75C2B8157348040A659B436A188808388C1306DDBDDF61",
     "tables": [
-      "report_resource_records"
+      "report_resource_records",
+      "report_step_continuation_snapshots"
     ],
     "indexes": [
       "idx_report_resource_records_recovery",
-      "idx_report_resource_records_ready_recovery"
+      "idx_report_resource_records_ready_recovery",
+      "idx_report_step_continuations_created"
     ]
   },
   "bootstrap": {

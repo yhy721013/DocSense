@@ -9,6 +9,7 @@ from app.modules.tasks.ports import (
     CallbackDeliveryControlPort,
     TaskAdmissionPort,
     TaskExecutionPort,
+    TaskStepContinuationStorePort,
 )
 from app.modules.weaponry.ports import (
     WeaponryCreationIntentStorePort,
@@ -72,6 +73,9 @@ class WeaponryExecutionUnitOfWork(Protocol):
 
     @property
     def results(self) -> WeaponryResultSnapshotStorePort: ...
+
+    @property
+    def continuations(self) -> TaskStepContinuationStorePort: ...
 
 
 @runtime_checkable

@@ -57,7 +57,7 @@
   "componentStoreMigration": {
     "componentManifest": "app/modules/weaponry/adapters/sqlite/weaponry_control_manifest.json",
     "componentName": "weaponry_control",
-    "componentVersion": 1,
+    "componentVersion": 2,
     "snapshotStore": "app/modules/weaponry/adapters/sqlite/task_document_snapshot_store.py",
     "snapshotIdentity": "task_id",
     "resultSnapshotStore": "app/modules/weaponry/adapters/sqlite/result_snapshot_store.py",

@@ -14,6 +14,7 @@ from .audit import (
 )
 from .batch_commands import (
     AnalysisBatchAdmission,
+    AnalysisBatchAdmissionPort,
     AnalysisBatchAdmissionOutcome,
     AnalysisBatchCommand,
     AnalysisBatchCommandPort,
@@ -44,7 +45,13 @@ from .dispatcher import (
     AnalysisDispatcherPort,
 )
 from .files import (
+    AcquiredAnalysisSource,
+    AnalysisDocumentPreparationPort,
+    AnalysisDocumentPreparationRequest,
     AnalysisFilePreparationRequest,
+    AnalysisSourceAcquisitionPort,
+    AnalysisSourceAcquisitionRequest,
+    AnalysisSourceResolutionRequest,
     AnalysisTaskWorkspace,
     AnalysisTaskWorkspacePort,
     FilePreparationPort,
@@ -91,13 +98,21 @@ from .translation import (
     AnalysisTranslationRequest,
     AnalysisTranslationResult,
 )
+from .result_snapshots import (
+    AnalysisResultSnapshot,
+    AnalysisResultSnapshotStorePort,
+)
 
 __all__ = (
+    "AcquiredAnalysisSource",
+    "AnalysisDocumentPreparationPort",
+    "AnalysisDocumentPreparationRequest",
     "AnalysisResourceActivityPort",
     "AnalysisAuditOutcome",
     "AnalysisAuditPort",
     "AppendAnalysisLifecycleEvents",
     "AnalysisBatchAdmission",
+    "AnalysisBatchAdmissionPort",
     "AnalysisBatchAdmissionOutcome",
     "AnalysisBatchCommand",
     "AnalysisBatchCommandPort",
@@ -120,6 +135,9 @@ __all__ = (
     "AnalysisDispatcherPort",
     "AnalysisExecutionRef",
     "AnalysisFilePreparationRequest",
+    "AnalysisSourceAcquisitionPort",
+    "AnalysisSourceAcquisitionRequest",
+    "AnalysisSourceResolutionRequest",
     "AnalysisTaskWorkspace",
     "AnalysisTaskWorkspacePort",
     "AnalysisInteractionAttempt",
@@ -161,6 +179,8 @@ __all__ = (
     "AnalysisTranslationPort",
     "AnalysisTranslationRequest",
     "AnalysisTranslationResult",
+    "AnalysisResultSnapshot",
+    "AnalysisResultSnapshotStorePort",
     "FilePreparationPort",
     "FinalizeAnalysisRecallAudit",
     "LoadAnalysisInteraction",

@@ -43,6 +43,26 @@ from .progress_delivery import (
 from .execution_runtime import TaskExecutionRuntime
 from .workflow_context import TaskWorkflowContext
 from .conservative_reaper import ConservativeTaskReaper
+from .recover_expired_attempts import (
+    RecoverExpiredAttemptsResult,
+    RecoverExpiredTaskAttempts,
+)
+from .recovery_policies import RegistryTaskRecoveryPolicy
+from .reconcile_recovery_case import (
+    ClaimRecoveryCaseCommand,
+    RecoveryCaseSession,
+    RecoveryCoordinator,
+    RecoveryCoordinatorResult,
+    RecoveryOperationPort,
+    RecoveryOperationRequest,
+    RecoveryOperationResult,
+)
+from .recovery_operator import (
+    RecoveryCaseInspection,
+    RecoveryOperatorAction,
+    RecoveryOperatorService,
+    StrictRecoveryDecisionCommand,
+)
 
 __all__ = [
     "CallbackRecoveryCommandContractError",
@@ -75,6 +95,20 @@ __all__ = [
     "TaskExecutionRuntime",
     "TaskWorkflowContext",
     "ConservativeTaskReaper",
+    "RecoverExpiredAttemptsResult",
+    "RecoverExpiredTaskAttempts",
+    "RegistryTaskRecoveryPolicy",
+    "ClaimRecoveryCaseCommand",
+    "RecoveryCaseSession",
+    "RecoveryCoordinator",
+    "RecoveryCoordinatorResult",
+    "RecoveryOperationPort",
+    "RecoveryOperationRequest",
+    "RecoveryOperationResult",
+    "RecoveryCaseInspection",
+    "RecoveryOperatorAction",
+    "RecoveryOperatorService",
+    "StrictRecoveryDecisionCommand",
     "TaskReadContractError",
     "TaskSnapshotUnavailableError",
 ]

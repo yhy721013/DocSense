@@ -8,12 +8,19 @@ import sys
 from typing import cast
 
 from app.modules.report.ports import ReportResourceStorePort
+from app.modules.report.adapters.sqlite.step_continuation_store import (
+    SQLiteReportStepContinuationStore,
+)
 from app.modules.tasks.adapters.sqlite.transaction import (
     SQLiteTransaction,
     SQLiteTransactionError,
     SQLiteTransactionManager,
 )
-from app.modules.tasks.ports import CallbackDeliveryControlPort, TaskExecutionPort
+from app.modules.tasks.ports import (
+    CallbackDeliveryControlPort,
+    TaskExecutionPort,
+    TaskStepContinuationStorePort,
+)
 
 
 StoreBuilder = Callable[[sqlite3.Connection], object]
@@ -29,6 +36,7 @@ class SQLiteReportExecutionUnitOfWork:
         execution_builder: StoreBuilder,
         callback_delivery_builder: StoreBuilder,
         resource_builder: StoreBuilder,
+        continuation_builder: StoreBuilder = SQLiteReportStepContinuationStore,
     ) -> None:
         if not isinstance(transaction_manager, SQLiteTransactionManager):
             raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
@@ -36,6 +44,7 @@ class SQLiteReportExecutionUnitOfWork:
             ("execution_builder", execution_builder),
             ("callback_delivery_builder", callback_delivery_builder),
             ("resource_builder", resource_builder),
+            ("continuation_builder", continuation_builder),
         ):
             if not callable(builder):
                 raise TypeError(f"{name} 必须可调用")
@@ -43,10 +52,12 @@ class SQLiteReportExecutionUnitOfWork:
         self._execution_builder = execution_builder
         self._callback_delivery_builder = callback_delivery_builder
         self._resource_builder = resource_builder
+        self._continuation_builder = continuation_builder
         self._transaction: SQLiteTransaction | None = None
         self._execution: object | None = None
         self._callback_delivery: object | None = None
         self._resources: object | None = None
+        self._continuations: object | None = None
         self._entered_once = False
 
     def __enter__(self) -> "SQLiteReportExecutionUnitOfWork":
@@ -64,12 +75,14 @@ class SQLiteReportExecutionUnitOfWork:
             self._execution = self._execution_builder(connection)
             self._callback_delivery = self._callback_delivery_builder(connection)
             self._resources = self._resource_builder(connection)
+            self._continuations = self._continuation_builder(connection)
             if any(
                 value is None
                 for value in (
                     self._execution,
                     self._callback_delivery,
                     self._resources,
+                    self._continuations,
                 )
             ):
                 raise TypeError("Report Execution UoW Store Builder 不得返回 None")
@@ -138,6 +151,16 @@ class SQLiteReportExecutionUnitOfWork:
             )
         return cast(ReportResourceStorePort, self._resources)
 
+    @property
+    def continuations(self) -> TaskStepContinuationStorePort:
+        self._require_transaction()
+        if self._continuations is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_store_missing",
+                "Report Continuation Store 未装配",
+            )
+        return cast(TaskStepContinuationStorePort, self._continuations)
+
     def _require_transaction(self) -> SQLiteTransaction:
         transaction = self._transaction
         if transaction is None or not transaction.active:
@@ -152,6 +175,7 @@ class SQLiteReportExecutionUnitOfWork:
         self._execution = None
         self._callback_delivery = None
         self._resources = None
+        self._continuations = None
 
 
 class SQLiteReportExecutionUnitOfWorkFactory:
@@ -164,6 +188,7 @@ class SQLiteReportExecutionUnitOfWorkFactory:
         execution_builder: StoreBuilder,
         callback_delivery_builder: StoreBuilder,
         resource_builder: StoreBuilder,
+        continuation_builder: StoreBuilder = SQLiteReportStepContinuationStore,
     ) -> None:
         if not isinstance(transaction_manager, SQLiteTransactionManager):
             raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
@@ -171,6 +196,7 @@ class SQLiteReportExecutionUnitOfWorkFactory:
             ("execution_builder", execution_builder),
             ("callback_delivery_builder", callback_delivery_builder),
             ("resource_builder", resource_builder),
+            ("continuation_builder", continuation_builder),
         ):
             if not callable(builder):
                 raise TypeError(f"{name} 必须可调用")
@@ -178,6 +204,7 @@ class SQLiteReportExecutionUnitOfWorkFactory:
         self._execution_builder = execution_builder
         self._callback_delivery_builder = callback_delivery_builder
         self._resource_builder = resource_builder
+        self._continuation_builder = continuation_builder
 
     def __call__(self) -> SQLiteReportExecutionUnitOfWork:
         return SQLiteReportExecutionUnitOfWork(
@@ -185,6 +212,7 @@ class SQLiteReportExecutionUnitOfWorkFactory:
             execution_builder=self._execution_builder,
             callback_delivery_builder=self._callback_delivery_builder,
             resource_builder=self._resource_builder,
+            continuation_builder=self._continuation_builder,
         )
 
 

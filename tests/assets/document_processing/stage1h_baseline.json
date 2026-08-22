@@ -27,6 +27,7 @@
   "currentTranslationConsumers": [
     "app/container.py",
     "app/modules/analysis/adapters/translation.py",
+    "app/modules/analysis/domain/task_inputs.py",
     "app/modules/weaponry/adapters/translation.py"
   ],
   "mhtmlCases": [

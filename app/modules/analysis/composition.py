@@ -13,8 +13,10 @@ import logging
 from typing import Any
 
 from app.modules.analysis.adapters.local_dispatcher import (
+    LocalAnalysisDispatcherSnapshot,
     LocalAnalysisTaskDispatcher,
 )
+from app.modules.analysis.adapters.v2_runtime import AnalysisV2TaskDispatcher
 from app.modules.analysis.adapters.resource_activity import (
     InMemoryAnalysisResourceActivityAdapter,
 )
@@ -25,10 +27,15 @@ from app.modules.analysis.application import (
     RunAnalysisTask,
     SubmitAnalysisBatch,
 )
-from app.modules.analysis.domain.task_inputs import AnalysisTaskInputV1
+from app.modules.analysis.domain.task_inputs import (
+    AnalysisTaskInputV1,
+    AnalysisTranslationProfile,
+)
+from app.modules.analysis.domain.execution_profile import AnalysisExecutionProfile
 from app.modules.analysis.application.workflow_models import AnalysisTaskCompletion
 from app.modules.analysis.ports import (
     AnalysisAuditPort,
+    AnalysisBatchAdmissionPort,
     AnalysisBatchCommandPort,
     AnalysisCallbackPort,
     AnalysisCallbackRecoverySourcePort,
@@ -48,8 +55,9 @@ from app.modules.tasks.ports import (
     TaskCommandPort,
     TaskExecutionPermitPort,
     TaskQueueInspectionPort,
+    ProgressPublisherPort,
 )
-from app.services.core.config import AnalysisInfrastructureConfig
+from app.modules.analysis.adapters.runtime_config import AnalysisInfrastructureConfig
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +82,132 @@ class AnalysisApplicationServices:
     progress_publisher: GuardedProgressPublisherPort
     execution_limiter: TaskExecutionPermitPort
     config: AnalysisInfrastructureConfig
+
+
+@dataclass(frozen=True)
+class AnalysisV2ApplicationServices:
+    """阶段 2-6 生产对象图；不暴露旧 TaskCommand/Runner Authority 入口。"""
+
+    submit: SubmitAnalysisBatch
+    dispatcher: AnalysisV2TaskDispatcher
+    callbacks: AnalysisCallbackPort
+    callback_recovery: RecoverAnalysisCallbackSynchronously
+    resource_recovery: RecoverAnalysisResources
+    progress_publisher: ProgressPublisherPort
+    execution_limiter: TaskExecutionPermitPort
+    execution_profile: AnalysisExecutionProfile
+    translation_profile: AnalysisTranslationProfile
+    config: AnalysisInfrastructureConfig
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.submit, SubmitAnalysisBatch):
+            raise TypeError("submit 必须是 SubmitAnalysisBatch")
+        if not isinstance(self.dispatcher, AnalysisV2TaskDispatcher):
+            raise TypeError("dispatcher 必须是 AnalysisV2TaskDispatcher")
+        if not isinstance(self.callbacks, AnalysisCallbackPort):
+            raise TypeError("callbacks 必须实现 AnalysisCallbackPort")
+        if not isinstance(self.callback_recovery, RecoverAnalysisCallbackSynchronously):
+            raise TypeError("callback_recovery 类型错误")
+        if not isinstance(self.resource_recovery, RecoverAnalysisResources):
+            raise TypeError("resource_recovery 类型错误")
+        if not isinstance(self.progress_publisher, ProgressPublisherPort):
+            raise TypeError("progress_publisher 必须实现 ProgressPublisherPort")
+        if not isinstance(self.execution_limiter, TaskExecutionPermitPort):
+            raise TypeError("execution_limiter 必须实现 TaskExecutionPermitPort")
+        if not isinstance(self.execution_profile, AnalysisExecutionProfile):
+            raise TypeError("execution_profile 必须是 AnalysisExecutionProfile")
+        if not isinstance(self.translation_profile, AnalysisTranslationProfile):
+            raise TypeError("translation_profile 必须是 TranslationProfile")
+        if not isinstance(self.config, AnalysisInfrastructureConfig):
+            raise TypeError("config 必须是 AnalysisInfrastructureConfig")
+        if self.submit.dispatcher is not self.dispatcher:
+            raise ValueError("Analysis v2 Submit 与 Dispatcher 必须共享实例")
+        if not (
+            self.callback_recovery.callbacks
+            is self.dispatcher.callbacks
+            is self.callbacks
+        ):
+            raise ValueError("Analysis Worker/check-task/维护必须共享 Callback Guard")
+        if self.dispatcher.resources is not self.resource_recovery:
+            raise ValueError("Analysis Worker 与维护必须共享资源恢复状态机")
+        if self.dispatcher.execution_limiter is not self.execution_limiter:
+            raise ValueError("Analysis Dispatcher 必须使用容器共享的重型任务 limiter")
+
+    def start(self) -> None:
+        self.dispatcher.start()
+
+    def stop(self, *, timeout_seconds: float | None = None) -> bool:
+        return self.dispatcher.stop(timeout_seconds=timeout_seconds)
+
+    def close(self) -> None:
+        self.dispatcher.close()
+
+    def snapshot(self) -> LocalAnalysisDispatcherSnapshot:
+        return self.dispatcher.snapshot()
+
+
+def compose_analysis_v2_application_services(
+    *,
+    admission: AnalysisBatchAdmissionPort,
+    dispatcher: AnalysisV2TaskDispatcher,
+    callbacks: AnalysisCallbackPort,
+    callback_recovery_source: AnalysisCallbackRecoverySourcePort,
+    resource_recovery: RecoverAnalysisResources,
+    progress_publisher: ProgressPublisherPort,
+    execution_limiter: TaskExecutionPermitPort,
+    execution_profile: AnalysisExecutionProfile,
+    translation_profile: AnalysisTranslationProfile,
+    config: AnalysisInfrastructureConfig,
+    callback_url: str,
+) -> AnalysisV2ApplicationServices:
+    """组装已经完成 v2 基础设施构造的单一生产对象图，不启动后台线程。"""
+
+    if not isinstance(admission, AnalysisBatchAdmissionPort):
+        raise TypeError("admission 必须实现 AnalysisBatchAdmissionPort")
+    if not isinstance(dispatcher, AnalysisV2TaskDispatcher):
+        raise TypeError("dispatcher 必须是 AnalysisV2TaskDispatcher")
+    if not isinstance(callbacks, AnalysisCallbackPort):
+        raise TypeError("callbacks 必须实现 AnalysisCallbackPort")
+    if not isinstance(callback_recovery_source, AnalysisCallbackRecoverySourcePort):
+        raise TypeError("callback_recovery_source 必须实现 AnalysisCallbackRecoverySourcePort")
+    if not isinstance(resource_recovery, RecoverAnalysisResources):
+        raise TypeError("resource_recovery 必须是 RecoverAnalysisResources")
+    if not isinstance(progress_publisher, ProgressPublisherPort):
+        raise TypeError("progress_publisher 必须实现 ProgressPublisherPort")
+    if not isinstance(execution_limiter, TaskExecutionPermitPort):
+        raise TypeError("execution_limiter 必须实现 TaskExecutionPermitPort")
+    if not isinstance(config, AnalysisInfrastructureConfig):
+        raise TypeError("config 必须是 AnalysisInfrastructureConfig")
+    if not isinstance(callback_url, str):
+        raise TypeError("callback_url 必须是 str")
+    callback_recovery = RecoverAnalysisCallbackSynchronously(
+        source=callback_recovery_source,
+        callbacks=callbacks,
+        callback_url=callback_url,
+    )
+    services = AnalysisV2ApplicationServices(
+        submit=SubmitAnalysisBatch(
+            batch_commands=admission,
+            dispatcher=dispatcher,
+        ),
+        dispatcher=dispatcher,
+        callbacks=callbacks,
+        callback_recovery=callback_recovery,
+        resource_recovery=resource_recovery,
+        progress_publisher=progress_publisher,
+        execution_limiter=execution_limiter,
+        execution_profile=execution_profile,
+        translation_profile=translation_profile,
+        config=config,
+    )
+    logger.info(
+        "文件分析 v2 应用组合根已构造: runtime_mode=%s profile_prefix=%s "
+        "callback_configured=%s background_started=false",
+        config.runtime_mode,
+        execution_profile.fingerprint[:12],
+        bool(callback_url.strip()),
+    )
+    return services
 
 
 def compose_analysis_application_services(
@@ -227,5 +361,7 @@ def compose_analysis_application_services(
 
 __all__ = (
     "AnalysisApplicationServices",
+    "AnalysisV2ApplicationServices",
     "compose_analysis_application_services",
+    "compose_analysis_v2_application_services",
 )

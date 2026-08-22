@@ -25,6 +25,10 @@ from app.modules.weaponry.ports import (
     WeaponryResultSnapshotStorePort,
     WeaponryTaskDocumentSnapshotStorePort,
 )
+from app.modules.weaponry.adapters.sqlite.step_continuation_store import (
+    SQLiteWeaponryStepContinuationStore,
+)
+from app.modules.tasks.ports import TaskStepContinuationStorePort
 
 
 StoreBuilder = Callable[[sqlite3.Connection], object]
@@ -185,6 +189,7 @@ class SQLiteWeaponryExecutionUnitOfWork:
         interaction_audit_builder: StoreBuilder,
         resource_builder: StoreBuilder,
         result_snapshot_builder: StoreBuilder,
+        continuation_builder: StoreBuilder = SQLiteWeaponryStepContinuationStore,
     ) -> None:
         if not isinstance(transaction_manager, SQLiteTransactionManager):
             raise TypeError("transaction_manager 必须是 SQLiteTransactionManager")
@@ -196,6 +201,7 @@ class SQLiteWeaponryExecutionUnitOfWork:
             "interaction_audit_builder": interaction_audit_builder,
             "resource_builder": resource_builder,
             "result_snapshot_builder": result_snapshot_builder,
+            "continuation_builder": continuation_builder,
         }
         if any(not callable(builder) for builder in builders.values()):
             raise TypeError("Weaponry Execution UoW 的 Store Builder 必须可调用")
@@ -312,6 +318,13 @@ class SQLiteWeaponryExecutionUnitOfWork:
             self._store("result_snapshot_builder"),
         )
 
+    @property
+    def continuations(self) -> TaskStepContinuationStorePort:
+        return cast(
+            TaskStepContinuationStorePort,
+            self._store("continuation_builder"),
+        )
+
     def _require_transaction(self) -> SQLiteTransaction:
         transaction = self._transaction
         if transaction is None or not transaction.active:
@@ -341,12 +354,17 @@ class SQLiteWeaponryExecutionUnitOfWorkFactory:
             "resource_builder",
             "result_snapshot_builder",
         }
-        if set(builders) != required:
+        optional = {"continuation_builder"}
+        if not required.issubset(builders) or set(builders) - required - optional:
             raise ValueError("Weaponry Execution UoW Builder 集合不完整或包含未知项")
         if any(not callable(builder) for builder in builders.values()):
             raise TypeError("Weaponry Execution UoW 的 Store Builder 必须可调用")
         self._transaction_manager = transaction_manager
         self._builders = dict(builders)
+        self._builders.setdefault(
+            "continuation_builder",
+            SQLiteWeaponryStepContinuationStore,
+        )
 
     def __call__(self) -> SQLiteWeaponryExecutionUnitOfWork:
         return SQLiteWeaponryExecutionUnitOfWork(

@@ -15,6 +15,8 @@ from .callback_delivery_control import (
 from .task_admission import TaskAdmissionPort
 from .task_execution import TaskExecutionPort, TaskRunnableQueryPort
 from .task_recovery import TaskRecoveryPort
+from .recovery_finalization import TaskRecoveryFinalizationPreflightPort
+from .recovery_resume import TaskRecoveryResumePreflightPort
 
 
 class _UnitOfWorkLifecycle(Protocol):
@@ -79,6 +81,18 @@ class TaskRecoveryUnitOfWork(_UnitOfWorkLifecycle, Protocol):
 
     @property
     def recovery(self) -> TaskRecoveryPort:
+        ...
+
+    @property
+    def callback_delivery(self) -> CallbackDeliveryControlPort:
+        ...
+
+    @property
+    def finalization_preflight(self) -> TaskRecoveryFinalizationPreflightPort:
+        ...
+
+    @property
+    def resume_preflight(self) -> TaskRecoveryResumePreflightPort:
         ...
 
 

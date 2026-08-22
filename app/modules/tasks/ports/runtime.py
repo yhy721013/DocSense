@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol, TypeVar, runtime_checkable
 
-from app.modules.tasks.domain import TaskExecutionAuthority, TaskExecutionSnapshot, TaskId
+from app.modules.tasks.domain import (
+    TaskExecutionAuthority,
+    TaskExecutionSnapshot,
+    TaskId,
+    TaskStep,
+)
 
 from .task_execution import (
     TaskExecutionMutationOutcome,
@@ -25,6 +30,8 @@ class LoadedTaskExecutionInput:
     snapshot: TaskExecutionSnapshot[object]
     input_schema_version: int
     input_payload_fingerprint: str
+    retry_from_step_key: str = ""
+    recovery_steps: tuple[TaskStep, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, TaskExecutionSnapshot):
@@ -35,6 +42,26 @@ class LoadedTaskExecutionInput:
         if len(fingerprint) != 64 or any(ch not in "0123456789abcdef" for ch in fingerprint):
             raise ValueError("input_payload_fingerprint 必须是 SHA-256 十六进制摘要")
         object.__setattr__(self, "input_payload_fingerprint", fingerprint)
+        if not isinstance(self.retry_from_step_key, str):
+            raise TypeError("retry_from_step_key 必须是 str")
+        retry_from = self.retry_from_step_key.strip()
+        steps = tuple(self.recovery_steps)
+        if any(
+            not isinstance(step, TaskStep)
+            or step.task_id != self.snapshot.task_id
+            for step in steps
+        ):
+            raise TypeError("recovery_steps 必须只包含当前 Task 的 TaskStep")
+        if len({step.step_key for step in steps}) != len(steps):
+            raise ValueError("recovery_steps 不得包含重复 step_key")
+        if retry_from and not any(step.step_key == retry_from for step in steps):
+            raise ValueError("retry_from_step_key 必须引用持久 Step")
+        if not retry_from and steps:
+            # 普通首次执行不需要把既有 Step 暴露给 Runner；出现该组合通常表示读取
+            # 与 Decision 身份漂移，必须在进入业务 Workflow 前失败关闭。
+            raise ValueError("非恢复执行不得携带 recovery_steps")
+        object.__setattr__(self, "retry_from_step_key", retry_from)
+        object.__setattr__(self, "recovery_steps", steps)
 
 
 @runtime_checkable

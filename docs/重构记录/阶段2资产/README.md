@@ -23,6 +23,8 @@
 | `260813-阶段2-3ExecutionRuntime与AuthoritySession设计.md` | 冻结完整 Authority、claim/start/heartbeat、协作停止、本地执行器、公平容量与保守 Reaper 边界。 |
 | `260813-阶段2-4Report试点设计.md` | 冻结 Report v2 Input/Profile/Step/UoW、Callback Control、资源维护和一次切换方案。 |
 | `260814-阶段2-5Weaponry迁移设计.md` | 冻结 Weaponry v2 快照、组件事实、字段 Step、结果/终态、Callback 与生产切换方案。 |
+| `260815-阶段2-6Analysis迁移设计.md` | 冻结 Analysis v5 Input/Profile、批内严格顺序、Authority-aware Step/UoW、Callback/恢复、一次切换与 fresh bootstrap 方案。 |
+| `260821-阶段2-7业务恢复策略与有限Reaper设计.md` | 冻结三业务恢复策略、有限 Reaper、Recovery Coordinator、检查点续跑、恢复终态与 Callback 原子性及严格运维命令。 |
 
 机器可读内部契约位于 `tests/contracts/stage2_task_execution_contract.json`、
 `tests/contracts/stage2_interface_contract_hashes.json` 和
@@ -32,9 +34,12 @@
 `tests/contracts/stage2_boundary_contract.json`、
 `tests/contracts/stage2_direct_parent_scope.json`、
 `tests/contracts/stage2_business_step_registry.json`、
-`tests/contracts/stage2_runtime_topology_contract.json`；对应测试固定状态机、Authority、恢复、Canonical
-Profile、公开接口哈希、数据库切换门禁、文件/表所有权、配置归属、跨层边界、专项隔离和三业务
-Step/Runtime 拓扑。
+`tests/contracts/stage2_runtime_topology_contract.json`、
+`tests/contracts/stage2_analysis_component_contract.json`、
+`tests/contracts/stage2_analysis_v2_contract.json` 和
+`tests/contracts/stage2_recovery_runtime_contract.json`；对应测试固定状态机、Authority、恢复、Canonical
+Profile、公开接口哈希、数据库切换门禁、文件/表所有权、配置归属、跨层边界、专项隔离、三业务
+Step/Runtime 拓扑，以及 Analysis 的组件身份和最终生产切换边界。
 
 阶段 2-2 根 SQLite 的逐表语义 Manifest 位于
 `app/modules/tasks/adapters/sqlite/root_schema_manifest.json`；它是生产 Bootstrap 与严格打开共同加载的

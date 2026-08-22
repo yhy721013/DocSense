@@ -13,7 +13,7 @@ from app.modules.tasks.adapters.sqlite.bootstrap import (
 
 
 WEAPONRY_CONTROL_COMPONENT_NAME = "weaponry_control"
-WEAPONRY_CONTROL_COMPONENT_VERSION = 1
+WEAPONRY_CONTROL_COMPONENT_VERSION = 2
 _MANIFEST_PATH = Path(__file__).with_name("weaponry_control_manifest.json")
 
 

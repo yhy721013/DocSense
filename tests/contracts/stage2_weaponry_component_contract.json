@@ -2,16 +2,17 @@
   "stage": "2-5-step-7",
   "component": {
     "name": "weaponry_control",
-    "version": 1,
-    "canonicalUtf8Bytes": 12930,
-    "fingerprint": "EEEC000736B12C249333B053E9ACB8AF9EE9B47E3F3A8BB09C2F101A8475587C",
+    "version": 2,
+    "canonicalUtf8Bytes": 15970,
+    "fingerprint": "69AA5F2B6C78AD162A632E3868CF4246B298DC25DCD2218E07811D35E6E6F10D",
     "tables": [
       "weaponry_task_document_snapshots",
       "weaponry_creation_intents",
       "weaponry_interaction_audits",
       "weaponry_resource_records",
       "weaponry_result_snapshots",
-      "weaponry_resource_operator_audits"
+      "weaponry_resource_operator_audits",
+      "weaponry_step_continuation_snapshots"
     ]
   },
   "migration": {

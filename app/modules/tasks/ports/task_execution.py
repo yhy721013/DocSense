@@ -179,6 +179,7 @@ class PersistedTaskExecutionInput:
     input_payload: Mapping[str, Any]
     accepted_at: str
     trace_id: str
+    retry_from_step_key: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, TaskId):
@@ -205,6 +206,13 @@ class PersistedTaskExecutionInput:
             self,
             "accepted_at",
             require_persisted_utc(self.accepted_at, name="accepted_at"),
+        )
+        if not isinstance(self.retry_from_step_key, str):
+            raise TypeError("retry_from_step_key 必须是 str")
+        object.__setattr__(
+            self,
+            "retry_from_step_key",
+            self.retry_from_step_key.strip(),
         )
 
 
@@ -433,6 +441,10 @@ class TaskRunnableQueryPort(Protocol):
         ...
 
     def load_candidate(self, task_id: TaskId) -> TaskRecoveryCandidate | None:
+        ...
+
+    def list_steps(self, task_id: TaskId) -> tuple[TaskStep, ...]:
+        """返回稳定排序的 Step 当前投影；只读结果本身不授予恢复写权限。"""
         ...
 
 

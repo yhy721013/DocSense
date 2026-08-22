@@ -44,9 +44,12 @@ class Stage2TaskControlSchemaContractTests(unittest.TestCase):
         )
 
     def test_decision_is_confirmed_internal_and_documented(self) -> None:
-        self.assertEqual(5, self.contract["assetVersion"])
+        self.assertEqual(6, self.contract["assetVersion"])
         self.assertTrue(self.contract["runtimeAsset"])
-        self.assertEqual("2-2-contract-v5-confirmed", self.contract["stage"])
+        self.assertEqual(
+            "2-6-fresh-bootstrap-confirmed",
+            self.contract["stage"],
+        )
         self.assertFalse(self.contract["publicContractChanged"])
         self.assertEqual("user_confirmed", self.composition["decisionStatus"])
         self.assertTrue(DECISION_DOCUMENT_PATH.is_file())
@@ -57,6 +60,13 @@ class Stage2TaskControlSchemaContractTests(unittest.TestCase):
         main_design = MAIN_DESIGN_PATH.read_text(encoding="utf-8")
         self.assertIn("task_control_schema_components", main_design)
         self.assertIn("根 + 全部已登记且当前代码认识的组件", main_design)
+        fresh = self.contract["initialization"]["freshInstall"]
+        self.assertEqual("user_confirmed", fresh["decisionStatus"])
+        self.assertTrue(fresh["ordinaryApplicationAutoDetectionForbidden"])
+        self.assertTrue(fresh["explicitOneShotConfirmationRequired"])
+        self.assertTrue(fresh["legacyFileSetMustBeAbsent"])
+        self.assertTrue(fresh["targetFileSetMustBeAbsent"])
+        self.assertEqual("fail_closed", fresh["repeatInvocation"])
 
     def test_root_identity_and_registry_fields_are_complete(self) -> None:
         identity = self.contract["databaseIdentity"]

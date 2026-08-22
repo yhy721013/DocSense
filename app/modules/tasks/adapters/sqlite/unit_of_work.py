@@ -19,6 +19,10 @@ from app.modules.tasks.ports.task_admission import TaskAdmissionPort
 from app.modules.tasks.ports.task_execution import TaskExecutionPort
 from app.modules.tasks.ports.task_execution import TaskRunnableQueryPort
 from app.modules.tasks.ports.task_recovery import TaskRecoveryPort
+from app.modules.tasks.ports.recovery_finalization import (
+    TaskRecoveryFinalizationPreflightPort,
+)
+from app.modules.tasks.ports.recovery_resume import TaskRecoveryResumePreflightPort
 
 from .transaction import (
     SQLiteTransaction,
@@ -270,12 +274,21 @@ class SQLiteTaskRecoveryUnitOfWork(_SQLiteUnitOfWorkBase):
         transaction_manager: SQLiteTransactionManager,
         *,
         recovery_builder: StoreBuilder,
+        callback_delivery_builder: StoreBuilder | None = None,
+        finalization_preflight_builder: StoreBuilder | None = None,
+        resume_preflight_builder: StoreBuilder | None = None,
     ) -> None:
         super().__init__(transaction_manager)
         if not callable(recovery_builder):
             raise TypeError("Recovery UoW Store Builder 必须可调用")
         self._recovery_builder = recovery_builder
+        self._callback_delivery_builder = callback_delivery_builder
+        self._finalization_preflight_builder = finalization_preflight_builder
+        self._resume_preflight_builder = resume_preflight_builder
         self._recovery: object | None = None
+        self._callback_delivery: object | None = None
+        self._finalization_preflight: object | None = None
+        self._resume_preflight: object | None = None
 
     def __enter__(self) -> "SQLiteTaskRecoveryUnitOfWork":
         connection = self._enter_transaction()
@@ -283,6 +296,20 @@ class SQLiteTaskRecoveryUnitOfWork(_SQLiteUnitOfWorkBase):
             self._recovery = self._recovery_builder(connection)
             if self._recovery is None:
                 raise TypeError("Recovery UoW Store Builder 不得返回 None")
+            if self._callback_delivery_builder is not None:
+                self._callback_delivery = self._callback_delivery_builder(connection)
+                if self._callback_delivery is None:
+                    raise TypeError("Recovery Callback Store Builder 不得返回 None")
+            if self._finalization_preflight_builder is not None:
+                self._finalization_preflight = self._finalization_preflight_builder(
+                    connection
+                )
+                if self._finalization_preflight is None:
+                    raise TypeError("Recovery 终态预检 Builder 不得返回 None")
+            if self._resume_preflight_builder is not None:
+                self._resume_preflight = self._resume_preflight_builder(connection)
+                if self._resume_preflight is None:
+                    raise TypeError("Recovery 续跑预检 Builder 不得返回 None")
         except BaseException:
             self._rollback_failed_enter()
             raise
@@ -295,8 +322,44 @@ class SQLiteTaskRecoveryUnitOfWork(_SQLiteUnitOfWorkBase):
             raise SQLiteTransactionError("unit_of_work_store_missing", "Recovery Store 未装配")
         return cast(TaskRecoveryPort, self._recovery)
 
+    @property
+    def callback_delivery(self) -> CallbackDeliveryControlPort:
+        self._require_transaction()
+        if self._callback_delivery is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_store_missing",
+                "Recovery Callback Store 未装配，恢复终态严格关闭",
+            )
+        return cast(CallbackDeliveryControlPort, self._callback_delivery)
+
+    @property
+    def finalization_preflight(self) -> TaskRecoveryFinalizationPreflightPort:
+        self._require_transaction()
+        if self._finalization_preflight is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_store_missing",
+                "Recovery 业务结果预检未装配，恢复终态严格关闭",
+            )
+        return cast(
+            TaskRecoveryFinalizationPreflightPort,
+            self._finalization_preflight,
+        )
+
+    @property
+    def resume_preflight(self) -> TaskRecoveryResumePreflightPort:
+        self._require_transaction()
+        if self._resume_preflight is None:
+            raise SQLiteTransactionError(
+                "unit_of_work_store_missing",
+                "Recovery 业务续跑预检未装配，retry_authorized 严格关闭",
+            )
+        return cast(TaskRecoveryResumePreflightPort, self._resume_preflight)
+
     def _clear_stores(self) -> None:
         self._recovery = None
+        self._callback_delivery = None
+        self._finalization_preflight = None
+        self._resume_preflight = None
 
 
 class SQLiteTaskControlQueryUnitOfWork:
@@ -426,14 +489,23 @@ class SQLiteTaskRecoveryUnitOfWorkFactory:
         transaction_manager: SQLiteTransactionManager,
         *,
         recovery_builder: StoreBuilder,
+        callback_delivery_builder: StoreBuilder | None = None,
+        finalization_preflight_builder: StoreBuilder | None = None,
+        resume_preflight_builder: StoreBuilder | None = None,
     ) -> None:
         self._transaction_manager = transaction_manager
         self._recovery_builder = recovery_builder
+        self._callback_delivery_builder = callback_delivery_builder
+        self._finalization_preflight_builder = finalization_preflight_builder
+        self._resume_preflight_builder = resume_preflight_builder
 
     def __call__(self) -> SQLiteTaskRecoveryUnitOfWork:
         return SQLiteTaskRecoveryUnitOfWork(
             self._transaction_manager,
             recovery_builder=self._recovery_builder,
+            callback_delivery_builder=self._callback_delivery_builder,
+            finalization_preflight_builder=self._finalization_preflight_builder,
+            resume_preflight_builder=self._resume_preflight_builder,
         )
 
 

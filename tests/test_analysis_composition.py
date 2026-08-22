@@ -29,7 +29,7 @@ from app.modules.tasks.adapters import (
     LatestTaskProgressPublisherAdapter,
     UploadTaskLimiter,
 )
-from app.services.core.config import (
+from app.modules.analysis.adapters.runtime_config import (
     AnalysisInfrastructureConfig,
     AnalysisInfrastructureConfigurationError,
     load_analysis_infrastructure_config,

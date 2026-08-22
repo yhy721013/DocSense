@@ -1,7 +1,7 @@
 {
   "manifestProfile": "canonical_json_v1",
   "componentName": "report_control",
-  "componentVersion": 1,
+  "componentVersion": 2,
   "schemaName": "docsense.task-control",
   "rootSchemaGeneration": 2,
   "semanticTypes": {
@@ -54,6 +54,38 @@
         {"id": "report_resource_created_at", "semanticExpression": "persisted_utc(created_at)"},
         {"id": "report_resource_updated_at", "semanticExpression": "persisted_utc(updated_at)"}
       ]
+    },
+    {
+      "name": "report_step_continuation_snapshots",
+      "columns": [
+        {"name": "task_id", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 1},
+        {"name": "step_key", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 2},
+        {"name": "step_attempt_no", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 3},
+        {"name": "task_attempt_no", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "task_fencing_token", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "source_step_attempt_no", "type": "INTEGER", "notNull": true, "default": "0", "primaryKeyPosition": 0},
+        {"name": "snapshot_schema_version", "type": "INTEGER", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "input_payload_fingerprint", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "execution_profile_fingerprint", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "predecessor_checkpoint_digest", "type": "TEXT", "notNull": true, "default": "''", "primaryKeyPosition": 0},
+        {"name": "payload_json", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "canonical_json"},
+        {"name": "payload_digest", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0},
+        {"name": "created_at", "type": "TEXT", "notNull": true, "default": null, "primaryKeyPosition": 0, "semanticType": "persisted_utc"}
+      ],
+      "uniqueConstraints": [],
+      "foreignKeys": [
+        {"columns": ["task_id", "step_key", "step_attempt_no"], "referencedTable": "task_step_attempts", "referencedColumns": ["task_id", "step_key", "step_attempt_no"], "onUpdate": "RESTRICT", "onDelete": "CASCADE", "deferrable": false}
+      ],
+      "checkConstraints": [
+        {"id": "report_continuation_attempts", "expression": "step_attempt_no >= 1 AND task_attempt_no >= 1 AND task_fencing_token >= 1 AND source_step_attempt_no >= 0 AND source_step_attempt_no < step_attempt_no"},
+        {"id": "report_continuation_schema", "expression": "snapshot_schema_version >= 1"},
+        {"id": "report_continuation_input_digest", "expression": "length(input_payload_fingerprint) = 64 AND input_payload_fingerprint NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "report_continuation_profile_digest", "expression": "length(execution_profile_fingerprint) = 64 AND execution_profile_fingerprint NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "report_continuation_predecessor_digest", "expression": "predecessor_checkpoint_digest = '' OR (length(predecessor_checkpoint_digest) = 64 AND predecessor_checkpoint_digest NOT GLOB '*[^0-9a-f]*')"},
+        {"id": "report_continuation_payload_json", "expression": "json_valid(payload_json) = 1 AND json_type(payload_json) = 'object' AND length(CAST(payload_json AS BLOB)) <= 16384"},
+        {"id": "report_continuation_payload_digest", "expression": "length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'"},
+        {"id": "report_continuation_created_at", "semanticExpression": "persisted_utc(created_at)"}
+      ]
     }
   ],
   "indexes": [
@@ -69,6 +101,13 @@
       "table": "report_resource_records",
       "unique": false,
       "columns": ["state", "next_recovery_at", "updated_at", "execution_id"],
+      "where": null
+    },
+    {
+      "name": "idx_report_step_continuations_created",
+      "table": "report_step_continuation_snapshots",
+      "unique": false,
+      "columns": ["created_at", "task_id", "step_key"],
       "where": null
     }
   ]

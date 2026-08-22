@@ -13,7 +13,7 @@ from app.modules.analysis.ports import (
     AnalysisBatchAdmission,
     AnalysisBatchAdmissionOutcome,
     AnalysisBatchCommand,
-    AnalysisBatchCommandPort,
+    AnalysisBatchAdmissionPort,
     AnalysisDispatcherPort,
 )
 
@@ -29,11 +29,11 @@ class SubmitAnalysisBatch:
     def __init__(
         self,
         *,
-        batch_commands: AnalysisBatchCommandPort,
+        batch_commands: AnalysisBatchAdmissionPort,
         dispatcher: AnalysisDispatcherPort,
     ) -> None:
-        if not isinstance(batch_commands, AnalysisBatchCommandPort):
-            raise TypeError("batch_commands 必须实现 AnalysisBatchCommandPort")
+        if not isinstance(batch_commands, AnalysisBatchAdmissionPort):
+            raise TypeError("batch_commands 必须实现 AnalysisBatchAdmissionPort")
         if not isinstance(dispatcher, AnalysisDispatcherPort):
             raise TypeError("dispatcher 必须实现 AnalysisDispatcherPort")
         self._batch_commands = batch_commands

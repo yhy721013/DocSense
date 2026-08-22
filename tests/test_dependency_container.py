@@ -27,13 +27,17 @@ from app.ports import (
     KnowledgeIndexPort,
 )
 from app.modules.chat.ports import ChatConversationFactory, ChatConversationPort
-from app.services.core.config import (
+from app.modules.analysis.adapters.runtime_config import (
+    AnalysisClassificationConfig,
+    AnalysisInfrastructureConfig,
+)
+from app.modules.analysis.domain.models import (
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
-    AnalysisClassificationConfig,
-    AnalysisInfrastructureConfig,
+)
+from app.services.core.config import (
     AnythingLLMConfig,
     LLMIntegrationConfig,
     ReportInfrastructureConfig,

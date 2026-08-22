@@ -124,14 +124,19 @@ class AnalysisTaskClaim:
 
 
 @runtime_checkable
-class AnalysisBatchCommandPort(Protocol):
-    """唯一允许 Application 操作 Analysis execution 事实的事务边界。"""
+class AnalysisBatchAdmissionPort(Protocol):
+    """只负责批量受理的窄事务边界；执行期不得复用它补造 Authority。"""
 
     def create_batch_if_allowed(
         self,
         command: AnalysisBatchCommand,
     ) -> AnalysisBatchAdmission:
         ...
+
+
+@runtime_checkable
+class AnalysisBatchCommandPort(AnalysisBatchAdmissionPort, Protocol):
+    """旧迁移夹具使用的受理、加载和领取组合端口。"""
 
     def load_input(self, task_id: TaskId) -> AnalysisTaskInputV1 | None:
         ...
@@ -157,6 +162,7 @@ class AnalysisPoisonTaskCommandPort(Protocol):
 
 __all__ = (
     "AnalysisBatchAdmission",
+    "AnalysisBatchAdmissionPort",
     "AnalysisBatchAdmissionOutcome",
     "AnalysisBatchCommand",
     "AnalysisBatchCommandPort",

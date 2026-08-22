@@ -53,6 +53,7 @@ from app.modules.tasks.ports import (
     ProgressPublication,
     ProgressPublisherPort,
     TaskExecutionStopRequested,
+    TaskStepContinuationDraft,
     TaskWorkflowContextPort,
     TaskWorkflowRunnerPort,
 )
@@ -176,11 +177,34 @@ class RunReportV2Workflow(TaskWorkflowRunnerPort):
         audit_receipt: ReportAuditReceipt | None = None
         prompt = ""
         resources_registered = False
+        initial_continuation = TaskStepContinuationDraft(
+            schema_version=1,
+            input_payload_fingerprint=context.loaded_input.input_payload_fingerprint,
+            execution_profile_fingerprint=self._execution_profile.fingerprint,
+            payload={
+                "business_key": snapshot.report_id.business_key,
+                "resolver": "report.artifact_scope.v1",
+                "step_key": "artifact.scope.begin",
+                "task_id": task_id.value,
+            },
+        )
+        restored = self._steps.load_resume_continuation(
+            context,
+            execution_profile_fingerprint=self._execution_profile.fingerprint,
+        )
+        if restored is not None:
+            if (
+                restored.step_key != "artifact.scope.begin"
+                or restored.draft != initial_continuation
+            ):
+                raise ReportTaskPersistenceError("Report 初始续跑快照解析结果不一致")
+            initial_continuation = restored.draft
         try:
             current_step = self._steps.begin(
                 context,
                 step_key="artifact.scope.begin",
                 idempotency_key=f"report:{task_id.value}:artifact-scope",
+                continuation=initial_continuation,
             )
             scope = self._checked_scope(self._artifacts.begin(task_id), task_id)
             self._steps.succeed(

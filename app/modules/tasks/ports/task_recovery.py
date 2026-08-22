@@ -20,6 +20,7 @@ from app.modules.tasks.domain import (
     TaskRecoveryDecision,
     TaskRecoveryObservation,
     TaskRecoveryOperation,
+    TaskRecord,
     TaskStep,
 )
 
@@ -51,6 +52,7 @@ class TaskRecoveryClaimRequest:
     lease_token: str = field(repr=False)
     claimed_at: str
     lease_expires_at: str
+    expected_current_fencing_token: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("case_id", "owner_id", "lease_token"):
@@ -64,6 +66,46 @@ class TaskRecoveryClaimRequest:
             object.__setattr__(self, name, require_persisted_utc(getattr(self, name), name=name))
         if self.lease_expires_at <= self.claimed_at:
             raise ValueError("Recovery lease 必须晚于 claimed_at")
+        if self.expected_current_fencing_token is not None and (
+            type(self.expected_current_fencing_token) is not int
+            or self.expected_current_fencing_token < 0
+        ):
+            raise ValueError("expected_current_fencing_token 必须是非负整数或 None")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRecoverySnapshot:
+    """一次只读 Recovery Case 快照；写入时仍需重新执行 Store CAS。"""
+
+    task: TaskRecord
+    case: TaskRecoveryCase
+    steps: tuple[TaskStep, ...]
+    operations: tuple[TaskRecoveryOperation, ...]
+    observations: tuple[TaskRecoveryObservation, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, TaskRecord):
+            raise TypeError("task 必须是 TaskRecord")
+        if not isinstance(self.case, TaskRecoveryCase):
+            raise TypeError("case 必须是 TaskRecoveryCase")
+        if self.task.task_id != self.case.task_id:
+            raise ValueError("Task 与 Recovery Case 身份不一致")
+        checks = (
+            (self.steps, TaskStep, "steps"),
+            (self.operations, TaskRecoveryOperation, "operations"),
+            (self.observations, TaskRecoveryObservation, "observations"),
+        )
+        for values, expected_type, name in checks:
+            if not isinstance(values, tuple) or any(
+                not isinstance(item, expected_type) for item in values
+            ):
+                raise TypeError(f"{name} 类型不正确")
+        if any(step.task_id != self.task.task_id for step in self.steps):
+            raise ValueError("Recovery Snapshot 包含其他 Task 的 Step")
+        if any(item.case_id != self.case.case_id for item in self.operations):
+            raise ValueError("Recovery Snapshot 包含其他 Case 的 Operation")
+        if any(item.case_id != self.case.case_id for item in self.observations):
+            raise ValueError("Recovery Snapshot 包含其他 Case 的 Observation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +292,14 @@ class TaskRecoveryPolicyPort(Protocol):
     ) -> RecoveryClassification:
         ...
 
+    def authorize_decision(
+        self,
+        snapshot: TaskRecoverySnapshot,
+        decision: TaskRecoveryDecision,
+    ) -> bool:
+        """纯校验一个证据绑定 Decision 是否符合对应业务 Registry。"""
+        ...
+
 
 @runtime_checkable
 class TaskRecoveryPort(Protocol):
@@ -302,6 +352,9 @@ class TaskRecoveryPort(Protocol):
     def get_case(self, case_id: str) -> TaskRecoveryCase | None:
         ...
 
+    def load_case_snapshot(self, case_id: str) -> TaskRecoverySnapshot | None:
+        ...
+
     def list_observations(self, case_id: str) -> tuple[TaskRecoveryObservation, ...]:
         ...
 
@@ -320,4 +373,5 @@ __all__ = [
     "TaskRecoveryOperationIntentCommand",
     "TaskRecoveryPolicyPort",
     "TaskRecoveryPort",
+    "TaskRecoverySnapshot",
 ]

@@ -188,6 +188,12 @@ _TRANSLATION_DOMAIN_FILE_STDLIB_ROOTS = {
     # 该文件是从旧 Translator 搬迁的纯分块规则；日志只记录计数/错误类型，不执行 I/O。
     "chunks.py": frozenset({"logging"}),
 }
+# 阶段 2-6 经评审确认 Input v5 直接复用 TranslationProfile 的八字段 Canonical
+# 值对象，避免复制一份容易漂移的同义 Profile。例外精确到 task_inputs.py 和
+# translation.domain；Analysis Domain 仍不能导入 Translation Application/Port/Adapter。
+_ANALYSIS_DOMAIN_FILE_INTERNAL_PREFIXES = {
+    "task_inputs.py": ("app.modules.translation.domain",),
+}
 _CHAT_DOMAIN_FILE_STDLIB_ROOTS = {
     "document_candidates.py": frozenset({"collections"}),
     "document_scope.py": frozenset({"collections"}),
@@ -208,6 +214,12 @@ _CHAT_PORT_FILE_STDLIB_ROOTS = {
     "conversations.py": frozenset({"contextlib"}),
     "persistence.py": frozenset({"collections", "types"}),
 }
+# 阶段 2-7 的续跑快照 DTO 在 Port 层直接承诺 canonical JSON、摘要与 16 KiB
+# 上限。该校验属于跨 Adapter 的数据契约，不是文件或网络 I/O，因此只对这一文件
+# 精确授予 hashlib/json；不能借此放宽整个 Tasks Ports。
+_TASKS_PORT_FILE_STDLIB_ROOTS = {
+    "step_continuation.py": frozenset({"hashlib", "json"}),
+}
 _APPLICATION_STDLIB_ROOTS = frozenset(
     {
         "__future__",
@@ -227,6 +239,30 @@ _APPLICATION_STDLIB_ROOTS = frozenset(
         "uuid",
     }
 )
+# 业务恢复策略和 Step Runtime 需要复用 Tasks 执行内核中的两项纯应用规则：
+# RegistryTaskRecoveryPolicy 负责统一恢复判定，expected_retry_step 只解析已持久化
+# Decision。例外同时限定业务模块、源文件与目标模块，禁止业务 Application 任意
+# 穿透到 Tasks Application 的协调器或基础设施装配。
+_BUSINESS_APPLICATION_FILE_INTERNAL_PREFIXES = {
+    ("analysis", "recovery_policy.py"): (
+        "app.modules.tasks.application.recovery_policies",
+    ),
+    ("analysis", "step_runtime.py"): (
+        "app.modules.tasks.application.checkpoint_resume",
+    ),
+    ("report", "recovery_policy.py"): (
+        "app.modules.tasks.application.recovery_policies",
+    ),
+    ("report", "step_runtime.py"): (
+        "app.modules.tasks.application.checkpoint_resume",
+    ),
+    ("weaponry", "recovery_policy.py"): (
+        "app.modules.tasks.application.recovery_policies",
+    ),
+    ("weaponry", "step_runtime.py"): (
+        "app.modules.tasks.application.checkpoint_resume",
+    ),
+}
 _PRESENTER_STDLIB_ROOTS = frozenset(
     {"__future__", "dataclasses", "enum", "json", "logging", "typing"}
 )
@@ -515,6 +551,13 @@ def _domain_matcher(reference: ImportReference) -> RuleMatch | None:
             )
         )
     allowed_internal = [f"app.modules.{module_name}.domain"]
+    if module_name == "analysis":
+        allowed_internal.extend(
+            _ANALYSIS_DOMAIN_FILE_INTERNAL_PREFIXES.get(
+                reference.source.name,
+                (),
+            )
+        )
     if module_name in {"document_processing", "translation"}:
         # TaskId 是跨业务共享的稳定控制面值对象；只放行 tasks domain。
         allowed_internal.append("app.modules.tasks.domain")
@@ -556,7 +599,15 @@ def _ports_matcher(reference: ImportReference) -> RuleMatch | None:
         # 两个消费者只共享不透明 ArtifactRef/表示类型，不获得 Processor 或路径能力。
         allowed_internal.append("app.modules.document_processing.domain")
     allowed_stdlib_roots = _PORTS_STDLIB_ROOTS
-    if module_name == "document_processing":
+    if module_name == "tasks":
+        allowed_stdlib_roots = (
+            _PORTS_STDLIB_ROOTS
+            | _TASKS_PORT_FILE_STDLIB_ROOTS.get(
+                reference.source.name,
+                frozenset(),
+            )
+        )
+    elif module_name == "document_processing":
         allowed_stdlib_roots = (
             _PORTS_STDLIB_ROOTS
             | _DOCUMENT_PROCESSING_PORT_FILE_STDLIB_ROOTS.get(
@@ -593,6 +644,12 @@ def _application_matcher(reference: ImportReference) -> RuleMatch | None:
         # 但不能反向接触 tasks 的 Application/Adapter 实现。
         allowed_internal.extend(
             ("app.modules.tasks.domain", "app.modules.tasks.ports")
+        )
+        allowed_internal.extend(
+            _BUSINESS_APPLICATION_FILE_INTERNAL_PREFIXES.get(
+                (module_name, reference.source.name),
+                (),
+            )
         )
     if module_name in {"analysis", "reassign"}:
         # 永久知识谱系名称是两个业务模块共享的稳定业务规则。只放行该精确纯领域模块，

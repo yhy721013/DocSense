@@ -61,6 +61,7 @@ from app.modules.tasks.ports import (
     TaskRecoveryHeartbeatResult,
     TaskRecoveryMutationOutcome,
     TaskRecoveryOperationIntentCommand,
+    TaskRecoverySnapshot,
     TaskStepCompletionCommand,
     TaskStepIntentCommand,
     TaskStepSkipCommand,
@@ -175,6 +176,27 @@ class StrictTaskControlFake:
         """与 ``TaskRecoveryPort`` 保持一致的读取别名。"""
 
         return self.get_recovery_case(case_id)
+
+    def load_case_snapshot(self, case_id: str) -> TaskRecoverySnapshot | None:
+        recovery_case = self._recovery_cases.get(case_id)
+        if recovery_case is None:
+            return None
+        task = self._tasks.get(recovery_case.task_id)
+        if task is None:
+            raise RuntimeError("Recovery Case 引用的 Task 不存在")
+        return TaskRecoverySnapshot(
+            task=task,
+            case=recovery_case,
+            steps=tuple(
+                step
+                for (task_id, _step_key), step in sorted(
+                    self._steps.items(), key=lambda item: item[0][1]
+                )
+                if task_id == recovery_case.task_id
+            ),
+            operations=self.list_operations(case_id),
+            observations=self.list_observations(case_id),
+        )
 
     def get_step(self, task_id: object, step_key: str) -> TaskStep | None:
         """仅供纯测试核对当前 Step 投影。"""
@@ -575,6 +597,12 @@ class StrictTaskControlFake:
         if case is None:
             return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.MISSING)
         if case.generation != request.generation:
+            return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.SOURCE_CHANGED)
+        if (
+            request.expected_current_fencing_token is not None
+            and case.recovery_fencing_token
+            != request.expected_current_fencing_token
+        ):
             return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.SOURCE_CHANGED)
         if request.lease_expires_at <= self._clock.now_utc():
             return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.LEASE_EXPIRED)

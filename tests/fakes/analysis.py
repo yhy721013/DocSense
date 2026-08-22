@@ -31,6 +31,10 @@ from app.modules.analysis.ports import (
     AnalysisCallbackWaitResult,
     AnalysisExecutionRef,
     AnalysisFilePreparationRequest,
+    AnalysisSourceAcquisitionRequest,
+    AnalysisSourceResolutionRequest,
+    AnalysisDocumentPreparationRequest,
+    AcquiredAnalysisSource,
     AnalysisInteractionAuditReceipt,
     AnalysisInteractionAuditRecord,
     AnalysisKnowledgeWriteRequest,
@@ -486,6 +490,61 @@ class StrictAnalysisPortFake:
         )
         return result
 
+    def acquire_source(
+        self,
+        request: AnalysisSourceAcquisitionRequest,
+    ) -> AcquiredAnalysisSource:
+        self._require_argument(request, AnalysisSourceAcquisitionRequest, "request")
+        result = self._require_result(
+            self.script.invoke(
+                "file.acquire",
+                request,
+                correlation_key=self._key_from_execution(request.execution),
+            ),
+            AcquiredAnalysisSource,
+            "file.acquire",
+        )
+        self._require_same_execution(request.execution, result.execution, "file.acquire")
+        return result
+
+    def resolve_source(
+        self,
+        request: AnalysisSourceResolutionRequest,
+    ) -> AcquiredAnalysisSource:
+        self._require_argument(request, AnalysisSourceResolutionRequest, "request")
+        result = self._require_result(
+            self.script.invoke(
+                "file.resolve",
+                request,
+                correlation_key=self._key_from_execution(request.execution),
+            ),
+            AcquiredAnalysisSource,
+            "file.resolve",
+        )
+        self._require_same_execution(request.execution, result.execution, "file.resolve")
+        return result
+
+    def prepare_document(
+        self,
+        request: AnalysisDocumentPreparationRequest,
+    ) -> PreparedAnalysisDocument:
+        self._require_argument(request, AnalysisDocumentPreparationRequest, "request")
+        result = self._require_result(
+            self.script.invoke(
+                "file.prepare_document",
+                request,
+                correlation_key=self._key_from_execution(request.execution),
+            ),
+            PreparedAnalysisDocument,
+            "file.prepare_document",
+        )
+        self._require_same_execution(
+            request.execution,
+            result.execution,
+            "file.prepare_document",
+        )
+        return result
+
     def create(self, command: AnalysisResourceCommand) -> AnalysisResourceRecord:
         return self._resource_write("resource.create", command)
 
@@ -763,6 +822,18 @@ class StrictAnalysisTaskWorkspaceFake:
             raise AssertionError("workspace.create 结果必须是 AnalysisTaskWorkspace")
         if result.execution != execution:
             raise AssertionError("workspace.create 结果 execution 不一致")
+        return result
+
+    def resolve(self, execution: AnalysisExecutionRef) -> AnalysisTaskWorkspace:
+        if not isinstance(execution, AnalysisExecutionRef):
+            raise TypeError("execution 必须是 AnalysisExecutionRef")
+        result = self.script.invoke(
+            "workspace.resolve",
+            execution,
+            correlation_key=str(execution.task_id),
+        )
+        if not isinstance(result, AnalysisTaskWorkspace) or result.execution != execution:
+            raise AssertionError("workspace.resolve 结果身份不一致")
         return result
 
 

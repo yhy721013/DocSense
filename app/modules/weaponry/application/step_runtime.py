@@ -24,12 +24,15 @@ from app.modules.tasks.ports import (
     TaskProgressCommand,
     TaskStepCompletionCommand,
     TaskStepIntentCommand,
+    TaskStepContinuationDraft,
+    TaskStepContinuationSnapshot,
     TaskTerminalCommand,
     TaskWorkflowContextPort,
 )
 from app.modules.weaponry.application.errors import WeaponryTaskPersistenceError
 
 from .execution_steps import resolve_weaponry_step
+from app.modules.tasks.application.checkpoint_resume import expected_retry_step
 from .execution_uow import (
     WeaponryExecutionUnitOfWork,
     WeaponryExecutionUnitOfWorkFactory,
@@ -71,6 +74,7 @@ class WeaponryStepRuntime:
         step_key: str,
         idempotency_key: str,
         component_mutation: ComponentMutation | None = None,
+        continuation: TaskStepContinuationDraft | None = None,
     ) -> ActiveWeaponryStep:
         """先持久化 Step Intent；组件本地事实可在同一事务原子登记。"""
 
@@ -82,19 +86,44 @@ class WeaponryStepRuntime:
             )
 
         definition = resolve_weaponry_step(step_key)
+        retry_step = expected_retry_step(
+            context,
+            step_key=step_key,
+            idempotency_key=idempotency_key,
+            definition=definition,
+        )
         holder: dict[str, int] = {}
 
         def mutation(authority):
             with self._uow_factory() as unit_of_work:
+                source_attempt_no = 0
+                if retry_step is not None:
+                    source_attempt_no = retry_step.current_step_attempt_no
+                    source_snapshot = unit_of_work.continuations.get(
+                        authority.task_id,
+                        step_key,
+                        source_attempt_no,
+                    )
+                    if (
+                        continuation is None
+                        or source_snapshot is None
+                        or source_snapshot.draft != continuation
+                    ):
+                        return TaskExecutionMutationOutcome.INVALID_STATE
                 existing = unit_of_work.execution.get_step(authority.task_id, step_key)
                 if existing is not None:
-                    holder["attempt_no"] = existing.current_step_attempt_no
-                    return TaskExecutionMutationOutcome.DUPLICATE_STEP_INTENT
-                step = definition.new_step(
-                    task_id=authority.task_id,
-                    step_key=step_key,
-                    idempotency_key=idempotency_key,
-                )
+                    if retry_step is None or existing != retry_step:
+                        holder["attempt_no"] = existing.current_step_attempt_no
+                        return TaskExecutionMutationOutcome.DUPLICATE_STEP_INTENT
+                    step = existing
+                else:
+                    if retry_step is not None:
+                        return TaskExecutionMutationOutcome.INVALID_STATE
+                    step = definition.new_step(
+                        task_id=authority.task_id,
+                        step_key=step_key,
+                        idempotency_key=idempotency_key,
+                    )
                 outcome = unit_of_work.execution.begin_step(
                     TaskStepIntentCommand(
                         authority=authority,
@@ -105,7 +134,17 @@ class WeaponryStepRuntime:
                 if outcome is TaskExecutionMutationOutcome.APPLIED:
                     if component_mutation is not None:
                         component_mutation(unit_of_work)
-                    holder["attempt_no"] = 1
+                    next_attempt_no = step.current_step_attempt_no + 1
+                    if continuation is not None:
+                        unit_of_work.continuations.save(
+                            authority=authority,
+                            step_key=step_key,
+                            step_attempt_no=next_attempt_no,
+                            source_step_attempt_no=source_attempt_no,
+                            draft=continuation,
+                            created_at=self._clock.now_utc(),
+                        )
+                    holder["attempt_no"] = next_attempt_no
                     unit_of_work.commit()
                 return outcome
 
@@ -119,6 +158,39 @@ class WeaponryStepRuntime:
                 f"Weaponry Step intent 未提交: {step_key}"
             )
         return ActiveWeaponryStep(step_key, holder["attempt_no"])
+
+    def load_resume_continuation(
+        self,
+        context: TaskWorkflowContextPort,
+        *,
+        execution_profile_fingerprint: str,
+    ) -> TaskStepContinuationSnapshot | None:
+        """只读加载恢复目标的业务快照；缺失或摘要漂移立即失败关闭。"""
+
+        retry_from = context.loaded_input.retry_from_step_key
+        if not retry_from:
+            return None
+        step = next(
+            item
+            for item in context.loaded_input.recovery_steps
+            if item.step_key == retry_from
+        )
+        with self._uow_factory() as unit_of_work:
+            snapshot = unit_of_work.continuations.get(
+                context.loaded_input.snapshot.task_id,
+                retry_from,
+                step.current_step_attempt_no,
+            )
+        if snapshot is None:
+            raise WeaponryTaskPersistenceError("Weaponry 恢复目标缺少业务续跑快照")
+        if (
+            snapshot.draft.input_payload_fingerprint
+            != context.loaded_input.input_payload_fingerprint
+            or snapshot.draft.execution_profile_fingerprint
+            != execution_profile_fingerprint
+        ):
+            raise WeaponryTaskPersistenceError("Weaponry 续跑快照与冻结输入/Profile 不一致")
+        return snapshot
 
     def succeed(
         self,

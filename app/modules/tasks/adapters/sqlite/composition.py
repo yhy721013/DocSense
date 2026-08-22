@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sqlite3
+from collections.abc import Callable
 
 from .control_store import SQLiteTaskControlStore
 from .callback_control_store import SQLiteCallbackControlStore
@@ -34,6 +36,11 @@ class SQLiteTaskControlUnitOfWorkFactories:
 
 def build_sqlite_task_control_uow_factories(
     transaction_manager: SQLiteTransactionManager,
+    *,
+    recovery_finalization_preflight_builder: Callable[[sqlite3.Connection], object]
+    | None = None,
+    recovery_resume_preflight_builder: Callable[[sqlite3.Connection], object]
+    | None = None,
 ) -> SQLiteTaskControlUnitOfWorkFactories:
     """使用唯一 Control Store 实现装配三类 UoW，不产生任何生产运行时副作用。"""
 
@@ -53,6 +60,9 @@ def build_sqlite_task_control_uow_factories(
         recovery=SQLiteTaskRecoveryUnitOfWorkFactory(
             transaction_manager,
             recovery_builder=SQLiteTaskControlStore,
+            callback_delivery_builder=SQLiteCallbackControlStore,
+            finalization_preflight_builder=recovery_finalization_preflight_builder,
+            resume_preflight_builder=recovery_resume_preflight_builder,
         ),
         queries=SQLiteTaskControlQueryUnitOfWorkFactory(
             transaction_manager,

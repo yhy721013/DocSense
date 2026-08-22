@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import signal
 from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
@@ -24,27 +23,33 @@ from app.integrations.anythingllm.policies import (
     knowledge_index_workspace_settings,
 )
 from app.modules.analysis.adapters import (
+    AnalysisV5TaskCommandCodec,
+    AnalysisV2Maintenance,
+    AnalysisV2TaskDispatcher,
     ArtifactAnalysisTranslationAdapter,
-    LegacyAnalysisAuditAdapter,
     LegacyAnalysisFilePreparationAdapter,
     LegacyAnalysisKnowledgeAdapter,
     LegacyAnalysisRagAdapterFactory,
     LocalAnalysisTaskWorkspaceAdapter,
-    SQLiteAnalysisBatchCommandAdapter,
-    SQLiteAnalysisCallbackAdapter,
-    SQLiteAnalysisCallbackRecoverySource,
-    SQLiteAnalysisResourceStoreAdapter,
+    SQLiteAnalysisV2BatchAdmissionAdapter,
+    SQLiteAnalysisV2CallbackRecoverySource,
+    TaskControlAnalysisCallbackAdapter,
+    build_analysis_execution_profile,
 )
 from app.modules.analysis.adapters.local_dispatcher import (
     LocalAnalysisDispatcherSnapshot,
     LocalAnalysisTaskDispatcher,
 )
 from app.modules.analysis.application import (
+    AnalysisTaskRecoveryPolicy,
+    AnalysisStepRuntime,
+    RecoverAnalysisResources,
     RecoverAnalysisCallbackSynchronously,
+    RunAnalysisV2Workflow,
     SubmitAnalysisBatch,
 )
 from app.modules.analysis.composition import (
-    compose_analysis_application_services,
+    compose_analysis_v2_application_services,
 )
 from app.modules.analysis.ports import AnalysisDispatcherPort
 from app.modules.document_processing import (
@@ -98,8 +103,15 @@ from app.modules.report.adapters.sqlite import (
     SQLiteReportResourceStore,
     load_report_control_manifest,
 )
+from app.modules.report.adapters.sqlite.recovery_finalization import (
+    SQLiteReportRecoveryFinalizationPreflight,
+)
+from app.modules.report.adapters.sqlite.recovery_resume import (
+    SQLiteReportRecoveryResumePreflight,
+)
 from app.modules.report.adapters.local_dispatcher import LocalReportDispatcherSnapshot
 from app.modules.report.application import (
+    ReportTaskRecoveryPolicy,
     ReportResourceRecoveryService,
     RecoverReportCallbackSynchronously,
     RunReportTask,
@@ -132,7 +144,6 @@ from app.modules.reassign.composition import (
     compose_reassign_application_services,
 )
 from app.modules.tasks.adapters import (
-    FileProcessSingletonGuard as GenericFileProcessSingletonGuard,
     InMemoryProgressAdapter,
     CodecTaskExecutionSnapshotLoader,
     FairTaskExecutionPermitPool,
@@ -146,10 +157,15 @@ from app.modules.tasks.adapters import (
     SystemSafeClock,
     TaskRuntimeConfig,
     ThreadedLeaseHeartbeatSupervisor,
-    LatestTaskProgressPublisherAdapter,
     SynchronousCallbackRecoveryRouterAdapter,
     UploadTaskLimiter,
     required_http_lease_seconds,
+)
+from app.modules.tasks.adapters.recovery_finalization import (
+    RoutedTaskRecoveryFinalizationPreflight,
+)
+from app.modules.tasks.adapters.recovery_resume import (
+    RoutedTaskRecoveryResumePreflight,
 )
 from app.modules.tasks.adapters.sqlite import (
     SQLiteCallbackControlStore,
@@ -158,12 +174,13 @@ from app.modules.tasks.adapters.sqlite import (
     SQLiteTransactionManager,
     build_sqlite_task_control_uow_factories,
     bootstrap_task_control_database,
+    require_explicit_fresh_bootstrap_when_uninitialized,
 )
 from app.modules.tasks.application import (
     CheckTaskStatusService,
-    ConservativeTaskReaper,
     ExecuteCheckTask,
     ProgressSubscriptionService,
+    RecoverExpiredTaskAttempts,
     TaskExecutionRuntime,
 )
 from app.modules.tasks.domain import TaskBusinessRef, TaskId, TaskOwnerIdentity
@@ -233,6 +250,12 @@ from app.modules.weaponry.adapters.sqlite import (
     SQLiteWeaponryResultSnapshotStore,
     load_weaponry_control_manifest,
 )
+from app.modules.weaponry.adapters.sqlite.recovery_finalization import (
+    SQLiteWeaponryRecoveryFinalizationPreflight,
+)
+from app.modules.weaponry.adapters.sqlite.recovery_resume import (
+    SQLiteWeaponryRecoveryResumePreflight,
+)
 from app.modules.weaponry.application import (
     RecoverWeaponryCallbackSynchronously,
     RunWeaponryV2Workflow,
@@ -240,20 +263,39 @@ from app.modules.weaponry.application import (
     WeaponryFieldExecutor,
     WeaponryResourceRecoveryService,
     WeaponryStepRuntime,
+    WeaponryTaskRecoveryPolicy,
 )
 from app.modules.chat.composition import (
     ChatApplicationServices,
     compose_chat_application_services,
 )
-from app.services.core.config import (
+from app.modules.analysis.adapters.runtime_config import (
     AnalysisClassificationConfig,
     AnalysisInfrastructureConfig,
+    load_analysis_classification_config,
+    load_analysis_infrastructure_config,
+    load_analysis_execution_capability_config,
+)
+from app.modules.analysis.adapters.sqlite import (
+    ANALYSIS_CONTROL_COMPONENT_NAME,
+    ANALYSIS_CONTROL_COMPONENT_VERSION,
+    SQLiteAnalysisExecutionUnitOfWorkFactory,
+    SQLiteAnalysisResultSnapshotStore,
+    SQLiteAnalysisV2ResourceStoreAdapter,
+    build_analysis_v2_audit_adapter,
+    load_analysis_control_manifest,
+)
+from app.modules.analysis.adapters.sqlite.recovery_finalization import (
+    SQLiteAnalysisRecoveryFinalizationPreflight,
+)
+from app.modules.analysis.adapters.sqlite.recovery_resume import (
+    SQLiteAnalysisRecoveryResumePreflight,
+)
+from app.services.core.config import (
     AnythingLLMConfig,
     ChatInfrastructureConfig,
     LLMIntegrationConfig,
     ReportInfrastructureConfig,
-    load_analysis_classification_config,
-    load_analysis_infrastructure_config,
     load_anythingllm_config,
     load_chat_infrastructure_config,
     load_legacy_office_config,
@@ -287,22 +329,6 @@ def _translation_mode_from_environment() -> TranslationMode:
     )
     return TranslationMode.MACHINE
 
-
-def _terminate_process_after_analysis_dispatcher_fatal(message: str) -> None:
-    """终止仍在提供 HTTP 的失效进程，交由 Docker 从持久任务事实恢复。
-
-    `/llm/analysis` 的 202 表示任务已经持久受理，不能在提交后改回 503。若唯一
-    Dispatcher 意外退出，继续让 Flask 存活会形成“仍可受理、永不执行”的假健康状态；
-    因此生产组合根发送 SIGTERM，由 ``restart: unless-stopped`` 启动新进程重新扫描。
-    """
-
-    logger.critical(
-        "文件分析 Dispatcher 已不可恢复退出，准备终止应用进程: "
-        "fatal_error=%s pid=%s",
-        message,
-        os.getpid(),
-    )
-    os.kill(os.getpid(), signal.SIGTERM)
 
 APPLICATION_SERVICES_EXTENSION = "docsense_services"
 
@@ -795,9 +821,8 @@ class ApplicationServices:
     def _validate_analysis_infrastructure_capabilities(self) -> None:
         """验证已装配的 Analysis 链只声明当前 SQLite 单实例能力。
 
-        旧测试夹具可以明确不装配 Analysis；但生产组合一旦提供该链，就必须证明进程锁、
-        共享 limiter 与 Callback 超时/租约关系完整，不能在公开路由尚未切换时静默留下
-        一个没有边界保护的后台 Worker。
+        旧测试夹具可以明确不装配 Analysis；但生产组合一旦提供该链，就必须证明旧进程
+        锁或 v2 lease/fencing Authority、共享 limiter 与 Callback 租约关系完整。
         """
 
         if self.analysis_dispatcher is None:
@@ -816,6 +841,9 @@ class ApplicationServices:
                 "Analysis callback lease 未严格覆盖HTTP连接、读取和安全余量"
             )
 
+        uses_v2_authority = bool(
+            getattr(self.analysis_dispatcher, "uses_task_control_authority", False)
+        )
         if isinstance(self.analysis_dispatcher, LocalAnalysisTaskDispatcher):
             if not self.analysis_dispatcher.has_process_guard:
                 raise RuntimeError(
@@ -836,6 +864,20 @@ class ApplicationServices:
             if not shares_capacity:
                 raise ValueError(
                     "Analysis 必须与 Report/Weaponry 共享同一重型任务 limiter"
+                )
+        elif uses_v2_authority:
+            if self.heavy_capacity_pool is not None:
+                shares_capacity = self.heavy_capacity_pool.owns(
+                    self.analysis_dispatcher.execution_limiter
+                )
+            else:
+                shares_capacity = (
+                    self.analysis_dispatcher.execution_limiter
+                    is self.upload_task_limiter
+                )
+            if not shares_capacity:
+                raise ValueError(
+                    "Analysis v2 必须与 Report/Weaponry 共享同一重型任务 limiter"
                 )
         else:
             # 显式 Fake 可用于离线组合/路由测试；它没有资格宣称生产后台能力，readiness
@@ -1257,19 +1299,26 @@ def create_application_services() -> ApplicationServices:
         mineru_model_source=os.getenv("MINERU_MODEL_SOURCE", "local"),
         tessdata_prefix=ocr_config.tessdata_prefix,
     )
-    task_service = LLMTaskService(llm_config.task_db_path)
-    # Report 是第一个迁移单元：先完成旧库只读切换门禁、v2 根库与 Report 组件身份
-    # 校验，再构造任何 Executor。这里不复制旧任务，也不向两套控制面双写。
+    # 必须先解析 v2 路径并判定当前是“既有 v2”还是“真实旧库迁移”，再构造会自动
+    # 建表的 LLMTaskService。若两边都不存在，普通应用无权猜测历史事实已被放弃；
+    # 部署方必须先运行一次性 fresh bootstrap。
     task_runtime_config = TaskRuntimeConfig.from_environment(
         runtime_directory=RUNTIME_DIR,
         legacy_task_database_path=llm_config.task_db_path,
     )
+    require_explicit_fresh_bootstrap_when_uninitialized(
+        llm_config.task_db_path,
+        task_runtime_config.database_path,
+    )
+    task_service = LLMTaskService(llm_config.task_db_path)
+    # Report 是第一个迁移单元：先完成旧库只读切换门禁、v2 根库与 Report 组件身份
+    # 校验，再构造任何 Executor。这里不复制旧任务，也不向两套控制面双写。
     task_control_busy_timeout_ms = max(
         1,
         int(task_runtime_config.lease.sqlite_busy_budget_seconds * 1000),
     )
-    # Report 与 Weaponry 已同时切入根 Schema generation 2。启动必须一次声明全部
-    # 已知/必需组件，避免先安装一个组件后把另一个合法组件误判为未知漂移。
+    # Report、Weaponry 与 Analysis/file 均切入根 Schema generation 2。启动必须一次
+    # 声明全部已知/必需组件，避免先安装一个组件后把另一个合法组件误判为未知漂移。
     report_task_control_bootstrap = bootstrap_task_control_database(
         llm_config.task_db_path,
         task_runtime_config.database_path,
@@ -1277,10 +1326,12 @@ def create_application_services() -> ApplicationServices:
         known_components={
             REPORT_CONTROL_COMPONENT_NAME: load_report_control_manifest(),
             WEAPONRY_CONTROL_COMPONENT_NAME: load_weaponry_control_manifest(),
+            ANALYSIS_CONTROL_COMPONENT_NAME: load_analysis_control_manifest(),
         },
         required_components={
             REPORT_CONTROL_COMPONENT_NAME: REPORT_CONTROL_COMPONENT_VERSION,
             WEAPONRY_CONTROL_COMPONENT_NAME: WEAPONRY_CONTROL_COMPONENT_VERSION,
+            ANALYSIS_CONTROL_COMPONENT_NAME: ANALYSIS_CONTROL_COMPONENT_VERSION,
         },
     )
     task_control_transactions = SQLiteTransactionManager(
@@ -1290,21 +1341,44 @@ def create_application_services() -> ApplicationServices:
         )
     )
     task_control_uows = build_sqlite_task_control_uow_factories(
-        task_control_transactions
+        task_control_transactions,
+        recovery_finalization_preflight_builder=(
+            lambda connection: RoutedTaskRecoveryFinalizationPreflight(
+                {
+                    "report": SQLiteReportRecoveryFinalizationPreflight(connection),
+                    "weaponry": SQLiteWeaponryRecoveryFinalizationPreflight(connection),
+                    "file": SQLiteAnalysisRecoveryFinalizationPreflight(connection),
+                }
+            )
+        ),
+        recovery_resume_preflight_builder=(
+            lambda connection: RoutedTaskRecoveryResumePreflight(
+                {
+                    "report": SQLiteReportRecoveryResumePreflight(connection),
+                    "weaponry": SQLiteWeaponryRecoveryResumePreflight(connection),
+                    "file": SQLiteAnalysisRecoveryResumePreflight(connection),
+                }
+            )
+        ),
     )
     task_control_clock = SystemSafeClock(
         max_jitter_seconds=task_runtime_config.lease.max_clock_jitter_seconds
     )
-    task_reaper = ConservativeTaskReaper(
+    task_reaper = RecoverExpiredTaskAttempts(
         clock=task_control_clock,
         query_uow_factory=task_control_uows.queries,
         recovery_uow_factory=task_control_uows.recovery,
+        policies={
+            "report": ReportTaskRecoveryPolicy(),
+            "weaponry": WeaponryTaskRecoveryPolicy(),
+            "file": AnalysisTaskRecoveryPolicy(),
+        },
         defer_seconds=task_runtime_config.reaper_scan_interval_seconds,
     )
     task_control_maintenance = LocalMaintenanceScheduler(
         jobs=(
             LocalMaintenanceJob(
-                name="conservative_task_reaper",
+                name="business_task_reaper",
                 interval_seconds=task_runtime_config.reaper_scan_interval_seconds,
                 action=task_reaper.run_once,
             ),
@@ -1318,9 +1392,9 @@ def create_application_services() -> ApplicationServices:
     routed_task_reader = RoutedTaskReadAdapter(
         v2_reader=task_control_task_reader,
         legacy_reader=LegacyTaskReadAdapter(task_service),
-        # Report 与 Weaponry 已分别在 2-4、2-5 完成一次切换，按业务键的公开
-        # check-task/Progress 必须只读 v2。Analysis/file 尚未迁移，仍保留旧库读取。
-        v2_business_types=frozenset({"report", "weaponry"}),
+        # Report、Weaponry 与 Analysis/file 已分别在 2-4、2-5、2-6 完成一次切换；
+        # 这些业务的公开 check-task/Progress 必须只读 v2，不再回退旧 Task DB。
+        v2_business_types=frozenset({"report", "weaponry", "file"}),
     )
     kb_service = DatabaseService(str(KNOWLEDGE_BASE_DB_PATH))
     chat_services = compose_chat_application_services(
@@ -1472,7 +1546,7 @@ def create_application_services() -> ApplicationServices:
 
     # Report 2-4 一次切换：受理、claim/start/heartbeat、Progress、终态、Callback
     # Control 全部使用 v2；本区块不再构造 LegacyTaskCommandAdapter，也不向旧库写 Report。
-    # 尚未迁移的 Analysis 继续使用旧链，不共享 Report 控制写入口。
+    # Report、Weaponry、Analysis 各自使用业务 UoW，但共享根 Task/Callback Authority。
     report_execution_profile = build_report_execution_profile(
         runtime_config=report_infrastructure_config,
         capabilities=load_report_execution_capability_config(),
@@ -1642,60 +1716,179 @@ def create_application_services() -> ApplicationServices:
         dispatcher=report_dispatcher,
     )
 
-    # 1F-5B 的唯一文件分析运行链。公开路由只写入这条批量受理链，Dispatcher 的扫描条件
-    # 严格限定为带 batch 身份的 execution，因此不会误领历史 file 兼容任务；真实 HTTP
-    # Session 仍延迟到 Worker 内创建。当前发布制度会先停服并由 clean.py 清库重建；
-    # 若未来保留存量库，则改用只读预检处理遗留任务。禁止在此处增加双跑或兼容回退。
-    analysis_task_commands = SQLiteAnalysisBatchCommandAdapter(task_service)
-    analysis_progress_publisher = LatestTaskProgressPublisherAdapter(
-        task_commands=analysis_task_commands,
-        delegate=progress_adapter,
+    # Analysis 2-6 一次切换：Batch Admission、Execution/Step、Progress、终态、
+    # Callback Control 与同步恢复全部只使用 Task Control v2。生产对象图不再构造旧
+    # Analysis TaskCommand/Callback/Resource Store，也不从旧 Runner 补造 Authority。
+    analysis_files = LegacyAnalysisFilePreparationAdapter(
+        download_timeout_seconds=llm_config.download_timeout,
+        document_preparer=document_preparer,
+        rag_projector=analysis_rag_projector,
+        document_scanned_pdf_engine=ScannedPDFEngine(
+            ocr_config.analysis_scanned_pdf_engine
+        ),
     )
-    analysis_callbacks = SQLiteAnalysisCallbackAdapter(
-        task_service,
+    analysis_translation = ArtifactAnalysisTranslationAdapter(
+        document_translation=translate_prepared_document,
+        engine=translation_engine,
+        renderer=translation_renderer,
+        mode_resolver=_translation_mode_from_environment,
+    )
+    analysis_execution_profile = build_analysis_execution_profile(
+        capabilities=load_analysis_execution_capability_config(),
+        files=analysis_files,
+    )
+    analysis_translation_profile = analysis_translation.execution_profile
+    analysis_task_codec = AnalysisV5TaskCommandCodec(
+        execution_profile=analysis_execution_profile,
+        translation_profile=analysis_translation_profile,
+    )
+    analysis_clock = SystemSafeClock(
+        max_jitter_seconds=task_runtime_config.lease.max_clock_jitter_seconds
+    )
+    analysis_admission = SQLiteAnalysisV2BatchAdmissionAdapter(
+        admission_uow_factory=task_control_uows.admission,
+        codec=analysis_task_codec,
+        clock=analysis_clock,
+    )
+    analysis_resources = SQLiteAnalysisV2ResourceStoreAdapter(
+        task_control_transactions
+    )
+    analysis_audit = build_analysis_v2_audit_adapter(
+        llm_config.task_db_path,
+        transaction_manager=task_control_transactions,
+        task_reader=task_control_task_reader,
+    )
+    analysis_callback_token_factory = SecureTaskLeaseTokenFactory()
+    analysis_callbacks = TaskControlAnalysisCallbackAdapter(
+        task_control_uows.callback_delivery,
+        clock=analysis_clock,
         callback_timeout=(
             analysis_infrastructure_config.callback_http_timeout_seconds
         ),
         lease_seconds=analysis_infrastructure_config.callback_lease_seconds,
+        token_factory=analysis_callback_token_factory.new_token,
     )
-    analysis_services = compose_analysis_application_services(
-        task_commands=analysis_task_commands,
-        progress_publisher=analysis_progress_publisher,
-        workspaces=LocalAnalysisTaskWorkspaceAdapter(
-            str(RUNTIME_DIR / "tasks")
+    analysis_resource_recovery = RecoverAnalysisResources(
+        store=analysis_resources,
+        audit=analysis_audit,
+        retry_base_seconds=(
+            analysis_infrastructure_config.dispatch_retry_base_seconds
         ),
-        files=LegacyAnalysisFilePreparationAdapter(
-            download_timeout_seconds=llm_config.download_timeout,
-            document_preparer=document_preparer,
-            rag_projector=analysis_rag_projector,
-            document_scanned_pdf_engine=ScannedPDFEngine(
-                ocr_config.analysis_scanned_pdf_engine
-            ),
+        retry_max_seconds=(
+            analysis_infrastructure_config.dispatch_retry_max_seconds
         ),
-        rag_factory=LegacyAnalysisRagAdapterFactory(document_rag_factory),
-        knowledge=LegacyAnalysisKnowledgeAdapter(knowledge_index_factory),
-        audit=LegacyAnalysisAuditAdapter(task_service),
-        translation=ArtifactAnalysisTranslationAdapter(
-            document_translation=translate_prepared_document,
-            engine=translation_engine,
-            renderer=translation_renderer,
-            mode_resolver=_translation_mode_from_environment,
-        ),
+    )
+    analysis_maintenance = AnalysisV2Maintenance(
         callbacks=analysis_callbacks,
-        callback_recovery_source=SQLiteAnalysisCallbackRecoverySource(
-            task_service
+        resources=analysis_resource_recovery,
+        config=analysis_infrastructure_config,
+    )
+    analysis_execution_uows = SQLiteAnalysisExecutionUnitOfWorkFactory(
+        task_control_transactions,
+        execution_builder=SQLiteTaskControlStore,
+        callback_delivery_builder=SQLiteCallbackControlStore,
+        resource_builder=SQLiteAnalysisV2ResourceStoreAdapter.from_connection,
+        result_snapshot_builder=SQLiteAnalysisResultSnapshotStore.from_connection,
+    )
+    analysis_steps = AnalysisStepRuntime(
+        uow_factory=analysis_execution_uows,
+        clock=analysis_clock,
+    )
+    analysis_snapshot_loader = CodecTaskExecutionSnapshotLoader(
+        query_uow_factory=task_control_uows.queries,
+        codec=analysis_task_codec,
+    )
+    analysis_workspaces = LocalAnalysisTaskWorkspaceAdapter(
+        str(RUNTIME_DIR / "tasks")
+    )
+    analysis_rag_factory = LegacyAnalysisRagAdapterFactory(document_rag_factory)
+    analysis_knowledge = LegacyAnalysisKnowledgeAdapter(knowledge_index_factory)
+    analysis_instance_start_id = str(uuid4())
+    analysis_lease_token_factory = SecureTaskLeaseTokenFactory()
+
+    def build_analysis_execution_runtime(worker_slot: str) -> TaskExecutionRuntime:
+        """每个 Worker 创建独立 Workflow，禁止跨线程共享可变执行结果。"""
+
+        workflow = RunAnalysisV2Workflow(
+            steps=analysis_steps,
+            progress_publisher=progress_adapter,
+            workspaces=analysis_workspaces,
+            files=analysis_files,
+            rag_factory=analysis_rag_factory,
+            knowledge=analysis_knowledge,
+            audit=analysis_audit,
+            translation=analysis_translation,
+            resources=analysis_resources,
+            callbacks=analysis_callbacks,
+            callback_url=llm_config.callback_url or "",
+            execution_profile=analysis_execution_profile,
+            translation_profile=analysis_translation_profile,
+            resource_close_running_grace_seconds=(
+                analysis_infrastructure_config.resource_close_running_grace_seconds
+            ),
+            maintenance_wakeup=analysis_maintenance.wake_up,
+        )
+        return TaskExecutionRuntime(
+            task_type="file",
+            owner=TaskOwnerIdentity(
+                instance_start_id=analysis_instance_start_id,
+                process_id=os.getpid(),
+                # 已确认的方案 B：持久化类型、Executor 与未来队列路由统一为 file。
+                executor_name="file",
+                worker_slot=worker_slot,
+            ),
+            clock=analysis_clock,
+            execution_uow_factory=task_control_uows.execution,
+            lease_token_factory=analysis_lease_token_factory,
+            heartbeat_supervisor_factory=lambda: ThreadedLeaseHeartbeatSupervisor(
+                clock=analysis_clock,
+                execution_uow_factory=task_control_uows.execution,
+                lease_settings=task_runtime_config.lease,
+                thread_name=f"analysis-lease-{worker_slot}",
+            ),
+            workflow_runner=workflow,
+            snapshot_loader=analysis_snapshot_loader,
+            lease_settings=task_runtime_config.lease,
+        )
+
+    analysis_executor = LocalTaskExecutor(
+        task_type="file",
+        worker_count=task_runtime_config.file_worker_count,
+        scan_interval_seconds=task_runtime_config.executor_scan_interval_seconds,
+        stop_grace_seconds=task_runtime_config.lease.stop_grace_seconds,
+        clock=analysis_clock,
+        query_uow_factory=task_control_uows.queries,
+        execution_uow_factory=task_control_uows.execution,
+        permit=analysis_execution_permit,
+        runtime_factory=build_analysis_execution_runtime,
+        thread_name_prefix="analysis-v2",
+        dispatch_failure_cooldown_seconds=(
+            analysis_infrastructure_config.dispatch_retry_base_seconds
         ),
-        resources=SQLiteAnalysisResourceStoreAdapter(task_service),
+    )
+    analysis_dispatcher = AnalysisV2TaskDispatcher(
+        executor=analysis_executor,
+        maintenance=analysis_maintenance,
+        worker_count=task_runtime_config.file_worker_count,
+    )
+    analysis_results = SQLiteAnalysisResultSnapshotStore(
+        task_control_transactions
+    )
+    analysis_services = compose_analysis_v2_application_services(
+        admission=analysis_admission,
+        dispatcher=analysis_dispatcher,
+        callbacks=analysis_callbacks,
+        callback_recovery_source=SQLiteAnalysisV2CallbackRecoverySource(
+            task_reader=task_control_task_reader,
+            results=analysis_results,
+        ),
+        resource_recovery=analysis_resource_recovery,
+        progress_publisher=progress_adapter,
         execution_limiter=analysis_execution_permit,
-        process_guard=GenericFileProcessSingletonGuard(
-            RUNTIME_DIR / "locks" / "analysis-dispatcher.lock",
-            component_name="文件分析本地 Dispatcher",
-        ),
+        execution_profile=analysis_execution_profile,
+        translation_profile=analysis_translation_profile,
         config=analysis_infrastructure_config,
         callback_url=llm_config.callback_url or "",
-        fatal_error_handler=(
-            _terminate_process_after_analysis_dispatcher_fatal
-        ),
     )
 
     # Weaponry 2-5 一次切换：受理、Execution/Step、Progress、终态和 Callback

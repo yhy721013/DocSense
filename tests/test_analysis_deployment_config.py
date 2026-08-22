@@ -3,11 +3,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from app.services.core.config import (
+from app.modules.analysis.domain.models import (
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
     ANALYSIS_DATA_STANDARD_MODE_SCOPE_GUARD,
     ANALYSIS_FILENAME_CONSTRAINT_MODE_SCOPE_GUARD,
     ANALYSIS_IDENTITY_RESELECT_MODE_ENFORCE,
+)
+from app.modules.analysis.adapters.runtime_config import (
     ANALYSIS_RUNTIME_MODE_SINGLE_INSTANCE,
 )
 
@@ -96,6 +98,20 @@ class AnalysisDeploymentConfigTests(unittest.TestCase):
         self.assertIn("single_instance", guide)
         self.assertIn("不得手工制造并行双跑", guide)
         self.assertIn("--force-recreate docsense", guide)
+        self.assertIn("DOCSENSE_ANALYSIS_RAG_PROVIDER_FINGERPRINT", guide)
+        self.assertIn("DOCSENSE_ANALYSIS_RAG_MODEL_FINGERPRINT", guide)
+
+    def test_capability_placeholders_are_documented_without_committing_fake_values(self):
+        for relative_path in (".env.example", "docker/.env.docker"):
+            content = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(
+                "# DOCSENSE_ANALYSIS_RAG_PROVIDER_FINGERPRINT=<64位SHA-256十六进制摘要>",
+                content,
+            )
+            self.assertIn(
+                "# DOCSENSE_ANALYSIS_RAG_MODEL_FINGERPRINT=<64位SHA-256十六进制摘要>",
+                content,
+            )
 
 
 if __name__ == "__main__":

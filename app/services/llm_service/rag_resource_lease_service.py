@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,7 +54,9 @@ class RagResourceLeaseService:
             raise ValueError("db_path 不能为空")
         self.db_path = normalized_path
         Path(normalized_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        # Connection 的 ``with`` 只管理事务，不管理 close；构造期必须确定性释放，
+        # 避免 GC 延迟关闭在 Task Control 旧库预检窗口内改动 WAL/SHM 文件集。
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS rag_resource_leases (

@@ -21,6 +21,8 @@ from app.adapters.web.flask.weaponry_requests import parse_weaponry_request
 from app.integrations.anythingllm import AnythingLLMHTTPError, AnythingLLMTimeoutError
 from app.integrations.anythingllm.models import AnythingLLMWorkspace
 from app.modules.tasks.adapters import LegacyTaskCommandAdapter
+from app.modules.analysis.adapters import AnalysisExecutionCapabilityConfig
+from scripts.bootstrap_fresh_task_control import main as bootstrap_fresh_task_control
 from app.modules.report.adapters import (
     ReportExecutionCapabilityConfig,
     ReportRuntimeConfig,
@@ -1369,6 +1371,19 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
 
         with workspace_tempdir() as runtime_directory:
             root = Path(runtime_directory)
+            fresh_task_control_path = root / "task-control-v2.sqlite3"
+            self.assertEqual(
+                0,
+                bootstrap_fresh_task_control(
+                    [
+                        "--legacy-db-path",
+                        str(root / "tasks.sqlite3"),
+                        "--new-db-path",
+                        str(fresh_task_control_path),
+                        "--confirm-abandon-legacy-task-facts",
+                    ]
+                ),
+            )
             weaponry_config = WeaponryRuntimeConfig(
                 runtime_mode="single_instance",
                 scan_interval_seconds=0.05,
@@ -1397,6 +1412,9 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
             ), patch(
                 "app.container.load_chat_infrastructure_config",
                 return_value=ChatInfrastructureConfig.single_instance(),
+            ), patch.dict(
+                "os.environ",
+                {"DOCSENSE_TASK_CONTROL_DB_PATH": str(fresh_task_control_path)},
             ), patch(
                 "app.container.load_report_runtime_config",
                 return_value=ReportRuntimeConfig.single_instance(),
@@ -1405,6 +1423,12 @@ class WeaponryProductionCompositionTests(unittest.TestCase):
                 return_value=ReportExecutionCapabilityConfig(
                     rag_provider_fingerprint="1" * 64,
                     rag_model_fingerprint="2" * 64,
+                ),
+            ), patch(
+                "app.container.load_analysis_execution_capability_config",
+                return_value=AnalysisExecutionCapabilityConfig(
+                    rag_provider_fingerprint="3" * 64,
+                    rag_model_fingerprint="4" * 64,
                 ),
             ), patch(
                 "app.container.load_weaponry_runtime_config",

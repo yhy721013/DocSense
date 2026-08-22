@@ -1,7 +1,7 @@
 {
-  "assetVersion": 5,
+  "assetVersion": 6,
   "runtimeAsset": true,
-  "stage": "2-2-contract-v5-confirmed",
+  "stage": "2-6-fresh-bootstrap-confirmed",
   "frozenAt": "2026-08-12",
   "publicContractChanged": false,
   "paths": {
@@ -218,7 +218,21 @@
     "newDatabaseCreationAllowsEmptyV2Only": true,
     "createTableIfNotExistsRepairForbidden": true,
     "storeConstructionBeforePreflightForbidden": true,
-    "backgroundThreadStartBeforePreflightForbidden": true
+    "backgroundThreadStartBeforePreflightForbidden": true,
+    "freshInstall": {
+      "decisionStatus": "user_confirmed",
+      "confirmedAt": "2026-08-20",
+      "ordinaryApplicationAutoDetectionForbidden": true,
+      "explicitOneShotConfirmationRequired": true,
+      "legacyFileSetMustBeAbsent": true,
+      "targetFileSetMustBeAbsent": true,
+      "existingTargetMustUseStrictOpen": true,
+      "deleteOrArchiveByApplicationForbidden": true,
+      "publishAlgorithm": "same_filesystem_random_temp_strict_validate_no_overwrite",
+      "installsAllRequiredComponents": true,
+      "repeatInvocation": "fail_closed",
+      "remainingAuxiliaryDatabaseSeparationStage": "2-8"
+    }
   },
   "fileSet": {
     "members": [".sqlite3", ".sqlite3-wal", ".sqlite3-shm"],

@@ -38,13 +38,25 @@ from .rag_naming import (
     AnalysisRagNamingSnapshot,
     AnalysisRagNamingSnapshotV3,
 )
+from .execution_profile import AnalysisExecutionProfile
+from app.modules.translation.domain import TranslationProfile
+
+
+# 阶段 2-6 明确复用 Translation 的纯 Canonical 值对象，但 Analysis 的外层代码
+# 只能通过本 Domain 别名引用它。这样跨模块依赖被收口在一个经过架构门禁批准的位置，
+# Application、Adapter 与组合代码不会各自形成新的 Translation 模块耦合面。
+AnalysisTranslationProfile = TranslationProfile
 
 
 ANALYSIS_BUSINESS_TYPE = "file"
 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1 = 1
 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2 = 2
 ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3 = 3
-ANALYSIS_TASK_INPUT_SCHEMA_VERSION = 4
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4 = 4
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5 = 5
+# 步骤 7 原子切换后，生产 v2 Codec 明确写 v5；本兼容常量仍固定为 v4，只供旧链
+# 离线读取/回归，禁止遗留调用方仅通过该别名获得 v5 写权限。
+ANALYSIS_TASK_INPUT_SCHEMA_VERSION = ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4
 ANALYSIS_PROCESSING_PROFILE_LEGACY_OFFICE_V1 = "legacy-office-v1"
 ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1 = "single-sheet-v1"
 ANALYSIS_LEGACY_OFFICE_DEFAULT_VERSION_SERIES = "26.2"
@@ -977,7 +989,7 @@ class AnalysisTaskInputV4(AnalysisTaskInputV3):
 
     rag_naming: AnalysisRagNamingSnapshot
 
-    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4
 
     def __post_init__(self) -> None:
         # V3 的命名校验刻意保留旧语义；V4 直接复用 V2 的公共身份/处理策略校验，再按
@@ -1028,6 +1040,61 @@ class AnalysisTaskInputV4(AnalysisTaskInputV3):
         )
 
 
+@dataclass(frozen=True)
+class AnalysisTaskInputV5(AnalysisTaskInputV4):
+    """当前 Worker 输入；在 v4 业务快照上冻结全部执行能力与翻译策略。"""
+
+    execution_profile: AnalysisExecutionProfile
+    translation_profile: AnalysisTranslationProfile
+
+    EXPECTED_SCHEMA_VERSION: ClassVar[int] = ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5
+
+    def __post_init__(self) -> None:
+        # V4 已显式绕开 V3 的历史命名校验；这里复用同一条校验链，随后校验新增 Profile。
+        AnalysisTaskInputV4.__post_init__(self)
+        if not isinstance(self.execution_profile, AnalysisExecutionProfile):
+            raise AnalysisContractError("V5 execution_profile 必须是 AnalysisExecutionProfile")
+        if not isinstance(self.translation_profile, AnalysisTranslationProfile):
+            raise AnalysisContractError("V5 translation_profile 必须是 TranslationProfile")
+
+    @classmethod
+    def from_submission(
+        cls,
+        submission: AnalysisSubmissionSnapshot,
+        *,
+        task_id: str,
+        batch_id: str,
+        batch_sequence: int,
+        accepted_at: str,
+        trace_id: str,
+        execution_profile: AnalysisExecutionProfile,
+        translation_profile: AnalysisTranslationProfile,
+    ) -> "AnalysisTaskInputV5":
+        """把单项受理快照合成为可跨实例严格验能的 v5 输入。"""
+
+        if not isinstance(submission, AnalysisSubmissionSnapshot):
+            raise TypeError("submission 必须是 AnalysisSubmissionSnapshot")
+        return cls(
+            schema_version=cls.EXPECTED_SCHEMA_VERSION,
+            task_id=task_id,
+            batch_id=batch_id,
+            batch_sequence=batch_sequence,
+            file_name=submission.file_name,
+            original_file_name=submission.original_file_name,
+            original_file_name_present=submission.original_file_name_present,
+            file_path=submission.file_path,
+            raw_params=submission.raw_params,
+            effective_ranges=submission.effective_ranges,
+            policy_snapshot=submission.policy_snapshot,
+            accepted_at=accepted_at,
+            trace_id=trace_id,
+            document_processing_policy=submission.document_processing_policy,
+            rag_naming=submission.rag_naming,
+            execution_profile=execution_profile,
+            translation_profile=translation_profile,
+        )
+
+
 __all__ = (
     "ANALYSIS_BUSINESS_TYPE",
     "ANALYSIS_EFFECTIVE_RANGE_KEYS",
@@ -1037,6 +1104,8 @@ __all__ = (
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V1",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V2",
     "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V3",
+    "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V4",
+    "ANALYSIS_TASK_INPUT_SCHEMA_VERSION_V5",
     "ANALYSIS_XLSX_SHEET_POLICY_SINGLE_V1",
     "AnalysisDocumentProcessingPolicySnapshot",
     "AnalysisPolicySnapshot",
@@ -1045,6 +1114,7 @@ __all__ = (
     "AnalysisTaskInputV2",
     "AnalysisTaskInputV3",
     "AnalysisTaskInputV4",
+    "AnalysisTaskInputV5",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",

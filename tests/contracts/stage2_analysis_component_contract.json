@@ -1,0 +1,24 @@
+{
+  "stage": "2-6-completed",
+  "component": {
+    "name": "analysis_control",
+    "version": 2,
+    "canonicalUtf8Bytes": 11957,
+    "fingerprint": "E056007AFCF4F76CA179944FCDBF5F9F86E53021A1B5C1312FAFEFE98E5EFCC5",
+    "tables": [
+      "analysis_resource_records",
+      "analysis_recall_decisions",
+      "analysis_interaction_audit_refs",
+      "analysis_result_snapshots",
+      "analysis_step_continuation_snapshots"
+    ]
+  },
+  "ownership": {
+    "rootBatchFields": ["batch_id", "batch_sequence", "dispatch_sequence"],
+    "knowledgeAuthorityExcluded": true,
+    "sharedInteractionBodyWriter": "app/infrastructure/observability/llm_interaction_store.py",
+    "callbackHistoryWriter": "app/infrastructure/observability/callback_history.py",
+    "selfHealingDdlForbidden": true,
+    "dualWriteForbidden": true
+  }
+}

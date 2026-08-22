@@ -58,7 +58,7 @@
     },
     {
       "name": "analysis_runtime_and_execution_profile_current",
-      "currentOwner": "app/services/core/config.py::AnalysisInfrastructureConfig_and_AnalysisClassificationConfig",
+      "currentOwner": "app/modules/analysis/adapters/runtime_config.py::AnalysisInfrastructureConfig_and_AnalysisClassificationConfig",
       "targetOwner": "app/modules/analysis/adapters/runtime_config.py",
       "envExampleStatus": "present",
       "logPolicy": "记录校验后模式/数值和聚合 fingerprint，不记录环境原值",
@@ -79,6 +79,8 @@
         {"key": "DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS", "default": "5", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_STOP_TIMEOUT_SECONDS=5"},
         {"key": "DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS", "default": "10", "validation": "大于 0 且不超过 604800 的有限数", "envExampleLine": "DOCSENSE_ANALYSIS_CALLBACK_HTTP_TIMEOUT_SECONDS=10"},
         {"key": "DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS", "default": "30", "validation": "正有限数且 > required_http_lease_seconds(callback timeout)", "envExampleLine": "DOCSENSE_ANALYSIS_CALLBACK_LEASE_SECONDS=30"}
+        ,{"key": "DOCSENSE_ANALYSIS_RAG_PROVIDER_FINGERPRINT", "default": "required_for_v5_admission", "validation": "64 位 SHA-256 十六进制摘要；永久知识 Provider 当前复用；不得含 URL/API Key 原文", "envExampleLine": "# DOCSENSE_ANALYSIS_RAG_PROVIDER_FINGERPRINT=<64位SHA-256十六进制摘要>"}
+        ,{"key": "DOCSENSE_ANALYSIS_RAG_MODEL_FINGERPRINT", "default": "required_for_v5_admission", "validation": "64 位 SHA-256 十六进制摘要；模型或部署变化必须更新", "envExampleLine": "# DOCSENSE_ANALYSIS_RAG_MODEL_FINGERPRINT=<64位SHA-256十六进制摘要>"}
       ]
     },
     {

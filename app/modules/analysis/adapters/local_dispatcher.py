@@ -41,7 +41,7 @@ from app.modules.tasks.ports import (
     TaskExecutionPermitPort,
     TaskQueueInspectionPort,
 )
-from app.services.core.config import AnalysisInfrastructureConfig
+from app.modules.analysis.adapters.runtime_config import AnalysisInfrastructureConfig
 
 
 logger = logging.getLogger(__name__)

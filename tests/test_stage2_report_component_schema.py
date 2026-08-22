@@ -9,6 +9,7 @@ import unittest
 
 from app.modules.report.adapters.sqlite import (
     REPORT_CONTROL_COMPONENT_NAME,
+    REPORT_CONTROL_COMPONENT_VERSION,
     bootstrap_report_task_control_database,
     load_report_control_manifest,
 )
@@ -53,7 +54,9 @@ class ReportControlComponentSchemaTests(unittest.TestCase):
                     known_components={
                         REPORT_CONTROL_COMPONENT_NAME: load_report_control_manifest()
                     },
-                    required_components={REPORT_CONTROL_COMPONENT_NAME: 1},
+                    required_components={
+                        REPORT_CONTROL_COMPONENT_NAME: REPORT_CONTROL_COMPONENT_VERSION
+                    },
                 )
                 self.assertEqual(result.identity, identity)
             finally:

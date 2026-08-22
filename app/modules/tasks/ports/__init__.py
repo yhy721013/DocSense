@@ -95,7 +95,20 @@ from .task_recovery import (
     TaskRecoveryOperationIntentCommand,
     TaskRecoveryPolicyPort,
     TaskRecoveryPort,
+    TaskRecoverySnapshot,
 )
+from .step_continuation import (
+    MAX_CONTINUATION_PAYLOAD_BYTES,
+    TaskStepContinuationDraft,
+    TaskStepContinuationSnapshot,
+    TaskStepContinuationStorePort,
+    canonical_continuation_json,
+)
+from .recovery_finalization import (
+    RecoveryCallbackEligibilityCommand,
+    TaskRecoveryFinalizationPreflightPort,
+)
+from .recovery_resume import TaskRecoveryResumePreflightPort
 from .unit_of_work import (
     CallbackDeliveryUnitOfWork,
     CallbackDeliveryUnitOfWorkFactory,
@@ -129,6 +142,7 @@ from .runtime import (
 )
 
 __all__ = [
+    "MAX_CONTINUATION_PAYLOAD_BYTES",
     "CALLBACK_RECOVERY_COMMAND_SCHEMA_VERSION",
     "CALLBACK_RECOVERY_TRIGGER_CHECK_TASK",
     "CallbackAdmissionConflict",
@@ -181,6 +195,7 @@ __all__ = [
     "ProgressSubscription",
     "ProgressSubscriptionPort",
     "ProcessSingletonGuardPort",
+    "RecoveryCallbackEligibilityCommand",
     "TaskExecutionAuthoritySessionPort",
     "TaskReadPort",
     "TaskClaimOutcome",
@@ -223,12 +238,18 @@ __all__ = [
     "TaskRecoveryOperationIntentCommand",
     "TaskRecoveryPolicyPort",
     "TaskRecoveryPort",
+    "TaskRecoverySnapshot",
+    "TaskRecoveryFinalizationPreflightPort",
+    "TaskRecoveryResumePreflightPort",
     "TaskRecoveryUnitOfWork",
     "TaskRecoveryUnitOfWorkFactory",
     "TaskControlQueryUnitOfWork",
     "TaskControlQueryUnitOfWorkFactory",
     "TaskRunnableQueryPort",
     "TaskStepCompletionCommand",
+    "TaskStepContinuationDraft",
+    "TaskStepContinuationSnapshot",
+    "TaskStepContinuationStorePort",
     "TaskStepIntentCommand",
     "TaskStepSkipCommand",
     "TaskSubmissionCommand",
@@ -240,5 +261,6 @@ __all__ = [
     "TaskExecutionSnapshotLoaderPort",
     "TaskWorkflowContextPort",
     "require_persisted_utc",
+    "canonical_continuation_json",
     "validate_task_admission_batch",
 ]

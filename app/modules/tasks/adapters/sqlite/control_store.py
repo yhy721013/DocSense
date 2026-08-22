@@ -80,6 +80,7 @@ from app.modules.tasks.ports import (
     TaskRecoveryHeartbeatResult,
     TaskRecoveryMutationOutcome,
     TaskRecoveryOperationIntentCommand,
+    TaskRecoverySnapshot,
     TaskStepCompletionCommand,
     TaskStepIntentCommand,
     TaskStepSkipCommand,
@@ -1606,7 +1607,7 @@ class SQLiteTaskControlStore:
             """
             SELECT e.execution_id, e.business_type, e.business_key,
                    e.execution_state, e.input_schema_version, e.input_payload,
-                   e.trace_id, e.created_at,
+                   e.trace_id, e.created_at, e.retry_from_step_key,
                    l.status AS public_status, l.progress, l.message
             FROM llm_task_executions AS e
             JOIN llm_tasks AS l
@@ -1640,6 +1641,7 @@ class SQLiteTaskControlStore:
             input_payload=payload,
             accepted_at=str(row["created_at"]),
             trace_id=str(row["trace_id"]),
+            retry_from_step_key=str(row["retry_from_step_key"] or ""),
         )
 
     def scan_expired_attempts(
@@ -1714,6 +1716,17 @@ class SQLiteTaskControlStore:
             raise TypeError("task_id 必须是 TaskId")
         return self._candidate_from_current(task_id)
 
+    def list_steps(self, task_id: TaskId) -> tuple[TaskStep, ...]:
+        """以 step_key 稳定排序返回当前投影，不读取或改写 Step Attempt 历史。"""
+
+        if not isinstance(task_id, TaskId):
+            raise TypeError("task_id 必须是 TaskId")
+        rows = self._connection.execute(
+            "SELECT * FROM task_steps WHERE task_id = ? ORDER BY step_key ASC",
+            (task_id.value,),
+        ).fetchall()
+        return tuple(self._step_from_row(row) for row in rows)
+
     def _abandon_expired_attempt(
         self,
         candidate: TaskRecoveryCandidate,
@@ -1741,6 +1754,81 @@ class SQLiteTaskControlStore:
             ),
         )
         return cursor.rowcount == 1
+
+    def _isolate_source_running_steps(
+        self,
+        candidate: TaskRecoveryCandidate,
+        *,
+        completed_at: str,
+        reason_code: str,
+    ) -> tuple[str, ...]:
+        """把 source Attempt 尚未收敛的活动 Step 明确标记为 outcome_unknown。
+
+        Attempt lease 过期时，进程可能在任意外部调用边界失联。保留 ``running`` 会让后续
+        Recovery Decision 无法引用精确 unknown Step，也可能诱导新 Attempt 绕过旧现场。
+        本方法只处理与 source Attempt/fencing 完整匹配的当前 Step Attempt；任何 CAS 漂移
+        都中止整个 Recovery 事务。
+        """
+
+        rows = self._connection.execute(
+            """
+            SELECT s.step_key, s.current_step_attempt_no, s.row_version
+            FROM task_steps AS s
+            JOIN task_step_attempts AS a
+              ON a.task_id = s.task_id
+             AND a.step_key = s.step_key
+             AND a.step_attempt_no = s.current_step_attempt_no
+            WHERE s.task_id = ? AND s.state = 'running'
+              AND a.state = 'running' AND a.task_attempt_no = ?
+              AND a.fencing_token = ?
+            ORDER BY s.step_key ASC
+            """,
+            (
+                candidate.task.task_id.value,
+                candidate.source_attempt_no,
+                candidate.source_fencing_token,
+            ),
+        ).fetchall()
+        isolated: list[str] = []
+        for row in rows:
+            step_key = str(row["step_key"])
+            step_attempt_no = int(row["current_step_attempt_no"])
+            attempt_cursor = self._connection.execute(
+                """
+                UPDATE task_step_attempts
+                SET state = 'outcome_unknown', result_at = ?, error_code = ?
+                WHERE task_id = ? AND step_key = ? AND step_attempt_no = ?
+                  AND state = 'running' AND task_attempt_no = ?
+                  AND fencing_token = ?
+                """,
+                (
+                    completed_at,
+                    reason_code,
+                    candidate.task.task_id.value,
+                    step_key,
+                    step_attempt_no,
+                    candidate.source_attempt_no,
+                    candidate.source_fencing_token,
+                ),
+            )
+            step_cursor = self._connection.execute(
+                """
+                UPDATE task_steps
+                SET state = 'outcome_unknown', row_version = row_version + 1
+                WHERE task_id = ? AND step_key = ? AND state = 'running'
+                  AND current_step_attempt_no = ? AND row_version = ?
+                """,
+                (
+                    candidate.task.task_id.value,
+                    step_key,
+                    step_attempt_no,
+                    int(row["row_version"]),
+                ),
+            )
+            if attempt_cursor.rowcount != 1 or step_cursor.rowcount != 1:
+                raise RuntimeError("Recovery Case 建立时活动 Step CAS 未能原子隔离")
+            isolated.append(step_key)
+        return tuple(isolated)
 
     def classify_candidate_if_current(
         self,
@@ -1876,6 +1964,11 @@ class SQLiteTaskControlStore:
                     TaskRecoveryMutationOutcome.SOURCE_CHANGED,
                     classification,
                 )
+            isolated_step_keys = self._isolate_source_running_steps(
+                current,
+                completed_at=command.classified_at,
+                reason_code="lease_expired_outcome_unknown",
+            )
             isolated, recovery_case = create_recovery_case(
                 task,
                 case_id=command.case_id,
@@ -1931,6 +2024,16 @@ class SQLiteTaskControlStore:
             )
             event_type = "task.recovery_case_created"
 
+            for step_key in isolated_step_keys:
+                self._append_event(
+                    task.task_id,
+                    event_type="task.step_outcome_unknown",
+                    created_at=command.classified_at,
+                    attempt_no=current.source_attempt_no,
+                    step_key=step_key,
+                    reason_code="lease_expired_outcome_unknown",
+                )
+
         self._append_event(
             task.task_id,
             event_type=event_type,
@@ -1972,6 +2075,23 @@ class SQLiteTaskControlStore:
             raise ValueError("case_id 必须是非空 str")
         row = self._case_row(case_id.strip())
         return self._case_from_row(row) if row is not None else None
+
+    def load_case_snapshot(self, case_id: str) -> TaskRecoverySnapshot | None:
+        """在当前短事务中读取同一 Case 的完整、稳定排序恢复快照。"""
+
+        recovery_case = self.get_case(case_id)
+        if recovery_case is None:
+            return None
+        task_row = self._task_row(recovery_case.task_id)
+        if task_row is None:
+            raise RuntimeError("Recovery Case 引用的 Task 不存在")
+        return TaskRecoverySnapshot(
+            task=self._task_from_row(task_row),
+            case=recovery_case,
+            steps=self.list_steps(recovery_case.task_id),
+            operations=self.list_operations(recovery_case.case_id),
+            observations=self.list_observations(recovery_case.case_id),
+        )
 
     @staticmethod
     def _authority_from_case_row(row: sqlite3.Row) -> RecoveryAuthority | None:
@@ -2017,6 +2137,12 @@ class SQLiteTaskControlStore:
         if row is None:
             return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.MISSING)
         if int(row["recovery_generation"]) != request.generation:
+            return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.SOURCE_CHANGED)
+        if (
+            request.expected_current_fencing_token is not None
+            and int(row["recovery_fencing_token"])
+            != request.expected_current_fencing_token
+        ):
             return TaskRecoveryClaimResult(TaskRecoveryMutationOutcome.SOURCE_CHANGED)
         state = RecoveryCaseState(str(row["state"]))
         if state in {RecoveryCaseState.RESOLVED, RecoveryCaseState.SUPERSEDED}:

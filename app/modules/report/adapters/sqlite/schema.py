@@ -13,7 +13,7 @@ from app.modules.tasks.adapters.sqlite.bootstrap import (
 
 
 REPORT_CONTROL_COMPONENT_NAME = "report_control"
-REPORT_CONTROL_COMPONENT_VERSION = 1
+REPORT_CONTROL_COMPONENT_VERSION = 2
 _MANIFEST_PATH = Path(__file__).with_name("report_control_manifest.json")
 
 

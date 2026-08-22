@@ -1,8 +1,8 @@
 """Report Step Registry 使用的五类恢复矩阵定义。
 
-本文件只冻结纯规则说明，不读取数据库、不探测供应商，也不直接作出 Recovery Decision。
-阶段 2-7 的 ``TaskRecoveryPolicyPort`` 将基于这里的矩阵和持久 Observation 实现；在此之前
-通用 Conservative Reaper 继续只返回 defer，不能把描述文本误当成自动重试授权。
+本文件冻结纯规则说明，并提供阶段 2-7 的 ``TaskRecoveryPolicyPort`` 实现。Policy 只读取
+调用方传入的冻结 Task/Step/Observation，不访问数据库或供应商；自动 retry 仍严格限制为
+尚未创建任何 Step 的现场。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from app.modules.tasks.domain import RecoveryClassification
+from app.modules.tasks.application.recovery_policies import RegistryTaskRecoveryPolicy
 
 from app.modules.report.domain import ReportDomainValidationError
 
@@ -101,8 +102,25 @@ def recovery_matrix(matrix_ref: str) -> ReportRecoveryMatrixDefinition:
         raise ReportDomainValidationError("Report recovery matrix 未登记") from exc
 
 
+class ReportTaskRecoveryPolicy(RegistryTaskRecoveryPolicy):
+    """Report Step Registry 的唯一过期 Attempt 分类策略。"""
+
+    def __init__(self) -> None:
+        # 局部导入避免 execution_steps 为加载静态矩阵反向依赖本模块。
+        from .execution_steps import resolve_report_step
+
+        super().__init__(
+            task_type="report",
+            policy_version="report-task-recovery.v1",
+            resolve_step=resolve_report_step,
+            finalization_step_key="artifact.publish",
+            resumable_step=lambda step_key: step_key == "artifact.scope.begin",
+        )
+
+
 __all__ = [
     "REPORT_RECOVERY_MATRICES",
     "ReportRecoveryMatrixDefinition",
+    "ReportTaskRecoveryPolicy",
     "recovery_matrix",
 ]

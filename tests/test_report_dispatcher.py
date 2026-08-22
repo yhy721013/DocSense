@@ -805,7 +805,10 @@ class FileProcessSingletonGuardTests(unittest.TestCase):
             cwd=Path(__file__).resolve().parents[1],
             capture_output=True,
             text=True,
-            timeout=10,
+            # Windows 全仓回归会同时创建大量线程、SQLite 连接和子进程；导入完整
+            # Report Adapter 在高负载机器上可能接近 10 秒。本测试验证的是跨进程锁
+            # 语义，不是模块导入性能，因此给探针一个仍然有界的 30 秒窗口。
+            timeout=30,
             check=False,
         )
 

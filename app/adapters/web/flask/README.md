@@ -30,6 +30,8 @@ Repository、AnythingLLM、Flask 全局对象或线程；非空非对象 JSON �
 `Parser → SubmitAnalysisBatch → Presenter`，不再直接受理任务、发布 Progress 或创建后台线程。
 
 该接线不改变参数、字段、Header、状态码、Progress 或 Callback；file `check-task` 的同步恢复也只使用
-新 Analysis Callback Guard 链，不能回退到遗留恢复器。真实部署仍需先通过只读切换预检，禁止新旧链路双跑。
+新 Analysis Callback Guard 链，不能回退到遗留恢复器。真实部署必须打开已经严格验证的 v2 控制库：
+保留旧库的迁移现场先通过只读切换预检；旧文件集已明确弃用的全新现场先运行一次性 fresh bootstrap。
+两种路径都禁止新旧链路双跑。
 
 这里不得访问 SQLite、调用 Callback、操作进度 Hub 或创建后台线程；解析后的输入交给框架无关应用服务，输出通过 Presenter 映射回已确认契约。

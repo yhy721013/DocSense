@@ -32,7 +32,9 @@ from app.modules.analysis.ports import (
 )
 from app.modules.tasks.http_deadlines import required_http_lease_seconds
 from app.services.llm_service.task_service import LLMTaskService
-from app.services.utils.callback_client import save_callback_history_payload
+from app.infrastructure.observability.callback_history import (
+    save_callback_history_payload,
+)
 
 
 logger = logging.getLogger(__name__)
