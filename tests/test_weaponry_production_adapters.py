@@ -28,7 +28,7 @@ from app.modules.weaponry.adapters import (
     AnythingLLMProvidedEvidenceExtractionAdapter,
     AnythingLLMTargetEvidenceRetrievalAdapter,
     AnythingLLMWeaponryCreationIntentRecoveryAdapter,
-    LLMTranslationServiceWeaponryAdapter,
+    TextTranslatorWeaponryAdapter,
     NoAuxiliaryGuidanceAdapter,
     SQLiteWeaponryCreationIntentStoreAdapter,
     SQLiteWeaponryInteractionAuditAdapter,
@@ -2023,9 +2023,9 @@ class WeaponryOptionalAdaptersTests(unittest.TestCase):
             text="source text",
             target_language="Chinese",
         )
-        success = LLMTranslationServiceWeaponryAdapter(_FakeTranslator()).translate(request)
+        success = TextTranslatorWeaponryAdapter(_FakeTranslator()).translate(request)
         self.assertEqual(WeaponryTranslationOutcome.SUCCEEDED, success.outcome)
-        failed = LLMTranslationServiceWeaponryAdapter(
+        failed = TextTranslatorWeaponryAdapter(
             _FakeTranslator(fail=True)
         ).translate(request)
         self.assertEqual(WeaponryTranslationOutcome.FAILED, failed.outcome)

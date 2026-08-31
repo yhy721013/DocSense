@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from app.modules.tasks.application.request_callback_recovery import (
     RequestCallbackRecoveryResult,
 )
+from app.modules.tasks.application.execute_check_task import ExecuteCheckTaskResult
 
 
 logger = logging.getLogger(__name__)
@@ -74,12 +75,15 @@ class CheckTaskResponsePresenter:
 
     def present(
         self,
-        result: RequestCallbackRecoveryResult,
+        result: RequestCallbackRecoveryResult | ExecuteCheckTaskResult,
     ) -> TaskStatusHttpPresentation:
         """映射可靠登记结果；不等待也不声称 Callback 已经完成。"""
 
-        if not isinstance(result, RequestCallbackRecoveryResult):
-            raise TypeError("result 必须是 RequestCallbackRecoveryResult")
+        if not isinstance(
+            result,
+            (RequestCallbackRecoveryResult, ExecuteCheckTaskResult),
+        ):
+            raise TypeError("result 必须是受支持的 check-task 应用结果")
         if result.single_missing:
             logger.debug("映射 check-task 单项未命中响应: status_code=404")
             return self._error(404, _TASK_NOT_FOUND_MESSAGE)
@@ -89,7 +93,11 @@ class CheckTaskResponsePresenter:
         logger.debug(
             "映射 check-task 空成功响应: status_code=200 item_count=%s "
             "missing_count=%s",
-            len(result.ordered_items),
+            (
+                len(result.ordered_items)
+                if isinstance(result, RequestCallbackRecoveryResult)
+                else result.unique_count
+            ),
             result.missing_count,
         )
         return TaskStatusHttpPresentation(status_code=200, body=b"")

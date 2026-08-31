@@ -10,10 +10,14 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
 from pathlib import Path
+from unittest.mock import Mock
+
+from bs4 import BeautifulSoup
 
 from app.modules.document_processing.adapters import (
     BytesArtifactContent,
     LocalArtifactStoreAdapter,
+    MinerUConverter,
 )
 from app.modules.document_processing.domain import (
     ArtifactKind,
@@ -23,6 +27,7 @@ from app.modules.document_processing.ports import ArtifactPublication
 from app.modules.tasks.domain import TaskId
 from app.modules.translation.adapters import (
     HYMTTranslationEngineAdapter,
+    LazyHYMTTranslationEngineAdapter,
     SafeHTMLTranslationRendererAdapter,
 )
 from app.modules.translation.application import (
@@ -101,6 +106,61 @@ def _request(task_id, artifact, engine, renderer, **overrides):
 
 
 class TranslationModuleTests(unittest.TestCase):
+    def test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag(self) -> None:
+        """机器/LLM 选择由接受时冻结的 Mode 决定，不再从进程环境隐式读取。"""
+
+        runtime = Mock()
+        runtime.translate_text.side_effect = ("machine", "llm")
+        engine = HYMTTranslationEngineAdapter(
+            runtime,
+            engine_fingerprint="mode-mapping-v1",
+        )
+
+        self.assertEqual(
+            "machine",
+            engine.translate(
+                "hello",
+                target_language="Chinese",
+                mode=TranslationMode.MACHINE,
+            ),
+        )
+        self.assertEqual(
+            "llm",
+            engine.translate(
+                "hello",
+                target_language="Chinese",
+                mode=TranslationMode.LLM,
+            ),
+        )
+        self.assertEqual(
+            [True, False],
+            [call.kwargs["fast_translate"] for call in runtime.translate_text.call_args_list],
+        )
+
+    def test_lazy_hymt_adapter_initializes_runtime_once(self) -> None:
+        """半初始化兼容逻辑由线程安全 Lazy Adapter 替代，运行时工厂只允许成功一次。"""
+
+        runtime = Mock()
+        runtime.translate_text.return_value = "translated"
+        factory = Mock(return_value=runtime)
+        engine = LazyHYMTTranslationEngineAdapter(
+            factory,
+            engine_fingerprint="lazy-runtime-v1",
+        )
+
+        for text in ("first", "second"):
+            self.assertEqual(
+                "translated",
+                engine.translate(
+                    text,
+                    target_language="Chinese",
+                    mode=TranslationMode.MACHINE,
+                ),
+            )
+
+        factory.assert_called_once_with()
+        self.assertEqual(2, runtime.translate_text.call_count)
+
     def test_request_contract_has_no_document_conversion_switch(self) -> None:
         field_names = {field.name for field in fields(TranslationRequest)}
         self.assertEqual(
@@ -350,6 +410,284 @@ class TranslationModuleTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,QUJD", rendered.monolingual_html)
         self.assertNotIn("# Heading", rendered.monolingual_html)
 
+    def test_safe_renderer_restores_only_sanitized_raw_html_tables(self) -> None:
+        """MinerU 表格恢复后仍只翻译文本节点，危险/无关属性不得进入结果。"""
+
+        renderer = SafeHTMLTranslationRendererAdapter()
+        engine = StrictTranslationEngineFake()
+        markdown_source = (
+            "Before table\n"
+            '<table border="1" style="width:9999px" onclick="attack()">\n'
+            '<tr><th scope="col" colspan="2">Specifications</th></tr>\n'
+            '<tr><td rowspan="3"><strong>Speed</strong></td>'
+            '<td><a href="https://example.test/spec" onclick="attack()">'
+            "30 knots</a></td></tr>\n"
+            '<tr><td><img src="data:image/png;base64,QUJD" '
+            'alt="diagram" onerror="attack()"></td></tr>\n'
+            '<tr><td><a href="javascript:attack()">Blocked link</a>'
+            '<img src="data:image/svg+xml;base64,PHN2Zz4="></td></tr>\n'
+            "</table>\n"
+            "After table"
+        )
+        with workspace_tempdir() as temporary:
+            store = LocalArtifactStoreAdapter(Path(temporary) / "artifacts")
+            task_id, artifact = _artifact(
+                store,
+                index=51,
+                payload=markdown_source.encode("utf-8"),
+                representation=DocumentRepresentation.MARKDOWN,
+                media_type="text/markdown",
+            )
+            request = _request(task_id, artifact, engine, renderer)
+            source_units = tuple(
+                renderer.extract_units(
+                    request=request,
+                    source_text=markdown_source,
+                )
+            )
+            rendered = renderer.render(
+                request=request,
+                source_text=markdown_source,
+                units=tuple(
+                    TranslationUnit(
+                        ordinal=index,
+                        source_text=text,
+                        translated_text=f"译:{text}",
+                        translated=True,
+                    )
+                    for index, text in enumerate(source_units, start=1)
+                ),
+            )
+
+        self.assertEqual(
+            (
+                "Before table",
+                "Specifications",
+                "Speed",
+                "30 knots",
+                "Blocked link",
+                "After table",
+            ),
+            source_units,
+        )
+        for output in (
+            rendered.bilingual_html,
+            rendered.monolingual_html,
+        ):
+            soup = BeautifulSoup(output, "html.parser")
+            table = soup.select_one(".document-container > table")
+            self.assertIsNotNone(table)
+            self.assertEqual("2", table.find("th").get("colspan"))
+            self.assertEqual("3", table.find("td").get("rowspan"))
+            self.assertEqual(
+                "https://example.test/spec",
+                table.find("a").get("href"),
+            )
+            self.assertEqual(
+                "data:image/png;base64,QUJD",
+                table.find("img").get("src"),
+            )
+            self.assertIsNone(table.find_all("a")[1].get("href"))
+            self.assertNotIn("data:image/svg+xml", output)
+            self.assertFalse(table.find(attrs={"onclick": True}))
+            self.assertFalse(table.find(attrs={"onerror": True}))
+            self.assertNotIn("style", table.attrs)
+            self.assertNotIn("border", table.attrs)
+            self.assertNotIn("&lt;td", output)
+
+    def test_safe_renderer_rejects_dangerous_malformed_or_oversized_tables(
+        self,
+    ) -> None:
+        """候选表格任一安全条件失败时必须整段保持转义，不能部分恢复。"""
+
+        renderer = SafeHTMLTranslationRendererAdapter()
+        engine = StrictTranslationEngineFake()
+        cases = (
+            (
+                "dangerous_tag",
+                "<table><tr><td>Safe<script>attack()</script></td></tr></table>",
+            ),
+            (
+                "mismatched_tag",
+                "<table><tr><td>Broken</tr></td></table>",
+            ),
+            (
+                "oversized_span",
+                '<table><tr><td colspan="1001">Wide</td></tr></table>',
+            ),
+        )
+        with workspace_tempdir() as temporary:
+            store = LocalArtifactStoreAdapter(Path(temporary) / "artifacts")
+            task_id, artifact = _artifact(
+                store,
+                index=52,
+                payload=b"table-validation",
+                representation=DocumentRepresentation.MARKDOWN,
+                media_type="text/markdown",
+            )
+            request = _request(task_id, artifact, engine, renderer)
+            for name, source in cases:
+                with self.subTest(name=name):
+                    source_units = tuple(
+                        renderer.extract_units(
+                            request=request,
+                            source_text=source,
+                        )
+                    )
+                    rendered = renderer.render(
+                        request=request,
+                        source_text=source,
+                        units=tuple(
+                            TranslationUnit(index, text, text, False)
+                            for index, text in enumerate(source_units, start=1)
+                        ),
+                    )
+                    soup = BeautifulSoup(
+                        rendered.monolingual_html,
+                        "html.parser",
+                    )
+                    self.assertIsNone(
+                        soup.select_one(".document-container table")
+                    )
+                    self.assertIsNone(soup.find("script"))
+                    self.assertIn("&lt;table", rendered.monolingual_html)
+                    self.assertIn("&lt;td", rendered.monolingual_html)
+
+    def test_safe_renderer_accepts_current_mineru_pptx_table_shape(self) -> None:
+        """项目的 PPTX 直转输出无需改写上游 Markdown 即可形成真实表格。"""
+
+        markdown_source = MinerUConverter._render_pptx_pages_to_markdown(
+            [
+                [
+                    {"type": "title", "content": "Performance"},
+                    {
+                        "type": "table",
+                        "content": (
+                            '<table border="1">\n'
+                            "  <tr><th>Metric</th><th>Value</th></tr>\n"
+                            "  <tr><td>Speed</td><td>30 knots</td></tr>\n"
+                            "</table>"
+                        ),
+                    },
+                ]
+            ],
+            extract_images=True,
+        )
+        renderer = SafeHTMLTranslationRendererAdapter()
+        engine = StrictTranslationEngineFake()
+        with workspace_tempdir() as temporary:
+            store = LocalArtifactStoreAdapter(Path(temporary) / "artifacts")
+            task_id, artifact = _artifact(
+                store,
+                index=54,
+                payload=markdown_source.encode("utf-8"),
+                representation=DocumentRepresentation.MARKDOWN,
+                media_type="text/markdown",
+            )
+            request = _request(task_id, artifact, engine, renderer)
+            source_units = tuple(
+                renderer.extract_units(
+                    request=request,
+                    source_text=markdown_source,
+                )
+            )
+            rendered = renderer.render(
+                request=request,
+                source_text=markdown_source,
+                units=tuple(
+                    TranslationUnit(index, text, f"译:{text}", True)
+                    for index, text in enumerate(source_units, start=1)
+                ),
+            )
+
+        self.assertEqual(
+            ("Performance", "Metric", "Value", "Speed", "30 knots"),
+            source_units,
+        )
+        soup = BeautifulSoup(rendered.monolingual_html, "html.parser")
+        self.assertIsNotNone(soup.select_one(".document-container > table"))
+        self.assertNotIn("&lt;td", rendered.monolingual_html)
+
+    def test_safe_table_restoration_is_deterministic_under_concurrency(
+        self,
+    ) -> None:
+        """共享 Renderer 不保存表格预算或 DOM，多个线程应得到完全相同的结果。"""
+
+        source = "<table><tr><td>Concurrent cell</td></tr></table>"
+        renderer = SafeHTMLTranslationRendererAdapter()
+        engine = StrictTranslationEngineFake()
+        with workspace_tempdir() as temporary:
+            store = LocalArtifactStoreAdapter(Path(temporary) / "artifacts")
+            task_id, artifact = _artifact(
+                store,
+                index=55,
+                payload=source.encode("utf-8"),
+                representation=DocumentRepresentation.MARKDOWN,
+                media_type="text/markdown",
+            )
+            request = _request(task_id, artifact, engine, renderer)
+
+            def render_once() -> str:
+                source_units = tuple(
+                    renderer.extract_units(
+                        request=request,
+                        source_text=source,
+                    )
+                )
+                return renderer.render(
+                    request=request,
+                    source_text=source,
+                    units=(
+                        TranslationUnit(
+                            1,
+                            source_units[0],
+                            "译:Concurrent cell",
+                            True,
+                        ),
+                    ),
+                ).monolingual_html
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                outputs = tuple(executor.map(lambda _: render_once(), range(32)))
+
+        self.assertEqual(1, len(set(outputs)))
+        self.assertEqual(
+            1,
+            len(
+                BeautifulSoup(outputs[0], "html.parser").select(
+                    ".document-container > table"
+                )
+            ),
+        )
+
+    def test_safe_renderer_never_restores_html_in_text_artifacts(self) -> None:
+        """Text Artifact 的既有纯文本语义不因 Markdown 表格修复而改变。"""
+
+        renderer = SafeHTMLTranslationRendererAdapter()
+        engine = StrictTranslationEngineFake()
+        source = "<table><tr><td>Plain text</td></tr></table>"
+        with workspace_tempdir() as temporary:
+            store = LocalArtifactStoreAdapter(Path(temporary) / "artifacts")
+            task_id, artifact = _artifact(
+                store,
+                index=53,
+                payload=source.encode("utf-8"),
+            )
+            request = _request(task_id, artifact, engine, renderer)
+            source_units = tuple(
+                renderer.extract_units(request=request, source_text=source)
+            )
+            rendered = renderer.render(
+                request=request,
+                source_text=source,
+                units=(TranslationUnit(1, source, source, False),),
+            )
+
+        self.assertEqual((source,), source_units)
+        soup = BeautifulSoup(rendered.monolingual_html, "html.parser")
+        self.assertIsNone(soup.select_one(".document-container table"))
+        self.assertIn("&lt;table&gt;", rendered.monolingual_html)
+
     def test_preprocessing_occurs_outside_engine_instance_lock(self) -> None:
         class BlockingLegacyEngine:
             def __init__(self) -> None:
@@ -479,21 +817,16 @@ class TranslationModuleTests(unittest.TestCase):
         self.assertEqual(expected, actual)
 
     def test_old_engine_support_files_are_thin_facades(self) -> None:
+        """1G-5B 后旧翻译引擎支持文件必须保持物理退出。"""
+
         facades = (
             _REPOSITORY_ROOT / "app/services/translator/core.py",
             _REPOSITORY_ROOT / "app/services/translator/utils.py",
             _REPOSITORY_ROOT / "app/services/translator/chunk_processor.py",
         )
         for facade in facades:
-            tree = ast.parse(facade.read_text(encoding="utf-8"))
             self.assertFalse(
-                any(
-                    isinstance(
-                        node,
-                        (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
-                    )
-                    for node in ast.walk(tree)
-                ),
+                facade.exists(),
                 facade.name,
             )
 

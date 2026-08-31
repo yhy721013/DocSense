@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "capturedDate": "2026-07-30",
   "publicContractHashes": {
-    "docs/接口文档/README.md": "71FC576BBC79F033199F73162A23BA22618C675B1610B85E6547C2C8FF0BA397",
+    "docs/接口文档/README.md": "F7172D315963513918BC19CDA6BEF45D5FDF294CD693CDB4964F043038BF03E5",
     "docs/接口文档/文件处理和报告生成.md": "51929713170D90B6D414810D2543F8BF60BE306192E5AEA00EEB91258E8EC516",
     "docs/接口文档/知识谱系解析.md": "DE7DB324D468137C72034B08420EFAE220FFA49D0ED7BAABA6451522E5166BE6"
   },
@@ -11,15 +11,7 @@
     "app.services.translator.MinerUConverter",
     "app.services.translator.mhtml2pdf"
   ],
-  "legacyFormatCompatibilityFiles": [
-    "app/services/translator/MarkdownHandler.py",
-    "app/services/translator/MinerUConverter.py",
-    "app/services/translator/mhtml2pdf.py",
-    "app/services/translator/mhtml_handler.py",
-    "app/services/utils/mhtml_normalizer.py",
-    "app/services/utils/ocr_preprocessor.py",
-    "app/services/utils/rag_pipeline.py"
-  ],
+  "legacyFormatCompatibilityFiles": [],
   "currentDocumentProcessingConsumers": [
     "app/container.py",
     "app/modules/analysis/adapters/legacy_files.py",
@@ -29,23 +21,13 @@
     "app/modules/report/adapters/legacy_files.py",
     "app/modules/report/adapters/local_artifacts.py",
     "app/services/core/config.py",
-    "app/services/translator/mhtml2pdf.py",
-    "app/services/translator/mhtml_handler.py",
-    "app/services/utils/mhtml_normalizer.py",
-    "app/services/translator/MinerUConverter.py",
-    "app/services/translator/MarkdownHandler.py",
-    "app/services/utils/ocr_preprocessor.py",
-    "app/services/utils/rag_pipeline.py",
     "app/modules/translation/domain/models.py",
     "app/modules/translation/ports/translation.py"
   ],
   "currentTranslationConsumers": [
     "app/container.py",
     "app/modules/analysis/adapters/translation.py",
-    "app/modules/weaponry/adapters/translation.py",
-    "app/services/translator/chunk_processor.py",
-    "app/services/translator/core.py",
-    "app/services/translator/utils.py"
+    "app/modules/weaponry/adapters/translation.py"
   ],
   "mhtmlCases": [
     {

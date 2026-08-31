@@ -131,13 +131,16 @@ class CheckTaskStatusService:
 
         if not isinstance(request, CheckTaskStatusRequest):
             raise TypeError("request 必须是 CheckTaskStatusRequest")
-        trace_label = str(trace_id or "").strip() or "-"
+        if not isinstance(trace_id, str):
+            raise TypeError("trace_id 必须是 str")
+        has_request_trace = bool(trace_id.strip())
         refs = tuple(item.business_ref for item in request.ordered_items)
         logger.info(
-            "开始检查任务状态: business_type=%s item_count=%s trace_id=%s",
+            "开始检查任务状态: business_type=%s item_count=%s "
+            "has_request_trace=%s",
             request.business_type,
             len(refs),
-            trace_label,
+            has_request_trace,
         )
         snapshots = tuple(self._task_reader.get_latest_many(refs))
         if len(snapshots) != len(refs):
@@ -151,12 +154,11 @@ class CheckTaskStatusService:
         ):
             if snapshot is None:
                 logger.info(
-                    "任务状态检查未命中: business_type=%s business_key=%s "
-                    "index=%s trace_id=%s",
+                    "任务状态检查未命中: business_type=%s index=%s "
+                    "has_request_trace=%s",
                     lookup.business_ref.business_type,
-                    lookup.business_ref.business_key,
                     index,
-                    trace_label,
+                    has_request_trace,
                 )
                 checked_items.append(
                     TaskCheckItemResult(
@@ -170,26 +172,49 @@ class CheckTaskStatusService:
 
             self._validate_latest_snapshot(snapshot, lookup, index=index)
             logger.debug(
-                "开始检查任务回调恢复: business_type=%s business_key=%s "
-                "task_id=%s callback_before=%s trace_id=%s",
+                "开始检查任务回调恢复: business_type=%s index=%s "
+                "callback_before=%s has_request_trace=%s",
                 lookup.business_ref.business_type,
-                lookup.business_ref.business_key,
-                snapshot.task_id,
+                index,
                 snapshot.callback_status,
-                trace_label,
+                has_request_trace,
             )
             try:
-                recovery = self._callback_recovery.recover_if_needed(
-                    snapshot.task_id
+                snapshot_recovery = getattr(
+                    self._callback_recovery,
+                    "recover_snapshot_with_context",
+                    None,
                 )
+                contextual_recovery = getattr(
+                    self._callback_recovery,
+                    "recover_if_needed_with_context",
+                    None,
+                )
+                if callable(snapshot_recovery):
+                    # 生产 Adapter 直接复用已经读取的 TaskSnapshot，并把恢复后的同一
+                    # 快照随结果返回，避免每项额外执行两次重复 SQLite 读取。
+                    recovery = snapshot_recovery(
+                        snapshot,
+                        trace_id=trace_id,
+                    )
+                elif callable(contextual_recovery):
+                    # 组合适配器可把同一请求 trace 传给具体业务恢复器；历史 Fake 和
+                    # 基础 Port 继续只实现 recover_if_needed，避免扩大必需端口表面。
+                    recovery = contextual_recovery(
+                        snapshot.task_id,
+                        trace_id=trace_id,
+                    )
+                else:
+                    recovery = self._callback_recovery.recover_if_needed(
+                        snapshot.task_id
+                    )
             except Exception:
                 logger.exception(
-                    "任务回调恢复失败: business_type=%s business_key=%s "
-                    "task_id=%s trace_id=%s",
+                    "任务回调恢复失败: business_type=%s index=%s "
+                    "has_request_trace=%s",
                     lookup.business_ref.business_type,
-                    lookup.business_ref.business_key,
-                    snapshot.task_id,
-                    trace_label,
+                    index,
+                    has_request_trace,
                 )
                 raise
 
@@ -198,14 +223,16 @@ class CheckTaskStatusService:
                     "CallbackRecoveryPort.recover_if_needed 返回类型无效"
                 )
 
-            # 无条件按原 TaskId 重读。即使 Adapter 声称“未尝试且状态未变化”，也不能
-            # 直接相信内存返回值，否则错误实现或并发写入仍可能造成“返回成功、库中失败”
-            # 等误报。这里绝不再次按业务键读取，避免切换到同一业务键的较新执行。
-            current_snapshot = self._task_reader.get_by_id(snapshot.task_id)
+            # 只接受按原 TaskId 读取的恢复后事实，绝不再次按业务键切换到较新执行。
+            # 生产 Adapter 已完成该读取并随结果返回；简单 Fake/兼容 Port 则由此处
+            # 补做一次，从而同时保持可测试性和生产路径的最小 SQLite 读次数。
+            current_snapshot = recovery.current_snapshot
             if current_snapshot is None:
-                raise TaskSnapshotUnavailableError(
-                    f"回调恢复后无法读取 TaskId={snapshot.task_id}"
-                )
+                # 简单 Fake 和兼容 Port 可以只返回恢复分类；此时应用层仍以一次按
+                # TaskId 重读完成一致性校验。生产 Adapter 已随结果返回权威快照。
+                current_snapshot = self._task_reader.get_by_id(snapshot.task_id)
+            if current_snapshot is None:
+                raise TaskSnapshotUnavailableError("回调恢复后无法读取原任务")
             self._validate_reread_snapshot(
                 current_snapshot,
                 expected=snapshot,
@@ -225,27 +252,26 @@ class CheckTaskStatusService:
                 )
             )
             logger.info(
-                "任务状态检查完成: business_type=%s business_key=%s "
-                "task_id=%s found=true callback_before=%s callback_after=%s "
-                "attempted=%s replayed=%s trace_id=%s",
+                "任务状态检查完成: business_type=%s index=%s found=true "
+                "callback_before=%s callback_after=%s attempted=%s "
+                "replayed=%s has_request_trace=%s",
                 lookup.business_ref.business_type,
-                lookup.business_ref.business_key,
-                snapshot.task_id,
+                index,
                 snapshot.callback_status,
                 current_snapshot.callback_status,
                 recovery.attempted,
                 recovery.replayed,
-                trace_label,
+                has_request_trace,
             )
 
         result = CheckTaskStatusResult(tuple(checked_items))
         logger.info(
             "任务状态检查批次完成: business_type=%s item_count=%s "
-            "replayed_count=%s trace_id=%s",
+            "replayed_count=%s has_request_trace=%s",
             request.business_type,
             len(result.ordered_items),
             result.replayed_count,
-            trace_label,
+            has_request_trace,
         )
         return result
 
@@ -294,9 +320,8 @@ class CheckTaskStatusService:
         if snapshot.callback_status == recovery.final_status:
             return
         logger.error(
-            "回调恢复结果与持久化状态不一致: task_id=%s "
+            "回调恢复结果与持久化状态不一致: "
             "reported_status=%s persisted_status=%s attempted=%s replayed=%s",
-            snapshot.task_id,
             recovery.final_status,
             snapshot.callback_status,
             recovery.attempted,
@@ -304,7 +329,7 @@ class CheckTaskStatusService:
         )
         raise CallbackRecoveryConsistencyError(
             "Callback Recovery Adapter 返回状态与持久化状态不一致: "
-            f"TaskId={snapshot.task_id} reported={recovery.final_status} "
+            f"reported={recovery.final_status} "
             f"persisted={snapshot.callback_status}"
         )
 

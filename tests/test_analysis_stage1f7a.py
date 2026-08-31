@@ -42,7 +42,6 @@ from app.modules.analysis.ports import (
     AnalysisResourceScanBatch,
     AnalysisResourceState,
     AnalysisTaskWorkspace,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationResult,
     PreparedAnalysisDocument,
@@ -253,6 +252,10 @@ def _case(index: int) -> _ParallelAnalysisCase:
         document_location=f"location:{task_id.value}",
         content_sha256=hashlib.sha256(task_id.value.encode("utf-8")).hexdigest(),
         ingested_file_name=f"{task_id.value}.txt",
+        structured_source_key=(
+            "docsense_ref:"
+            + hashlib.sha256(task_id.value.encode("utf-8")).hexdigest()[:32]
+        ),
     )
     return _ParallelAnalysisCase(
         index=index,
@@ -421,7 +424,6 @@ def _expect_happy_path(
         "translation.translate",
         AnalysisTranslationResult(
             execution=case.execution,
-            kind=AnalysisTranslationKind.DOCUMENT,
             outcome=AnalysisTranslationOutcome.SUCCEEDED,
             document_translation_one=f"单语翻译-{case.index:02d}",
             document_translation_two=f"双语翻译-{case.index:02d}",

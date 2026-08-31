@@ -2,38 +2,40 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from uuid import uuid4
 
 from flask import Blueprint, Response, jsonify, request
 from flask_sock import Sock
 
 from app.adapters.web import (
-    ArchitectureIdValidationError,
     ChatScopeSelectorValidationError,
-    ReportIdValidationError,
-    normalize_architecture_id,
-    normalize_report_id,
+    WeaponryChatRequestValidationError,
     parse_chat_scope_selector,
+    parse_weaponry_chat_history_query,
+    parse_weaponry_chat_post,
 )
 from app.adapters.web.flask import (
     AnalysisPresentedResponse,
     AnalysisRequestValidationError,
     AnalysisSubmissionResponsePresenter,
+    CheckTaskRequestValidationError,
     ReportRequestValidationError,
     ProgressConnectionRegistry,
     ProgressRequestValidationError,
     ReassignRequestValidationError,
     WeaponryRequestValidationError,
     parse_analysis_flask_request,
+    parse_check_task_request,
     parse_report_request,
     parse_progress_subscription,
     parse_reassign_request,
     parse_weaponry_request,
 )
-from app.container import ApplicationServices, get_application_services
+from app.container import ApplicationServices
+from app.blueprints.dependencies import get_application_services
 from app.modules.analysis.domain.task_inputs import AnalysisPolicySnapshot
-from app.modules.report.domain import ReportId, ReportTaskConflictError
+from app.modules.report.domain import ReportTaskConflictError
 from app.modules.tasks.application import ProgressSubscriptionRollbackError
 from app.modules.weaponry.application import WeaponryTaskConflictError
 from app.modules.weaponry.ports import (
@@ -44,7 +46,12 @@ from app.modules.weaponry.ports import (
 from app.presenters.chat_stream import (
     finalize_chat_run_stream,
 )
+from app.presenters.weaponry_chat_stream import finalize_weaponry_chat_stream
 from app.presenters.task_progress import ProgressWebSocketPresenter
+from app.presenters.task_status import (
+    CheckTaskResponsePresenter,
+    TaskStatusHttpPresentation,
+)
 from app.presenters.report_submission import (
     ReportSubmissionHttpPresentation,
     ReportSubmissionResponsePresenter,
@@ -57,7 +64,7 @@ from app.presenters.weaponry_submission import (
     WeaponrySubmissionHttpPresentation,
     WeaponrySubmissionResponsePresenter,
 )
-from app.services.chat import (
+from app.modules.chat import (
     ChatAdmissionBusyError,
     ChatArchitectureIdConflictError,
     ChatArchitectureScopeInvalidError,
@@ -73,11 +80,13 @@ from app.services.chat import (
     ChatTitleGenerationError,
     ChatTitleUnavailableError,
 )
-from app.services.chat.domain.chat_id import (
+from app.modules.chat.domain.chat_id import (
     chat_id_storage_key,
     parse_query_chat_id,
     require_public_chat_id,
 )
+from app.modules.chat.domain.document_scope import ChatScopeSelector
+from app.modules.chat.domain.identity import FileChatIdentity, WeaponryChatIdentity
 from app.services.core.settings import (
     CHAT_MAX_FILES_PER_REQUEST,
     CHAT_MAX_MESSAGE_CHARS,
@@ -130,6 +139,24 @@ def _weaponry_http_response(
     )
     if presentation.content_type is None:
         # 已批准的成功响应必须严格为零字节，且不能暗示 JSON 实体。
+        response.headers.pop("Content-Type", None)
+    else:
+        response.headers["Content-Type"] = presentation.content_type
+    return response
+
+
+def _task_status_http_response(
+    presentation: TaskStatusHttpPresentation,
+) -> Response:
+    """把框架无关 check-task 展示值机械转换为 Flask Response。"""
+
+    if not isinstance(presentation, TaskStatusHttpPresentation):
+        raise TypeError("presentation 必须是 TaskStatusHttpPresentation")
+    response = Response(
+        response=presentation.body,
+        status=presentation.status_code,
+    )
+    if presentation.content_type is None:
         response.headers.pop("Content-Type", None)
     else:
         response.headers["Content-Type"] = presentation.content_type
@@ -260,30 +287,6 @@ def _read_query_chat_id(
         )
         raise
     return public_chat_id, chat_id_storage_key(public_chat_id)
-
-
-def _get_params(payload: Dict[str, Any]) -> list[Dict[str, Any]]:
-    """校验 check-task 的完整参数数组，禁止静默过滤非法元素。
-
-    已批准契约要求 ``params`` 中任一元素不是对象时拒绝整次请求。此前的过滤式
-    解析会让调用方误以为无效项已被检查，且与 Progress/Report 的原子校验不一致。
-    """
-
-    params = payload.get("params")
-    if not isinstance(params, list) or not params:
-        return []
-
-    validated_params: list[Dict[str, Any]] = []
-    for item in params:
-        if not isinstance(item, dict):
-            return []
-        validated_params.append(item)
-    return validated_params
-
-
-def _get_first_param(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    params = _get_params(payload)
-    return params[0] if params else None
 
 
 @llm_bp.post("/llm/analysis")
@@ -426,245 +429,74 @@ def llm_weaponry():
         return _weaponry_http_response(presenter.present_bad_request(str(exc)))
 
     trace_id = uuid4().hex
+    command = parsed_request.to_command(trace_id=trace_id)
     try:
-        document_scope = weaponry_services.document_scope.resolve(
-            architecture_id=parsed_request.architecture_id,
-            requested_file_names=parsed_request.selected_file_names,
-        )
+        result = weaponry_services.submit_request.execute(command)
     except WeaponryDocumentScopeNotFoundError as exc:
         logger.warning(
-            "武器装备提取请求引用未解析文档: architecture_id=%s file_count=%d",
-            parsed_request.architecture_id,
+            "武器装备提取请求引用未解析文档: file_count=%d",
             len(parsed_request.selected_file_names),
         )
         return _weaponry_http_response(presenter.present_not_found(str(exc)))
     except (WeaponryDocumentScopeAmbiguityError, WeaponryDocumentScopeError) as exc:
         logger.warning(
-            "武器装备提取请求文档范围不确定: architecture_id=%s file_count=%d "
-            "error_type=%s",
-            parsed_request.architecture_id,
+            "武器装备提取请求文档范围不确定: file_count=%d error_type=%s",
             len(parsed_request.selected_file_names),
             type(exc).__name__,
         )
         return _weaponry_http_response(presenter.present_bad_request(str(exc)))
 
-    policies = weaponry_services.policies
-    submission = parsed_request.to_submission(
-        document_scope=document_scope,
-        evidence_selection_policy=policies.evidence_selection,
-        execution_policy=policies.execution,
-        auxiliary_guidance_policy=policies.auxiliary_guidance,
-        trace_id=trace_id,
-    )
-    try:
-        result = weaponry_services.submit.execute(submission)
     except WeaponryTaskConflictError:
         logger.info(
             "武器装备提取请求因活动任务或回调 Guard 被拒绝: "
-            "architecture_id=%s trace_id=%s",
-            parsed_request.architecture_id,
-            trace_id,
+            "file_count=%d has_request_trace=%s",
+            len(parsed_request.selected_file_names),
+            bool(trace_id),
         )
         return _weaponry_http_response(presenter.present_conflict())
     except Exception:
         logger.exception(
-            "武器装备提取受理失败: architecture_id=%s trace_id=%s",
-            parsed_request.architecture_id,
-            trace_id,
+            "武器装备提取受理失败: file_count=%d has_request_trace=%s",
+            len(parsed_request.selected_file_names),
+            bool(trace_id),
         )
         raise
 
     logger.info(
-        "武器装备提取请求已可靠受理: architecture_id=%s task_id=%s "
-        "document_count=%d field_count=%d trace_id=%s",
-        parsed_request.architecture_id,
-        result.task_id.value,
-        len(document_scope.documents),
-        len(parsed_request.fields),
-        trace_id,
+        "武器装备提取请求已可靠受理: document_count=%d field_count=%d "
+        "has_request_trace=%s",
+        result.document_count,
+        result.field_count,
+        bool(trace_id),
     )
     return _weaponry_http_response(presenter.present_success())
 
 
 @llm_bp.post("/llm/check-task")
 def llm_check_task():
+    """完成 Parser → Application → Presenter，同步恢复语义保持不变。"""
+
     services = _services()
-    task_service = services.task_service
+    presenter = CheckTaskResponsePresenter()
     trace_id = uuid4().hex
-    payload = request.get_json(silent=True) or {}
-    business_type = payload.get("businessType")
-    if business_type not in {"file", "report", "weaponry"}:
+    raw_payload = request.get_json(silent=True)
+    try:
+        parsed_request = parse_check_task_request(raw_payload)
+    except CheckTaskRequestValidationError as exc:
         logger.warning(
-            "任务查询请求被拒绝: businessType无效 businessType=%s",
-            business_type,
+            "任务查询请求被拒绝: validation_error=%s payload_type=%s",
+            str(exc),
+            type(raw_payload).__name__,
         )
-        return jsonify({"error": "businessType无效"}), 400
-
-    params_list = _get_params(payload)
-    if not params_list:
-        logger.warning(
-            "任务查询请求被拒绝: params为空或格式无效 businessType=%s",
-            business_type,
+        return _task_status_http_response(
+            presenter.present_bad_request(str(exc))
         )
-        return jsonify({"error": "params不能为空"}), 400
 
-    # check-task 会在当前 HTTP 请求线程内执行必要的 Callback 恢复，因此它不是纯查询。
-    # 必须先完整校验所有业务键，再进入任何任务读取或网络副作用；否则前面的合法项可能
-    # 已经发出回调，后面的非法项却让整次请求返回 400，形成难以解释的部分执行。
-    #
-    # 同一业务键允许存在多种公开表示，例如 report 的 132/"000132" 和 weaponry 的
-    # 10502/"00010502"。去重必须发生在规范化之后，并稳定保留首次出现顺序，确保一个
-    # HTTP 请求对同一逻辑任务至多授权一轮恢复。原始 params 数量仍用于既有单项 404/
-    # 批量 200 判定，不能因内部去重擅自改变公开状态码。
-    parsed_items: list[tuple[int, str, str | int]] = []
-    first_index_by_key: dict[str, int] = {}
-    duplicate_item_count = 0
-    for index, params in enumerate(params_list):
-        if business_type == "file":
-            business_key = params.get("fileName")
-            if not isinstance(business_key, str) or not business_key.strip():
-                logger.warning(
-                    "任务查询请求被拒绝: fileName为空 index=%s",
-                    index,
-                )
-                return jsonify({"error": "fileName不能为空"}), 400
-            normalized_key = business_key.strip()
-            normalized_value: str | int = normalized_key
-        elif business_type == "weaponry":
-            architecture_id = params.get("architectureId")
-            if architecture_id is None:
-                logger.warning(
-                    "任务查询请求被拒绝: architectureId为空 index=%s",
-                    index,
-                )
-                return jsonify({"error": "architectureId不能为空"}), 400
-            try:
-                normalized_architecture_id = normalize_architecture_id(
-                    architecture_id
-                )
-            except ArchitectureIdValidationError as exc:
-                logger.warning(
-                    "任务查询请求被拒绝: architectureId格式无效 index=%s "
-                    "architecture_id_type=%s",
-                    index,
-                    type(architecture_id).__name__,
-                )
-                return jsonify({"error": str(exc)}), 400
-            normalized_key = normalized_architecture_id.business_key
-            normalized_value = normalized_architecture_id.value
-        else:
-            report_id = params.get("reportId")
-            if report_id is None:
-                logger.warning(
-                    "任务查询请求被拒绝: reportId为空 index=%s",
-                    index,
-                )
-                return jsonify({"error": "reportId不能为空"}), 400
-            try:
-                normalized_report_id = normalize_report_id(report_id)
-            except ReportIdValidationError as exc:
-                logger.warning(
-                    "任务查询请求被拒绝: reportId格式无效 index=%s "
-                    "report_id_type=%s",
-                    index,
-                    type(report_id).__name__,
-                )
-                return jsonify({"error": str(exc)}), 400
-            normalized_key = normalized_report_id.business_key
-            normalized_value = normalized_report_id.value
-
-        first_index = first_index_by_key.get(normalized_key)
-        if first_index is not None:
-            duplicate_item_count += 1
-            logger.info(
-                "任务查询请求跳过规范化重复项: business_type=%s index=%d "
-                "first_index=%d trace_id=%s",
-                business_type,
-                index,
-                first_index,
-                trace_id,
-            )
-            continue
-        first_index_by_key[normalized_key] = index
-        parsed_items.append((index, normalized_key, normalized_value))
-
-    missing_count = 0
-    callback_replayed_count = 0
-    for original_index, normalized_key, normalized_value in parsed_items:
-
-        task = task_service.get_task(business_type, normalized_key)
-        if not task:
-            if len(params_list) == 1:
-                logger.warning(
-                    "任务查询请求未找到任务: businessType=%s businessKey=%s",
-                    business_type,
-                    normalized_key,
-                )
-                return jsonify({"error": "任务不存在"}), 404
-            logger.warning(
-                "批量任务查询项未找到任务: businessType=%s businessKey=%s index=%s",
-                business_type,
-                normalized_key,
-                original_index,
-            )
-            # 批量缺失项不终止其余项的回调恢复；成功体不再公开占位任务快照。
-            missing_count += 1
-            continue
-
-        if business_type == "report":
-            # 甲方规定 check-task 必须在本次请求内触发报告回调恢复。报告链路不能再走
-            # 遗留直发方法，而是与正常 Worker 共用 execution 级 latest-wins、Guard 和
-            # fencing，避免并发请求重复发送或新任务受理后继续发送旧回调。
-            replayed = services.report_callback_recovery.execute(
-                ReportId.from_public_value(normalized_value),  # type: ignore[arg-type]
-                request_trace_id=trace_id,
-            )
-        elif business_type == "weaponry":
-            weaponry_services = services.weaponry_services
-            if weaponry_services is None:
-                raise RuntimeError("应用容器未装配武器谱运行链")
-            replayed = weaponry_services.callback_recovery.execute(
-                normalized_value,  # type: ignore[arg-type]
-                request_trace_id=trace_id,
-            )
-        else:
-            analysis_callback_recovery = services.analysis_callback_recovery
-            if analysis_callback_recovery is None:
-                # 生产切换前的只读预检会阻断旧 file 活跃任务和待恢复回调。运行时若仍
-                # 缺少新恢复链，必须显式失败，不能回退到旧 replay 以免形成第二个 owner。
-                logger.error("文件 check-task 缺少新回调恢复链，拒绝使用遗留恢复器")
-                raise RuntimeError("应用容器未装配文件分析回调恢复链")
-            replayed = analysis_callback_recovery.execute(
-                normalized_key,
-                request_trace_id=trace_id,
-            )
-        # 保持原有“恢复后重读”的一致性门禁，但不再把内部状态投影到 HTTP 响应。
-        refreshed_task = task_service.get_task(business_type, normalized_key)
-        if refreshed_task is None:
-            logger.error(
-                "任务回调恢复后重新读取失败: businessType=%s businessKey=%s index=%s",
-                business_type,
-                normalized_key,
-                original_index,
-            )
-            raise RuntimeError("任务回调恢复后不存在")
-        if replayed:
-            callback_replayed_count += 1
-
-    logger.info(
-        "任务检查与必要回调恢复已完成: businessType=%s requested_count=%d "
-        "unique_count=%d missing_count=%d duplicate_item_count=%d "
-        "callback_replayed_count=%d status_code=200 trace_id=%s",
-        business_type,
-        len(params_list),
-        len(parsed_items),
-        missing_count,
-        duplicate_item_count,
-        callback_replayed_count,
-        trace_id,
+    result = services.check_task.execute(
+        parsed_request.command,
+        trace_id=trace_id,
     )
-    # 公开接口只承诺检查已完成；任务状态、进度、Callback 细节继续留在内部存储。
-    return _empty_http_response(200)
+    return _task_status_http_response(presenter.present(result))
 
 
 @llm_bp.post("/llm/reassign")
@@ -855,9 +687,14 @@ def llm_chat():
         return jsonify({"error": "params不能为空"}), 400
 
     try:
-        _, chat_id = _read_json_chat_id(params, operation="文件对话请求")
+        public_chat_id, _ = _read_json_chat_id(
+            params,
+            operation="文件对话请求",
+        )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    chat_id = public_chat_id
+    identity = FileChatIdentity(chat_id=public_chat_id)
 
     try:
         scope_selector = parse_chat_scope_selector(params)
@@ -885,11 +722,10 @@ def llm_chat():
     logger.info(
         "文件对话请求参数校验通过: "
         "chatId=%s scope_mode=%s normalized_requested_file_count=%d "
-        "requested_architecture_id=%s message_length=%d",
+        "message_length=%d",
         chat_id,
         scope_selector.scope_mode,
         len(scope_selector.file_names),
-        scope_selector.architecture_id,
         len(message),
     )
     if len(scope_selector.file_names) > CHAT_MAX_FILES_PER_REQUEST:
@@ -902,26 +738,12 @@ def llm_chat():
         )
         return jsonify({"error": "fileNames超过文件对话数量上限"}), 400
 
-    chat_run_executor = services.chat_run_executor
+    chat_run_executor = services.chat_services.run_executor
     try:
-        admission_lease = services.chat_commands.reserve_chat_admission(
-            chat_id=chat_id,
+        admission_lease = services.chat_services.commands.reserve_chat_admission(
+            identity=identity,
             scope_selector=scope_selector,
         )
-    except ChatScopeModeConflictError:
-        logger.warning(
-            "文件对话准入被拒绝：会话范围模式冲突: chatId=%s",
-            chat_id,
-        )
-        return jsonify({"error": "当前对话的范围模式不匹配"}), 409
-    except ChatArchitectureIdConflictError:
-        logger.warning(
-            "architecture 文件对话准入被拒绝：会话类别 ID 冲突: "
-            "chatId=%s requestedArchitectureId=%s",
-            chat_id,
-            scope_selector.architecture_id,
-        )
-        return jsonify({"error": "当前对话已绑定其他architectureId"}), 409
     except (
         ChatAdmissionBusyError,
         ChatRunBusyError,
@@ -945,7 +767,7 @@ def llm_chat():
     except Exception:
         # 容量适配器异常时尚未创建任何 Session/run；必须先按 token 释放 Guard，
         # 避免同一 chatId 在异常恢复后仍被临时准入事实阻塞。
-        services.chat_commands.release_chat_admission(
+        services.chat_services.commands.release_chat_admission(
             lease=admission_lease
         )
         logger.exception(
@@ -954,7 +776,7 @@ def llm_chat():
         )
         raise
     if not stream_slot_available:
-        services.chat_commands.release_chat_admission(
+        services.chat_services.commands.release_chat_admission(
             lease=admission_lease
         )
         logger.warning(
@@ -979,7 +801,7 @@ def llm_chat():
 
     try:
         prepared_run = chat_run_executor.prepare_chat_run(
-            chat_id=chat_id,
+            identity=identity,
             message=message,
             scope_selector=scope_selector,
             admission_lease=admission_lease,
@@ -991,44 +813,6 @@ def llm_chat():
             chat_id,
         )
         return jsonify({"error": str(exc)}), 404
-    except ChatArchitectureScopeNotFoundError:
-        _release_stream_slot()
-        logger.warning(
-            "architecture 文件对话请求被拒绝：类别不存在或为空: "
-            "chatId=%s architectureId=%s",
-            chat_id,
-            scope_selector.architecture_id,
-        )
-        return jsonify({
-            "error": "architectureId对应类别不存在或没有可用于对话的文件"
-        }), 404
-    except ChatArchitectureScopeInvalidError:
-        _release_stream_slot()
-        logger.warning(
-            "architecture 文件对话请求被拒绝：类别目录无法形成有效范围: "
-            "chatId=%s architectureId=%s",
-            chat_id,
-            scope_selector.architecture_id,
-        )
-        return jsonify({
-            "error": "architectureId对应类别文件无法形成有效对话范围"
-        }), 400
-    except ChatScopeModeConflictError:
-        _release_stream_slot()
-        logger.warning(
-            "文件对话请求被拒绝：会话范围模式冲突: chatId=%s",
-            chat_id,
-        )
-        return jsonify({"error": "当前对话的范围模式不匹配"}), 409
-    except ChatArchitectureIdConflictError:
-        _release_stream_slot()
-        logger.warning(
-            "architecture 文件对话请求被拒绝：会话类别 ID 冲突: "
-            "chatId=%s requestedArchitectureId=%s",
-            chat_id,
-            scope_selector.architecture_id,
-        )
-        return jsonify({"error": "当前对话已绑定其他architectureId"}), 409
     except (ChatRunBusyError, ChatSessionUnavailableError):
         _release_stream_slot()
         logger.warning(
@@ -1053,17 +837,15 @@ def llm_chat():
 
     logger.info(
         "文件对话运行已分配，准备创建流式响应: "
-        "chatId=%s runId=%s scope_mode=%s requested_file_count=%d "
-        "requested_architecture_id=%s",
+        "chatId=%s runId=%s scope_mode=%s requested_file_count=%d",
         chat_id,
         prepared_run.run_id,
         scope_selector.scope_mode,
         len(scope_selector.file_names),
-        scope_selector.architecture_id,
     )
 
     try:
-        stream = services.chat_dispatcher.dispatch(run_id=prepared_run.run_id)
+        stream = services.chat_services.dispatcher.dispatch(run_id=prepared_run.run_id)
         stream_started = False
 
         def generate_sse_response():
@@ -1078,6 +860,7 @@ def llm_chat():
             yield from finalize_chat_run_stream(
                 stream=stream,
                 run_id=prepared_run.run_id,
+                chat_id=public_chat_id,
                 on_close=_release_stream_slot,
             )
 
@@ -1090,7 +873,7 @@ def llm_chat():
                     prepared_run.run_id,
                 )
                 try:
-                    services.chat_commands.discard_unstarted_chat_run(
+                    services.chat_services.commands.discard_unstarted_chat_run(
                         run_id=prepared_run.run_id,
                         error_message="SSE response closed before execution started",
                     )
@@ -1130,7 +913,7 @@ def llm_chat():
             prepared_run.run_id,
         )
         try:
-            services.chat_commands.discard_unstarted_chat_run(
+            services.chat_services.commands.discard_unstarted_chat_run(
                 run_id=prepared_run.run_id,
                 error_message=str(exc) or exc.__class__.__name__,
             )
@@ -1161,41 +944,50 @@ def llm_chat_title():
         return jsonify({"error": "params不能为空"}), 400
 
     try:
-        _, chat_id = _read_json_chat_id(params, operation="生成对话标题请求")
+        public_chat_id, _ = _read_json_chat_id(
+            params,
+            operation="生成对话标题请求",
+        )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    identity = FileChatIdentity(chat_id=public_chat_id)
 
     try:
-        result = services.chat_title.generate_title(chat_id=chat_id)
+        result = services.chat_services.title.generate_title(identity=identity)
     except ChatTitleEmptyHistoryError as exc:
         return jsonify({"error": str(exc)}), 400
     except ChatTitleUnavailableError as exc:
         return jsonify({"error": str(exc)}), 409
     except ChatTitleGenerationError as exc:
-        logger.exception("生成文件对话标题失败: chatId=%s", chat_id)
+        logger.exception("生成文件对话标题失败: chatId=%s", public_chat_id)
         return jsonify({"error": str(exc)}), 500
 
     logger.info(
         "返回文件对话标题: chatId=%s title_chars=%d",
-        result.chat_id,
+        public_chat_id,
         len(result.title),
     )
-    return jsonify(result.to_response())
+    return jsonify({"chatId": public_chat_id, "title": result.title})
 
 
 @llm_bp.get("/llm/chat/history")
 def llm_chat_history():
     services = _services()
     try:
-        _, chat_id = _read_query_chat_id(
+        public_chat_id, _ = _read_query_chat_id(
             request.args.get("chatId"),
             operation="对话历史请求",
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    history = services.chat_history.list_history(chat_id)
-    logger.info("返回文件对话历史: chatId=%s message_count=%d", chat_id, len(history))
+    identity = FileChatIdentity(chat_id=public_chat_id)
+    history = services.chat_services.history.list_history(identity)
+    logger.info(
+        "返回文件对话历史: chatId=%s message_count=%d",
+        public_chat_id,
+        len(history),
+    )
     return jsonify(history)
 
 
@@ -1221,17 +1013,27 @@ def llm_chat_abort():
         return jsonify({"error": "params不能为空"}), 400
 
     try:
-        _, chat_id = _read_json_chat_id(params, operation="中断对话请求")
+        public_chat_id, _ = _read_json_chat_id(
+            params,
+            operation="中断对话请求",
+        )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    result = services.chat_abort.abort_chat(chat_id=chat_id)
+    identity = FileChatIdentity(chat_id=public_chat_id)
+    result = services.chat_services.abort.abort_chat(identity=identity)
     logger.info(
         "返回文件对话中断结果: chatId=%s aborted=%s",
-        result.chat_id,
+        public_chat_id,
         result.aborted,
     )
-    return jsonify(result.to_response())
+    return jsonify(
+        {
+            "chatId": public_chat_id,
+            "aborted": result.aborted,
+            "msg": result.msg,
+        }
+    )
 
 
 @llm_bp.post("/llm/chat/delete")
@@ -1256,18 +1058,25 @@ def llm_chat_delete():
         return jsonify({"error": "params不能为空"}), 400
 
     try:
-        public_chat_id, chat_id = _read_json_chat_id(
+        public_chat_id, _ = _read_json_chat_id(
             params,
             operation="删除对话请求",
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    identity = FileChatIdentity(chat_id=public_chat_id)
     try:
-        result = services.chat_delete.delete_chat(chat_id=chat_id)
-        return jsonify(result.to_response())
+        result = services.chat_services.delete.delete_chat(identity=identity)
+        return jsonify(
+            {
+                "chatId": public_chat_id,
+                "deleted": result.deleted,
+                "msg": result.msg,
+            }
+        )
     except ChatDeleteNotFoundError:
-        logger.warning("删除对话请求未找到对话: chatId=%s", chat_id)
+        logger.warning("删除对话请求未找到对话: chatId=%s", public_chat_id)
         return jsonify({"error": "对话不存在"}), 404
     except ChatDeleteBusyError as exc:
         return jsonify(
@@ -1280,7 +1089,7 @@ def llm_chat_delete():
     except ChatDeleteCleanupError as exc:
         logger.warning(
             "删除对话远端资源失败: chatId=%s failed_count=%d",
-            exc.chat_id,
+            public_chat_id,
             len(exc.failed_leases),
         )
         return jsonify(
@@ -1290,3 +1099,314 @@ def llm_chat_delete():
                 "error": "对话资源清理失败",
             }
         ), 500
+
+
+# ══════════════════════════════
+#  知识谱系类别文件对话接口
+# ══════════════════════════════
+
+
+def _weaponry_chat_identity_payload(
+    identity: WeaponryChatIdentity,
+) -> dict[str, int]:
+    """构造稳定的公开复合身份，禁止泄露内部 Conversation ID。"""
+    return {
+        "userId": identity.user_id,
+        "architectureId": identity.architecture_id,
+    }
+
+
+@llm_bp.post("/llm/weaponry-chat")
+def llm_weaponry_chat():
+    services = _services()
+    payload = request.get_json(silent=True)
+    logger.info(
+        "收到知识谱系对话请求: payload_type=%s",
+        type(payload).__name__,
+    )
+    try:
+        request_model = parse_weaponry_chat_post(
+            payload,
+            require_message=True,
+        )
+    except WeaponryChatRequestValidationError as exc:
+        logger.warning(
+            "知识谱系对话入站校验失败: error_type=%s",
+            exc.__class__.__name__,
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    identity = request_model.identity
+    message = request_model.message or ""
+    if len(message) > CHAT_MAX_MESSAGE_CHARS:
+        logger.warning(
+            "知识谱系对话消息超过长度上限: "
+            "identity_kind=%s message_length=%d limit=%d",
+            identity.identity_kind,
+            len(message),
+            CHAT_MAX_MESSAGE_CHARS,
+        )
+        return jsonify({"error": "message超过文件对话长度上限"}), 400
+
+    scope_selector = ChatScopeSelector.for_architecture(
+        identity.architecture_id
+    )
+    chat_run_executor = services.chat_services.run_executor
+    try:
+        admission_lease = services.chat_services.commands.reserve_chat_admission(
+            identity=identity,
+            scope_selector=scope_selector,
+        )
+    except (ChatAdmissionBusyError, ChatRunBusyError):
+        logger.warning(
+            "知识谱系对话准入被拒绝：已有活动请求: identity_kind=%s",
+            identity.identity_kind,
+        )
+        return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
+    except (
+        ChatSessionUnavailableError,
+        ChatScopeModeConflictError,
+        ChatArchitectureIdConflictError,
+    ):
+        logger.warning(
+            "知识谱系对话准入被拒绝：会话不可用: identity_kind=%s",
+            identity.identity_kind,
+        )
+        return jsonify({"error": "当前对话暂不可用"}), 409
+    except ValueError as exc:
+        logger.warning(
+            "知识谱系对话准入校验失败: error_type=%s",
+            exc.__class__.__name__,
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        stream_slot_available = chat_run_executor.try_acquire_stream_slot()
+    except Exception:
+        services.chat_services.commands.release_chat_admission(lease=admission_lease)
+        logger.exception(
+            "知识谱系对话获取流容量许可失败，已释放准入 Guard"
+        )
+        raise
+    if not stream_slot_available:
+        services.chat_services.commands.release_chat_admission(lease=admission_lease)
+        logger.warning(
+            "知识谱系对话被拒绝：当前实例流容量已满: limit=%d",
+            chat_run_executor.max_concurrent_streams,
+        )
+        return jsonify({"error": "文件对话并发流已达上限，请稍后重试"}), 429
+
+    stream_slot_acquired = True
+
+    def _release_stream_slot() -> None:
+        nonlocal stream_slot_acquired
+        if stream_slot_acquired:
+            chat_run_executor.release_stream_slot()
+            stream_slot_acquired = False
+            logger.debug("已释放知识谱系对话进程内流容量许可")
+
+    try:
+        prepared_run = chat_run_executor.prepare_chat_run(
+            identity=identity,
+            message=message,
+            scope_selector=scope_selector,
+            admission_lease=admission_lease,
+        )
+    except ChatArchitectureScopeNotFoundError:
+        _release_stream_slot()
+        return jsonify({
+            "error": "architectureId对应类别不存在或没有可用于对话的文件"
+        }), 404
+    except ChatArchitectureScopeInvalidError:
+        _release_stream_slot()
+        return jsonify({
+            "error": "architectureId对应类别文件无法形成有效对话范围"
+        }), 400
+    except (ChatRunBusyError, ChatAdmissionBusyError):
+        _release_stream_slot()
+        return jsonify({"error": "当前对话已有进行中的流式响应"}), 409
+    except (
+        ChatSessionUnavailableError,
+        ChatScopeModeConflictError,
+        ChatArchitectureIdConflictError,
+    ):
+        _release_stream_slot()
+        return jsonify({"error": "当前对话暂不可用"}), 409
+    except ValueError as exc:
+        _release_stream_slot()
+        if str(exc) == "fileNames超过文件对话数量上限":
+            return jsonify({"error": "类别文件超过文件对话数量上限"}), 400
+        logger.warning(
+            "知识谱系对话受理校验失败: error_type=%s",
+            exc.__class__.__name__,
+        )
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        _release_stream_slot()
+        logger.exception("知识谱系对话受理发生未预期异常")
+        raise
+
+    try:
+        stream = services.chat_services.dispatcher.dispatch(run_id=prepared_run.run_id)
+        stream_started = False
+
+        def generate_sse_response():
+            """标记运行已开始，并由 Weaponry Presenter 强制公开事件顺序。"""
+            nonlocal stream_started
+            stream_started = True
+            logger.info(
+                "知识谱系对话 SSE 开始消费: run_id=%s",
+                prepared_run.run_id,
+            )
+            yield from finalize_weaponry_chat_stream(
+                stream=stream,
+                run_id=prepared_run.run_id,
+                identity=identity,
+                on_close=_release_stream_slot,
+            )
+
+        def close_response() -> None:
+            """收敛未启动运行，并幂等释放当前实例容量。"""
+            if not stream_started:
+                logger.warning(
+                    "知识谱系对话 SSE 未启动即关闭: run_id=%s",
+                    prepared_run.run_id,
+                )
+                try:
+                    services.chat_services.commands.discard_unstarted_chat_run(
+                        run_id=prepared_run.run_id,
+                        error_message=(
+                            "SSE response closed before execution started"
+                        ),
+                    )
+                except Exception:
+                    logger.exception(
+                        "知识谱系对话未启动运行收敛失败: run_id=%s",
+                        prepared_run.run_id,
+                    )
+            _release_stream_slot()
+
+        response = Response(
+            generate_sse_response(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        response.call_on_close(close_response)
+        return response
+    except Exception as exc:
+        logger.exception(
+            "知识谱系对话在 SSE 响应创建前失败: run_id=%s",
+            prepared_run.run_id,
+        )
+        try:
+            services.chat_services.commands.discard_unstarted_chat_run(
+                run_id=prepared_run.run_id,
+                error_message=str(exc) or exc.__class__.__name__,
+            )
+        finally:
+            _release_stream_slot()
+        raise
+
+
+@llm_bp.post("/llm/weaponry-chat/title")
+def llm_weaponry_chat_title():
+    services = _services()
+    try:
+        request_model = parse_weaponry_chat_post(
+            request.get_json(silent=True),
+            require_message=False,
+        )
+    except WeaponryChatRequestValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    identity = request_model.identity
+    try:
+        result = services.chat_services.title.generate_title(identity=identity)
+    except ChatTitleEmptyHistoryError:
+        return jsonify({"error": "对话历史为空，无法生成标题"}), 400
+    except ChatTitleUnavailableError:
+        return jsonify({"error": "当前对话暂不可用于标题生成"}), 409
+    except ChatTitleGenerationError as exc:
+        logger.exception(
+            "知识谱系对话标题生成失败: error_type=%s",
+            exc.__class__.__name__,
+        )
+        return jsonify({"error": str(exc)}), 500
+
+    response_payload = _weaponry_chat_identity_payload(identity)
+    response_payload["title"] = result.title
+    return jsonify(response_payload)
+
+
+@llm_bp.get("/llm/weaponry-chat/history")
+def llm_weaponry_chat_history():
+    services = _services()
+    try:
+        identity = parse_weaponry_chat_history_query(
+            tuple(request.args.items(multi=True))
+        )
+    except WeaponryChatRequestValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    history = services.chat_services.history.list_history(identity)
+    logger.info(
+        "返回知识谱系对话历史: identity_kind=%s message_count=%d",
+        identity.identity_kind,
+        len(history),
+    )
+    return jsonify(history)
+
+
+@llm_bp.post("/llm/weaponry-chat/abort")
+def llm_weaponry_chat_abort():
+    services = _services()
+    try:
+        request_model = parse_weaponry_chat_post(
+            request.get_json(silent=True),
+            require_message=False,
+        )
+    except WeaponryChatRequestValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    identity = request_model.identity
+    result = services.chat_services.abort.abort_chat(identity=identity)
+    response_payload = _weaponry_chat_identity_payload(identity)
+    response_payload.update({"aborted": result.aborted, "msg": result.msg})
+    return jsonify(response_payload)
+
+
+@llm_bp.post("/llm/weaponry-chat/delete")
+def llm_weaponry_chat_delete():
+    services = _services()
+    try:
+        request_model = parse_weaponry_chat_post(
+            request.get_json(silent=True),
+            require_message=False,
+        )
+    except WeaponryChatRequestValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    identity = request_model.identity
+    try:
+        result = services.chat_services.delete.delete_chat(identity=identity)
+    except ChatDeleteNotFoundError:
+        return jsonify({"error": "对话不存在"}), 404
+    except ChatDeleteBusyError as exc:
+        response_payload = _weaponry_chat_identity_payload(identity)
+        response_payload.update({"deleted": False, "error": exc.reason})
+        return jsonify(response_payload), 409
+    except ChatDeleteCleanupError as exc:
+        logger.warning(
+            "知识谱系对话资源清理失败: failed_count=%d",
+            len(exc.failed_leases),
+        )
+        response_payload = _weaponry_chat_identity_payload(identity)
+        response_payload.update({"deleted": False, "error": "对话资源清理失败"})
+        return jsonify(response_payload), 500
+
+    response_payload = _weaponry_chat_identity_payload(identity)
+    response_payload.update({"deleted": result.deleted, "msg": result.msg})
+    return jsonify(response_payload)

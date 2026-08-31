@@ -14,9 +14,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.services.llm_service.weaponry_service import (
-    _build_weaponry_callback_payload,
-)
 
 
 _CONTRACT_PATH = (
@@ -288,34 +285,6 @@ class Stage1DWeaponryContractAssetTests(unittest.TestCase):
         self.assertEqual(["file-aggregate-v1"], mode["supported"])
         self.assertEqual(["chunk-question-mode-1"], mode["removed"])
         self.assertFalse(mode["environmentSelectionDuringExecution"])
-
-    def test_input_and_table_golden_callbacks_match_existing_root_builder(self) -> None:
-        callbacks = self.contract["goldenCallbacks"]
-        for name in ("inputSuccess", "tableSuccess"):
-            expected = callbacks[name]
-            with self.subTest(name=name):
-                self.assertEqual(
-                    expected,
-                    _build_weaponry_callback_payload(
-                        expected["data"]["architectureId"],
-                        expected["data"]["weaponryTemplateFieldList"],
-                        status="2",
-                    ),
-                )
-        failure = callbacks["failure"]
-        self.assertEqual(
-            failure,
-            _build_weaponry_callback_payload(
-                failure["data"]["architectureId"],
-                [],
-                status="3",
-            ),
-        )
-        self.assertEqual(
-            {"content", "source", "time", "fileName", "rows", "translate"},
-            set(callbacks["emptySource"]),
-        )
-        self.assertEqual([], callbacks["emptySource"]["rows"])
 
     def test_field_description_is_required_in_both_retrieval_and_extraction(self) -> None:
         dual_stage = self.contract["fieldDescriptionDualStage"]

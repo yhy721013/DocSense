@@ -7,11 +7,11 @@
 | 路径 | 作用 |
 | --- | --- |
 | `__init__.py` | 集成层包标记。 |
-| `anythingllm/` | AnythingLLM 的原子客户端、传输层、RAG/知识索引网关与文件对话网关。 |
+| `anythingllm/` | AnythingLLM 的共享原子客户端、传输层及 RAG/知识索引网关；Chat 专属网关位于 `app/modules/chat/adapters/`。 |
 
 ## 文件对话集成流程
 
-1. 容器创建 `AnythingLLMChatConversationFactory`，该工厂只保存不可变配置。
+1. Chat 模块组合根创建 `AnythingLLMChatConversationFactory`，该工厂只保存不可变配置。
 2. 一次文件对话运行进入工厂上下文时，工厂创建独立传输对象、原子客户端和 `AnythingLLMChatGateway`。
 3. 网关把供应商的工作区、线程、文档、流式消息和删除操作转换为 `ChatConversationPort` 约定的对象与异常。
 4. 上下文退出时关闭传输对象，避免不同 HTTP 流或后台任务共享有状态网络会话。

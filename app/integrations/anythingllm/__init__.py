@@ -16,8 +16,6 @@ from app.integrations.anythingllm.documents import (
     AnythingLLMDocumentClient,
     XlsxFolderInventoryItem,
 )
-from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
-from app.integrations.anythingllm.chat_gateway import AnythingLLMChatGateway
 from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
@@ -40,8 +38,6 @@ from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 __all__ = [
     "AnythingLLMAnswer",
     "AnythingLLMConnectionError",
-    "AnythingLLMChatFactory",
-    "AnythingLLMChatGateway",
     "AnythingLLMDocument",
     "AnythingLLMDocumentClient",
     "AnythingLLMHTTPError",

@@ -67,7 +67,6 @@ from app.modules.analysis.ports import (
     AnalysisTaskClaim,
     AnalysisTaskClaimOutcome,
     AnalysisTaskWorkspacePort,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationPort,
     AnalysisTranslationRequest,
@@ -157,6 +156,7 @@ class AnalysisPortsTests(unittest.TestCase):
             document_location="location:ports-demo",
             content_sha256="a" * 64,
             ingested_file_name="ports-demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         open_request = AnalysisRagSessionOpenRequest(
             execution=execution,
@@ -282,8 +282,7 @@ class AnalysisPortsTests(unittest.TestCase):
         )
         translation_request = AnalysisTranslationRequest(
             execution=execution,
-            kind=AnalysisTranslationKind.SUMMARY,
-            text="待翻译摘要",
+            source_path="C:/analysis/ports-demo-1.pdf",
         )
         resource_payload = FrozenJsonObject.from_mapping(
             {"documentRef": session.document_ref},
@@ -387,10 +386,9 @@ class AnalysisPortsTests(unittest.TestCase):
             )),
             ("translation.translate", AnalysisTranslationResult(
                 execution=execution,
-                kind=translation_request.kind,
                 outcome=AnalysisTranslationOutcome.SUCCEEDED,
                 document_translation_one="翻译文本",
-                document_translation_two="原文\n翻译文本",
+                document_translation_two="双语翻译文本",
             )),
             ("rag.close_session", close_result),
             ("resource.create", resource_record),
@@ -483,6 +481,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         request = AnalysisRagRequest(
             execution,
@@ -500,6 +499,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:2",
             "b" * 64,
             "other.txt",
+            structured_source_key="docsense_ref:" + "b" * 32,
         )
         wrong_result = AnalysisRagResult(
             execution=other_execution,
@@ -525,7 +525,6 @@ class AnalysisPortsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "两种非空展示结果"):
             AnalysisTranslationResult(
                 execution=execution,
-                kind=AnalysisTranslationKind.SUMMARY,
                 outcome=AnalysisTranslationOutcome.SUCCEEDED,
             )
         payload = FrozenJsonObject.from_mapping({"schema_version": 1})
@@ -556,6 +555,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         request = AnalysisRagRequest(
             execution,
@@ -603,6 +603,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         request = AnalysisRagRequest(
             execution,
@@ -635,6 +636,7 @@ class AnalysisPortsTests(unittest.TestCase):
             "location:1",
             "a" * 64,
             "demo.txt",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
         rag_request = AnalysisRagRequest(
             execution,
@@ -659,21 +661,20 @@ class AnalysisPortsTests(unittest.TestCase):
 
         translation_request = AnalysisTranslationRequest(
             execution=execution,
-            kind=AnalysisTranslationKind.SUMMARY,
-            text="摘要",
+            source_path="C:/analysis/strict-fake.pdf",
         )
+        wrong_execution, _, _ = _fixture(2)
         translation_script = StrictAnalysisFakeScript()
         translation_script.expect(
             "translation.translate",
             AnalysisTranslationResult(
-                execution=execution,
-                kind=AnalysisTranslationKind.DOCUMENT,
+                execution=wrong_execution,
                 outcome=AnalysisTranslationOutcome.SUCCEEDED,
                 document_translation_one="单语",
                 document_translation_two="双语",
             ),
         )
-        with self.assertRaisesRegex(AssertionError, "kind"):
+        with self.assertRaisesRegex(AssertionError, "execution 不一致"):
             StrictAnalysisPortFake(translation_script).translate(translation_request)
 
     def test_per_execution_scripts_allow_concurrent_interleaving(self) -> None:
@@ -685,15 +686,13 @@ class AnalysisPortsTests(unittest.TestCase):
             execution, _, _ = _fixture(index)
             request = AnalysisTranslationRequest(
                 execution=execution,
-                kind=AnalysisTranslationKind.SUMMARY,
-                text=f"摘要-{index}",
+                source_path=f"C:/analysis/concurrent-{index}.pdf",
             )
             result = AnalysisTranslationResult(
                 execution=execution,
-                kind=request.kind,
                 outcome=AnalysisTranslationOutcome.SUCCEEDED,
                 document_translation_one=f"译文-{index}",
-                document_translation_two=f"摘要-{index}\n译文-{index}",
+                document_translation_two=f"双语译文-{index}",
             )
             script.expect_for(
                 str(execution.task_id),

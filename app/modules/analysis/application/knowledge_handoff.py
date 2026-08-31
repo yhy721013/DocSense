@@ -20,7 +20,6 @@ from app.modules.analysis.ports import (
     AnalysisKnowledgeWriteOutcome,
     AnalysisKnowledgeWriteRequest,
     AnalysisKnowledgeWriteResult,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationPort,
     AnalysisTranslationRequest,
@@ -149,66 +148,54 @@ class _AnalysisKnowledgeHandoff:
         self,
         *,
         execution: AnalysisExecutionRef,
-        snapshot: AnalysisTaskInputV1,
         prepared: PreparedAnalysisDocument,
         mapped_result: dict[str, Any],
     ) -> None:
-        """保持翻译失败降级为空展示字段的旧语义，不让它覆盖知识库已提交事实。"""
+        """执行全文翻译；失败时保留空展示字段，不覆盖已提交的知识库事实。
+
+        翻译决策只依赖当前 execution 与 prepared 文档，不再读取原始请求快照，避免
+        未声明的请求扩展字段重新形成隐藏业务分支。
+        """
 
         file_item = mapped_result.get("fileDataItem")
         if not isinstance(file_item, dict):
             raise AnalysisApplicationContractError("映射结果缺少 fileDataItem")
-        enable_full_translation = bool(
-            snapshot.raw_params.to_dict().get("enableFullTranslation", True)
-        )
-        if enable_full_translation:
-            if prepared.prepared_artifact is not None:
-                request = AnalysisTranslationRequest(
-                    execution=execution,
-                    kind=AnalysisTranslationKind.DOCUMENT,
-                    # 生产文件 Adapter 必须提供该引用；RAG、正文读取和全文翻译共享
-                    # 同一份 prepared Artifact，Translation Application 不接收路径。
-                    prepared_artifact=prepared.prepared_artifact,
-                )
-            else:
-                # 两级 OCR 均明确失败时，生产 Adapter 会让 RAG 使用原 PDF，同时不提供
-                # prepared 文本 Artifact。这里沿用既有兼容请求形态，生产 Translation
-                # Adapter 会稳定返回可降级失败，公开翻译字段保持为空。
-                request = AnalysisTranslationRequest(
-                    execution=execution,
-                    kind=AnalysisTranslationKind.DOCUMENT,
-                    source_path=prepared.processing_path,
-                )
-        else:
-            summary = file_item.get("summary", "")
-            if not isinstance(summary, str) or not summary:
-                return
+        if prepared.prepared_artifact is not None:
             request = AnalysisTranslationRequest(
                 execution=execution,
-                kind=AnalysisTranslationKind.SUMMARY,
-                text=summary,
+                # 生产文件 Adapter 必须提供该引用；RAG、正文读取和全文翻译共享
+                # 同一份 prepared Artifact，Translation Application 不接收路径。
+                prepared_artifact=prepared.prepared_artifact,
+            )
+        else:
+            # 两级 OCR 均明确失败时，生产 Adapter 会让 RAG 使用原 PDF，同时不提供
+            # prepared 文本 Artifact。这里沿用既有兼容请求形态，生产 Translation
+            # Adapter 会稳定返回可降级失败，公开翻译字段保持为空。
+            request = AnalysisTranslationRequest(
+                execution=execution,
+                source_path=prepared.processing_path,
             )
         try:
             result = self._translation.translate(request)
-            if result.execution != execution or result.kind is not request.kind:
+            if result.execution != execution:
                 raise AnalysisApplicationContractError("翻译结果与当前 execution 不一致")
             if result.outcome is AnalysisTranslationOutcome.SUCCEEDED:
                 file_item["documentTranslationOne"] = result.document_translation_one
                 file_item["documentTranslationTwo"] = result.document_translation_two
                 return
             logger.warning(
-                "文件分析翻译可降级失败，保留空展示字段: task_id=%s kind=%s error_code=%s",
+                "文件分析全文翻译可降级失败，保留空展示字段: "
+                "task_id=%s error_code=%s",
                 execution.task_id,
-                request.kind.value,
                 result.error_code,
             )
         except Exception as error:
             # 旧链路也把翻译异常降级为未翻译结果。异常只记录类型，避免把正文或模型响应
             # 写入普通日志。
             logger.warning(
-                "文件分析翻译发生可降级异常，保留空展示字段: task_id=%s kind=%s error_type=%s",
+                "文件分析全文翻译发生可降级异常，保留空展示字段: "
+                "task_id=%s error_type=%s",
                 execution.task_id,
-                request.kind.value,
                 type(error).__name__,
                 exc_info=True,
             )

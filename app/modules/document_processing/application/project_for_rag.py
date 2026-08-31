@@ -10,7 +10,7 @@ from app.modules.document_processing.domain import (
     ProcessingProfile,
 )
 
-RAG_PROJECTION_STEP_ID = "rag-markdown-projection-v1"
+RAG_PROJECTION_STEP_ID = "rag-markdown-projection-v2"
 
 
 class ProjectDocumentForRag:

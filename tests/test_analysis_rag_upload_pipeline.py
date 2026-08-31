@@ -283,7 +283,10 @@ class AnalysisRagUploadPipelineTests(unittest.TestCase):
             )
             projected = Path(prepared.upload_path).read_text(encoding="utf-8")
             self.assertNotIn("aGVsbG8=", projected)
-            self.assertIn("内嵌图片已移除", projected)
+            self.assertNotIn("内嵌图片已移除", projected)
+            self.assertNotIn("payload_bytes=", projected)
+            self.assertNotIn("sha256=", projected)
+            self.assertNotIn("舰徽", projected)
             with store.open_reader(canonical) as reader:
                 self.assertEqual(payload, reader.read())
 
@@ -470,6 +473,7 @@ class AnalysisRagUploadPipelineTests(unittest.TestCase):
                 document_location="location",
                 content_sha256=artifact.metadata.sha256,
                 ingested_file_name="原始资料.md",
+                structured_source_key="docsense_ref:" + "a" * 32,
             )
             lifecycle.checkpoint_rag_state(state)
             assert resource_store.record is not None
@@ -533,6 +537,7 @@ class AnalysisRagUploadPipelineTests(unittest.TestCase):
                 document_location="location",
                 content_sha256=artifact.metadata.sha256,
                 ingested_file_name="provider-rewritten.md",
+                structured_source_key="docsense_ref:" + "a" * 32,
             )
 
             with self.assertRaisesRegex(

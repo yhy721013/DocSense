@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from app.container import create_application_services
-from app.services.chat import (
+from app.modules.chat import (
     AbortNotificationCapabilities,
     ChatAbortService,
     ChatCleanupDispatchCapabilities,
@@ -31,6 +31,7 @@ from app.services.core.config import (
     load_chat_infrastructure_config,
 )
 from tests.fakes import FakeChatConversationFactory
+from app.modules.chat.domain.identity import FileChatIdentity
 
 
 class _RecordingAbortNotifier:
@@ -46,8 +47,8 @@ class _RecordingAbortNotifier:
         self.fail = fail
         self.notifications: list[tuple[str, str]] = []
 
-    def notify_abort_requested(self, *, chat_id: str, run_id: str) -> None:
-        self.notifications.append((chat_id, run_id))
+    def notify_abort_requested(self, *, conversation_id: str, run_id: str) -> None:
+        self.notifications.append((conversation_id, run_id))
         if self.fail:
             raise RuntimeError("notifier unavailable")
 
@@ -110,7 +111,7 @@ class ChatInfrastructureContractTests(unittest.TestCase):
     def test_single_instance_execution_lease_is_internal_but_not_fenced(self) -> None:
         """当前适配器保留未来租约签名，同时明确不声称跨实例 fencing。"""
         run = self.commands.start_chat_run(
-            chat_id="chat-lease",
+            identity=FileChatIdentity(chat_id=20001),
             user_message="请总结",
         )
         lease = self.commands.issue_execution_lease(run_id=run.run_id)
@@ -120,7 +121,7 @@ class ChatInfrastructureContractTests(unittest.TestCase):
             ChatRunCoordinator,
         )
         self.assertEqual(run.run_id, lease.run_id)
-        self.assertEqual("chat-lease", lease.chat_id)
+        self.assertEqual(run.conversation_id, lease.conversation_id)
         self.assertFalse(lease.has_fencing)
         self.assertFalse(self.commands.lease_capabilities.supports_fencing)
 
@@ -149,13 +150,17 @@ class ChatInfrastructureContractTests(unittest.TestCase):
             chat_commands=self.commands,
             abort_notifier=notifier,
         )
-        run = self.commands.start_chat_run(chat_id="chat-abort-notify")
+        identity = FileChatIdentity(chat_id=20002)
+        run = self.commands.start_chat_run(identity=identity)
 
-        result = service.abort_chat(chat_id="chat-abort-notify")
+        result = service.abort_chat(identity=identity)
         stored = self.store.runs.get(run.run_id)
 
         self.assertTrue(result.aborted)
-        self.assertEqual([("chat-abort-notify", run.run_id)], notifier.notifications)
+        self.assertEqual(
+            [(run.conversation_id, run.run_id)],
+            notifier.notifications,
+        )
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertTrue(stored.abort_requested)
@@ -168,14 +173,18 @@ class ChatInfrastructureContractTests(unittest.TestCase):
                 context_name="cleanup-context",
                 conversation_name="cleanup-thread",
             )
+        identity = FileChatIdentity(chat_id=20003)
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         self.store.sessions.create_or_get(
-            chat_id="chat-cleanup",
+            conversation_id=conversation_id,
             workspace_ref=refs.context_ref,
             thread_ref=refs.conversation_ref,
         )
         self.store.resource_leases.ensure_active(
-            lease_id=chat_workspace_lease_id("chat-cleanup"),
-            chat_id="chat-cleanup",
+            lease_id=chat_workspace_lease_id(conversation_id),
+            conversation_id=conversation_id,
             resource_type=RESOURCE_WORKSPACE,
             external_ref=refs.context_ref,
         )
@@ -192,11 +201,11 @@ class ChatInfrastructureContractTests(unittest.TestCase):
             cleanup_executor=cleanup_executor,
         )
 
-        result = service.delete_chat(chat_id="chat-cleanup")
+        result = service.delete_chat(identity=identity)
 
         self.assertTrue(result.deleted)
         self.assertEqual(1, len(dispatcher.jobs))
-        self.assertEqual("chat-cleanup", dispatcher.jobs[0].chat_id)
+        self.assertEqual(conversation_id, dispatcher.jobs[0].conversation_id)
         self.assertEqual("delete_chat", dispatcher.jobs[0].reason)
 
     def test_invalid_chat_runtime_mode_fails_before_external_configuration_load(self) -> None:

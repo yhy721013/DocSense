@@ -15,6 +15,8 @@ from tempfile import TemporaryDirectory
 from typing import Iterator
 import unittest
 
+from tests.task_service_fixtures import seed_legacy_file_task
+
 from app.modules.analysis.adapters import (
     LegacyAnalysisAuditAdapter,
     LegacyAnalysisFilePreparationAdapter,
@@ -24,7 +26,6 @@ from app.modules.analysis.adapters import (
 )
 from app.modules.analysis.adapters.legacy_files import AnalysisFilePreparationError
 from app.modules.analysis.domain.task_inputs import (
-    AnalysisDocumentProcessingPolicySnapshot,
     FrozenJsonObject,
 )
 from app.modules.document_processing import (
@@ -32,7 +33,6 @@ from app.modules.document_processing import (
     ArtifactMetadata,
     ArtifactRef,
     DocumentRepresentation,
-    LegacyOfficeConversionError,
 )
 from app.modules.analysis.ports import (
     AnalysisAuditOutcome,
@@ -74,9 +74,12 @@ from app.ports.rag import (
     RagResult,
     RagSource,
 )
-from app.services.core.config import OCRConfig
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.document_processing_fixtures import (
+    build_test_document_preparer,
+    build_test_rag_projector,
+)
 
 
 def _execution(task_id: str = "analysis-adapter-task-1") -> AnalysisExecutionRef:
@@ -105,24 +108,7 @@ def _bound_session(execution: AnalysisExecutionRef):  # type: ignore[no-untyped-
         document_location="location:adapter",
         content_sha256="c" * 64,
         ingested_file_name="adapter-demo.txt",
-    )
-
-
-def _ocr_config() -> OCRConfig:
-    """返回最小 OCR 配置；真实 OCR 不会在测试中被调用。"""
-
-    return OCRConfig(
-        enabled=False,
-        languages="eng",
-        dpi=150,
-        sample_pages=1,
-        text_threshold=1,
-        cache_dir="shared-cache",
-        analysis_scanned_pdf_engine="none",
-        mineru_cache_dir="shared-mineru-cache",
-        mineru_lang="en",
-        mineru_api_url=None,
-        tessdata_prefix=None,
+        structured_source_key="docsense_ref:" + "c" * 32,
     )
 
 
@@ -132,11 +118,13 @@ class _KnowledgePortFake:
     def __init__(self, mode: str) -> None:
         self.mode = mode
         self.calls: list[str] = []
+        self.last_collection_spec = None
         self.last_document = None
         self.last_metadata = None
 
     def ensure_collection(self, spec):  # type: ignore[no-untyped-def]
         self.calls.append("ensure_collection")
+        self.last_collection_spec = spec
         return CollectionRef(
             ref=f"collection:{spec.architecture_id}",
             name=spec.name,
@@ -208,6 +196,7 @@ class _NativeRagSessionFake:
             external_location="location:adapter",
             content_sha256="c" * 64,
             ingested_file_name="adapter-demo.txt",
+            structured_source_key="docsense_ref:" + "c" * 32,
         )
         attempt = RagAttempt(
             operation="analyse",
@@ -288,35 +277,28 @@ class _DocumentRagFactoryFake:
 class AnalysisProductionAdaptersTests(unittest.TestCase):
     """验证真实 Adapter 的任务目录、三态外部结果和 SQLite 审计映射。"""
 
-    def test_file_adapter_keeps_download_normalize_and_ocr_outputs_inside_task_directory(self) -> None:
+    def test_file_adapter_keeps_shared_artifact_mapping_inside_task_directory(self) -> None:
         execution = _execution()
-        observed: dict[str, str] = {}
 
         with TemporaryDirectory() as temporary_root:
             workspace = LocalAnalysisTaskWorkspaceAdapter(temporary_root).create(execution)
             task_root = Path(workspace.root_path)
+            document_root = Path(temporary_root) / "document-processing"
+            document_preparer = build_test_document_preparer(document_root)
+            rag_projector = build_test_rag_projector(
+                document_preparer,
+                document_root / "rag-projection",
+            )
 
             def downloader(url: str, file_name: str, download_dir: str, timeout: float, maximum: int) -> str:
                 target = Path(download_dir) / file_name
                 target.write_text("原始文件", encoding="utf-8")
                 return str(target)
 
-            def upload_preparer(source_path: str, config: OCRConfig) -> str:
-                source = Path(source_path)
-                scoped_root = source.parents[1]
-                observed["cache_dir"] = config.cache_dir
-                observed["mineru_cache_dir"] = config.mineru_cache_dir
-                target = scoped_root / "upload" / source.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-                return str(target)
-
             adapter = LegacyAnalysisFilePreparationAdapter(
-                ocr_config_loader=_ocr_config,
+                document_preparer=document_preparer,
+                rag_projector=rag_projector,
                 downloader=downloader,
-                normalizer=lambda source_path: source_path,
-                upload_preparer=upload_preparer,
-                text_reader=lambda path: "隔离后的正文",
             )
             prepared = adapter.prepare(
                 AnalysisFilePreparationRequest(
@@ -326,219 +308,11 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                 )
             )
 
-            for value in (prepared.source_path, prepared.upload_path, observed["cache_dir"], observed["mineru_cache_dir"]):
+            for value in (prepared.source_path, prepared.upload_path):
                 Path(value).resolve().relative_to(task_root.resolve())
-            self.assertEqual("隔离后的正文", prepared.original_text)
+            self.assertEqual("原始文件", prepared.original_text)
             self.assertTrue(Path(prepared.source_path).is_file())
             self.assertTrue(Path(prepared.upload_path).is_file())
-
-    def test_file_adapter_converts_three_legacy_formats_before_rag_text_and_translation(self) -> None:
-        """DOC/PPT/XLS 都发布任务内 OOXML；转换 Job 清理后返回路径仍然有效。"""
-
-        target_suffixes = {"doc": ".docx", "ppt": ".pptx", "xls": ".xlsx"}
-        for source_suffix, target_suffix in target_suffixes.items():
-            with self.subTest(source_suffix=source_suffix), TemporaryDirectory() as temporary_root:
-                execution = _execution(f"analysis-legacy-{source_suffix}")
-                if source_suffix == "xls":
-                    execution = replace(execution, file_name="customer-hash.xls")
-                workspace = LocalAnalysisTaskWorkspaceAdapter(temporary_root).create(execution)
-                observed: dict[str, object] = {"closed": False}
-
-                def downloader(_url, file_name, download_dir, _timeout, _maximum):  # type: ignore[no-untyped-def]
-                    target = Path(download_dir) / file_name
-                    target.write_bytes(b"legacy-binary")
-                    return str(target)
-
-                class Result:
-                    converted = True
-                    target_suffix = target_suffixes[source_suffix]
-
-                    def __init__(self, prepared_path: Path) -> None:
-                        self.prepared_path = prepared_path
-
-                    def __enter__(self):  # type: ignore[no-untyped-def]
-                        return self
-
-                    def __exit__(self, *_args):  # type: ignore[no-untyped-def]
-                        self.prepared_path.unlink()
-                        observed["closed"] = True
-
-                class Preparer:
-                    def preflight(self) -> str:
-                        return "26.2.1.0"
-
-                    def prepare(self, source_path, *, job_id):  # type: ignore[no-untyped-def]
-                        observed["raw"] = str(source_path)
-                        observed["job_id"] = job_id
-                        prepared_path = Path(temporary_root) / (
-                            f"prepared-{'a' * 32}{target_suffixes[source_suffix]}"
-                        )
-                        prepared_path.write_text("converted-body", encoding="utf-8")
-                        observed["temporary"] = str(prepared_path)
-                        return Result(prepared_path)
-
-                def upload_preparer(source_path: str, _config: OCRConfig) -> str:
-                    observed["upload_input"] = source_path
-                    return source_path
-
-                def text_reader(source_path: str) -> str:
-                    observed["text_input"] = source_path
-                    return Path(source_path).read_text(encoding="utf-8")
-
-                source_url = (
-                    "https://example.invalid/download?id=opaque-token"
-                    if source_suffix == "xls"
-                    else f"https://example.invalid/source.{source_suffix}"
-                )
-                adapter = LegacyAnalysisFilePreparationAdapter(
-                    ocr_config_loader=_ocr_config,
-                    downloader=downloader,
-                    normalizer=lambda path: path,
-                    upload_preparer=upload_preparer,
-                    text_reader=text_reader,
-                    legacy_office_preparer=Preparer(),
-                )
-                prepared = adapter.prepare(
-                    AnalysisFilePreparationRequest(
-                        execution=execution,
-                        source_url=source_url,
-                        task_root=workspace.root_path,
-                        document_processing_policy=(
-                            AnalysisDocumentProcessingPolicySnapshot.for_source(
-                                source_url,
-                                business_file_name=execution.file_name,
-                                allowed_version_series="26.2",
-                            )
-                        ),
-                    )
-                )
-
-                task_root = Path(workspace.root_path).resolve()
-                Path(prepared.source_path).resolve().relative_to(task_root)
-                Path(prepared.processing_path).resolve().relative_to(task_root)
-                Path(prepared.upload_path).resolve().relative_to(task_root)
-                self.assertEqual(target_suffix, Path(prepared.processing_path).suffix)
-                self.assertEqual(prepared.processing_path, observed["upload_input"])
-                self.assertEqual(prepared.upload_path, observed["text_input"])
-                self.assertEqual("converted-body", prepared.original_text)
-                self.assertTrue(observed["closed"])
-                self.assertFalse(Path(str(observed["temporary"])).exists())
-                self.assertTrue(Path(prepared.processing_path).is_file())
-                self.assertRegex(
-                    prepared.internal_prepared_basename,
-                    r"^prepared-[0-9a-f]{32}\.(docx|pptx|xlsx)$",
-                )
-
-    def test_file_adapter_legacy_conversion_failure_never_uses_raw_fallback(self) -> None:
-        """转换能力、版本或输出失败时，不得调用 MHTML/OCR 把原格式送进 RAG。"""
-
-        execution = _execution("analysis-legacy-failure")
-        calls: list[str] = []
-        with TemporaryDirectory() as temporary_root:
-            workspace = LocalAnalysisTaskWorkspaceAdapter(temporary_root).create(execution)
-
-            def downloader(_url, file_name, download_dir, _timeout, _maximum):  # type: ignore[no-untyped-def]
-                target = Path(download_dir) / file_name
-                target.write_bytes(b"secret-legacy-binary")
-                return str(target)
-
-            class FailingPreparer:
-                def preflight(self) -> str:
-                    return "26.2.9"
-
-                def prepare(self, _source_path, *, job_id):  # type: ignore[no-untyped-def]
-                    raise LegacyOfficeConversionError(
-                        "test_conversion_failure",
-                        diagnostic="C:/private/profile/secret",
-                    )
-
-            source_url = "https://example.invalid/private.xls"
-            adapter = LegacyAnalysisFilePreparationAdapter(
-                ocr_config_loader=_ocr_config,
-                downloader=downloader,
-                normalizer=lambda path: calls.append("normalize") or path,
-                upload_preparer=lambda path, _config: calls.append("upload") or path,
-                text_reader=lambda path: calls.append("text") or "",
-                legacy_office_preparer=FailingPreparer(),
-            )
-            with self.assertLogs(
-                "app.modules.analysis.adapters.legacy_files",
-                level="ERROR",
-            ) as captured:
-                with self.assertRaisesRegex(
-                    AnalysisFilePreparationError,
-                    "Legacy Office 文件本地转换失败",
-                ):
-                    adapter.prepare(
-                        AnalysisFilePreparationRequest(
-                            execution=execution,
-                            source_url=source_url,
-                            task_root=workspace.root_path,
-                            document_processing_policy=(
-                                AnalysisDocumentProcessingPolicySnapshot.for_source(
-                                    source_url
-                                )
-                            ),
-                        )
-                    )
-
-        self.assertEqual([], calls)
-        joined_logs = "\n".join(captured.output)
-        self.assertIn("error_code=test_conversion_failure", joined_logs)
-        self.assertNotIn("private/profile", joined_logs)
-        self.assertNotIn("secret-legacy-binary", joined_logs)
-
-    def test_file_adapter_rejects_runtime_version_drift_from_accepted_snapshot(self) -> None:
-        """重启后运行时版本系列漂移时保留失败现场，不用新环境猜测执行承诺。"""
-
-        execution = replace(
-            _execution("analysis-legacy-version-drift"),
-            file_name="versioned.xls",
-        )
-        prepare_called = False
-        with TemporaryDirectory() as temporary_root:
-            workspace = LocalAnalysisTaskWorkspaceAdapter(temporary_root).create(execution)
-
-            def downloader(_url, file_name, download_dir, _timeout, _maximum):  # type: ignore[no-untyped-def]
-                target = Path(download_dir) / file_name
-                target.write_bytes(b"legacy")
-                return str(target)
-
-            class DriftedPreparer:
-                def preflight(self) -> str:
-                    return "27.1.0"
-
-                def prepare(self, _source_path, *, job_id):  # type: ignore[no-untyped-def]
-                    nonlocal prepare_called
-                    prepare_called = True
-                    raise AssertionError("版本门禁失败后不得启动转换进程")
-
-            source_url = "https://example.invalid/download?id=versioned"
-            adapter = LegacyAnalysisFilePreparationAdapter(
-                ocr_config_loader=_ocr_config,
-                downloader=downloader,
-                normalizer=lambda path: path,
-                upload_preparer=lambda path, _config: path,
-                text_reader=lambda _path: "",
-                legacy_office_preparer=DriftedPreparer(),
-            )
-            with self.assertRaises(AnalysisFilePreparationError):
-                adapter.prepare(
-                    AnalysisFilePreparationRequest(
-                        execution=execution,
-                        source_url=source_url,
-                        task_root=workspace.root_path,
-                        document_processing_policy=(
-                            AnalysisDocumentProcessingPolicySnapshot.for_source(
-                                source_url,
-                                business_file_name=execution.file_name,
-                                allowed_version_series="26.2",
-                            )
-                        ),
-                    )
-                )
-
-        self.assertFalse(prepare_called)
 
     def test_file_adapter_rejects_downloader_path_outside_current_task_directory(self) -> None:
         execution = _execution("analysis-adapter-task-escape")
@@ -546,12 +320,15 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
             workspace = LocalAnalysisTaskWorkspaceAdapter(temporary_root).create(execution)
             escaped = Path(temporary_root) / "escaped.txt"
             escaped.write_text("not task owned", encoding="utf-8")
+            document_root = Path(temporary_root) / "document-processing"
+            document_preparer = build_test_document_preparer(document_root)
             adapter = LegacyAnalysisFilePreparationAdapter(
-                ocr_config_loader=_ocr_config,
+                document_preparer=document_preparer,
+                rag_projector=build_test_rag_projector(
+                    document_preparer,
+                    document_root / "rag-projection",
+                ),
                 downloader=lambda *_: str(escaped),
-                normalizer=lambda source_path: source_path,
-                upload_preparer=lambda source_path, config: source_path,
-                text_reader=lambda path: "",
             )
 
             with self.assertRaises(AnalysisFilePreparationError):
@@ -592,6 +369,8 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                 self.assertEqual(1, factory.entered)
                 self.assertEqual(1, factory.exited)
                 self.assertEqual(["ensure_collection", "store_prepared_document"], port.calls)
+                self.assertEqual(103, port.last_collection_spec.architecture_id)
+                self.assertEqual("archId-103", port.last_collection_spec.name)
                 if outcome is AnalysisKnowledgeWriteOutcome.COMMITTED:
                     self.assertEqual("knowledge:adapter", result.external_ref)
                 else:
@@ -827,6 +606,7 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
                 external_location="location:adapter",
                 content_sha256="c" * 64,
                 ingested_file_name="adapter-demo.txt",
+                structured_source_key="docsense_ref:" + "c" * 32,
             )
             native_session.start_fresh_conversation = switch_conversation  # type: ignore[method-assign]
             native_session.ask_optional = lambda *_args, **_kwargs: RagResult(  # type: ignore[method-assign]
@@ -1028,7 +808,7 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
         # 统一临时目录上下文，避免清理瞬态干扰审计事务本身的离线断言。
         with workspace_tempdir() as temporary_root:
             service = LLMTaskService(db_path=str(Path(temporary_root) / "tasks.sqlite3"))
-            task = service.create_file_task("adapter-audit.txt", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"adapter-audit.txt", {"businessType": "file"})
             execution = AnalysisExecutionRef(
                 task_id=TaskId(task["execution_id"]),
                 file_name="adapter-audit.txt",
@@ -1162,7 +942,7 @@ class AnalysisProductionAdaptersTests(unittest.TestCase):
 
         with workspace_tempdir() as temporary_root:
             service = LLMTaskService(db_path=str(Path(temporary_root) / "tasks.sqlite3"))
-            task = service.create_file_task(
+            task = seed_legacy_file_task(service,
                 "partial-open.txt",
                 {"businessType": "file"},
             )

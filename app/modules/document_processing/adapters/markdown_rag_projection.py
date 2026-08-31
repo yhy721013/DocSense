@@ -1,8 +1,9 @@
 """Markdown 到 RAG-only Markdown 的流式投影 Adapter。
 
-投影只移除 Markdown 图片 data URI 的内嵌正文，保留普通链接、外部图片、标题、表格和
-代码块。扫描器以固定块读取、候选语法超过内存阈值后自动落到 Processor 私有 scratch，
-不会用一个无界正则把整份文档或十几 MiB Base64 一次载入内存。
+投影删除 Markdown 图片 data URI 的完整可渲染语法，仅写入一个 ASCII 空格维持相邻文本
+边界；普通链接、外部图片、标题、表格和代码块保持不变。扫描器以固定块读取、候选语法超过
+内存阈值后自动落到 Processor 私有 scratch，不会用一个无界正则把整份文档或十几 MiB
+Base64 一次载入内存。
 """
 
 from __future__ import annotations
@@ -14,10 +15,10 @@ import hashlib
 import logging
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
-from uuid import uuid4
+from typing import BinaryIO, Iterator
 
 from app.modules.document_processing.adapters.content import FileArtifactContent
 from app.modules.document_processing.domain import (
@@ -34,12 +35,10 @@ logger = logging.getLogger(__name__)
 
 MARKDOWN_RAG_PROJECTION_PROCESSOR_ID = "markdown-rag-projection"
 MARKDOWN_RAG_PROJECTION_PROCESSOR_FINGERPRINT = (
-    "docsense-markdown-rag-projection-v1"
+    "docsense-markdown-rag-projection-v2"
 )
 _SCAN_CHUNK_BYTES = 64 * 1024
 _CANDIDATE_MEMORY_BYTES = 64 * 1024
-_ALT_MAX_CHARS = 160
-_PLACEHOLDER_MAX_CHARS = 512
 _MAX_DATA_URI_HEADER_BYTES = 1024
 _DATA_IMAGE_PREFIX = b"data:image/"
 _ALLOWED_SOURCE_REPRESENTATIONS = frozenset(
@@ -49,14 +48,13 @@ _ALLOWED_SOURCE_REPRESENTATIONS = frozenset(
     }
 )
 _EXPECTED_PROFILE_PARAMETERS = {
-    "algorithmVersion": "markdown-rag-projection-v1",
-    "altMaxChars": _ALT_MAX_CHARS,
+    "algorithmVersion": "markdown-rag-projection-v2",
     "candidateMemoryBytes": _CANDIDATE_MEMORY_BYTES,
-    "dataUriImagePolicy": "remove-payload-with-digest-v1",
-    "decodeStrategy": "strict-base64-else-raw-sha256-v1",
+    "dataUriImagePolicy": "remove-image-syntax-with-space-v2",
+    "decodeStrategy": "strict-base64-validation-v2",
     "encoding": "utf-8-strict",
     "newlinePolicy": "preserve-source-v1",
-    "placeholderMaxChars": _PLACEHOLDER_MAX_CHARS,
+    "replacementPolicy": "single-ascii-space-v1",
     "scanChunkBytes": _SCAN_CHUNK_BYTES,
 }
 
@@ -77,6 +75,7 @@ class _ProjectionStats:
     source_bytes: int = 0
     output_bytes: int = 0
     removed_images: int = 0
+    removed_payload_bytes: int = 0
     invalid_base64_images: int = 0
     malformed_data_images: int = 0
 
@@ -353,7 +352,6 @@ class _MarkdownProjectionScanner:
             mode="w+b",
         ) as candidate:
             candidate.write(b"![")
-            alt_bytes = bytearray()
             escaped = False
             last_consumed: int | None = ord("[")
             while True:
@@ -365,8 +363,6 @@ class _MarkdownProjectionScanner:
                 candidate.write(bytes((value,)))
                 if value == ord("]") and not escaped:
                     break
-                if len(alt_bytes) < _ALT_MAX_CHARS * 4:
-                    alt_bytes.append(value)
                 if value == ord("\\") and not escaped:
                     escaped = True
                 else:
@@ -412,7 +408,6 @@ class _MarkdownProjectionScanner:
                 reader,
                 destination,
                 stats,
-                alt_bytes=bytes(alt_bytes),
             )
 
     def _consume_data_image(
@@ -420,8 +415,6 @@ class _MarkdownProjectionScanner:
         reader: _ValidatingByteReader,
         destination: BinaryIO,
         stats: _ProjectionStats,
-        *,
-        alt_bytes: bytes,
     ) -> tuple[bool, int | None]:
         header = bytearray()
         header_overflow = False
@@ -440,8 +433,6 @@ class _MarkdownProjectionScanner:
             else:
                 header_overflow = True
 
-        raw_digest = hashlib.sha256()
-        decoded_digest = hashlib.sha256()
         decoded_valid = found_comma and b";base64" in bytes(header).lower()
         base64_quartet = bytearray()
         padding_seen = False
@@ -450,7 +441,6 @@ class _MarkdownProjectionScanner:
         if found_comma:
             while True:
                 payload_chunk, found_closing = reader.read_until(ord(")"))
-                raw_digest.update(payload_chunk)
                 payload_bytes += len(payload_chunk)
                 if decoded_valid:
                     cleaned = payload_chunk.translate(None, b" \t\r\n")
@@ -466,11 +456,9 @@ class _MarkdownProjectionScanner:
                         if ord("=") in complete:
                             padding_seen = True
                         try:
-                            decoded = base64.b64decode(complete, validate=True)
+                            base64.b64decode(complete, validate=True)
                         except (ValueError, binascii.Error):
                             decoded_valid = False
-                        else:
-                            decoded_digest.update(decoded)
                 if found_closing:
                     last_consumed = ord(")")
                     break
@@ -490,57 +478,13 @@ class _MarkdownProjectionScanner:
         if found_comma and b";base64" in bytes(header).lower() and not decoded_valid:
             stats.invalid_base64_images += 1
 
-        media_subtype = bytes(header).split(b";", 1)[0]
-        media_type = self._safe_media_type(media_subtype)
-        digest = (
-            decoded_digest.hexdigest()
-            if decoded_valid
-            else raw_digest.hexdigest()
-        )
-        digest_label = "sha256" if decoded_valid else "payload_sha256"
-        placeholder = self._placeholder(
-            alt_bytes=alt_bytes,
-            media_type=media_type,
-            digest_label=digest_label,
-            digest=digest,
-            payload_bytes=payload_bytes,
-            malformed=malformed,
-        )
-        self._write(destination, placeholder.encode("utf-8"), stats)
+        # RAG 正文不应携带图片的 alt、类型、摘要或体积等运维元数据。使用单个
+        # ASCII 空格而非零字节替换，可避免 ``before![...](...)after`` 被拼成
+        # ``beforeafter``；原始换行仍由外层扫描器逐字保留。
+        self._write(destination, b" ", stats)
         stats.removed_images += 1
+        stats.removed_payload_bytes += payload_bytes
         return True, last_consumed
-
-    @staticmethod
-    def _safe_media_type(header_subtype: bytes) -> str:
-        decoded = header_subtype.decode("ascii", errors="ignore").lower()
-        safe = "".join(
-            character
-            for character in decoded
-            if character.isalnum() or character in ".+-"
-        )[:64]
-        return f"image/{safe or 'unknown'}"
-
-    @staticmethod
-    def _placeholder(
-        *,
-        alt_bytes: bytes,
-        media_type: str,
-        digest_label: str,
-        digest: str,
-        payload_bytes: int,
-        malformed: bool,
-    ) -> str:
-        alt = alt_bytes.decode("utf-8", errors="replace")
-        alt = " ".join(alt.split()).replace("[", "（").replace("]", "）")
-        alt = alt[:_ALT_MAX_CHARS] or "未提供"
-        status = "；语法不完整" if malformed else ""
-        result = (
-            f"[内嵌图片已移除：alt={alt}；media_type={media_type}；"
-            f"{digest_label}={digest}；payload_bytes={payload_bytes}{status}]"
-        )
-        # 当前固定字段加最大 alt 明显小于上限；仍保留防御性截断，避免未来字段扩展
-        # 意外把超长占位文本送入 RAG。
-        return result[:_PLACEHOLDER_MAX_CHARS]
 
     @staticmethod
     def _flush_candidate(
@@ -588,30 +532,29 @@ class MarkdownRagProjectionProcessorAdapter:
 
     def process(self, request: DocumentProcessingRequest) -> ProcessorOutput:
         self._validate_request(request)
-        # 使用截断哈希避免 Windows MAX_PATH (260) 限制：
-        # materialization_root(~92) + 16 + 1 + 14 + 1 + filename(16+1+8+5=30) ≈ 154
+        # 任务目录保留完整 SHA-256，避免长期运行及多实例环境中出现命名空间碰撞。
+        # 输出文件不再重复携带 64 位 step_key，而由 tempfile 在目录内原子分配短名称；
+        # 按故障环境约 92 字符的 root 计算，总路径约 92+1+64+1+14+1+17=190，
+        # 既低于传统 Windows MAX_PATH，又不需要截断任务身份或随机数。
         task_namespace = hashlib.sha256(
             request.task_id.value.encode("utf-8")
-        ).hexdigest()[:16]
+        ).hexdigest()
         scratch_directory = (
             self._materialization_root / task_namespace / "rag-projection"
         ).resolve()
         self._require_contained(scratch_directory, self._materialization_root)
         scratch_directory.mkdir(parents=True, exist_ok=True)
-        output_path = (
-            scratch_directory
-            / f"{request.step_key[:16]}.{uuid4().hex[:8]}.part"
-        ).resolve()
-        self._require_contained(output_path, scratch_directory)
+        output_path: Path | None = None
 
         try:
-            destination = output_path.open("xb")
             with (
                 self._source_store.open_reader(
                     request.source_artifact
                 ) as source,
-                destination,
+                self._open_owned_output(scratch_directory) as owned_output,
             ):
+                output_path, destination = owned_output
+                self._require_contained(output_path, scratch_directory)
                 stats = self._scanner.transform(source, destination)
                 destination.flush()
                 os.fsync(destination.fileno())
@@ -623,12 +566,14 @@ class MarkdownRagProjectionProcessorAdapter:
             logger.info(
                 "RAG Markdown 投影已生成: task_id=%s step_key=%s "
                 "source_bytes=%d output_bytes=%d removed_images=%d "
+                "removed_payload_bytes=%d "
                 "invalid_base64_images=%d malformed_data_images=%d",
                 request.task_id,
                 request.step_key[:12],
                 stats.source_bytes,
                 stats.output_bytes,
                 stats.removed_images,
+                stats.removed_payload_bytes,
                 stats.invalid_base64_images,
                 stats.malformed_data_images,
             )
@@ -637,6 +582,13 @@ class MarkdownRagProjectionProcessorAdapter:
                 if stats.removed_images
                 else ()
             )
+            # 正常退出两个上下文后文件句柄已经关闭，才能把候选文件交给后续
+            # Artifact 发布流程。显式校验可以在优化模式下继续守住该不变量。
+            if output_path is None:
+                raise RagProjectionError(
+                    "rag_projection_output_missing",
+                    "RAG 投影输出文件未创建",
+                )
             return ProcessorOutput.with_cleanup(
                 content=FileArtifactContent(output_path),
                 kind=ArtifactKind.RAG_PROJECTION,
@@ -663,6 +615,49 @@ class MarkdownRagProjectionProcessorAdapter:
                 "rag_projection_unexpected_error",
                 "无法生成 RAG Markdown 投影",
             ) from exc
+
+    @staticmethod
+    @contextmanager
+    def _open_owned_output(
+        scratch_directory: Path,
+    ) -> Iterator[tuple[Path, BinaryIO]]:
+        """原子创建并持有一个短名称输出文件。
+
+        ``mkstemp`` 使用独占创建并在名称冲突时由标准库重试，适用于同一任务被
+        多线程或多实例同时执行的情况。文件描述符从创建成功起就由本上下文持有，
+        任何异常都会先关闭句柄，再尝试删除仅属于本次调用的文件，绝不删除其他
+        执行已经存在的碰撞目标。
+        """
+
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix="rag-",
+            suffix=".part",
+            dir=scratch_directory,
+        )
+        output_path = Path(raw_path).resolve()
+        try:
+            destination = os.fdopen(descriptor, "wb")
+        except BaseException:
+            # fdopen 极少失败，但失败时裸文件描述符仍归当前调用所有，必须显式关闭。
+            os.close(descriptor)
+            output_path.unlink(missing_ok=True)
+            raise
+
+        completed = False
+        try:
+            with destination:
+                yield output_path, destination
+            completed = True
+        finally:
+            if not completed:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "RAG 投影异常候选清理失败: scratch_name=%s",
+                        output_path.name,
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _validate_request(request: DocumentProcessingRequest) -> None:
@@ -699,16 +694,21 @@ class MarkdownRagProjectionProcessorAdapter:
             ) from exc
 
     @staticmethod
-    def _cleanup_scratch(path: Path, scratch_directory: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning(
-                "RAG 投影 scratch 文件清理失败: scratch_name=%s",
-                path.name,
-                exc_info=True,
-            )
-            return
+    def _cleanup_scratch(
+        path: Path | None,
+        scratch_directory: Path,
+    ) -> None:
+        # 源 Artifact 可能在目标文件创建前就打开失败，此时只需回收空目录。
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "RAG 投影 scratch 文件清理失败: scratch_name=%s",
+                    path.name,
+                    exc_info=True,
+                )
+                return
         for directory in (scratch_directory, scratch_directory.parent):
             try:
                 directory.rmdir()

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.core.architecture_tree import build_architecture_tree_index
-from app.services.llm_service.analysis_service import (
-    ArchitectureContractError,
+from app.modules.analysis.domain.architecture_tree import build_architecture_tree_index
+from app.modules.analysis.domain.errors import ArchitectureContractError
+from app.modules.analysis.domain.classification_rules import (
     _build_equipment_identity_reselect_profile,
     _decide_identity_reselect_gate,
     _ordered_equipment_family_scope_ids,

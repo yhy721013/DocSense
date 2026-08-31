@@ -1,0 +1,1901 @@
+{
+  "schemaVersion": 2,
+  "stage": "1G-4R",
+  "policy": {
+    "migrationComplete": true,
+    "legacyExecutionReferencesRemoved": true,
+    "publicContractChanged": false,
+    "mappingUnit": "test_method",
+    "taskServiceCompatibilityMethodsDeferredTo": "1G-5E",
+    "sourceFilesCutOverInPlace": [
+      "tests/test_analysis_service.py",
+      "tests/test_document_processing_baseline.py",
+      "tests/test_mhtml_normalizer.py",
+      "tests/test_ocr_preprocessor.py"
+    ],
+    "sourceFilesRemovedAfterMigration": [
+      "tests/test_analysis_two_stage.py",
+      "tests/test_report_service.py",
+      "tests/test_weaponry_service.py",
+      "tests/test_translation_service.py",
+      "tests/test_anythingllm_client.py",
+      "tests/test_chat_debug_preview.py"
+    ]
+  },
+  "sourceMethodCount": 200,
+  "migrations": [
+    {
+      "source": "tests/test_analysis_service.py",
+      "sourceSnapshotSha256": "24fd30da939db48d9a2f5979b111358501e65c452c93fbde25c4d7e095dc5ba8",
+      "sourceMethodCount": 71,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_keeps_translation_fields_blank",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_keeps_translation_fields_blank"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_callback_payload_uses_fixed_success_message",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_callback_payload_uses_fixed_success_message"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_supports_current_chinese_object_response",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_supports_current_chinese_object_response"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_rejects_out_of_range_country",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_rejects_out_of_range_country"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_rejects_out_of_range_channel_maturity_format",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_rejects_out_of_range_channel_maturity_format"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_keeps_channel_empty_without_request_candidates",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_keeps_channel_empty_without_request_candidates"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_resolves_security_from_candidate_range",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_resolves_security_from_candidate_range"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_infers_security_from_opening_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_infers_security_from_opening_text"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_defaults_security_to_public_when_missing",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_defaults_security_to_public_when_missing"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_matches_options_after_normalization",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_matches_options_after_normalization"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_forces_data_format_to_resolved_format",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_forces_data_format_to_resolved_format"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_data_format_as_format_fallback",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_data_format_as_format_fallback"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_architecture_to_one_when_not_matched",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_architecture_to_one_when_not_matched"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_routes_gjb_content_to_general_requirement_leaf",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_routes_gjb_content_to_general_requirement_leaf"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_architecture_keeps_normal_parent_but_rejects_data_standard_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_architecture_keeps_normal_parent_but_rejects_data_standard_parent"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_returns_standard_fields_when_architecture_matches_standard_range",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_returns_standard_fields_when_architecture_matches_standard_range"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_returns_standard_fields_for_descendant_architecture",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_returns_standard_fields_for_descendant_architecture"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_resolved_architecture_for_child_only_standard_range",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_resolved_architecture_for_child_only_standard_range"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_omits_standard_fields_when_architecture_not_in_standard_range",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_omits_standard_fields_when_architecture_not_in_standard_range"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_returns_blank_standard_fields_when_missing",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_returns_blank_standard_fields_when_missing"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_to_original_text_for_standard_fields",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_to_original_text_for_standard_fields"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_only_architecture_candidate_when_single_node",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_only_architecture_candidate_when_single_node"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_normalizes_score_to_protocol_discrete_values",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_normalizes_score_to_protocol_discrete_values"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_composes_path_and_summary_keywords",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_composes_path_and_summary_keywords"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_source_backed_keyword_to_reach_minimum",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_source_backed_keyword_to_reach_minimum"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_normalizes_related_technology_string",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_normalizes_related_technology_string"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_accepts_chinese_technology_with_english_evidence",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_accepts_chinese_technology_with_english_evidence"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_retains_related_technology_without_evidence_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_retains_related_technology_without_evidence_text"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_forces_score_55_when_source_is_unknown",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_forces_score_55_when_source_is_unknown"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_replaces_exact_known_legacy_internal_source",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_replaces_exact_known_legacy_internal_source"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_keeps_unrelated_source_with_internal_name_known",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_keeps_unrelated_source_with_internal_name_known"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_defaults_missing_source_to_unknown_and_forces_score_55",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_defaults_missing_source_to_unknown_and_forces_score_55"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_score_to_55_when_missing_or_invalid",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_score_to_55_when_missing_or_invalid"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_default_ranges_when_request_missing",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_uses_default_ranges_when_request_missing"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_requires_protocol_schema",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_requires_protocol_schema"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_includes_original_file_name_and_architecture_remark",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_includes_original_file_name_and_architecture_remark"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_includes_standard_fields_when_standard_range_present",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_includes_standard_fields_when_standard_range_present"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_omits_standard_fields_when_standard_range_missing",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_omits_standard_fields_when_standard_range_missing"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_uses_default_ranges_when_missing",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_uses_default_ranges_when_missing"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_uses_explicit_ranges_over_defaults",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_uses_explicit_ranges_over_defaults"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_includes_architecture_classification_rules",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_build_file_analysis_prompt_includes_architecture_classification_rules"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_default_architecture_options_use_current_protocol_shape",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_default_architecture_options_use_current_protocol_shape"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_to_original_text_for_obvious_fields",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_falls_back_to_original_text_for_obvious_fields"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_matches_architecture_by_path_name",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_matches_architecture_by_path_name"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_matches_architecture_by_nested_name",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_map_analysis_result_matches_architecture_by_nested_name"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_routes_weaponry_detail_categories_to_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_routes_weaponry_detail_categories_to_parent"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_supports_hyphens_in_weaponry_name",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_supports_hyphens_in_weaponry_name"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_uses_parent_id_when_parent_node_is_not_in_range",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_uses_parent_id_when_parent_node_is_not_in_range"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_keeps_original_for_non_matching_category",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_keeps_original_for_non_matching_category"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_keeps_original_without_reliable_weaponry_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_resolve_storage_architecture_id_keeps_original_without_reliable_weaponry_parent"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_topk_contract_accepts_finite_boundary_parent_but_rejects_true_root",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_topk_contract_accepts_finite_boundary_parent_but_rejects_true_root"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_finite_boundary_data_standard_parent_remains_forbidden",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_finite_boundary_data_standard_parent_remains_forbidden"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_filename_constraint_matches_finite_boundary_equipment_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_filename_constraint_matches_finite_boundary_equipment_parent"
+          ],
+          "semanticReason": "纯规则或 Prompt 断言已在原测试位置直接改指现行 Analysis Domain，不再经过旧 Service。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_run_file_analysis_batch_processes_files_in_order",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stale_file_worker_stops_before_external_side_effects",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_invalid_tree_stops_worker_before_download_and_remote_ports",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_success_audits_then_transfers_prepared_document",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_non_architecture_field_violations_are_mapped_without_failure",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_non_object_file_data_item_is_mapped_without_failure",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_valid_model_architecture_id_wins_over_gjb_heuristic",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_invalid_model_architecture_uses_general_gjb_leaf_before_repair",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_data_standard_parent_falls_back_to_general_leaf_without_gjb_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_repair_cannot_store_data_standard_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_architecture_repair_has_separate_audit_attempt",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_invalid_architecture_repair_fails_without_knowledge_transfer",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_json_repair_has_separate_audit_attempt",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_audit_failure_preserves_session_and_blocks_downstream_work",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_retention_required_error_keeps_global_document",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_confirmed_compensation_deletes_untransferred_document",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_cleanup_failure_keeps_resource_lease_open",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_service.py::LLMAnalysisServiceTests.test_stage9_batch_uses_independent_rag_and_knowledge_leases",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "旧 Worker 编排由 RunAnalysisTask、批量受理和严格 Fake 覆盖；不再冻结旧补丁路径。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_analysis_two_stage.py",
+      "sourceSnapshotSha256": "0ee037017de45480c47af12cf7c29b3e5ea0cd7cb38a525c55062c8815f2aaea",
+      "sourceMethodCount": 46,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_single_candidate_skips_classification_and_starts_with_extraction",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_unqualified_content_warns_but_task_still_succeeds",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_single_candidate_accepts_root_and_finite_boundary_shapes",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_classification_and_extraction_are_isolated_and_resolved_id_wins",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_identity_reselect_shadow_keeps_initial_result_in_three_conversations",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "身份重选的门禁、候选范围和修复 Prompt 已分别归属现行 Domain。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_identity_reselect_enforce_applies_valid_scoped_parent_everywhere",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "身份重选的门禁、候选范围和修复 Prompt 已分别归属现行 Domain。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_identity_reselect_skips_when_initial_result_is_already_in_target_branch",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "身份重选的门禁、候选范围和修复 Prompt 已分别归属现行 Domain。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_identity_reselect_skips_when_classification_used_two_attempts",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "身份重选的门禁、候选范围和修复 Prompt 已分别归属现行 Domain。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_identity_reselect_null_or_invalid_result_keeps_initial_classification",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "身份重选的门禁、候选范围和修复 Prompt 已分别归属现行 Domain。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_identity_reselect_optional_failures_keep_initial_and_continue_extraction",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "身份重选的门禁、候选范围和修复 Prompt 已分别归属现行 Domain。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_second_conversation_failure_is_audited_without_extraction_fallback",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_two_stage_constraint_decision_is_computed_once_and_reused",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_full_tree_root_outside_visible_candidates_is_repaired_with_identical_candidates",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_visible_ordinary_parent_is_allowed_as_deepest_reliable_fallback",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_model_can_return_visible_finite_boundary_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_gjb_null_classification_falls_back_to_general_requirement_leaf",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_data_standard_profile_requires_cover_confirmation_not_body_reference",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_scope_guard_limits_gjb_candidates_to_six_standard_leaves",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_scope_guard_keeps_topk_single_rollback_inside_six_standard_leaves",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_scope_guard_repairs_then_falls_back_to_general_requirement",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_scope_guard_uses_general_requirement_when_classification_budget_is_exhausted",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_scope_guard_without_general_requirement_fails_closed",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_repairs_share_phase_budgets_and_total_model_calls_are_four",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_supplier_retry_consumes_classification_budget_and_prevents_repair",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_recall_audit_failure_prevents_remote_session_creation",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_oversized_classification_prompt_fails_before_remote_session",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_recall_finalize_failure_blocks_permanent_knowledge_store",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_topk_single_keeps_bounded_parent_projection_and_audit",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_legacy_small_tree_is_audited_before_success",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_legacy_rejects_root_from_initial_and_repair_results",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_legacy_tree_over_global_candidate_limit_fails_before_session",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_factory_acquisition_failure_finalizes_existing_recall_audit",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_factory_exit_failure_does_not_overwrite_committed_success",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_topk_single_json_failure_uses_analysis_extraction_stage",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_extraction_repair_prompt_budget_is_checked_before_second_call",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_explicit_gjb_signal_overrides_valid_non_standard_model_choice",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_strong_gjb_filename_keeps_model_selected_visible_standard_leaf",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_body_gjb_reference_does_not_override_valid_equipment_choice",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_strong_gjb_filename_does_not_select_invisible_standard_leaf",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_unique_cvn68_filename_identifier_forces_cross_branch_choice_to_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_scope_guard_non_jane_filename_does_not_force_cross_branch_choice",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_unique_cvn78_filename_identifier_keeps_correct_visible_descendant",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_ambiguous_or_non_numeric_filename_does_not_force_equipment_branch",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_filename_match_does_not_force_invisible_equipment_parent",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_duplicate_equipment_identifier_parents_do_not_force_branch",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_scope_guard.py::JaneScopeResolutionTests.test_confirmed_gjb_constraint_is_identical_across_filename_modes",
+            "tests/test_analysis_identity_reselect.py::AnalysisIdentityReselectTests.test_gate_only_reselects_ancestor_sibling_or_cross_branch_results",
+            "tests/test_analysis_prompts.py::AnalysisPromptSplitTests.test_architecture_repair_reuses_minimal_candidates_and_allows_null"
+          ],
+          "semanticReason": "分类范围、标准叶节点和文件名约束由现行 Scope/Prompt/Identity 测试共同冻结。"
+        },
+        {
+          "sourceTest": "tests/test_analysis_two_stage.py::AnalysisTwoStageTests.test_docx_body_is_read_before_session_and_reused_by_mapper",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_happy_path_preserves_stage_order_and_single_success_terminal",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_stale_claim_has_no_workspace_rag_or_terminal_side_effect",
+            "tests/test_analysis_application.py::RunAnalysisTaskTests.test_interaction_audit_failure_prevents_knowledge_and_preserves_session",
+          "tests/test_analysis_batch.py::AnalysisBatchSchemaAndAdapterTests.test_thirty_two_items_are_committed_atomically_with_stable_batch_and_dispatch_order"
+          ],
+          "semanticReason": "两阶段会话顺序、预算、审计与失败收敛由现行 Application 和 RAG Gateway 测试承接。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_report_service.py",
+      "sourceSnapshotSha256": "8c044796b40a251d38ec550cd688cc473723480a646f5932a1f4a73bceed9baf",
+      "sourceMethodCount": 9,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_ensure_report_html_wraps_plain_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_domain.py::ReportResultAndCallbackTests.test_plain_text_is_escaped_and_wrapped"
+          ],
+          "semanticReason": "HTML 规范化是 Report Domain 纯规则。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_build_report_callback_payload_uses_fixed_success_message",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_domain.py::ReportResultAndCallbackTests.test_success_and_failure_callbacks_keep_fixed_messages"
+          ],
+          "semanticReason": "成功/失败 Callback 固定文案由 Report Domain 统一冻结。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_extract_text_from_word_reads_paragraphs_and_table_cells",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_io_adapters.py::ReportIoAdapterTests.test_word_template_extractor_reads_paragraphs_and_table_cells"
+          ],
+          "semanticReason": "Word 段落与表格单元格读取已迁入 Report I/O Adapter 边界测试。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_run_report_task_normalizes_mhtml_before_prepare_upload_files",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_application.py::RunReportApplicationTests.test_success_path_preserves_order_and_audits_before_terminal",
+            "tests/test_report_application.py::RunReportApplicationTests.test_normalization_has_explicit_fallback_and_strict_artifact_contract",
+            "tests/test_report_io_adapters.py::ReportIoAdapterTests.test_legacy_file_adapter_downloads_at_call_time_and_republishes_every_stage"
+          ],
+          "semanticReason": "旧 Report Worker 的下载、规范化、Prompt 和终态顺序已拆到 Application/I/O Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_run_report_task_falls_back_to_original_file_when_mhtml_normalization_fails",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_application.py::RunReportApplicationTests.test_success_path_preserves_order_and_audits_before_terminal",
+            "tests/test_report_application.py::RunReportApplicationTests.test_normalization_has_explicit_fallback_and_strict_artifact_contract",
+            "tests/test_report_io_adapters.py::ReportIoAdapterTests.test_legacy_file_adapter_downloads_at_call_time_and_republishes_every_stage"
+          ],
+          "semanticReason": "旧 Report Worker 的下载、规范化、Prompt 和终态顺序已拆到 Application/I/O Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_run_report_task_marks_success",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_application.py::RunReportApplicationTests.test_success_path_preserves_order_and_audits_before_terminal",
+            "tests/test_report_application.py::RunReportApplicationTests.test_normalization_has_explicit_fallback_and_strict_artifact_contract",
+            "tests/test_report_io_adapters.py::ReportIoAdapterTests.test_legacy_file_adapter_downloads_at_call_time_and_republishes_every_stage"
+          ],
+          "semanticReason": "旧 Report Worker 的下载、规范化、Prompt 和终态顺序已拆到 Application/I/O Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_run_report_task_keeps_empty_rag_result_success_and_logs_quality_signal",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_application.py::RunReportApplicationTests.test_empty_rag_result_remains_success_with_internal_signal"
+          ],
+          "semanticReason": "空 RAG 仍成功且只记录内部质量信号由现行 Application 冻结。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_run_report_task_uses_extracted_word_template_text_in_prompt",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_application.py::RunReportApplicationTests.test_success_path_preserves_order_and_audits_before_terminal",
+            "tests/test_report_application.py::RunReportApplicationTests.test_normalization_has_explicit_fallback_and_strict_artifact_contract",
+            "tests/test_report_io_adapters.py::ReportIoAdapterTests.test_legacy_file_adapter_downloads_at_call_time_and_republishes_every_stage"
+          ],
+          "semanticReason": "旧 Report Worker 的下载、规范化、Prompt 和终态顺序已拆到 Application/I/O Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_report_service.py::LLMReportServiceTests.test_run_report_task_fails_when_word_template_has_no_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_report_application.py::RunReportApplicationTests.test_empty_template_fails_before_rag_and_sends_failure_callback"
+          ],
+          "semanticReason": "空模板失败顺序由现行 Application 严格 Fake 冻结。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_weaponry_service.py",
+      "sourceSnapshotSha256": "2dc8904a368a05e88fede9ed73ede91f9037cfb41daf382fb58169ecb40b7427",
+      "sourceMethodCount": 33,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestAnythingLLMHTTPBoundary.test_vector_search_delegates_to_public_client_method",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryAnythingLLMRetrievalAdapterTests.test_retrieval_uses_task_workspace_strong_source_mapping_and_score_mode",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_normalizes_source_and_allows_optional_fields"
+          ],
+          "semanticReason": "供应商 HTTP 与 Vector Search 协议由 Integration Client 和生产 Adapter 各自验证。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestAnythingLLMHTTPBoundary.test_workspace_document_list_delegates_to_public_client_method",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryAnythingLLMRetrievalAdapterTests.test_retrieval_uses_task_workspace_strong_source_mapping_and_score_mode",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_normalizes_source_and_allows_optional_fields"
+          ],
+          "semanticReason": "供应商 HTTP 与 Vector Search 协议由 Integration Client 和生产 Adapter 各自验证。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestAnythingLLMHTTPBoundary.test_weaponry_source_contains_no_anythingllm_http_escape_hatch",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryAnythingLLMRetrievalAdapterTests.test_retrieval_uses_task_workspace_strong_source_mapping_and_score_mode",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_normalizes_source_and_allows_optional_fields"
+          ],
+          "semanticReason": "供应商 HTTP 与 Vector Search 协议由 Integration Client 和生产 Adapter 各自验证。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryExtractionStrategy.test_explicit_mode_one_is_rejected_before_vector_search",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestStripDocumentMetadata.test_strips_metadata_prefix",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestStripDocumentMetadata.test_no_metadata_returns_stripped",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestStripDocumentMetadata.test_empty_string",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestStripDocumentMetadata.test_none_like_empty",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestStripDocumentMetadata.test_metadata_only",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_extract_chunk_source_name_from_metadata_or_raw_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_terms_and_target_source_detection",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryOptionalAdaptersTests.test_no_auxiliary_is_zero_io_and_terms_failure_degrades"
+          ],
+          "semanticReason": "旧 Terms 搬移/恢复路径不迁移；只冻结现行可选辅助上下文的零 I/O 与降级语义。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_target_document_records_returns_all_documents_in_current_category",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_explicit_cross_category_scope_preserves_request_order_and_identity",
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_category_scope_has_repository_independent_stable_order_and_may_be_empty"
+          ],
+          "semanticReason": "显式/分类文档范围、歧义与稳定顺序由现行 DocumentScope Adapter 统一负责。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_resolve_selected_documents_accepts_cross_category_and_preserves_order",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_explicit_cross_category_scope_preserves_request_order_and_identity",
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_category_scope_has_repository_independent_stable_order_and_may_be_empty"
+          ],
+          "semanticReason": "显式/分类文档范围、歧义与稳定顺序由现行 DocumentScope Adapter 统一负责。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_resolve_selected_documents_rejects_ambiguous_same_file_name",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_explicit_cross_category_scope_preserves_request_order_and_identity",
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_category_scope_has_repository_independent_stable_order_and_may_be_empty"
+          ],
+          "semanticReason": "显式/分类文档范围、歧义与稳定顺序由现行 DocumentScope Adapter 统一负责。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_resolve_selected_documents_rejects_same_external_document_path",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_explicit_cross_category_scope_preserves_request_order_and_identity",
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_category_scope_has_repository_independent_stable_order_and_may_be_empty"
+          ],
+          "semanticReason": "显式/分类文档范围、歧义与稳定顺序由现行 DocumentScope Adapter 统一负责。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_resolve_selected_documents_rejects_unknown_file",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_explicit_cross_category_scope_preserves_request_order_and_identity",
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_category_scope_has_repository_independent_stable_order_and_may_be_empty"
+          ],
+          "semanticReason": "显式/分类文档范围、歧义与稳定顺序由现行 DocumentScope Adapter 统一负责。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_target_document_records_reject_invalid_database_contract",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_explicit_cross_category_scope_preserves_request_order_and_identity",
+            "tests/test_weaponry_document_scope.py::WeaponryDocumentScopeSQLiteTests.test_category_scope_has_repository_independent_stable_order_and_may_be_empty"
+          ],
+          "semanticReason": "显式/分类文档范围、歧义与稳定顺序由现行 DocumentScope Adapter 统一负责。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_resolve_original_source_name_for_mode2_callback",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_prepare_context_uses_ingested_mhtml_pdf_name_for_source_mapping",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_prepare_context_rejects_document_without_ingested_file_name",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_query_input_field_returns_requested_original_name_for_mhtml_pdf_source",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_retrieval_quality.py::WeaponryChunkQualityTests.test_normalizer_removes_only_prefix_metadata_and_repairs_cjk_spacing",
+            "tests/test_weaponry_domain.py::WeaponrySourceAndPromptRuleTests.test_source_mapping_supports_provider_aliases_without_guessing_public_name"
+          ],
+          "semanticReason": "Chunk 清洗、来源身份和 Evidence Selection 已归属现行 Domain/质量门禁。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_format_terms_rule_context_uses_only_term_sources",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryOptionalAdaptersTests.test_no_auxiliary_is_zero_io_and_terms_failure_degrades"
+          ],
+          "semanticReason": "旧 Terms 搬移/恢复路径不迁移；只冻结现行可选辅助上下文的零 I/O 与降级语义。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_query_input_field_filters_terms_from_target_evidence",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryOptionalAdaptersTests.test_no_auxiliary_is_zero_io_and_terms_failure_degrades"
+          ],
+          "semanticReason": "旧 Terms 搬移/恢复路径不迁移；只冻结现行可选辅助上下文的零 I/O 与降级语义。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_query_input_field_skips_terms_rule_context_when_disabled",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryOptionalAdaptersTests.test_no_auxiliary_is_zero_io_and_terms_failure_degrades"
+          ],
+          "semanticReason": "旧 Terms 搬移/恢复路径不迁移；只冻结现行可选辅助上下文的零 I/O 与降级语义。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_prepare_context_moves_terms_out_of_target_workspace_and_restore",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryOptionalAdaptersTests.test_no_auxiliary_is_zero_io_and_terms_failure_degrades"
+          ],
+          "semanticReason": "旧 Terms 搬移/恢复路径不迁移；只冻结现行可选辅助上下文的零 I/O 与降级语义。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryRetrievalSplitting.test_ensure_terms_workspace_reuses_existing_and_adds_only_missing",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_production_adapters.py::WeaponryOptionalAdaptersTests.test_no_auxiliary_is_zero_io_and_terms_failure_degrades"
+          ],
+          "semanticReason": "旧 Terms 搬移/恢复路径不迁移；只冻结现行可选辅助上下文的零 I/O 与降级语义。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryTableFieldExtraction.test_count_query_fields_counts_table_as_single_task",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_domain.py::WeaponryTableRuleTests.test_parse_merge_and_assemble_are_deterministic_and_preserve_column_extensions",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_mixed_table_without_valid_model_rows_returns_complete_empty_row"
+          ],
+          "semanticReason": "表格解析、归并、空行和字段执行已分别归属 Domain/Application。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryTableFieldExtraction.test_parse_table_json_rows_accepts_code_fenced_array",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_domain.py::WeaponryTableRuleTests.test_parse_merge_and_assemble_are_deterministic_and_preserve_column_extensions",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_mixed_table_without_valid_model_rows_returns_complete_empty_row"
+          ],
+          "semanticReason": "表格解析、归并、空行和字段执行已分别归属 Domain/Application。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryTableFieldExtraction.test_query_table_field_extracts_rows_in_one_table_prompt",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_domain.py::WeaponryTableRuleTests.test_parse_merge_and_assemble_are_deterministic_and_preserve_column_extensions",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_mixed_table_without_valid_model_rows_returns_complete_empty_row"
+          ],
+          "semanticReason": "表格解析、归并、空行和字段执行已分别归属 Domain/Application。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryTableFieldExtraction.test_query_table_field_preserves_original_template_when_no_rows",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_domain.py::WeaponryTableRuleTests.test_parse_merge_and_assemble_are_deterministic_and_preserve_column_extensions",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_mixed_table_without_valid_model_rows_returns_complete_empty_row"
+          ],
+          "semanticReason": "表格解析、归并、空行和字段执行已分别归属 Domain/Application。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponryTableFieldExtraction.test_query_table_field_preserves_original_template_when_model_returns_empty_rows",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_domain.py::WeaponryTableRuleTests.test_parse_merge_and_assemble_are_deterministic_and_preserve_column_extensions",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_mixed_table_without_valid_model_rows_returns_complete_empty_row"
+          ],
+          "semanticReason": "表格解析、归并、空行和字段执行已分别归属 Domain/Application。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponrySelectedFilesTask.test_selected_files_use_and_cleanup_temporary_workspace",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_success_matches_golden_and_calls_documents_in_frozen_order",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_cleanup_failure_keeps_recoverable_pending_record"
+          ],
+          "semanticReason": "临时资源所有权、顺序和清理由现行 Application/Resource Store 覆盖。"
+        },
+        {
+          "sourceTest": "tests/test_weaponry_service.py::TestWeaponrySelectedFilesTask.test_selected_workspace_is_deleted_when_document_binding_fails",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_success_matches_golden_and_calls_documents_in_frozen_order",
+            "tests/test_weaponry_application.py::RunWeaponryApplicationTests.test_cleanup_failure_keeps_recoverable_pending_record"
+          ],
+          "semanticReason": "临时资源所有权、顺序和清理由现行 Application/Resource Store 覆盖。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_translation_service.py",
+      "sourceSnapshotSha256": "c843f5e0e976e91d9de6f507106752145b2006015e0dbb9d90fa612ff39048b8",
+      "sourceMethodCount": 10,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_translate_text_only_defaults_to_machine_translation",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag"
+          ],
+          "semanticReason": "翻译模式已从环境隐式选择改为接受时冻结的 TranslationMode，并在窄 Adapter 验证。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_translate_text_only_can_use_llm_from_env",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag"
+          ],
+          "semanticReason": "翻译模式已从环境隐式选择改为接受时冻结的 TranslationMode，并在窄 Adapter 验证。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_translate_text_only_explicit_fast_translate_overrides_env",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag"
+          ],
+          "semanticReason": "翻译模式已从环境隐式选择改为接受时冻结的 TranslationMode，并在窄 Adapter 验证。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_translate_document_uses_translation_mode_from_env",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag"
+          ],
+          "semanticReason": "翻译模式已从环境隐式选择改为接受时冻结的 TranslationMode，并在窄 Adapter 验证。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_ensure_document_translator_recovers_half_initialized_state",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_lazy_hymt_adapter_initializes_runtime_once"
+          ],
+          "semanticReason": "半初始化恢复由现行线程安全 Lazy Adapter 的一次性工厂语义替代。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_hymt_translate_text_defaults_to_machine_translation",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag"
+          ],
+          "semanticReason": "翻译模式已从环境隐式选择改为接受时冻结的 TranslationMode，并在窄 Adapter 验证。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_argos_source_language_detection_for_supported_languages",
+          "disposition": "retired_unstable_implementation_detail",
+          "targetTests": [],
+          "semanticReason": "Argos 语言猜测和英语中转是待删除引擎私有算法，不属于公开或稳定内部契约。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_argos_source_language_detection_keeps_common_french_from_italian",
+          "disposition": "retired_unstable_implementation_detail",
+          "targetTests": [],
+          "semanticReason": "Argos 语言猜测和英语中转是待删除引擎私有算法，不属于公开或稳定内部契约。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_argos_uses_english_pivot_when_direct_chinese_package_missing",
+          "disposition": "retired_unstable_implementation_detail",
+          "targetTests": [],
+          "semanticReason": "Argos 语言猜测和英语中转是待删除引擎私有算法，不属于公开或稳定内部契约。"
+        },
+        {
+          "sourceTest": "tests/test_translation_service.py::LLMTranslationServiceTests.test_ensure_translator_skips_ollama_check_for_default_machine_translation",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_translation_module.py::TranslationModuleTests.test_hymt_adapter_maps_explicit_mode_to_legacy_engine_flag"
+          ],
+          "semanticReason": "翻译模式已从环境隐式选择改为接受时冻结的 TranslationMode，并在窄 Adapter 验证。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_document_processing_baseline.py",
+      "sourceSnapshotSha256": "cd8e102f7c80f82d9280c6b2516f1b4e8dbd20aa188d0b5a847d187bdedb0fff",
+      "sourceMethodCount": 5,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_public_contract_documents_match_readonly_stage1h_hashes",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_public_contract_documents_match_readonly_stage1h_hashes"
+          ],
+          "semanticReason": "仍有效的契约哈希、耦合资产、MHTML 语料和任务命名空间测试已改指现行模块。"
+        },
+        {
+          "sourceTest": "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_temporary_conversion_couplings_match_inventory",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_temporary_conversion_couplings_match_inventory"
+          ],
+          "semanticReason": "仍有效的契约哈希、耦合资产、MHTML 语料和任务命名空间测试已改指现行模块。"
+        },
+        {
+          "sourceTest": "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_committed_mhtml_corpus_freezes_current_text_rules",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_committed_mhtml_corpus_freezes_current_text_rules"
+          ],
+          "semanticReason": "仍有效的契约哈希、耦合资产、MHTML 语料和任务命名空间测试已改指现行模块。"
+        },
+        {
+          "sourceTest": "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_document_translator_format_dispatch_matches_baseline",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_document_processing_architecture.py::Stage1HDocumentProcessingArchitectureTests.test_translation_never_imports_document_format_adapters"
+          ],
+          "semanticReason": "旧 DocumentTranslator 格式分派已退出架构；由 DocumentProcessing/Translation 所有权门禁替代。"
+        },
+        {
+          "sourceTest": "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_fifty_task_namespaces_are_isolated_in_current_adapters",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_document_processing_baseline.py::Stage1HDocumentProcessingBaselineTests.test_fifty_task_namespaces_are_isolated_in_current_adapters"
+          ],
+          "semanticReason": "仍有效的契约哈希、耦合资产、MHTML 语料和任务命名空间测试已改指现行模块。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_mhtml_normalizer.py",
+      "sourceSnapshotSha256": "7f3587f5d3be1ca32030e3271cd9592511d8e2cabc328d7640f8beb5a94268e3",
+      "sourceMethodCount": 6,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_is_mhtml_file_recognizes_mhtml_and_mht",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_is_mhtml_file_recognizes_mhtml_and_mht"
+          ],
+          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_extract_text_from_mhtml_returns_clean_text",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_extract_text_from_mhtml_returns_clean_text"
+          ],
+          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_normalize_mhtml_file_extracts_html_text_to_markdown",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_normalize_mhtml_file_extracts_html_text_to_markdown"
+          ],
+          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_extract_retrieval_text_prefers_main_and_removes_reference_noise",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_extract_retrieval_text_prefers_main_and_removes_reference_noise"
+          ],
+          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_retrieval_text_falls_back_to_clean_body_without_main",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_retrieval_text_falls_back_to_clean_body_without_main"
+          ],
+          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+        },
+        {
+          "sourceTest": "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_normalize_mhtml_file_for_retrieval_writes_dedicated_markdown",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_mhtml_normalizer.py::MHTMLNormalizerTests.test_normalize_mhtml_file_for_retrieval_writes_dedicated_markdown"
+          ],
+          "semanticReason": "测试保留原输入输出断言，但导入已直接切到 document_processing 当前 Adapter。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_ocr_preprocessor.py",
+      "sourceSnapshotSha256": "5d2e9fdfa61db0db4b48826d88033d17b908d25c83f74635e4eb0f117b530cc8",
+      "sourceMethodCount": 7,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_uses_mineru_first",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_scanned_pdf_confirmed_failures_fallback_to_source_for_rag_only"
+          ],
+          "semanticReason": "旧路径式入口已物理删除；当前共享流水线测试直接证明 Analysis 保持 MinerU 到内置 OCR 的明确失败降级顺序。"
+        },
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_falls_back_to_builtin_ocr",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_scanned_pdf_confirmed_failures_fallback_to_source_for_rag_only"
+          ],
+          "semanticReason": "共享流水线在 MinerU 明确失败后调用一次内置 OCR；旧自由函数及其全局缓存配置不再存在。"
+        },
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_scanned_pdf_falls_back_to_original_pdf",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_scanned_pdf_confirmed_failures_fallback_to_source_for_rag_only"
+          ],
+          "semanticReason": "共享流水线测试覆盖 MinerU 与内置 OCR 均明确失败后仅把原 PDF 交给 RAG、且不伪装成正文 Artifact。"
+        },
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_analysis_engine_ocr_skips_mineru",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_report_builtin_ocr_failure_falls_back_to_source_pdf"
+          ],
+          "semanticReason": "显式选择内置 OCR 时不启动 MinerU 的规则现由共享 DocumentProcessing 消费切换测试覆盖。"
+        },
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_non_scanned_pdf_keeps_original",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_ocr_preprocessor.py::OCRPreprocessorRemovalTests.test_removed_path_functions_are_not_available"
+          ],
+          "semanticReason": "该断言属于已删除自由函数的旧返回路径；永久门禁改为禁止该路径式 API 回归，PDF 当前行为由共享流水线负责。"
+        },
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_default_prepare_file_for_upload_keeps_builtin_ocr",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_ocr_preprocessor.py::OCRPreprocessorRemovalTests.test_removed_path_functions_are_not_available",
+            "tests/test_stage1h_consumer_cutover.py::Stage1HConsumerCutoverTests.test_report_builtin_ocr_failure_falls_back_to_source_pdf"
+          ],
+          "semanticReason": "旧上传准备函数已删除；Report 的内置 OCR 选择由共享流水线规则测试继续覆盖。"
+        },
+        {
+          "sourceTest": "tests/test_ocr_preprocessor.py::OCRPreprocessorTests.test_mineru_pdf_to_markdown_caches_markdown_with_metadata",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_ocr_preprocessor.py::OCRPreprocessorRemovalTests.test_current_builtin_ocr_adapter_owns_materialization_root",
+            "tests/test_document_processing_formats.py::DocumentFormatAdapterTests.test_mineru_fifty_tasks_use_distinct_scratch_and_provider_identity"
+          ],
+          "semanticReason": "全局 Markdown 缓存已删除；当前门禁验证处理器显式拥有物化根，并验证 MinerU 并发任务使用独立 scratch 与供应商身份。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_anythingllm_client.py",
+      "sourceSnapshotSha256": "f7526606a4ad2400ca00b9d86c87919b6a2824dd29a65a88c4482d9acdbad6f3",
+      "sourceMethodCount": 9,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_send_prompt_returns_legacy_cleaned_and_raw_response_keys",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_threads.py::AnythingLLMThreadClientTests.test_ask_cleans_answer_normalizes_sources_and_omits_empty_files"
+          ],
+          "semanticReason": "Prompt 结果改由规范化 Thread DTO 表达，不继续冻结旧 cleaned/raw 字典别名。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_stream_chat_delegates_arguments_and_yields_original_chunks",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_threads.py::AnythingLLMThreadClientTests.test_stream_yields_chunks_and_closes_inner_generator_early"
+          ],
+          "semanticReason": "流式参数与资源释放由 Threads Client 验证。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_upload_document_returns_both_new_and_legacy_aliases",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_documents.py::AnythingLLMDocumentClientTests.test_upload_returns_normalized_document_from_real_response_fields"
+          ],
+          "semanticReason": "上传响应只冻结现行规范化 DTO，不保留旧包装别名。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_vector_search_delegates_top_n_and_preserves_retrieval_fields",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_list_workspaces_normalizes_slug_and_id_aliases",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_can_explicitly_override_threshold_for_calibration",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_update_embeddings_normalizes_paths_and_validates_workspace"
+          ],
+          "semanticReason": "Workspace 列表、检索阈值和 Embedding 更新由现行 Workspaces Client 冻结。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_vector_search_delegates_explicit_calibration_threshold",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_list_workspaces_normalizes_slug_and_id_aliases",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_can_explicitly_override_threshold_for_calibration",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_update_embeddings_normalizes_paths_and_validates_workspace"
+          ],
+          "semanticReason": "Workspace 列表、检索阈值和 Embedding 更新由现行 Workspaces Client 冻结。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_list_workspace_documents_returns_legacy_aliases",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_list_workspaces_normalizes_slug_and_id_aliases",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_can_explicitly_override_threshold_for_calibration",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_update_embeddings_normalizes_paths_and_validates_workspace"
+          ],
+          "semanticReason": "Workspace 列表、检索阈值和 Embedding 更新由现行 Workspaces Client 冻结。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_update_embeddings_keeps_legacy_best_effort_follow_up",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_list_workspaces_normalizes_slug_and_id_aliases",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_can_explicitly_override_threshold_for_calibration",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_update_embeddings_normalizes_paths_and_validates_workspace"
+          ],
+          "semanticReason": "Workspace 列表、检索阈值和 Embedding 更新由现行 Workspaces Client 冻结。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_list_workspaces_converts_dto_and_failure_keeps_empty_list_contract",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_list_workspaces_normalizes_slug_and_id_aliases",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_vector_search_can_explicitly_override_threshold_for_calibration",
+            "tests/test_anythingllm_workspaces.py::AnythingLLMWorkspaceClientTests.test_update_embeddings_normalizes_paths_and_validates_workspace"
+          ],
+          "semanticReason": "Workspace 列表、检索阈值和 Embedding 更新由现行 Workspaces Client 冻结。"
+        },
+        {
+          "sourceTest": "tests/test_anythingllm_client.py::AnythingLLMClientFacadeTests.test_constructor_closes_session_when_transport_configuration_is_invalid",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_anythingllm_transport.py::AnythingLLMTransportTests.test_api_key_and_timeout_are_validated_before_creating_session"
+          ],
+          "semanticReason": "Transport 配置必须在 Session 构造前校验。"
+        }
+      ]
+    },
+    {
+      "source": "tests/test_chat_debug_preview.py",
+      "sourceSnapshotSha256": "6e5896677fda681cabb65cd9446f043ba2bfc8d17151c6704ee2575dc37fa31a",
+      "sourceMethodCount": 4,
+      "methodMappings": [
+        {
+          "sourceTest": "tests/test_chat_debug_preview.py::ChatDebugPreviewTests.test_bootstrap_uses_active_scope_and_counts_bindings_separately",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_debug_adapters.py::DebugAdapterTests.test_chat_adapter_projects_active_scope_and_binding_count"
+          ],
+          "semanticReason": "Chat Debug 的快照读取、错误收敛和 HTTP 投影已按 Adapter/Application/Route 分层。"
+        },
+        {
+          "sourceTest": "tests/test_chat_debug_preview.py::ChatDebugPreviewTests.test_deleted_session_is_hidden_from_debug_list",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_debug_adapters.py::DebugAdapterTests.test_chat_adapter_hides_deleted_sessions"
+          ],
+          "semanticReason": "Chat Debug 的快照读取、错误收敛和 HTTP 投影已按 Adapter/Application/Route 分层。"
+        },
+        {
+          "sourceTest": "tests/test_chat_debug_preview.py::ChatDebugPreviewTests.test_legacy_string_chat_id_is_not_returned_to_debug_page",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_debug_adapters.py::DebugAdapterTests.test_chat_adapter_hides_weaponry_identity_from_file_debug"
+          ],
+          "semanticReason": "旧字符串 chatId 已按无需兼容决策退出；现行等价隔离门禁确保文件 Debug 不展示知识谱系复合身份。"
+        },
+        {
+          "sourceTest": "tests/test_chat_debug_preview.py::ChatDebugPreviewTests.test_query_failure_returns_stable_empty_error_payload",
+          "disposition": "migrated",
+          "targetTests": [
+            "tests/test_debug_application.py::DebugApplicationTests.test_chat_query_converges_failure_to_stable_empty_result",
+            "tests/test_chat_debug_routes.py::ChatDebugRouteTests.test_chat_bootstrap_query_failure_keeps_http_200_and_stable_shape"
+          ],
+          "semanticReason": "Chat Debug 的快照读取、错误收敛和 HTTP 投影已按 Adapter/Application/Route 分层。"
+        }
+      ]
+    }
+  ]
+}

@@ -41,8 +41,10 @@ from app.integrations.anythingllm.models import (  # noqa: E402
 from app.integrations.anythingllm.policies import (  # noqa: E402
     document_rag_workspace_settings,
 )
+from app.modules.weaponry.adapters import (  # noqa: E402
+    AnythingLLMWeaponryClientFactory,
+)
 from app.services.core.config import load_anythingllm_config  # noqa: E402
-from app.services.utils.anythingllm_client import AnythingLLMClient  # noqa: E402
 from scripts.calibrate_weaponry_retrieval_quality import (  # noqa: E402
     CalibrationQuery,
     _load_queries,
@@ -695,10 +697,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     queries = _load_queries(args.query_file.resolve())
     config = load_anythingllm_config()
-    with AnythingLLMClient(config) as client:
+    with AnythingLLMWeaponryClientFactory(config).create() as clients:
         output = run_isolated_calibration(
-            client.workspaces,
-            client.documents,
+            clients.workspaces,
+            clients.documents,
             source_json=args.source_json,
             storage_root=args.storage_root,
             queries=queries,

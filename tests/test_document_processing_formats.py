@@ -205,6 +205,51 @@ class _FakeAsyncClient:
 
 
 class DocumentFormatAdapterTests(unittest.TestCase):
+    def test_pptx_renderer_preserves_current_and_legacy_list_shapes(self) -> None:
+        """MinerU 当前使用 content 保存列表；同时兼容早期 list_items 结构。"""
+
+        pages = [
+            [
+                {"type": "title", "content": "系统组成"},
+                {
+                    "type": "list",
+                    "attribute": "ordered",
+                    "start": 3,
+                    "content": [
+                        {"type": "text", "content": "指挥模块"},
+                        {
+                            "type": "list",
+                            "attribute": "unordered",
+                            "content": [
+                                {"type": "text", "content": "通信单元"},
+                                {"type": "text", "content": "导航单元"},
+                            ],
+                        },
+                        {"type": "text", "content": "保障模块"},
+                    ],
+                },
+                {
+                    "type": "list",
+                    "attribute": "unordered",
+                    "list_items": [
+                        {"content": "旧版列表项"},
+                    ],
+                },
+            ]
+        ]
+
+        markdown = MinerUConverter._render_pptx_pages_to_markdown(
+            pages,
+            extract_images=True,
+        )
+
+        self.assertIn("# 系统组成", markdown)
+        self.assertIn("3. 指挥模块", markdown)
+        self.assertIn("    - 通信单元", markdown)
+        self.assertIn("    - 导航单元", markdown)
+        self.assertIn("4. 保障模块", markdown)
+        self.assertIn("- 旧版列表项", markdown)
+
     def test_mineru_profile_persists_only_redacted_endpoint_fingerprint(
         self,
     ) -> None:

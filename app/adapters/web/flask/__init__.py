@@ -9,6 +9,11 @@ from .analysis_submission import (
     AnalysisPresentedResponse,
     AnalysisSubmissionResponsePresenter,
 )
+from .check_task_requests import (
+    CheckTaskRequestValidationError,
+    ParsedCheckTaskRequest,
+    parse_check_task_request,
+)
 from .progress_connection import ProgressConnectionRegistry
 from .progress_requests import (
     ProgressRequestValidationError,
@@ -34,7 +39,9 @@ __all__ = [
     "AnalysisPresentedResponse",
     "AnalysisRequestValidationError",
     "AnalysisSubmissionResponsePresenter",
+    "CheckTaskRequestValidationError",
     "ParsedAnalysisRequest",
+    "ParsedCheckTaskRequest",
     "ProgressConnectionRegistry",
     "ProgressRequestValidationError",
     "ParsedReportRequest",
@@ -44,6 +51,7 @@ __all__ = [
     "ReassignRequestValidationError",
     "WeaponryRequestValidationError",
     "parse_analysis_flask_request",
+    "parse_check_task_request",
     "parse_progress_subscription",
     "parse_report_request",
     "parse_reassign_request",

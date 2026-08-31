@@ -52,8 +52,8 @@ class _KnowledgeGatewayHarness:
         self.workspace_client = Mock(spec=AnythingLLMWorkspaceClient)
         self.workspace = AnythingLLMWorkspace(
             id="workspace-1",
-            slug="architectureid-100",
-            name="architectureId-100",
+            slug="archid-100",
+            name="archId-100",
         )
         self.workspace_client.create_workspace.return_value = self.workspace
         self.workspace_client.get_workspace.return_value = self.workspace
@@ -76,7 +76,7 @@ class _KnowledgeGatewayHarness:
             user_id=1,
         )
         self.collection = self.gateway.ensure_collection(
-            CollectionSpec(architecture_id=100, name="architectureId-100")
+            CollectionSpec(architecture_id=100, name="archId-100")
         )
 
     @staticmethod
@@ -119,6 +119,7 @@ class _KnowledgeGatewayHarness:
             external_location=document.location,
             content_sha256=content_sha256,
             ingested_file_name="hash.pdf",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
 
     def _upload(self, _file_path: str, **_kwargs) -> AnythingLLMDocument:
@@ -186,15 +187,27 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
             )
 
             reused = second_gateway.ensure_collection(
-                CollectionSpec(architecture_id=100, name="architectureId-100")
+                CollectionSpec(architecture_id=100, name="archId-100")
             )
 
             self.assertEqual(harness.collection, reused)
             harness.workspace_client.get_workspace.assert_called_with(
-                "architectureid-100",
+                "archid-100",
+                user_id=1,
+            )
+            harness.workspace_client.create_workspace.assert_called_once_with(
+                "archId-100",
+                settings=None,
                 user_id=1,
             )
             self.assertEqual(1, harness.workspace_client.create_workspace.call_count)
+            with sqlite3.connect(harness.task_service.db_path) as connection:
+                persisted_name = connection.execute(
+                    "SELECT collection_name FROM knowledge_index_collections "
+                    "WHERE architecture_id = ?",
+                    (100,),
+                ).fetchone()[0]
+            self.assertEqual("archId-100", persisted_name)
 
     def test_workspace_policy_update_failure_is_retried(self):
         """远程策略更新失败时不得提前标记版本，下一任务必须继续应用。"""
@@ -217,13 +230,13 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 user_id=1,
                 workspace_settings={"chatMode": "query", "topN": 6},
             )
-            spec = CollectionSpec(architecture_id=100, name="architectureId-100")
+            spec = CollectionSpec(architecture_id=100, name="archId-100")
 
             with self.assertRaisesRegex(RuntimeError, "workspace update failed"):
                 gateway.ensure_collection(spec)
             collection = gateway.ensure_collection(spec)
 
-            self.assertEqual("architectureid-100", collection.ref)
+            self.assertEqual("archid-100", collection.ref)
             self.assertEqual(2, harness.workspace_client.update_workspace.call_count)
 
     def test_prepared_document_is_transferred_without_upload_or_metadata_api(self):
@@ -251,7 +264,11 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
             self.assertEqual(record["ingested_file_name"], "hash.pdf")
             self.assertEqual(
                 record["metadata"],
-                {"country": "中国", "channel": "陆基"},
+                {
+                    "country": "中国",
+                    "channel": "陆基",
+                    "docSource": prepared.structured_source_key,
+                },
             )
             operation = harness.task_service.knowledge_index_operations.get(
                 harness.collection.ref,
@@ -274,6 +291,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 external_location=location,
                 content_sha256="b" * 64,
                 ingested_file_name="prepared-hash.xlsx",
+                structured_source_key="docsense_ref:" + "b" * 32,
             )
 
             def find_with_workspace_id(
@@ -417,6 +435,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 external_location=old_location,
                 content_sha256="a" * 64,
                 ingested_file_name="prepared-old.xlsx",
+                structured_source_key="docsense_ref:" + "a" * 32,
             )
             harness.gateway.store_prepared_document(
                 harness.collection,
@@ -435,6 +454,7 @@ class AnythingLLMKnowledgeGatewayTests(unittest.TestCase):
                 external_location=new_location,
                 content_sha256="b" * 64,
                 ingested_file_name="prepared-new.xlsx",
+                structured_source_key="docsense_ref:" + "b" * 32,
             )
             harness.document_client.delete_document_artifact.side_effect = (
                 AssertionError("替换旧 XLSX 不应删除全局目录")

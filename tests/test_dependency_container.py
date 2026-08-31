@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 import os
 import tempfile
 import threading
@@ -17,16 +18,15 @@ from app.integrations.anythingllm.factory import (
     AnythingLLMGatewayFactory,
     AnythingLLMKnowledgeIndexFactory,
 )
-from app.integrations.anythingllm.chat_factory import AnythingLLMChatFactory
+from app.modules.chat.adapters.anythingllm_factory import AnythingLLMChatFactory
 from app.integrations.anythingllm.transport import AnythingLLMTransport
 from app.ports import (
-    ChatConversationFactory,
-    ChatConversationPort,
     DocumentRagFactory,
     DocumentRagPort,
     KnowledgeIndexFactory,
     KnowledgeIndexPort,
 )
+from app.modules.chat.ports import ChatConversationFactory, ChatConversationPort
 from app.services.core.config import (
     ANALYSIS_CLASSIFICATION_MODE_TOPK_TWO_STAGE,
     ANALYSIS_CLASSIFICATION_MODE_TOPK_SINGLE,
@@ -54,6 +54,7 @@ from app.modules.analysis.application import (
     RecoverAnalysisCallbackSynchronously,
     SubmitAnalysisBatch,
 )
+from app.modules.debug.composition import compose_debug_application_services
 from app.modules.report.adapters import (
     AnythingLLMReportClientFactory,
     ReportTaskCommandCodec,
@@ -79,7 +80,7 @@ from app.modules.weaponry.adapters import (
 from app.modules.weaponry.composition import (
     compose_weaponry_application_services,
 )
-from app.services.chat import (
+from app.modules.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
     ChatCommandService,
@@ -122,9 +123,16 @@ from tests.fakes import (
 class _NoopWeaponryMaintenance:
     """1D-5 容器生命周期测试使用的显式有界维护替身。"""
 
-    def run_once(self, *, limit: int) -> object:
+    def run_once(
+        self,
+        *,
+        limit: int,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> object:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit 必须是正整数")
+        if stop_requested is not None and stop_requested():
+            return {"limit": limit, "stopped": True}
         return {"limit": limit}
 
 
@@ -657,7 +665,6 @@ class ApplicationContainerRouteTests(unittest.TestCase):
                 callback_timeout=5.0,
                 task_db_path=f"{self.runtime_directory}/tasks.sqlite3",
                 download_timeout=5.0,
-                download_dir=self.runtime_directory,
             ),
             anythingllm_config=AnythingLLMConfig(
                 base_url="http://anythingllm.invalid/api/v1",
@@ -667,6 +674,10 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             ),
             report_infrastructure_config=(
                 ReportInfrastructureConfig.single_instance()
+            ),
+            debug_services=compose_debug_application_services(
+                chat_store=chat_store,
+                kb_service=kb_service,
             ),
         )
 
@@ -721,6 +732,23 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         self.assertIsInstance(self.services.chat_title, ChatTitleService)
         self.assertIsInstance(self.services.chat_abort, ChatAbortService)
         self.assertIsInstance(self.services.chat_delete, ChatDeleteService)
+        self.assertIs(self.services.chat_services.store, self.services.chat_store)
+        self.assertIs(
+            self.services.chat_services.commands,
+            self.services.chat_commands,
+        )
+        self.assertIs(
+            self.services.chat_services.run_executor,
+            self.services.chat_run_executor,
+        )
+        self.assertIs(
+            self.services.chat_services.dispatcher,
+            self.services.chat_dispatcher,
+        )
+        self.assertIs(
+            self.services.chat_services.history,
+            self.services.chat_history,
+        )
         self.assertEqual(
             AnalysisClassificationConfig.topk_two_stage(),
             self.services.analysis_classification_config,
@@ -833,7 +861,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
         register.assert_not_called()
 
     def test_production_container_constructs_one_shared_office_preparer(self) -> None:
-        """Report 与 Analysis 必须引用同一个进程级转换容量许可。"""
+        """共享文档处理器与应用容器必须引用同一个进程级 Office 转换器。"""
 
         source_path = Path(__file__).resolve().parents[1] / "app" / "container.py"
         module = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -850,8 +878,9 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             and isinstance(node.func, ast.Name)
             and node.func.id == "LibreOfficeLegacyOfficePreparer"
         ]
-        # 生产组合根内部只能构造一次，随后把同一局部变量注入 Report、Analysis
-        # 和 ApplicationServices；离线默认依赖工厂不属于这个函数作用域。
+        # 生产组合根内部只能构造一次。Report 与 Analysis 已统一依赖共享文档处理器，
+        # 因此 Office 转换器只注入该处理器和 ApplicationServices；离线默认依赖工厂
+        # 不属于这个函数作用域。
         self.assertEqual(1, len(constructor_calls))
 
         injected_targets: dict[str, str] = {}
@@ -859,8 +888,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
             if node.func.id not in {
-                "LegacyReportFileAdapter",
-                "LegacyAnalysisFilePreparationAdapter",
+                "LocalDocumentPreparationAdapter",
                 "ApplicationServices",
             }:
                 continue
@@ -877,10 +905,7 @@ class ApplicationContainerRouteTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "LegacyReportFileAdapter": "legacy_office_preparer",
-                "LegacyAnalysisFilePreparationAdapter": (
-                    "legacy_office_preparer"
-                ),
+                "LocalDocumentPreparationAdapter": "legacy_office_preparer",
                 "ApplicationServices": "legacy_office_preparer",
             },
             injected_targets,

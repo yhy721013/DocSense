@@ -1,17 +1,15 @@
-"""把现有下载、规范化、OCR 准备和 Word 提取能力适配为报告文件端口。"""
+"""把下载、共享文档准备和 Word 提取能力适配为报告文件端口。"""
 
 from __future__ import annotations
 
 import logging
 import re
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 from urllib.parse import unquote, urlsplit
 
 from app.modules.document_processing import (
     DocumentRepresentation,
-    LegacyOfficePreparer,
-    is_legacy_office_path,
 )
 from app.modules.document_processing.adapters import (
     LocalDocumentPreparationAdapter,
@@ -31,10 +29,6 @@ from app.modules.report.ports import (
     ReportTemplateDownload,
 )
 from app.services.utils.file_downloader import download_to_temp_file
-from app.modules.document_processing.adapters.path_compat import (
-    normalize_file_for_llm,
-)
-from app.services.utils.rag_pipeline import prepare_upload_files
 from app.services.utils.word_extractor import extract_text_from_word
 
 from .local_artifacts import LocalReportArtifactAdapter
@@ -45,31 +39,27 @@ logger = logging.getLogger(__name__)
 _SAFE_SUFFIX_PATTERN = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
 
 Downloader = Callable[[str, str, str, float, int], str]
-Normalizer = Callable[[str], str]
-UploadPreparer = Callable[[str], Sequence[str]]
 WordExtractor = Callable[[str], str]
 
 
 class LegacyReportFileAdapter:
-    """复用遗留文件能力，同时补齐任务隔离、原子发布和稳定错误分类。
+    """复用既有下载与模板提取能力，并统一接入共享文档处理链。
 
-    legacy 工具仍以真实路径工作；路径只在本适配器内部出现。每个工具的输出都会重新复制
-    到当前 task 的明确 Artifact 类别中，避免 normalizer/OCR 返回任意宿主路径后被直接交
-    给 RAG。下载仍保持当前 60 秒超时和受控离线 URL 口径，本阶段不新增 URL host 策略。
+    下载器仍以真实路径工作，但返回路径只能位于当前任务的私有 staging 目录。源文件随后
+    交给共享 ``document_preparer``，处理结果再映射到当前 task 的明确 Artifact 类别，
+    Report 不再维护独立的规范化、OCR 或 MinerU 分支。下载仍保持既有超时和大小限制，
+    本适配器不新增 URL host 策略。
     """
 
     def __init__(
         self,
         artifacts: LocalReportArtifactAdapter,
         *,
+        document_preparer: LocalDocumentPreparationAdapter,
         download_timeout: float = 60.0,
         max_download_bytes: int = 512 * 1024 * 1024,
         downloader: Downloader = download_to_temp_file,
-        normalizer: Normalizer = normalize_file_for_llm,
-        upload_preparer: UploadPreparer = prepare_upload_files,
         word_extractor: WordExtractor = extract_text_from_word,
-        legacy_office_preparer: LegacyOfficePreparer | None = None,
-        document_preparer: LocalDocumentPreparationAdapter | None = None,
     ) -> None:
         if not isinstance(artifacts, LocalReportArtifactAdapter):
             raise TypeError("artifacts 必须是 LocalReportArtifactAdapter")
@@ -87,17 +77,11 @@ class LegacyReportFileAdapter:
             raise ValueError("max_download_bytes 必须是正整数")
         for name, dependency in (
             ("downloader", downloader),
-            ("normalizer", normalizer),
-            ("upload_preparer", upload_preparer),
             ("word_extractor", word_extractor),
         ):
             if not callable(dependency):
                 raise TypeError(f"{name} 必须可调用")
-        if legacy_office_preparer is not None and not callable(
-            getattr(legacy_office_preparer, "prepare", None)
-        ):
-            raise TypeError("legacy_office_preparer 必须实现 prepare")
-        if document_preparer is not None and not callable(
+        if not callable(
             getattr(document_preparer, "prepare", None)
         ):
             raise TypeError("document_preparer 必须实现 prepare")
@@ -105,10 +89,7 @@ class LegacyReportFileAdapter:
         self._download_timeout = float(download_timeout)
         self._max_download_bytes = max_download_bytes
         self._downloader = downloader
-        self._normalizer = normalizer
-        self._upload_preparer = upload_preparer
         self._word_extractor = word_extractor
-        self._legacy_office_preparer = legacy_office_preparer
         self._document_preparer = document_preparer
 
     def download_source(self, command: ReportSourceDownload) -> ReportArtifactRef:
@@ -160,45 +141,11 @@ class LegacyReportFileAdapter:
         )
         scope = self._scope_for(source)
         source_path = self._artifacts.resolve_path(source)
-        if self._document_preparer is not None:
-            return self._prepare_with_document_processing(
-                source,
-                source_path=source_path,
-                scope=scope,
-            )
-        if is_legacy_office_path(source_path):
-            return self._convert_legacy_source(source, source_path, scope)
-        try:
-            normalized_value = self._normalizer(str(source_path))
-            if not isinstance(normalized_value, str) or not normalized_value.strip():
-                raise ValueError("规范化工具未返回有效路径")
-            normalized_path = Path(normalized_value)
-            if not normalized_path.is_file():
-                raise FileNotFoundError("规范化结果文件不存在")
-            suffix = self._safe_suffix(normalized_path.suffix)
-            artifact = self._artifacts.publish_file(
-                scope,
-                category=ReportArtifactCategory.NORMALIZED_SOURCE,
-                source_path=normalized_path,
-                file_name=f"{source.sequence_no:04d}-normalized{suffix}",
-                sequence_no=source.sequence_no,
-            )
-        except Exception as exc:
-            logger.warning(
-                "报告源文件规范化失败: task_id=%s sequence_no=%s error_type=%s",
-                source.task_id,
-                source.sequence_no,
-                type(exc).__name__,
-                exc_info=True,
-            )
-            raise ReportSourceNormalizationError("报告源文件规范化失败") from exc
-        logger.info(
-            "报告源文件规范化完成: task_id=%s sequence_no=%s bytes=%d",
-            source.task_id,
-            source.sequence_no,
-            artifact.size_bytes or 0,
+        return self._prepare_with_document_processing(
+            source,
+            source_path=source_path,
+            scope=scope,
         )
-        return artifact
 
     def _prepare_with_document_processing(
         self,
@@ -210,7 +157,6 @@ class LegacyReportFileAdapter:
         """生产路径只调用一次共享流水线，并映射回 ReportArtifactRef。"""
 
         preparer = self._document_preparer
-        assert preparer is not None
         try:
             prepared = preparer.prepare(
                 LocalDocumentPreparationRequest(
@@ -254,71 +200,11 @@ class LegacyReportFileAdapter:
         )
         return artifact
 
-    def _convert_legacy_source(
-        self,
-        source: ReportArtifactRef,
-        source_path: Path,
-        scope,
-    ) -> ReportArtifactRef:
-        """把 legacy Office 源转为任务内 OOXML Artifact；失败禁止 raw fallback。"""
-
-        preparer = self._legacy_office_preparer
-        if preparer is None:
-            logger.error(
-                "报告 legacy Office 转换能力未配置: task_id=%s sequence_no=%s",
-                source.task_id,
-                source.sequence_no,
-            )
-            raise ReportInputError("报告源文件本地转换失败")
-
-        try:
-            job_id = f"report-{source.task_id.value}-{source.sequence_no}"
-            with preparer.prepare(source_path, job_id=job_id) as result:
-                prepared_path = Path(result.prepared_path)
-                if not result.converted or not prepared_path.is_file():
-                    raise ValueError("legacy Office 转换未返回有效 OOXML 文件")
-                suffix = self._safe_suffix(result.target_suffix)
-                if not suffix:
-                    raise ValueError("legacy Office 转换未返回有效目标扩展名")
-                artifact = self._artifacts.publish_file(
-                    scope,
-                    category=ReportArtifactCategory.NORMALIZED_SOURCE,
-                    source_path=prepared_path,
-                    file_name=(
-                        f"{source.sequence_no:04d}-normalized{suffix}"
-                    ),
-                    sequence_no=source.sequence_no,
-                )
-        except Exception as exc:
-            if isinstance(exc, ReportInputError):
-                raise
-            logger.warning(
-                "报告 legacy Office 本地转换失败: "
-                "task_id=%s sequence_no=%s error_type=%s",
-                source.task_id,
-                source.sequence_no,
-                type(exc).__name__,
-            )
-            # 底层异常可能包含 LibreOffice stdout、profile 或宿主绝对路径。核心转换层已
-            # 负责截断和脱敏诊断；报告应用层会用 logger.exception 记录这里的异常，因此
-            # 必须切断异常链，避免敏感细节被二次展开。
-            raise ReportInputError("报告源文件本地转换失败") from None
-
-        logger.info(
-            "报告 legacy Office 本地转换完成: "
-            "task_id=%s sequence_no=%s target_suffix=%s bytes=%d",
-            source.task_id,
-            source.sequence_no,
-            suffix,
-            artifact.size_bytes or 0,
-        )
-        return artifact
-
     def prepare_upload_files(
         self,
         source: ReportArtifactRef,
     ) -> tuple[ReportArtifactRef, ...]:
-        """执行现有 OCR 准备逻辑，并把全部结果按确定顺序发布为 RAG_INPUT。"""
+        """把共享 DocumentProcessing 已准备的唯一结果映射为 RAG_INPUT。"""
 
         self._require_source_artifact(
             source,
@@ -329,69 +215,29 @@ class LegacyReportFileAdapter:
         )
         source_path = self._artifacts.resolve_path(source)
         scope = self._scope_for(source)
-        if self._document_preparer is not None:
-            # normalize_source 已形成最终 prepared Markdown。这里只映射到报告既有的
-            # RAG_INPUT 生命周期类别，禁止再次运行 OCR/MinerU 形成第二条真实转换链。
-            try:
-                artifact = self._artifacts.publish_file(
-                    scope,
-                    category=ReportArtifactCategory.RAG_INPUT,
-                    source_path=source_path,
-                    file_name=(
-                        f"{source.sequence_no:04d}-001"
-                        f"{self._safe_suffix(source_path.suffix)}"
-                    ),
-                    sequence_no=source.sequence_no,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "报告 prepared Artifact 映射 RAG 输入失败: "
-                    "task_id=%s sequence_no=%s error_type=%s",
-                    source.task_id,
-                    source.sequence_no,
-                    type(exc).__name__,
-                )
-                raise ReportInputError("报告文件无法准备为 RAG 输入") from exc
-            return (artifact,)
+        # normalize_source 已形成最终 prepared Artifact。这里只映射到报告既有的
+        # RAG_INPUT 生命周期类别，禁止再次运行 OCR/MinerU 形成第二条真实转换链。
         try:
-            prepared_values = self._upload_preparer(str(source_path))
-            if isinstance(prepared_values, (str, bytes, bytearray)):
-                raise TypeError("上传准备工具必须返回路径序列")
-            prepared_paths = tuple(Path(value) for value in prepared_values)
-            if not prepared_paths:
-                raise ValueError("上传准备工具未返回文件")
-            if any(not path.is_file() for path in prepared_paths):
-                raise FileNotFoundError("上传准备结果包含不存在的文件")
-
-            artifacts: list[ReportArtifactRef] = []
-            for item_index, path in enumerate(prepared_paths, start=1):
-                suffix = self._safe_suffix(path.suffix)
-                artifacts.append(
-                    self._artifacts.publish_file(
-                        scope,
-                        category=ReportArtifactCategory.RAG_INPUT,
-                        source_path=path,
-                        file_name=(
-                            f"{source.sequence_no:04d}-{item_index:03d}{suffix}"
-                        ),
-                        sequence_no=source.sequence_no,
-                    )
-                )
+            artifact = self._artifacts.publish_file(
+                scope,
+                category=ReportArtifactCategory.RAG_INPUT,
+                source_path=source_path,
+                file_name=(
+                    f"{source.sequence_no:04d}-001"
+                    f"{self._safe_suffix(source_path.suffix)}"
+                ),
+                sequence_no=source.sequence_no,
+            )
         except Exception as exc:
             logger.exception(
-                "报告 RAG 上传文件准备失败: task_id=%s sequence_no=%s error_type=%s",
+                "报告 prepared Artifact 映射 RAG 输入失败: "
+                "task_id=%s sequence_no=%s error_type=%s",
                 source.task_id,
                 source.sequence_no,
                 type(exc).__name__,
             )
             raise ReportInputError("报告文件无法准备为 RAG 输入") from exc
-        logger.info(
-            "报告 RAG 上传文件准备完成: task_id=%s sequence_no=%s output_count=%d",
-            source.task_id,
-            source.sequence_no,
-            len(artifacts),
-        )
-        return tuple(artifacts)
+        return (artifact,)
 
     @staticmethod
     def _document_artifact_suffix(artifact) -> str:

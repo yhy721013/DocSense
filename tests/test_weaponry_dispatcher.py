@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from itertools import count
 from pathlib import Path
@@ -34,6 +34,7 @@ from app.modules.weaponry.adapters import (
 from app.modules.weaponry.application import (
     RunWeaponryOutcome,
     RunWeaponryResult,
+    WeaponryResourceRecoverySweepResult,
 )
 from app.modules.weaponry.composition import (
     compose_weaponry_application_services,
@@ -173,12 +174,80 @@ class _BoundedMaintenanceStub:
         self.calls: list[int] = []
         self._lock = threading.Lock()
 
-    def run_once(self, *, limit: int) -> object:
+    def run_once(
+        self,
+        *,
+        limit: int,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> object:
         with self._lock:
             self.calls.append(limit)
+        if stop_requested is not None and stop_requested():
+            return {"limit": limit, "stopped": True}
         if self.error is not None:
             raise self.error
         return {"limit": limit}
+
+
+class _ProgressingResourceMaintenanceStub(_BoundedMaintenanceStub):
+    """模拟“空启动扫描 → 清理一项仍 pending → 最后一项 cleaned”。"""
+
+    def run_once(
+        self,
+        *,
+        limit: int,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> object:
+        with self._lock:
+            self.calls.append(limit)
+            call_count = len(self.calls)
+        if stop_requested is not None and stop_requested():
+            return WeaponryResourceRecoverySweepResult(
+                requested_limit=limit,
+                scanned_count=0,
+                cleaned_count=0,
+                cleaned_resource_count=0,
+                pending_count=0,
+                quarantined_count=0,
+                not_ready_count=0,
+                missing_count=0,
+                failed_count=0,
+            )
+        if call_count == 1:
+            return WeaponryResourceRecoverySweepResult(
+                requested_limit=limit,
+                scanned_count=0,
+                cleaned_count=0,
+                cleaned_resource_count=0,
+                pending_count=0,
+                quarantined_count=0,
+                not_ready_count=0,
+                missing_count=0,
+                failed_count=0,
+            )
+        if call_count == 2:
+            return WeaponryResourceRecoverySweepResult(
+                requested_limit=limit,
+                scanned_count=1,
+                cleaned_count=0,
+                cleaned_resource_count=1,
+                pending_count=1,
+                quarantined_count=0,
+                not_ready_count=0,
+                missing_count=0,
+                failed_count=0,
+            )
+        return WeaponryResourceRecoverySweepResult(
+            requested_limit=limit,
+            scanned_count=1,
+            cleaned_count=1,
+            cleaned_resource_count=1,
+            pending_count=0,
+            quarantined_count=0,
+            not_ready_count=0,
+            missing_count=0,
+            failed_count=0,
+        )
 
 
 class _ClaimingRunner:
@@ -932,6 +1001,63 @@ class LocalWeaponryTaskDispatcherTests(unittest.TestCase):
                 snapshot = dispatcher.snapshot()
                 self.assertTrue(snapshot.ready)
                 self.assertEqual("", snapshot.fatal_error)
+            finally:
+                dispatcher.close()
+
+    def test_terminal_cleanup_wakes_maintenance_and_progress_continues_immediately(
+        self,
+    ) -> None:
+        """终态只发常量空间提示；持久清理有进展时无需再等待固定周期。"""
+
+        with workspace_tempdir() as tmp:
+            root = Path(tmp)
+            _service, commands = self._commands(root)
+            config = _config(maintenance_interval_seconds=30.0)
+            resource = _ProgressingResourceMaintenanceStub()
+            callback = _BoundedMaintenanceStub()
+            finished = threading.Event()
+
+            class _CleanupPendingRunner:
+                def execute(self, task_id: TaskId) -> RunWeaponryResult:
+                    claim = commands.claim(task_id)
+                    if claim.outcome is not TaskClaimOutcome.CLAIMED:
+                        raise AssertionError(claim.outcome)
+                    finished.set()
+                    return RunWeaponryResult(
+                        task_id,
+                        RunWeaponryOutcome.SUCCEEDED,
+                        cleanup_state="cleanup_pending",
+                        selected_evidence_count=1,
+                    )
+
+            dispatcher = self._dispatcher(
+                commands=commands,
+                runner=_CleanupPendingRunner(),
+                config=config,
+                lock_path=root / "locks" / "weaponry.lock",
+                resource=resource,
+                callback=callback,
+            )
+            try:
+                dispatcher.start()
+                self.assertTrue(
+                    _wait_until(
+                        lambda: len(resource.calls) == 1 and len(callback.calls) == 1
+                    )
+                )
+                task_id = _accept(commands, 73001, config)
+                dispatcher.dispatch(task_id)
+
+                self.assertTrue(finished.wait(timeout=1.0))
+                self.assertTrue(
+                    _wait_until(lambda: len(resource.calls) >= 3, timeout=1.0)
+                )
+                # Callback Guard 没有资源积压提示，不能被本次资源唤醒连带执行。
+                self.assertEqual(1, len(callback.calls))
+                self.assertGreaterEqual(
+                    dispatcher.snapshot().resource_maintenance_count,
+                    3,
+                )
             finally:
                 dispatcher.close()
 

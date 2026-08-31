@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zlib
 from contextlib import contextmanager
 from typing import Iterator
 
-from app.ports import ChatOperationResult, ChatSessionRefs
-from app.services.chat import (
+from app.modules.chat.ports import ChatOperationResult, ChatSessionRefs
+from app.modules.chat import (
     ChatCleanupJobExecutor,
     ChatCommandService,
     ChatDeleteBusyError,
@@ -27,6 +28,14 @@ from app.services.chat import (
     chat_temporary_thread_lease_id,
 )
 from tests.fakes import FakeChatConversationFactory
+from app.modules.chat.domain.identity import FileChatIdentity
+
+
+def _identity(value: str | int) -> FileChatIdentity:
+    """把测试标签稳定映射为合法文件对话身份。"""
+    if isinstance(value, int) or str(value).isdigit():
+        return FileChatIdentity(chat_id=int(value))
+    return FileChatIdentity(chat_id=zlib.crc32(str(value).encode("utf-8")) + 1)
 
 
 class _FailingConversation:
@@ -96,23 +105,33 @@ class ChatTitleServiceTests(unittest.TestCase):
         *,
         chat_id: str,
         factory: FakeChatConversationFactory,
-    ) -> None:
+    ) -> tuple[FileChatIdentity, str]:
+        identity = _identity(chat_id)
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         with factory.create() as port:
             refs = port.open_conversation(
                 context_name=f"context-{chat_id}",
                 conversation_name=f"thread-{chat_id}",
             )
         self.store.sessions.create_or_get(
-            chat_id=chat_id,
+            conversation_id=conversation_id,
             workspace_ref=refs.context_ref,
             thread_ref=refs.conversation_ref,
         )
+        return identity, conversation_id
 
-    def _append_committed_turn(self, *, chat_id: str, run_id: str = "run-title") -> None:
-        self.store.runs.create(run_id=run_id, chat_id=chat_id)
+    def _append_committed_turn(
+        self,
+        *,
+        conversation_id: str,
+        run_id: str = "run-title",
+    ) -> None:
+        self.store.runs.create(run_id=run_id, conversation_id=conversation_id)
         self.store.messages.append(
             message_id=f"{run_id}:user",
-            chat_id=chat_id,
+            conversation_id=conversation_id,
             run_id=run_id,
             role=MESSAGE_ROLE_USER,
             content="请总结这份国防战略文件",
@@ -120,55 +139,73 @@ class ChatTitleServiceTests(unittest.TestCase):
         )
         self.store.messages.append(
             message_id=f"{run_id}:assistant",
-            chat_id=chat_id,
+            conversation_id=conversation_id,
             run_id=run_id,
             role=MESSAGE_ROLE_ASSISTANT,
             content="文件主要讨论美日国防战略协作和装备发展。",
             status=MESSAGE_COMMITTED,
         )
+        # 标题只能基于已完成轮次生成；活动 run 必须继续与标题租约互斥。
+        self.store.runs.mark_running(run_id)
+        self.store.runs.mark_succeeded(run_id)
 
     def test_nonexistent_chat_returns_empty_title_without_model_call(self) -> None:
         service, factory = self._service()
 
-        result = service.generate_title(chat_id="10001")
+        identity = _identity(10001)
+        result = service.generate_title(identity=identity)
 
-        self.assertEqual({"chatId": 10001, "title": ""}, result.to_response())
+        self.assertEqual(identity, result.identity)
+        self.assertEqual("", result.title)
         self.assertEqual(0, len(factory.ports))
 
     def test_existing_chat_with_empty_history_is_rejected(self) -> None:
         service, factory = self._service()
-        self._create_session_with_known_context(chat_id="chat-empty", factory=factory)
+        identity, _ = self._create_session_with_known_context(
+            chat_id="chat-empty",
+            factory=factory,
+        )
 
         with self.assertRaises(ChatTitleEmptyHistoryError):
-            service.generate_title(chat_id="chat-empty")
+            service.generate_title(identity=identity)
 
         self.assertEqual(1, len(factory.ports))
 
     def test_deleting_session_cannot_create_a_title_resource(self) -> None:
         service, factory = self._service()
+        identity = _identity("chat-deleting")
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         self.store.sessions.create_or_get(
-            chat_id="chat-deleting",
+            conversation_id=conversation_id,
             workspace_ref="workspace-deleting",
             thread_ref="thread-deleting",
         )
-        self.store.sessions.set_status(chat_id="chat-deleting", status="deleting")
+        self.store.sessions.set_status(
+            conversation_id=conversation_id,
+            status="deleting",
+        )
 
         with self.assertRaises(ChatTitleUnavailableError):
-            service.generate_title(chat_id="chat-deleting")
+            service.generate_title(identity=identity)
 
         self.assertEqual(0, len(factory.ports))
 
     def test_title_is_cleaned_and_history_is_not_mutated(self) -> None:
         service, factory = self._service(standalone_reply=' 标题： "美日战略对比" \n说明忽略')
-        self._create_session_with_known_context(chat_id="chat-title", factory=factory)
-        self._append_committed_turn(chat_id="chat-title")
+        identity, conversation_id = self._create_session_with_known_context(
+            chat_id="chat-title",
+            factory=factory,
+        )
+        self._append_committed_turn(conversation_id=conversation_id)
         history = ChatHistoryService(self.store)
-        before = history.list_history("chat-title")
+        before = history.list_history(identity)
 
-        result = service.generate_title(chat_id="chat-title")
+        result = service.generate_title(identity=identity)
 
         self.assertEqual("美日战略对比", result.title)
-        self.assertEqual(before, history.list_history("chat-title"))
+        self.assertEqual(before, history.list_history(identity))
         prompts = factory.ports[-1].standalone_prompts
         self.assertEqual(1, len(prompts))
         self.assertIn("请总结这份国防战略文件", prompts[0][1])
@@ -178,10 +215,16 @@ class ChatTitleServiceTests(unittest.TestCase):
             standalone_reply="这是一段超过二十个字符的标题用于验证截断逻辑",
             max_title_chars=20,
         )
-        self._create_session_with_known_context(chat_id="chat-long", factory=factory)
-        self._append_committed_turn(chat_id="chat-long", run_id="run-long")
+        identity, conversation_id = self._create_session_with_known_context(
+            chat_id="chat-long",
+            factory=factory,
+        )
+        self._append_committed_turn(
+            conversation_id=conversation_id,
+            run_id="run-long",
+        )
 
-        result = service.generate_title(chat_id="chat-long")
+        result = service.generate_title(identity=identity)
 
         self.assertEqual("这是一段超过二十个字符的标题用于验证截断", result.title)
         self.assertEqual(20, len(result.title))
@@ -193,15 +236,22 @@ class ChatTitleServiceTests(unittest.TestCase):
             history_service=history,
             conversation_factory=_FailingConversationFactory(),
         )
+        identity = _identity("chat-error")
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         self.store.sessions.create_or_get(
-            chat_id="chat-error",
+            conversation_id=conversation_id,
             workspace_ref="workspace-error",
             thread_ref="thread-error",
         )
-        self._append_committed_turn(chat_id="chat-error", run_id="run-error")
+        self._append_committed_turn(
+            conversation_id=conversation_id,
+            run_id="run-error",
+        )
 
         with self.assertRaisesRegex(RuntimeError, "model boom"):
-            service.generate_title(chat_id="chat-error")
+            service.generate_title(identity=identity)
 
     def test_temporary_cleanup_failure_is_durable_and_can_be_retried(self) -> None:
         """标题线程删除失败不得被吞掉，并保留按 lease 重试的工作项。"""
@@ -209,19 +259,25 @@ class ChatTitleServiceTests(unittest.TestCase):
             standalone_reply="可恢复标题",
             delete_conversation_error_message="temporary delete failed",
         )
-        self._create_session_with_known_context(chat_id="chat-cleanup-fail", factory=factory)
-        self._append_committed_turn(chat_id="chat-cleanup-fail", run_id="run-cleanup")
+        identity, conversation_id = self._create_session_with_known_context(
+            chat_id="chat-cleanup-fail",
+            factory=factory,
+        )
+        self._append_committed_turn(
+            conversation_id=conversation_id,
+            run_id="run-cleanup",
+        )
 
         with self.assertRaises(ChatTitleGenerationError):
-            service.generate_title(chat_id="chat-cleanup-fail")
+            service.generate_title(identity=identity)
 
-        leases = self.store.resource_leases.list_by_chat("chat-cleanup-fail")
+        leases = self.store.resource_leases.list_by_chat(conversation_id)
         temporary_lease = next(
             lease
             for lease in leases
-            if lease.lease_id.startswith("chat:chat-cleanup-fail:temporary_thread:")
+            if lease.lease_id.startswith(f"chat:{conversation_id}:temporary_thread:")
         )
-        jobs = self.store.cleanup_jobs.list_by_chat("chat-cleanup-fail")
+        jobs = self.store.cleanup_jobs.list_by_chat(conversation_id)
         self.assertEqual("cleanup_failed", temporary_lease.status)
         self.assertEqual(1, len(jobs))
         self.assertEqual("temporary_thread", jobs[0].reason)
@@ -235,7 +291,7 @@ class ChatTitleServiceTests(unittest.TestCase):
             conversation_factory=FakeChatConversationFactory(),
         )
         requeued = self.store.cleanup_jobs.enqueue(
-            chat_id="chat-cleanup-fail",
+            conversation_id=conversation_id,
             reason="temporary_thread",
             lease_id=temporary_lease.lease_id,
         )
@@ -250,14 +306,17 @@ class ChatTitleServiceTests(unittest.TestCase):
     def test_delete_is_rejected_while_title_has_a_planned_temporary_lease(self) -> None:
         """计划租约使标题创建与删除在 SQLite 临界区互斥。"""
         factory = FakeChatConversationFactory()
-        self._create_session_with_known_context(chat_id="chat-title-race", factory=factory)
-        lease_id = chat_temporary_thread_lease_id(
+        identity, conversation_id = self._create_session_with_known_context(
             chat_id="chat-title-race",
+            factory=factory,
+        )
+        lease_id = chat_temporary_thread_lease_id(
+            conversation_id=conversation_id,
             attempt_id="race-test",
         )
         self.store.resource_leases.begin(
             lease_id=lease_id,
-            chat_id="chat-title-race",
+            conversation_id=conversation_id,
             resource_type=RESOURCE_THREAD,
             require_active_session=True,
         )
@@ -270,7 +329,7 @@ class ChatTitleServiceTests(unittest.TestCase):
         )
 
         with self.assertRaises(ChatDeleteBusyError):
-            delete_service.delete_chat(chat_id="chat-title-race")
+            delete_service.delete_chat(identity=identity)
 
 
 if __name__ == "__main__":

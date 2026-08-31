@@ -6,6 +6,7 @@ import logging
 import threading
 from uuid import uuid4
 
+from app.modules.tasks.domain import TaskId
 from app.modules.analysis.ports import (
     AnalysisCallbackAcquireOutcome,
     AnalysisCallbackAcquireResult,
@@ -83,13 +84,21 @@ class RecoverAnalysisCallbackSynchronously:
 
         return self._callbacks
 
-    def execute(self, file_name: str, *, request_trace_id: str = "") -> bool:
+    def execute(
+        self,
+        file_name: str,
+        *,
+        request_trace_id: str = "",
+        expected_task_id: TaskId | None = None,
+    ) -> bool:
         """同步尝试一次补发；仅严格 2xx 的 ``delivered`` 返回 ``True``。"""
 
         if not isinstance(file_name, str) or not file_name.strip():
             raise ValueError("file_name 必须是非空 str")
         if not isinstance(request_trace_id, str):
             raise TypeError("request_trace_id 必须是 str")
+        if expected_task_id is not None and not isinstance(expected_task_id, TaskId):
+            raise TypeError("expected_task_id 必须是 TaskId 或 None")
         normalized_trace_id = request_trace_id.strip()
         if len(normalized_trace_id) > 128:
             raise ValueError("request_trace_id 最多 128 个字符")
@@ -109,6 +118,15 @@ class RecoverAnalysisCallbackSynchronously:
         try:
             candidate = self._source.load_recoverable(normalized_file_name)
             if candidate is None:
+                return False
+            if (
+                expected_task_id is not None
+                and candidate.execution.task_id != expected_task_id
+            ):
+                logger.info(
+                    "文件分析同步回调跳过已切换的 latest execution: "
+                    "business_type=file reason=expected_task_changed"
+                )
                 return False
             return self._attempt_candidate(
                 candidate,

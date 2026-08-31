@@ -110,23 +110,16 @@ class WeaponryModeOneDeletionTests(unittest.TestCase):
             resolve_legacy_extraction_strategy("1")
 
     def test_production_sources_no_longer_contain_mode_one_execution_branch(self) -> None:
-        service_source = (
+        legacy_service = (
             ROOT / "app" / "services" / "llm_service" / "weaponry_service.py"
-        ).read_text(encoding="utf-8")
+        )
         prompt_source = (
             ROOT / "app" / "services" / "core" / "prompts.py"
         ).read_text(encoding="utf-8")
 
-        for forbidden in (
-            "build_chunk_based_field_prompt",
-            "build_multi_chunk_based_field_prompt",
-            "build_input_field_prompt",
-            "build_table_column_prompt",
-            "_map_source_to_analyse_data_source",
-            "_build_analyse_data_sources",
-            "if analyse_mode",
-        ):
-            self.assertNotIn(forbidden, service_source)
+        # 1G-5A4 已物理删除旧 Worker；不存在的文件比检查旧文件内部不含分支更强，
+        # 同时保留 Prompt 公共工具不得重新引入模式 1 的永久门禁。
+        self.assertFalse(legacy_service.exists())
         for forbidden in (
             "build_chunk_based_field_prompt",
             "build_multi_chunk_based_field_prompt",
@@ -134,6 +127,9 @@ class WeaponryModeOneDeletionTests(unittest.TestCase):
             "build_table_column_prompt",
             "build_table_extraction_prompt",
             "_build_terms_rule_part",
+            "_map_source_to_analyse_data_source",
+            "_build_analyse_data_sources",
+            "if analyse_mode",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, prompt_source)

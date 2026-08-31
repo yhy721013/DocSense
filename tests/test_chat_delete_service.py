@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zlib
 
-from app.services.chat import (
+from app.modules.chat import (
     ChatDeleteCleanupError,
     ChatDeleteBusyError,
     ChatDeleteNotFoundError,
@@ -28,6 +29,12 @@ from app.services.chat import (
     chat_workspace_lease_id,
 )
 from tests.fakes import FakeChatConversationFactory
+from app.modules.chat.domain.identity import FileChatIdentity, WeaponryChatIdentity
+
+
+def _identity(value: str) -> FileChatIdentity:
+    """把测试标签稳定映射为文件对话公开身份。"""
+    return FileChatIdentity(chat_id=zlib.crc32(value.encode("utf-8")) + 1)
 
 
 class ChatDeleteServiceTests(unittest.TestCase):
@@ -47,34 +54,51 @@ class ChatDeleteServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
-    def _create_remote_chat(self, chat_id: str = "chat-delete"):
+    def _create_remote_chat(
+        self,
+        label: str = "chat-delete",
+        *,
+        identity: FileChatIdentity | WeaponryChatIdentity | None = None,
+    ):
+        identity = identity or _identity(label)
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         with self.factory.create() as port:
             refs = port.open_conversation(
-                context_name=f"context-{chat_id}",
-                conversation_name=f"thread-{chat_id}",
+                context_name=f"context-{label}",
+                conversation_name=f"thread-{label}",
             )
         self.store.sessions.create_or_get(
-            chat_id=chat_id,
+            conversation_id=conversation_id,
             workspace_ref=refs.context_ref,
             thread_ref=refs.conversation_ref,
         )
         self.store.session_scope_bindings.create(
             ChatSessionScopeBinding(
-                chat_id=chat_id,
-                scope_mode="files",
-                architecture_id=None,
+                conversation_id=conversation_id,
+                scope_mode=(
+                    "architecture"
+                    if isinstance(identity, WeaponryChatIdentity)
+                    else "files"
+                ),
+                architecture_id=(
+                    identity.architecture_id
+                    if isinstance(identity, WeaponryChatIdentity)
+                    else None
+                ),
                 created_at="2026-07-28T00:00:00+00:00",
             )
         )
         self.store.resource_leases.ensure_active(
-            lease_id=chat_workspace_lease_id(chat_id),
-            chat_id=chat_id,
+            lease_id=chat_workspace_lease_id(conversation_id),
+            conversation_id=conversation_id,
             resource_type=RESOURCE_WORKSPACE,
             external_ref=refs.context_ref,
         )
         self.store.resource_leases.ensure_active(
-            lease_id=chat_thread_lease_id(chat_id),
-            chat_id=chat_id,
+            lease_id=chat_thread_lease_id(conversation_id),
+            conversation_id=conversation_id,
             resource_type=RESOURCE_THREAD,
             external_ref=chat_scoped_external_ref(
                 context_ref=refs.context_ref,
@@ -83,24 +107,24 @@ class ChatDeleteServiceTests(unittest.TestCase):
         )
         self.store.resource_leases.ensure_active(
             lease_id=chat_document_binding_lease_id(
-                chat_id=chat_id,
+                conversation_id=conversation_id,
                 file_name="delete.pdf",
             ),
-            chat_id=chat_id,
+            conversation_id=conversation_id,
             resource_type=RESOURCE_DOCUMENT_BINDING,
             external_ref=f"{refs.context_ref}::custom-documents/delete.pdf.json",
         )
-        return refs
+        return refs, identity, conversation_id
 
     def test_delete_success_closes_leases_and_keeps_audit_session(self) -> None:
-        self._create_remote_chat()
+        _, identity, conversation_id = self._create_remote_chat()
 
-        result = self.service.delete_chat(chat_id="chat-delete")
+        result = self.service.delete_chat(identity=identity)
         second_port_count = len(self.factory.ports)
-        repeated = self.service.delete_chat(chat_id="chat-delete")
+        repeated = self.service.delete_chat(identity=identity)
 
-        session = self.store.sessions.get("chat-delete")
-        leases = self.store.resource_leases.list_by_chat("chat-delete")
+        session = self.store.sessions.get(conversation_id)
+        leases = self.store.resource_leases.list_by_chat(conversation_id)
 
         self.assertTrue(result.deleted)
         self.assertTrue(repeated.deleted)
@@ -119,10 +143,10 @@ class ChatDeleteServiceTests(unittest.TestCase):
             chat_commands=self.commands,
             conversation_factory=self.factory,
         )
-        self._create_remote_chat("chat-thread-fail")
+        _, identity, conversation_id = self._create_remote_chat("chat-thread-fail")
 
-        result = self.service.delete_chat(chat_id="chat-thread-fail")
-        leases = self.store.resource_leases.list_by_chat("chat-thread-fail")
+        result = self.service.delete_chat(identity=identity)
+        leases = self.store.resource_leases.list_by_chat(conversation_id)
 
         self.assertTrue(result.deleted)
         self.assertEqual({LEASE_CLOSED}, {lease.status for lease in leases})
@@ -136,16 +160,16 @@ class ChatDeleteServiceTests(unittest.TestCase):
             chat_commands=self.commands,
             conversation_factory=self.factory,
         )
-        self._create_remote_chat("chat-workspace-fail")
+        _, identity, conversation_id = self._create_remote_chat("chat-workspace-fail")
 
         with self.assertRaises(ChatDeleteCleanupError):
-            self.service.delete_chat(chat_id="chat-workspace-fail")
+            self.service.delete_chat(identity=identity)
 
-        session = self.store.sessions.get("chat-workspace-fail")
+        session = self.store.sessions.get(conversation_id)
         leases = {
             lease.resource_type: lease
             for lease in self.store.resource_leases.list_by_chat(
-                "chat-workspace-fail"
+                conversation_id
             )
         }
 
@@ -163,61 +187,99 @@ class ChatDeleteServiceTests(unittest.TestCase):
             leases[RESOURCE_WORKSPACE].error_message,
         )
 
+    def test_weaponry_cleanup_failure_keeps_identity_bound_to_old_generation(
+        self,
+    ) -> None:
+        """远端清理未完成时不得释放复合身份并创建第二个同名 Workspace。"""
+
+        self.factory = FakeChatConversationFactory(
+            delete_context_error_message="workspace delete failed",
+        )
+        self.service = ChatDeleteService(
+            store=self.store,
+            chat_commands=self.commands,
+            conversation_factory=self.factory,
+        )
+        identity = WeaponryChatIdentity(user_id=70001, architecture_id=90001)
+        _, _, conversation_id = self._create_remote_chat(
+            "weaponry-workspace-fail",
+            identity=identity,
+        )
+
+        with self.assertRaises(ChatDeleteCleanupError):
+            self.service.delete_chat(identity=identity)
+
+        resolution = self.store.identities.resolve_active(identity)
+        self.assertIsNotNone(resolution)
+        assert resolution is not None
+        self.assertEqual(conversation_id, resolution.conversation_id)
+        self.assertEqual("error", resolution.session.status)
+
     def test_deleted_session_history_returns_empty_list(self) -> None:
-        refs = self._create_remote_chat("chat-history-delete")
-        self.store.runs.create(run_id="run-history-delete", chat_id="chat-history-delete")
+        refs, identity, conversation_id = self._create_remote_chat("chat-history-delete")
+        self.store.runs.create(
+            run_id="run-history-delete",
+            conversation_id=conversation_id,
+        )
         self.store.runs.mark_running("run-history-delete")
         self.store.runs.mark_succeeded("run-history-delete")
         self.store.messages.append(
             message_id="message-history-delete",
-            chat_id="chat-history-delete",
+            conversation_id=conversation_id,
             run_id="run-history-delete",
             role=MESSAGE_ROLE_USER,
             content="delete me",
             status=MESSAGE_COMMITTED,
         )
 
-        before = ChatHistoryService(self.store).list_history("chat-history-delete")
-        self.service.delete_chat(chat_id="chat-history-delete")
-        after = ChatHistoryService(self.store).list_history("chat-history-delete")
+        before = ChatHistoryService(self.store).list_history(identity)
+        self.service.delete_chat(identity=identity)
+        after = ChatHistoryService(self.store).list_history(identity)
 
         self.assertEqual(1, len(before))
         self.assertEqual([], after)
-        self.assertEqual(refs.context_ref, self.store.sessions.get("chat-history-delete").workspace_ref)
+        # 远端引用属于不含正文的最小清理审计事实；消息正文已由历史空数组证明清除。
+        self.assertEqual(
+            refs.context_ref,
+            self.store.sessions.get(conversation_id).workspace_ref,
+        )
 
     def test_missing_chat_raises_not_found(self) -> None:
         with self.assertRaises(ChatDeleteNotFoundError):
-            self.service.delete_chat(chat_id="missing-chat")
+            self.service.delete_chat(identity=_identity("missing-chat"))
 
     def test_delete_rejects_active_run_without_changing_session_state(self) -> None:
-        self._create_remote_chat("chat-delete-active")
+        _, identity, conversation_id = self._create_remote_chat("chat-delete-active")
         self.commands.start_chat_run(
-            chat_id="chat-delete-active",
+            identity=identity,
             user_message="still running",
         )
 
         with self.assertRaises(ChatDeleteBusyError):
-            self.service.delete_chat(chat_id="chat-delete-active")
+            self.service.delete_chat(identity=identity)
 
-        session = self.store.sessions.get("chat-delete-active")
+        session = self.store.sessions.get(conversation_id)
         self.assertIsNotNone(session)
         assert session is not None
         self.assertEqual("active", session.status)
 
     def test_delete_preserves_unresolved_planned_leases_for_recovery(self) -> None:
-        self.store.sessions.create_or_get(chat_id="chat-unresolved-resource")
+        identity = _identity("chat-unresolved-resource")
+        conversation_id = self.store.identities.create_conversation(
+            identity
+        ).conversation_id
         self.store.resource_leases.begin(
-            lease_id=chat_workspace_lease_id("chat-unresolved-resource"),
-            chat_id="chat-unresolved-resource",
+            lease_id=chat_workspace_lease_id(conversation_id),
+            conversation_id=conversation_id,
             resource_type=RESOURCE_WORKSPACE,
         )
 
         with self.assertRaises(ChatDeleteCleanupError):
-            self.service.delete_chat(chat_id="chat-unresolved-resource")
+            self.service.delete_chat(identity=identity)
 
-        session = self.store.sessions.get("chat-unresolved-resource")
+        session = self.store.sessions.get(conversation_id)
         lease = self.store.resource_leases.get(
-            chat_workspace_lease_id("chat-unresolved-resource")
+            chat_workspace_lease_id(conversation_id)
         )
         self.assertIsNotNone(session)
         self.assertIsNotNone(lease)

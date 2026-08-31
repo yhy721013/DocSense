@@ -7,25 +7,16 @@
 from __future__ import annotations
 
 import ast
-import importlib
 import unittest
 from pathlib import Path
 
 from app.modules.analysis.domain import (
-    architecture_recall as domain_recall,
-    architecture_tree as domain_tree,
     callback_payloads,
     classification_rules,
     models,
-    prompts,
     ranges,
     result_mapping,
 )
-from app.services.core import architecture_tree as legacy_tree
-from app.services.core import prompts as legacy_prompts
-from app.services.core import config as legacy_config
-from app.services.llm_service import analysis_service
-from app.services.llm_service import architecture_recall_service as legacy_recall
 from tests.architecture.import_rules import (
     DOMAIN_RULE,
     collect_violations,
@@ -35,9 +26,6 @@ from tests.architecture.import_rules import (
 
 ROOT = Path(__file__).resolve().parents[1]
 ANALYSIS_DOMAIN_ROOT = ROOT / "app" / "modules" / "analysis" / "domain"
-LEGACY_ANALYSIS_SERVICE_PATH = (
-    ROOT / "app" / "services" / "llm_service" / "analysis_service.py"
-)
 
 
 class AnalysisDomainBoundaryTests(unittest.TestCase):
@@ -162,39 +150,6 @@ class AnalysisDomainBoundaryTests(unittest.TestCase):
             "Analysis Domain 禁止执行文件系统 I/O:\n" + "\n".join(violations),
         )
 
-    def test_legacy_analysis_service_only_keeps_io_and_compatibility_symbols(self) -> None:
-        """迁移后的旧 Service 不能重新定义已迁移的领域算法。"""
-
-        source = LEGACY_ANALYSIS_SERVICE_PATH.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(LEGACY_ANALYSIS_SERVICE_PATH))
-        top_level_definitions = {
-            node.name
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        }
-        migrated_symbols = {
-            "AnalysisContractError",
-            "ArchitectureContractError",
-            "DataStandardParentContractError",
-            "build_effective_analysis_ranges",
-            "validate_analysis_architecture_ranges",
-            "build_file_callback_payload",
-            "_parse_strict_json_object",
-            "_decide_topk_deterministic_architecture_constraint",
-        }
-        self.assertFalse(
-            migrated_symbols & top_level_definitions,
-            "旧 Analysis Service 不得重新定义已迁移的 Domain 纯规则",
-        )
-        for required_import in (
-            "app.modules.analysis.domain.classification_rules",
-            "app.modules.analysis.domain.ranges",
-            "app.modules.analysis.domain.result_mapping",
-        ):
-            with self.subTest(required_import=required_import):
-                self.assertIn(required_import, source)
-        self.assertIn("@wraps(_domain_map_analysis_result)", source)
-
     def test_domain_export_surfaces_are_explicit_literals(self) -> None:
         """兼容导出必须显式冻结，新增私有函数不能自动泄漏到旧 Service。"""
 
@@ -237,54 +192,6 @@ class AnalysisDomainBoundaryTests(unittest.TestCase):
         self.assertNotIn(
             "_sanitize_related_technologies_with_diagnostics",
             result_mapping.__all__,
-        )
-
-    def test_tree_and_recall_legacy_modules_are_same_implementation_modules(self) -> None:
-        """模块别名保留私有测试替身、缓存身份和旧导入路径的一致性。"""
-
-        self.assertIs(
-            importlib.import_module("app.services.core.architecture_tree"),
-            domain_tree,
-        )
-        self.assertIs(
-            importlib.import_module(
-                "app.services.llm_service.architecture_recall_service"
-            ),
-            domain_recall,
-        )
-        self.assertIs(legacy_tree, domain_tree)
-        self.assertIs(legacy_recall, domain_recall)
-
-    def test_legacy_exports_delegate_to_domain_implementations(self) -> None:
-        """兼容层必须复用同一实现；仅日志适配允许保留薄包装。"""
-
-        self.assertIs(
-            analysis_service.build_effective_analysis_ranges,
-            ranges.build_effective_analysis_ranges,
-        )
-        self.assertIs(
-            analysis_service.validate_analysis_architecture_ranges,
-            ranges.validate_analysis_architecture_ranges,
-        )
-        self.assertIs(
-            analysis_service.map_analysis_result.__wrapped__,
-            result_mapping.map_analysis_result,
-        )
-        self.assertIs(
-            analysis_service.build_file_callback_payload,
-            callback_payloads.build_file_callback_payload,
-        )
-        self.assertIs(
-            analysis_service._decide_topk_deterministic_architecture_constraint,
-            classification_rules._decide_topk_deterministic_architecture_constraint,
-        )
-        self.assertIs(
-            legacy_prompts.build_file_extraction_prompt,
-            prompts.build_file_extraction_prompt,
-        )
-        self.assertIs(
-            legacy_config.ANALYSIS_CLASSIFICATION_MODES,
-            models.ANALYSIS_CLASSIFICATION_MODES,
         )
 
     def test_effective_ranges_are_deeply_isolated_snapshots(self) -> None:
@@ -350,8 +257,8 @@ class AnalysisDomainBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "prompt 必须是 str"):
             classification_rules._normalize_bounded_analysis_prompt(None)
 
-    def test_related_technology_overflow_log_has_exact_reason(self) -> None:
-        """证据充分的第 11 项只能记为数量截断，不能误报证据缺失。"""
+    def test_related_technology_overflow_keeps_first_ten_domain_values(self) -> None:
+        """数量截断属于现行 Domain 规则，不依赖旧 Service 日志包装。"""
 
         terms = [
             "技术甲",
@@ -369,19 +276,11 @@ class AnalysisDomainBoundaryTests(unittest.TestCase):
         parsed_result = {
             "fileDataItem": {"relatedTechnology": ",".join(terms)}
         }
-        with self.assertLogs(
-            "app.services.llm_service.analysis_service",
-            level="WARNING",
-        ) as captured:
-            mapped_result = analysis_service.map_analysis_result(
-                parsed_result,
-                {"fileName": "demo.txt"},
-                original_text=" ".join(terms),
-            )
-
-        messages = "\n".join(captured.output)
-        self.assertIn("所属技术数量超过上限", messages)
-        self.assertNotIn("缺少可核验原文术语映射", messages)
+        mapped_result = result_mapping.map_analysis_result(
+            parsed_result,
+            {"fileName": "demo.txt"},
+            original_text=" ".join(terms),
+        )
         self.assertEqual(
             ", ".join(terms[:10]),
             mapped_result["fileDataItem"]["relatedTechnology"],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.chat.domain.resource_ids import (
+from app.modules.chat.domain.resource_ids import (
     chat_scoped_external_ref,
     parse_chat_scoped_external_ref,
 )

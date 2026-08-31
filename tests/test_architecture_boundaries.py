@@ -16,23 +16,29 @@ from pathlib import Path
 from tests.architecture.import_rules import (
     APPLICATION_RULE,
     DOMAIN_RULE,
+    FRAMEWORK_FREE_CONTAINER_RULE,
     PORTS_RULE,
     PRESENTER_RULE,
+    SHARED_DOMAIN_RULE,
     TASKS_MODULE_RULE,
+    WEB_ROUTE_RULE,
     ArchitectureRule,
     ImportViolation,
     collect_violations,
+    collect_forbidden_web_route_operations,
     describe_violations,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES_ROOT = ROOT / "app" / "modules"
+SHARED_DOMAIN_ROOT = ROOT / "app" / "domain"
 TASKS_ROOT = MODULES_ROOT / "tasks"
 REPORT_ROOT = MODULES_ROOT / "report"
 WEAPONRY_ROOT = MODULES_ROOT / "weaponry"
 REASSIGN_ROOT = MODULES_ROOT / "reassign"
 ANALYSIS_ROOT = MODULES_ROOT / "analysis"
+CHAT_ROOT = MODULES_ROOT / "chat"
 ANALYSIS_APPLICATION_FACADE_PATH = ANALYSIS_ROOT / "application" / "run_analysis.py"
 ANALYSIS_APPLICATION_COLLABORATOR_PATHS = {
     "models": ANALYSIS_ROOT / "application" / "workflow_models.py",
@@ -43,6 +49,8 @@ ANALYSIS_APPLICATION_COLLABORATOR_PATHS = {
 }
 PRESENTERS_ROOT = ROOT / "app" / "presenters"
 LLM_ROUTE_PATH = ROOT / "app" / "blueprints" / "llm.py"
+DEBUG_ROUTE_PATH = ROOT / "app" / "blueprints" / "debug.py"
+CONTAINER_PATH = ROOT / "app" / "container.py"
 REASSIGN_COMPOSITION_PATH = REASSIGN_ROOT / "composition.py"
 REASSIGN_RECOVERY_COMPATIBILITY_PATH = (
     REASSIGN_ROOT / "application" / "recover_reassignment.py"
@@ -169,6 +177,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
             ANALYSIS_ROOT / "application",
             ANALYSIS_ROOT / "ports",
             ANALYSIS_ROOT / "adapters",
+            CHAT_ROOT,
+            CHAT_ROOT / "domain",
+            CHAT_ROOT / "application",
+            CHAT_ROOT / "ports",
+            CHAT_ROOT / "adapters",
             ROOT / "app" / "adapters",
             ROOT / "app" / "adapters" / "web",
             ROOT / "app" / "adapters" / "web" / "flask",
@@ -181,6 +194,11 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
     def test_all_module_domain_layers_are_framework_and_infrastructure_free(self) -> None:
         self.assert_rule_clean(_module_layer_dirs("domain"), DOMAIN_RULE)
 
+    def test_shared_domain_is_framework_and_infrastructure_free(self) -> None:
+        """共享业务规则不得成为跨模块访问数据库或供应商实现的捷径。"""
+
+        self.assert_rule_clean((SHARED_DOMAIN_ROOT,), SHARED_DOMAIN_RULE)
+
     def test_all_module_ports_remain_abstract(self) -> None:
         self.assert_rule_clean(_module_layer_dirs("ports"), PORTS_RULE)
 
@@ -192,6 +210,29 @@ class CurrentArchitectureBoundaryTests(unittest.TestCase):
 
     def test_presenters_do_not_read_database_or_anythingllm_client(self) -> None:
         self.assert_rule_clean((PRESENTERS_ROOT,), PRESENTER_RULE)
+
+    def test_web_routes_do_not_import_infrastructure_implementations(self) -> None:
+        """1G-0 永久冻结正式路由和 Debug 路由的基础设施导入边界。"""
+
+        self.assert_rule_clean(
+            (LLM_ROUTE_PATH, DEBUG_ROUTE_PATH),
+            WEB_ROUTE_RULE,
+        )
+
+    def test_application_container_is_independent_from_web_frameworks(self) -> None:
+        """1G-2 永久禁止框架依赖重新进入生产组合根。"""
+
+        self.assert_rule_clean((CONTAINER_PATH,), FRAMEWORK_FREE_CONTAINER_RULE)
+
+    def test_formal_routes_do_not_construct_infrastructure_or_open_files(self) -> None:
+        """1G-3 锁定 AST 导入规则无法识别的直接调用与 daemon 调度。"""
+
+        for route_path in (LLM_ROUTE_PATH, DEBUG_ROUTE_PATH):
+            with self.subTest(route=route_path.name):
+                violations = collect_forbidden_web_route_operations(
+                    route_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual((), violations)
 
     def test_reassign_route_and_composition_root_keep_saga_boundaries(self) -> None:
         """长期锁定 1E-6 的薄路由和唯一 Application 组合根边界。
@@ -635,6 +676,35 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
         )
         self.assertEqual({"flask", "sqlite3", "requests"}, self._targets(violations))
 
+    def test_shared_domain_rule_rejects_database_and_supplier_dependencies(self) -> None:
+        violations = self._scan_source(
+            "app/domain/knowledge_workspace.py",
+            """
+            import sqlite3
+            from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
+            """,
+            SHARED_DOMAIN_RULE,
+        )
+        self.assertEqual(
+            {"sqlite3", "app.integrations.anythingllm.workspaces"},
+            self._targets(violations),
+        )
+
+    def test_application_rule_only_allows_the_approved_shared_naming_module(self) -> None:
+        allowed = self._scan_source(
+            "app/modules/reassign/application/service.py",
+            "from app.domain.knowledge_workspace import permanent_architecture_workspace_name\n",
+            APPLICATION_RULE,
+        )
+        rejected = self._scan_source(
+            "app/modules/reassign/application/service.py",
+            "from app.domain.unreviewed_rules import unsafe_rule\n",
+            APPLICATION_RULE,
+        )
+
+        self.assertEqual((), allowed)
+        self.assertEqual({"app.domain.unreviewed_rules"}, self._targets(rejected))
+
     def test_ports_rule_rejects_reverse_application_dependency(self) -> None:
         violations = self._scan_source(
             "app/modules/tasks/ports/task_read.py",
@@ -695,7 +765,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
         violations = self._scan_source(
             "app/modules/tasks/adapters/legacy_task_service.py",
             """
-            from app.services.chat.persistence import ChatStore
+            from app.modules.chat.adapters.sqlite import ChatStore
             from app.modules.report.adapters.mysql import ReportRepository
             from app.modules.weaponry.domain import WeaponryTask
             """,
@@ -703,7 +773,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                "app.services.chat.persistence",
+                "app.modules.chat.adapters.sqlite",
                 "app.modules.report.adapters.mysql",
                 "app.modules.weaponry.domain",
             },
@@ -782,6 +852,69 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
             self._targets(violations),
         )
 
+    def test_web_route_rule_rejects_database_thread_and_business_adapters(self) -> None:
+        violations = self._scan_source(
+            "app/blueprints/example.py",
+            """
+            import sqlite3
+            import threading
+            from app.services.core.database import DatabaseService
+            from app.integrations.anythingllm.transport import AnythingLLMTransport
+            from app.modules.report.adapters import SQLiteReportCallbackAdapter
+            from app.modules.debug.composition import compose_debug_services
+            """,
+            WEB_ROUTE_RULE,
+        )
+
+        self.assertEqual(
+            {
+                "sqlite3",
+                "threading",
+                "app.services.core.database",
+                "app.integrations.anythingllm.transport",
+                "app.modules.report.adapters",
+                "app.modules.debug.composition",
+            },
+            self._targets(violations),
+        )
+
+    def test_framework_free_container_rule_rejects_flask_and_fastapi(self) -> None:
+        violations = self._scan_source(
+            "app/container.py",
+            """
+            from flask import current_app
+            from fastapi import Request
+            """,
+            FRAMEWORK_FREE_CONTAINER_RULE,
+        )
+        self.assertEqual({"flask", "fastapi"}, self._targets(violations))
+
+    def test_formal_route_operation_rule_rejects_file_thread_and_repository(self) -> None:
+        source = """
+        worker = Thread(target=run, daemon=True)
+        worker.daemon = True
+        payload = open("payload.json")
+        path = Path("payload.json")
+        repository = TaskRepository()
+        client = AnythingLLMClient()
+        services = compose_debug_services()
+        """
+        violations = collect_forbidden_web_route_operations(
+            textwrap.dedent(source)
+        )
+        self.assertEqual(
+            {
+                "AnythingLLMClient",
+                "Path",
+                "TaskRepository",
+                "Thread",
+                "compose_debug_services",
+                "daemon",
+                "open",
+            },
+            {item.symbol for item in violations},
+        )
+
     def test_rules_allow_expected_inward_dependencies(self) -> None:
         allowed_cases = (
             (
@@ -818,7 +951,7 @@ class ArchitectureRuleSelfTests(unittest.TestCase):
             ),
             (
                 "app/presenters/task_status.py",
-                "from app.services.chat.domain.events import ChatStreamEvent\n",
+                "from app.modules.chat.domain.events import ChatStreamEvent\n",
                 PRESENTER_RULE,
             ),
         )

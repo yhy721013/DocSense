@@ -12,6 +12,11 @@ from app.ports.rag import (
     RagLifecycleEvent,
     RagSource,
 )
+from app.modules.analysis.ports import (
+    AnalysisCallbackDelivery,
+    AnalysisCallbackDeliveryOutcome,
+    AnalysisCallbackDeliveryRequest,
+)
 from app.services.llm_service.task_service import (
     ArchitectureRecallAuditError,
     InteractionAuditError,
@@ -21,6 +26,13 @@ from app.services.llm_service.task_service import (
     TaskStateConflictError,
 )
 from tests import workspace_tempdir
+from tests.task_service_fixtures import (
+    admit_analysis_task,
+    admit_analysis_tasks,
+    build_analysis_callback_recovery,
+    create_terminal_analysis_task,
+    seed_legacy_file_task,
+)
 
 
 def _successful_trace() -> RagExecutionTrace:
@@ -76,7 +88,7 @@ def _successful_trace() -> RagExecutionTrace:
 
 def _create_audited_interaction(service: LLMTaskService) -> int:
     """创建一条已提交审计，供生命周期追加测试复用。"""
-    task = service.get_task("file", "demo.pdf") or service.create_file_task(
+    task = service.get_task("file", "demo.pdf") or seed_legacy_file_task(service,
         "demo.pdf",
         {"businessType": "file"},
     )
@@ -127,10 +139,10 @@ def _recall_decision_args(execution_id: str) -> dict:
 
 
 class LLMTaskServiceTests(unittest.TestCase):
-    def test_create_file_task_defaults_to_processing(self):
+    def test_current_analysis_admission_defaults_to_processing(self):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task(
+            task = admit_analysis_task(service,
                 file_name="demo.pdf",
                 request_payload={"businessType": "file"},
             )
@@ -138,16 +150,16 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertEqual(task["status"], "1")
             self.assertEqual(task["callback_status"], "pending")
 
-    def test_create_file_task_can_start_as_pending(self):
+    def test_current_analysis_single_admission_rejects_pending_status(self):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task(
-                file_name="demo-2.pdf",
-                request_payload={"businessType": "file"},
-                status="0",
-            )
-            self.assertEqual(task["status"], "0")
-            self.assertEqual(task["progress"], 0.0)
+            with self.assertRaisesRegex(ValueError, "首项必须使用公开处理中状态1"):
+                admit_analysis_task(
+                    service,
+                    file_name="demo-2.pdf",
+                    request_payload={"businessType": "file"},
+                    status="0",
+                )
 
     def test_concurrent_file_task_admission_has_single_winner(self):
         """两个服务实例并发受理同一文件时只能有一个执行获得任务所有权。"""
@@ -160,7 +172,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             def submit(service: LLMTaskService, marker: str):
                 barrier.wait()
                 try:
-                    task = service.create_file_task(
+                    task = admit_analysis_task(service,
                         "same.pdf",
                         {"businessType": "file", "marker": marker},
                     )
@@ -192,14 +204,15 @@ class LLMTaskServiceTests(unittest.TestCase):
         """批次任一文件处于活动态时，其他新文件也不得留下半批任务。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            active = service.create_file_task(
+            # 旧库中可能残留等待态投影；现行批量入口必须把它当作活动冲突处理。
+            active = seed_legacy_file_task(service,
                 "b.pdf",
                 {"businessType": "file", "marker": "active"},
                 status="0",
             )
 
             with self.assertRaises(TaskAlreadyProcessingError):
-                service.create_file_tasks_if_available(
+                admit_analysis_tasks(service,
                     (
                         ("a.pdf", {"businessType": "file"}, "1"),
                         ("b.pdf", {"businessType": "file"}, "0"),
@@ -217,7 +230,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """批次命中回调交接窗口时不得提前创建其他文件任务。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            previous = service.create_file_task(
+            previous = admit_analysis_task(service,
                 "callback-window.pdf",
                 {"businessType": "file", "marker": "previous"},
             )
@@ -230,7 +243,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             )
 
             with self.assertRaises(TaskAlreadyProcessingError) as raised:
-                service.create_file_tasks_if_available(
+                admit_analysis_tasks(service,
                     (
                         ("new.pdf", {"businessType": "file"}, "1"),
                         (
@@ -253,7 +266,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """业务终态的首次回调尚未结束时不得覆盖旧 execution 和结果。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_file_task(
+            first = admit_analysis_task(service,
                 "callback-window.pdf",
                 {"businessType": "file", "marker": "first"},
             )
@@ -266,7 +279,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             )
 
             with self.assertRaises(TaskAlreadyProcessingError) as raised:
-                service.create_file_task(
+                admit_analysis_task(service,
                     "callback-window.pdf",
                     {"businessType": "file", "marker": "too-early"},
                 )
@@ -288,7 +301,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "callback-window.pdf",
                 execution_id=first["execution_id"],
             )
-            second = service.create_file_task(
+            second = admit_analysis_task(service,
                 "callback-window.pdf",
                 {"businessType": "file", "marker": "second"},
             )
@@ -303,7 +316,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """真实回调已失败过一次后仍允许重跑，避免长期故障造成永久 409。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_file_task(
+            first = admit_analysis_task(service,
                 "callback-failed.pdf",
                 {"businessType": "file", "marker": "first"},
             )
@@ -321,7 +334,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                 execution_id=first["execution_id"],
             )
 
-            second = service.create_file_task(
+            second = admit_analysis_task(service,
                 "callback-failed.pdf",
                 {"businessType": "file", "marker": "second"},
             )
@@ -337,16 +350,10 @@ class LLMTaskServiceTests(unittest.TestCase):
         """failed 补发在 HTTP 阶段必须持有租约，结束后才能受理新 execution。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_file_task(
+            first = create_terminal_analysis_task(
+                service,
                 "callback-replay.pdf",
-                {"businessType": "file", "marker": "first"},
-            )
-            service.mark_business_result(
-                "file",
-                "callback-replay.pdf",
-                {"status": "2", "marker": "first-result"},
-                status="2",
-                execution_id=first["execution_id"],
+                result_data={"marker": "first-result"},
             )
             service.mark_callback_failed(
                 "file",
@@ -358,32 +365,41 @@ class LLMTaskServiceTests(unittest.TestCase):
             release_callback = Event()
             delivered_markers: list[str] = []
 
-            def blocking_callback(_url, payload, timeout, **_kwargs):
-                self.assertEqual(timeout, 5)
-                delivered_markers.append(payload["marker"])
+            def blocking_callback(
+                request: AnalysisCallbackDeliveryRequest,
+            ) -> AnalysisCallbackDelivery:
+                delivered_markers.append(
+                    request.payload.to_dict()["data"]["marker"]
+                )
                 callback_started.set()
                 if not release_callback.wait(timeout=5):
                     raise AssertionError("测试未释放回调阻塞")
-                return True
-
-            with (
-                patch(
-                    "app.services.llm_service.task_service.post_callback_payload",
-                    side_effect=blocking_callback,
-                ) as callback_mock,
-                ThreadPoolExecutor(max_workers=1) as pool,
-            ):
-                replay = pool.submit(
-                    service.replay_callback_if_needed,
-                    "file",
-                    "callback-replay.pdf",
-                    callback_url="http://callback.test/llm/callback",
-                    timeout=5,
+                return AnalysisCallbackDelivery(
+                    execution=request.lease.execution,
+                    lease_token=request.lease.lease_token,
+                    lease_version=request.lease.lease_version,
+                    outcome=AnalysisCallbackDeliveryOutcome.DELIVERED,
                 )
-                self.assertTrue(callback_started.wait(timeout=5))
+
+            recovery = build_analysis_callback_recovery(
+                service,
+                callback_url="http://callback.test/llm/callback",
+                transport=blocking_callback,
+            )
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                replay = pool.submit(
+                    recovery.execute,
+                    "callback-replay.pdf",
+                )
+                if not callback_started.wait(timeout=5):
+                    # 若恢复线程在进入 Transport 前失败，优先抛出其真实异常，避免只看到
+                    # 一个缺少根因的 Event 超时断言。
+                    replay.result(timeout=1)
+                    self.fail("同步回调恢复未进入 Transport")
 
                 with self.assertRaises(TaskAlreadyProcessingError) as raised:
-                    service.create_file_task(
+                    admit_analysis_task(service,
                         "callback-replay.pdf",
                         {"businessType": "file", "marker": "too-early"},
                     )
@@ -393,14 +409,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                 )
                 # 第二个补发调用拿不到同一租约，不得重复发送。
                 self.assertFalse(
-                    service.replay_callback_if_needed(
-                        "file",
-                        "callback-replay.pdf",
-                        callback_url=(
-                            "http://callback.test/llm/callback"
-                        ),
-                        timeout=5,
-                    )
+                    recovery.execute("callback-replay.pdf")
                 )
 
                 release_callback.set()
@@ -410,7 +419,6 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "file",
                 "callback-replay.pdf",
             )
-            self.assertEqual(callback_mock.call_count, 1)
             self.assertEqual(delivered_markers, ["first-result"])
             self.assertEqual(
                 completed["execution_id"],
@@ -418,7 +426,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             )
             self.assertEqual(completed["callback_status"], "success")
 
-            second = service.create_file_task(
+            second = admit_analysis_task(service,
                 "callback-replay.pdf",
                 {"businessType": "file", "marker": "second"},
             )
@@ -433,7 +441,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """发送进程崩溃遗留的过期租约可由后续 check-task 安全接管。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task(
+            task = seed_legacy_file_task(service,
                 "stale-callback-lease.pdf",
                 {"businessType": "file"},
             )
@@ -498,7 +506,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """旧 execution 对进度、结果和回调状态的迟到写入必须全部被 CAS 拒绝。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_file_task(
+            first = seed_legacy_file_task(service,
                 "rerun.pdf",
                 {"businessType": "file", "marker": "first"},
             )
@@ -514,7 +522,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                 "rerun.pdf",
                 execution_id=first["execution_id"],
             )
-            second = service.create_file_task(
+            second = seed_legacy_file_task(service,
                 "rerun.pdf",
                 {"businessType": "file", "marker": "second"},
             )
@@ -560,7 +568,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """同一执行成功终结后，迟到的失败路径也不能覆盖既有终态。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("done.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"done.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file",
                 "done.pdf",
@@ -587,12 +595,12 @@ class LLMTaskServiceTests(unittest.TestCase):
         """同一业务键主动重跑必须获得新执行身份，不能复用上一轮审计幂等键。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_file_task("demo.pdf", {"businessType": "file"})
+            first = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file", "demo.pdf", {"status": "2"}, status="2"
             )
             service.mark_callback_skipped("file", "demo.pdf")
-            second = service.create_file_task("demo.pdf", {"businessType": "file"})
+            second = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
 
             self.assertNotEqual(first["execution_id"], second["execution_id"])
 
@@ -835,7 +843,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             db_path = f"{tmp}/tasks.sqlite3"
             source_service = LLMTaskService(db_path=db_path)
-            original_task = source_service.create_file_task(
+            original_task = seed_legacy_file_task(source_service,
                 "main-migration.pdf",
                 {"businessType": "file"},
             )
@@ -1127,7 +1135,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """终结只补结果字段，模型候选、排名、分数和保护原因必须保持原值。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("ford.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"ford.pdf", {"businessType": "file"})
             decision_args = _recall_decision_args(task["execution_id"])
 
             initial_result = service.upsert_architecture_recall_decision(
@@ -1175,7 +1183,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """同 execution 同内容可重放，不同初始或终结内容必须稳定报冲突。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("nimitz.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"nimitz.pdf", {"businessType": "file"})
             decision_args = _recall_decision_args(task["execution_id"])
 
             service.upsert_architecture_recall_decision(**decision_args)
@@ -1219,7 +1227,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """Top-64、最终 128 候选及模型投影文本均受严格持久化上限约束。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("limits.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"limits.pdf", {"businessType": "file"})
             decision_args = _recall_decision_args(task["execution_id"])
 
             too_many_base = dict(decision_args)
@@ -1286,7 +1294,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """召回审计与交互审计共用有限 SQLite 锁重试执行器。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("locked.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"locked.pdf", {"businessType": "file"})
             decision_args = _recall_decision_args(task["execution_id"])
             original_connect = service._connect
             lock_failures = 0
@@ -1309,7 +1317,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """同文件重跑替换当前 execution 后，旧召回记录仍必须可读取。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            first = service.create_file_task("rerun.pdf", {"businessType": "file"})
+            first = seed_legacy_file_task(service,"rerun.pdf", {"businessType": "file"})
             service.upsert_architecture_recall_decision(
                 **_recall_decision_args(first["execution_id"])
             )
@@ -1332,7 +1340,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                 execution_id=first["execution_id"],
             )
 
-            second = service.create_file_task("rerun.pdf", {"businessType": "file"})
+            second = seed_legacy_file_task(service,"rerun.pdf", {"businessType": "file"})
             historical = service.get_architecture_recall_decision(
                 first["execution_id"]
             )
@@ -1363,7 +1371,7 @@ class LLMTaskServiceTests(unittest.TestCase):
                     **_recall_decision_args("missing-execution")
                 )
 
-            task = service.create_file_task("missing-initial.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"missing-initial.pdf", {"businessType": "file"})
             with self.assertRaisesRegex(
                 ArchitectureRecallAuditError,
                 "缺少初始召回决策",
@@ -1381,7 +1389,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """稳定阶段仅允许约定枚举，索引失败可在无树指纹和无候选时留痕。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("bad-tree.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"bad-tree.pdf", {"businessType": "file"})
             empty_decision = _recall_decision_args(task["execution_id"])
             empty_decision.update(
                 {
@@ -1426,7 +1434,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """32K 是模型发送门禁，审计仍须保存实际超限值和预算失败阶段。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("oversized-prompt.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"oversized-prompt.pdf", {"businessType": "file"})
             decision_args = _recall_decision_args(task["execution_id"])
             decision_args["prompt_chars"] = 32_001
 
@@ -1447,8 +1455,8 @@ class LLMTaskServiceTests(unittest.TestCase):
     def test_get_tasks_returns_snapshots_in_request_order(self):
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("a.pdf", {"businessType": "file"}, status="1")
-            service.create_file_task("b.pdf", {"businessType": "file"}, status="0")
+            seed_legacy_file_task(service,"a.pdf", {"businessType": "file"}, status="1")
+            seed_legacy_file_task(service,"b.pdf", {"businessType": "file"}, status="0")
 
             tasks = service.get_tasks("file", ["a.pdf", "b.pdf"])
 
@@ -1487,56 +1495,17 @@ class LLMTaskServiceTests(unittest.TestCase):
             service.mark_callback_failed("report", "7", "timeout")
             self.assertTrue(service.should_replay_callback("report", "7"))
 
-    def test_report_replay_rejects_legacy_generic_entry(self):
-        """报告回调补偿必须拒绝遗留通用入口，避免绕过 Callback Guard。
-
-        报告模块已经以 execution 为粒度实现 latest-wins 与 fencing；若继续由
-        ``LLMTaskService`` 的通用补偿方法发送回调，就会绕过该保护。因此这里只
-        验证遗留入口 fail closed，实际补偿行为由报告模块的应用服务测试覆盖。
-        """
+    def test_task_service_has_no_cross_business_callback_recovery_entry(self):
+        """通用 Service 不再暴露可绕过各业务 Callback Guard 的补偿入口。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_report_task(
-                report_id=7,
-                request_payload={"businessType": "report"},
-            )
-            service.mark_business_completed(
-                "report",
-                "7",
-                {"details": "<div>ok</div>"},
-                status="1",
-            )
-            service.mark_callback_failed("report", "7", "timeout")
-
-            with (
-                patch.object(service, "claim_callback_delivery") as claim_callback,
-                patch(
-                    "app.services.llm_service.task_service.post_callback_payload"
-                ) as callback_post,
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "报告回调恢复必须通过 RecoverReportCallbackSynchronously",
-                ):
-                    service.replay_callback_if_needed(
-                        "report",
-                        "7",
-                        callback_url="http://callback.test/llm/callback",
-                        timeout=5,
-                    )
-
-            current = service.get_task("report", "7")
-
-        claim_callback.assert_not_called()
-        callback_post.assert_not_called()
-        self.assertEqual(current["callback_status"], "failed")
-        self.assertEqual(current["callback_attempts"], 1)
+            self.assertFalse(hasattr(service, "replay_callback_if_needed"))
 
     def test_atomic_audit_persists_main_attempts_and_lifecycle_events(self):
         """完整事务提交后才返回 succeeded 门禁结果，并保留全部审计明细。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
 
             result = service.create_llm_interaction_with_trace(
                 business_type="file",
@@ -1566,7 +1535,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """首尾换行和 CRLF 不得再次制造主审计与实际模型调用摘要不一致。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
 
             result = service.create_llm_interaction_with_trace(
                 business_type="file",
@@ -1585,7 +1554,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """相同执行的完全一致重放幂等复用，内容变化则拒绝覆盖。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             arguments = {
                 "business_type": "file",
                 "business_key": "demo.pdf",
@@ -1615,7 +1584,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """主表 Prompt 与最终模型调用不对应时必须在获取数据库写锁前失败。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
 
             with self.assertRaisesRegex(ValueError, "最后一次 RagAttempt"):
                 service.create_llm_interaction_with_trace(
@@ -1634,7 +1603,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             db_path = f"{tmp}/tasks.sqlite3"
             service = LLMTaskService(db_path=db_path)
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     """
@@ -1663,7 +1632,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             db_path = f"{tmp}/tasks.sqlite3"
             service = LLMTaskService(db_path=db_path)
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             with sqlite3.connect(db_path) as conn:
                 conn.execute(
                     """
@@ -1700,7 +1669,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """短暂锁冲突允许有限退避，锁释放后提交完整事务。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             original_connect = service._connect
             lock_failures = 0
 
@@ -1730,7 +1699,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         with workspace_tempdir() as tmp:
             db_path = f"{tmp}/tasks.sqlite3"
             service = LLMTaskService(db_path=db_path)
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             lock_connection = sqlite3.connect(db_path, timeout=0)
             lock_connection.execute("BEGIN IMMEDIATE")
             released = False
@@ -1768,7 +1737,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """锁冲突达到硬上限后必须失败，不能返回审计成功凭据。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             connect_attempts = 0
 
             def always_locked(*, timeout_seconds=5.0):
@@ -1798,7 +1767,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """只读数据库等永久异常必须立即失败，避免无意义重试掩盖根因。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             connect_attempts = 0
 
             def read_only_error(*, timeout_seconds=5.0):
@@ -1824,7 +1793,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """准备阶段失败只记录生命周期事件，不伪造空的 RagAttempt。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.pdf", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             trace = RagExecutionTrace(
                 context_name="analysis-demo",
                 context_ref="context-001",
@@ -1875,7 +1844,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         cleanup_token = "v1.internal-xlsx-folder-cleanup-token"
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            task = service.create_file_task("demo.xlsx", {"businessType": "file"})
+            task = seed_legacy_file_task(service,"demo.xlsx", {"businessType": "file"})
             trace = RagExecutionTrace(
                 context_name="analysis-demo",
                 context_ref="context-001",
@@ -2062,7 +2031,7 @@ class LLMTaskServiceTests(unittest.TestCase):
         """未配置回调是零次尝试的明确终态，重复标记不会改变计数。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("demo.pdf", {"businessType": "file"})
+            seed_legacy_file_task(service,"demo.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file",
                 "demo.pdf",
@@ -2079,37 +2048,35 @@ class LLMTaskServiceTests(unittest.TestCase):
             self.assertEqual(task["callback_attempts"], 0)
             self.assertFalse(service.should_replay_callback("file", "demo.pdf"))
 
-    def test_empty_callback_replay_migrates_historical_pending_to_skipped(self):
-        """补偿入口遇到空配置时应修正历史 pending，且不得制造回调尝试。"""
+    def test_current_empty_callback_recovery_marks_task_skipped(self):
+        """当前 Guard 恢复链遇到空配置时应收敛为 skipped，且不得发送。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("demo.pdf", {"businessType": "file"})
-            service.mark_business_result(
-                "file", "demo.pdf", {"status": "2"}, status="2"
+            task = create_terminal_analysis_task(
+                service,
+                "demo.pdf",
             )
 
-            replayed = service.replay_callback_if_needed(
-                "file",
-                "demo.pdf",
+            recovery = build_analysis_callback_recovery(
+                service,
                 callback_url="   ",
-                timeout=5,
             )
+            replayed = recovery.execute("demo.pdf")
 
             task = service.get_task("file", "demo.pdf")
             self.assertFalse(replayed)
             self.assertEqual(task["callback_status"], "skipped")
-            self.assertEqual(task["callback_attempts"], 0)
 
     def test_callback_skipped_does_not_override_actual_callback_result(self):
         """真实成功或失败结果一旦产生，skipped 不得覆盖审计事实。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("success.pdf", {"businessType": "file"})
+            seed_legacy_file_task(service,"success.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file", "success.pdf", {"status": "2"}, status="2"
             )
             service.mark_callback_success("file", "success.pdf")
-            service.create_file_task("failed.pdf", {"businessType": "file"})
+            seed_legacy_file_task(service,"failed.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file", "failed.pdf", {"status": "3"}, status="3"
             )
@@ -2131,11 +2098,11 @@ class LLMTaskServiceTests(unittest.TestCase):
         """回调状态只能沿合法方向转换，处理中任务和既有终态不得被覆盖。"""
         with workspace_tempdir() as tmp:
             service = LLMTaskService(db_path=f"{tmp}/tasks.sqlite3")
-            service.create_file_task("processing.pdf", {"businessType": "file"})
+            seed_legacy_file_task(service,"processing.pdf", {"businessType": "file"})
             with self.assertRaisesRegex(ValueError, "任务尚未完成"):
                 service.mark_callback_skipped("file", "processing.pdf")
 
-            service.create_file_task("success.pdf", {"businessType": "file"})
+            seed_legacy_file_task(service,"success.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file", "success.pdf", {"status": "2"}, status="2"
             )
@@ -2143,7 +2110,7 @@ class LLMTaskServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "非法回调状态转换"):
                 service.mark_callback_failed("file", "success.pdf", "late failure")
 
-            service.create_file_task("skipped.pdf", {"businessType": "file"})
+            seed_legacy_file_task(service,"skipped.pdf", {"businessType": "file"})
             service.mark_business_result(
                 "file", "skipped.pdf", {"status": "2"}, status="2"
             )

@@ -37,12 +37,16 @@ Markdown/Text Artifact。它拥有格式判断、MHTML、LibreOffice、MinerU、
 - FIFO 的当前实例等待者有硬上限；可靠业务积压仍必须保存在数据库/未来队列，而不是进程内。
 - `running/outcome_unknown` 通过内部对账用例显式确认失败或恢复已验证 Artifact；禁止自动重提
   外部操作。陈旧 `running` 只能先隔离为 unknown。
+- RAG-only Markdown 投影使用 v2 Profile：可渲染的 Base64 Markdown 图片会被完整移除，并用
+  单个 ASCII 空格维持相邻 Token 边界；alt、媒体类型、摘要和 payload 长度不进入 RAG 正文，
+  图片数量与移除字节数只写入脱敏统计日志。canonical prepared Artifact 保持不变。
 - 本地 Store 的读取校验、文件句柄和删除使用同一进程内读租约，锁条目会回收；这仍不能替代
   多实例对象存储的条件写/租约。
 - MHTML 浏览器 Profile 固定 `confirmed failure -> Markdown`、`unknown -> reconcile`，并按负责人
   要求持续使用 `--no-sandbox`。
-- 旧 `services/translator` 与 `services/utils` 入口仅为兼容 Facade/回滚证据；当前生产组合根不得
-  从旧 `mhtml2pdf` 或 `MinerUConverter` 路径取得转换器。
+- 旧 `app/services/translator` 包以及 MHTML/OCR/MinerU 文件处理 Facade 已在阶段 1G 删除；当前
+  生产组合根只能从本模块取得转换能力。历史文档中的 `mhtml2pdf`、`MinerUConverter` 等路径仅作为
+  迁移证据保留，不得重新创建或接回运行链。
 - MySQL、MinIO、可靠任务队列、跨实例 lease/fencing、自动 Artifact GC 和真实生产容量仍属于
   后续阶段。
 - Analysis/Report accepted 快照尚未冻结全部 OCR/MinerU/Translation 参数与依赖版本；阶段 2

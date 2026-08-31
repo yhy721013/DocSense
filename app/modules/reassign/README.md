@@ -4,6 +4,11 @@
 可审计步骤、条件本地提交、外部结果探测和补偿恢复；它不是后台任务接口，也不会向公开响应
 暴露 operation、lease、fencing 或步骤信息。
 
+目标分类 Workspace 名称由 Application 先把 `newArchitectureId` 投影为数据库权威整数，再通过
+共享领域规则生成 `archId-{architecture_id}`。前向执行与恢复观察器必须使用同一规则；当前开发
+阶段不查找、不迁移也不自动认领旧 `architectureId-*` Workspace。AnythingLLM Adapter 只负责
+按精确名称查找、创建和结果核验，不拥有目标分类规范化规则。
+
 ## 分层职责
 
 | 目录 | 当前职责 | 允许依赖 |

@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 
 import app.ports as port_module
-from app.ports import (
+from app.modules.chat.ports import (
     ChatChunk,
     ChatConversationFactory,
     ChatConversationPort,
@@ -17,6 +17,7 @@ from app.ports import (
     ChatResourceError,
     ChatRole,
     ChatSessionRefs,
+    ChatSourceFinalization,
 )
 from tests.fakes import FakeChatConversationFactory, FakeChatConversationPort
 
@@ -158,13 +159,16 @@ class ChatPortContractTests(unittest.TestCase):
             )
             messages = second_port.fetch_messages(session)
 
-        self.assertEqual([ChatChunk("后续回答", 1)], chunks)
+        self.assertEqual(
+            [ChatChunk("后续回答", 1), ChatSourceFinalization(sources=())],
+            chunks,
+        )
         self.assertEqual(2, len(messages))
         self.assertEqual("继续总结", messages[0].content)
         self.assertEqual("后续回答", messages[1].content)
 
     def test_stream_message_returns_chunks_and_commits_history_on_completion(self) -> None:
-        """流式接口只返回领域片段；完整消费后 Fake 才提交助手消息快照。"""
+        """流式接口返回领域片段和唯一来源终态；完整消费后 Fake 才提交历史。"""
         port = FakeChatConversationPort(stream_contents=(" 第一段", "第二段\n"))
         session = port.open_conversation(
             context_name="chat-c1",
@@ -183,7 +187,11 @@ class ChatPortContractTests(unittest.TestCase):
         messages = port.fetch_messages(session)
 
         self.assertEqual(
-            [ChatChunk(" 第一段", 1), ChatChunk("第二段\n", 2)],
+            [
+                ChatChunk(" 第一段", 1),
+                ChatChunk("第二段\n", 2),
+                ChatSourceFinalization(sources=()),
+            ],
             chunks,
         )
         self.assertEqual(2, len(messages))
@@ -271,9 +279,14 @@ class ChatPortBoundaryTests(unittest.TestCase):
     def test_chat_port_source_does_not_contain_supplier_protocol_terms(self) -> None:
         """文件对话 Port 源码不得出现具体客户端、字段或协议输出词。"""
         project_root = Path(__file__).resolve().parents[1]
-        source = (project_root / "app" / "ports" / "chat.py").read_text(
-            encoding="utf-8"
-        )
+        source = (
+            project_root
+            / "app"
+            / "modules"
+            / "chat"
+            / "ports"
+            / "conversations.py"
+        ).read_text(encoding="utf-8")
         forbidden_terms = (
             "AnythingLLM",
             "workspace_slug",

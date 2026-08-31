@@ -7,6 +7,7 @@ import threading
 from uuid import uuid4
 
 from app.modules.report.domain import ReportPortContractError, ReportId
+from app.modules.tasks.domain import TaskId
 from app.modules.report.ports import (
     DeliverReportCallback,
     ReportCallbackAcquire,
@@ -55,7 +56,13 @@ class RecoverReportCallbackSynchronously:
 
         return self._callbacks
 
-    def execute(self, report_id: ReportId, *, request_trace_id: str = "") -> bool:
+    def execute(
+        self,
+        report_id: ReportId,
+        *,
+        request_trace_id: str = "",
+        expected_task_id: TaskId | None = None,
+    ) -> bool:
         """同步尝试一次恢复；仅真正收到 2xx 时返回 ``True``。
 
         ``False`` 包含无需恢复、旧执行过期、其他执行者正在发送、结果未知冻结、未配置
@@ -67,6 +74,8 @@ class RecoverReportCallbackSynchronously:
             raise TypeError("report_id 必须是 ReportId")
         if not isinstance(request_trace_id, str):
             raise TypeError("request_trace_id 必须是 str")
+        if expected_task_id is not None and not isinstance(expected_task_id, TaskId):
+            raise TypeError("expected_task_id 必须是 TaskId 或 None")
         normalized_trace_id = request_trace_id.strip()
         if len(normalized_trace_id) > 128:
             raise ValueError("request_trace_id 最多 128 个字符")
@@ -82,6 +91,7 @@ class RecoverReportCallbackSynchronously:
             return self._execute_owned(
                 report_id,
                 request_trace_id=effective_trace_id,
+                expected_task_id=expected_task_id,
             )
         finally:
             self._leave_local_recovery(business_key)
@@ -104,6 +114,7 @@ class RecoverReportCallbackSynchronously:
         report_id: ReportId,
         *,
         request_trace_id: str,
+        expected_task_id: TaskId | None,
     ) -> bool:
         """由当前进程内 owner 使用首次候选快照完成至多一次发送。"""
 
@@ -112,6 +123,12 @@ class RecoverReportCallbackSynchronously:
             logger.debug(
                 "报告同步回调无需恢复: report_id=%s",
                 report_id.public_value,
+            )
+            return False
+        if expected_task_id is not None and candidate.task_id != expected_task_id:
+            logger.info(
+                "报告同步回调跳过已切换的 latest execution: "
+                "business_type=report reason=expected_task_changed"
             )
             return False
 

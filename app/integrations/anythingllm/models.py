@@ -515,6 +515,125 @@ class AnythingLLMSource:
         )
 
 
+def _lossless_optional_string(
+    container: Mapping[str, Any],
+    key: str,
+    *,
+    context: str,
+) -> str | None:
+    """读取可选字符串字段，不做字符串化、去空白或 Unicode 归一化。"""
+
+    if key not in container or container.get(key) is None:
+        return None
+    value = container.get(key)
+    if not isinstance(value, str):
+        raise _protocol_error(f"AnythingLLM {context} 必须是字符串")
+    return value
+
+
+@dataclass(frozen=True)
+class AnythingLLMStreamSource:
+    """`/stream-chat` Finalization 中的一条无损来源。
+
+    与兼容型 ``AnythingLLMSource`` 不同，本 DTO 不读取 title/URL 猜测身份，也不复用会
+    ``str()`` 和 ``strip()`` 的 ``first_text()``。正文逐字符保持，结构化来源键只从
+    ``docSource`` 顶层或 metadata 精确读取；两个位置冲突属于供应商协议错误。
+    """
+
+    content: str
+    structured_source_key: str
+
+    @classmethod
+    def from_payload(cls, value: Any) -> "AnythingLLMStreamSource":
+        payload = require_mapping(value, context="流式来源记录")
+        metadata_value = payload.get("metadata")
+        if metadata_value is None:
+            metadata: Mapping[str, Any] = {}
+        else:
+            metadata = require_mapping(
+                metadata_value,
+                context="流式来源 metadata 字段",
+            )
+
+        top_key = _lossless_optional_string(
+            payload,
+            "docSource",
+            context="流式来源 docSource 字段",
+        )
+        nested_key = _lossless_optional_string(
+            metadata,
+            "docSource",
+            context="流式来源 metadata.docSource 字段",
+        )
+        if top_key is not None and nested_key is not None and top_key != nested_key:
+            raise _protocol_error("AnythingLLM 流式来源 docSource 字段冲突")
+        raw_key = top_key if top_key is not None else nested_key
+
+        content: str | None = None
+        for field_name in ("text", "pageContent", "content", "chunk"):
+            candidate = _lossless_optional_string(
+                payload,
+                field_name,
+                context=f"流式来源 {field_name} 字段",
+            )
+            if candidate is not None:
+                content = candidate
+                break
+        if content is None:
+            raise _protocol_error("AnythingLLM 流式来源缺少 Chunk 正文")
+
+        # 格式不合法或带多余空白的来源键先保留为空，由业务 SourceMapper 按冻结
+        # Scope 整体失败关闭；这里绝不从 title、URL、ID 或正文猜测替代身份。
+        structured_source_key = (
+            raw_key
+            if raw_key is not None
+            and raw_key == raw_key.strip()
+            and normalize_source_marker(raw_key)
+            else ""
+        )
+        return cls(
+            content=content,
+            structured_source_key=structured_source_key,
+        )
+
+
+@dataclass(frozen=True)
+class AnythingLLMTextDelta:
+    """AnythingLLM 正常文本增量。"""
+
+    content: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, str):
+            raise TypeError("content must be str")
+        if self.content == "":
+            raise ValueError("content cannot be empty")
+
+
+@dataclass(frozen=True)
+class AnythingLLMFinalization:
+    """常规回答唯一合法的完整来源终态。"""
+
+    sources: tuple[AnythingLLMStreamSource, ...]
+
+    def __post_init__(self) -> None:
+        sources = tuple(self.sources)
+        if any(not isinstance(item, AnythingLLMStreamSource) for item in sources):
+            raise TypeError("sources must contain AnythingLLMStreamSource")
+        object.__setattr__(self, "sources", sources)
+
+
+@dataclass(frozen=True)
+class AnythingLLMQueryRejection:
+    """v1.15.0 Query 无上下文时的独立合法终态，不伪装成 Finalization。"""
+
+    content: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, str) or self.content == "":
+            raise ValueError("query rejection content must be a non-empty str")
+
+
 @dataclass(frozen=True)
 class AnythingLLMAnswer:
     """线程问答完成后的规范化文本、原始文本和来源集合。"""

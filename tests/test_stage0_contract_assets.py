@@ -13,13 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from app.presenters.chat_stream import format_sse_event
-from app.services.llm_service.analysis_service import build_file_callback_payload
-from app.services.llm_service.report_service import (
-    build_report_callback_payload,
+from app.modules.analysis.domain.callback_payloads import build_file_callback_payload
+from app.modules.report.domain import (
+    ReportId,
+    build_report_callback,
     ensure_report_html,
 )
-from app.services.llm_service.weaponry_service import (
-    _build_weaponry_callback_payload,
+from app.modules.weaponry.domain import (
+    WEAPONRY_FAILURE_MESSAGE,
+    WeaponryCallbackPayload,
 )
 
 
@@ -236,27 +238,33 @@ class Stage0ContractAssetTests(unittest.TestCase):
         )
         self.assertEqual(
             callbacks["reportFailure"],
-            build_report_callback_payload(132, "", status="2"),
+            build_report_callback(
+                ReportId.from_public_value(132), "", status="2"
+            ).to_public_dict(),
         )
         self.assertEqual(
             callbacks["reportSuccess"],
-            build_report_callback_payload(
-                132,
+            build_report_callback(
+                ReportId.from_public_value(132),
                 "<div>报告内容</div>",
                 status="1",
-            ),
+            ).to_public_dict(),
         )
         self.assertEqual(
             callbacks["reportEmptySuccess"],
-            build_report_callback_payload(
-                132,
+            build_report_callback(
+                ReportId.from_public_value(132),
                 ensure_report_html(None),
                 status="1",
-            ),
+            ).to_public_dict(),
         )
         self.assertEqual(
             callbacks["weaponryFailure"],
-            _build_weaponry_callback_payload(132, [], status="3"),
+            WeaponryCallbackPayload(
+                architecture_id=132,
+                status="3",
+                message=WEAPONRY_FAILURE_MESSAGE,
+            ).to_public_dict(),
         )
 
     def test_chat_sse_wire_examples_match_presenter(self) -> None:

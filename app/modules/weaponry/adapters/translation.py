@@ -29,8 +29,12 @@ class WeaponryTextTranslatorProtocol(Protocol):
         ...
 
 
-class LLMTranslationServiceWeaponryAdapter:
-    """不保存跨任务正文缓存；翻译失败按既有兼容语义返回空文本。"""
+class TextTranslatorWeaponryAdapter:
+    """把稳定的纯文本翻译协议适配到 Weaponry Port。
+
+    适配器不绑定已经删除的旧 Translation Service 类名，也不保存跨任务正文缓存；
+    翻译失败继续按既有兼容语义返回空文本。
+    """
 
     def __init__(self, translator: WeaponryTextTranslatorProtocol) -> None:
         if not isinstance(translator, WeaponryTextTranslatorProtocol):
@@ -140,7 +144,7 @@ class TranslationEngineWeaponryAdapter:
 
 
 __all__ = [
-    "LLMTranslationServiceWeaponryAdapter",
+    "TextTranslatorWeaponryAdapter",
     "TranslationEngineWeaponryAdapter",
     "WeaponryTextTranslatorProtocol",
 ]

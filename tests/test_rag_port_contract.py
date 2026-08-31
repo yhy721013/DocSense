@@ -849,6 +849,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
             external_location="external:prepared",
             content_sha256="a" * 64,
             ingested_file_name="sample.pdf",
+            structured_source_key="docsense_ref:" + "a" * 32,
         )
 
         stored = port.store_prepared_document(
@@ -963,6 +964,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
                 "external:first",
                 "a" * 64,
                 "first-upload.pdf",
+                "docsense_ref:" + "a" * 32,
             ),
             self._metadata(),
             operation_context=operation_context,
@@ -977,6 +979,7 @@ class KnowledgeIndexPortContractTests(unittest.TestCase):
                     "external:second",
                     "b" * 64,
                     "second-upload.pdf",
+                    "docsense_ref:" + "b" * 32,
                 ),
                 self._metadata(),
                 operation_context=operation_context,

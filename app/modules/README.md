@@ -23,9 +23,15 @@ Web/Worker Adapter
 
 | 模块 | 职责 | 当前状态 |
 | --- | --- | --- |
+| `chat/` | 文件对话与知识谱系对话共用的会话、运行、文档快照、历史、标题、中断、删除及供应商适配 | 已完成物理模块化并接入 `/llm/chat*` 与独立 `/llm/weaponry-chat*` 五接口；本机 AnythingLLM v1.15.0 与 Flask 协议级逐帧验收已通过，SQLite/内联调度仍只证明单实例能力 |
 | `tasks/` | 通用任务身份、状态读取、写入命令、回调恢复与进度边界 | 1A/1B 已接管 Progress 并建立可靠恢复命令；1C 增加 SQLite Task Command/Queue Inspection、原子 latest Progress Guard和共享审计 Schema v3；1D-5 抽取业务无关持久扫描 Dispatcher 与 OS 单实例锁，Report/Weaponry 通过薄适配复用 |
+| `analysis/` | 文件分析受理、批次顺序、执行、Callback 与资源恢复 | 阶段 1F 已关闭并在 1G 删除旧执行器；当前为 SQLite accepted、单执行 Worker 与独立维护线程，尚不是可靠队列或多实例执行模型 |
 | `report/` | 报告输入、HTML 结果、回调载荷及报告执行用例 | 阶段 1C 已关闭：契约、Domain/Application/Ports、SQLite 任务事实、任务级 I/O/RAG/Audit、Callback/资源恢复、一条执行 Worker与两条隔离维护线程、毒任务冷却、跨进程单实例门禁、组合根、当前 Flask 薄路由及最终扩大回归均已完成；尚未部署生产或接入可靠队列 |
 | `weaponry/` | 武器谱字段检索、证据选择、抽取与回调 | 1D-1～1D-7 的开发分支代码与离线验收已关闭：Domain/受理/Ports、唯一 Schema v2、生产 I/O Adapter、Submit/Run/字段 Application、严格配置、通用本地 Dispatcher、真实 Callback Guard、同步恢复、资源恢复、生产组合根、公开 202 空体薄路由、Creation Intent、HTTP 租约及永久 AST/配置门禁均已完成。50 个 accepted 只形成持久行、一条 Worker 和零内存积压项；有效 production attestation 与生产容量仍待真实环境验收，代码尚未部署生产 |
+| `reassign/` | 分类节点变更同步 Saga、补偿和恢复观测 | 阶段 1E 已关闭；当前 SQLite UoW 只证明单实例事务语义，真实供应商与共享数据库演练仍是后续门禁 |
+| `document_processing/` | Artifact/Profile/Lineage、Processor 与共享准备流水线 | 阶段 1H 已切换生产调用方；当前本地 Store/SQLite Record 由阶段 3 MinIO 与共享数据库接续 |
+| `translation/` | prepared Artifact 翻译、语言引擎、分段与 Renderer | 阶段 1H 已独立并在 1G 删除旧 Translation Service/Translator 包；不重新取得原始文件转换所有权 |
+| `debug/` | `/debug/*` 背后的只读 Query/Port/Adapter | 阶段 1G 已收口为无网络、无后台线程的内部调试模块；部署时仍须在网络或反向代理层限制访问 |
 
 ## 维护规则
 

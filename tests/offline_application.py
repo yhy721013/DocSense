@@ -31,6 +31,7 @@ from app.modules.analysis.adapters import (
     SerializedAnalysisTranslationAdapter,
 )
 from app.modules.analysis.composition import compose_analysis_application_services
+from app.modules.debug.composition import compose_debug_application_services
 from app.modules.analysis.ports import (
     AnalysisCallbackDelivery,
     AnalysisCallbackDeliveryOutcome,
@@ -64,7 +65,7 @@ from app.modules.weaponry.adapters import (
     WeaponryTaskCommandCodec,
 )
 from app.modules.weaponry.composition import compose_weaponry_application_services
-from app.services.chat import (
+from app.modules.chat import (
     ChatAbortService,
     ChatCleanupJobExecutor,
     ChatCommandService,
@@ -87,6 +88,10 @@ from app.services.core.config import (
 from app.services.core.database import DatabaseService
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
+from tests.document_processing_fixtures import (
+    build_test_document_preparer,
+    build_test_rag_projector,
+)
 from tests.fakes import (
     FakeChatConversationFactory,
     FakeDocumentRagFactory,
@@ -112,16 +117,6 @@ class _OfflineAnalysisTranslationService:
         """返回稳定空翻译；当前路由测试不会启动 Worker 调用该方法。"""
 
         return ("", "")
-
-    def translate_text_only(
-        self,
-        text: str,
-        *args: object,
-        **kwargs: object,
-    ) -> str:
-        """保留摘要翻译的输入文本，避免测试替身擅自改变业务结果。"""
-
-        return text
 
 
 def _offline_analysis_callback_transport(
@@ -255,7 +250,6 @@ def build_offline_application_services(
         callback_timeout=5.0,
         task_db_path=str(task_db_path),
         download_timeout=5.0,
-        download_dir=str(root),
     )
     analysis_config = AnalysisInfrastructureConfig.single_instance()
     analysis_task_commands = SQLiteAnalysisBatchCommandAdapter(task_service)
@@ -271,6 +265,9 @@ def build_offline_application_services(
     )
     # 显式注入的 Flask 测试容器不会调用 start_background_services，因此这里只构造
     # Dispatcher、受理和同步恢复链，不会创建后台线程或执行文件/RAG/模型 I/O。
+    analysis_document_preparer = build_test_document_preparer(
+        root / "analysis-document-processing"
+    )
     analysis_services = compose_analysis_application_services(
         task_commands=analysis_task_commands,
         progress_publisher=LatestTaskProgressPublisherAdapter(
@@ -280,6 +277,11 @@ def build_offline_application_services(
         workspaces=LocalAnalysisTaskWorkspaceAdapter(str(root / "analysis-tasks")),
         files=LegacyAnalysisFilePreparationAdapter(
             download_timeout_seconds=llm_integration_config.download_timeout,
+            document_preparer=analysis_document_preparer,
+            rag_projector=build_test_rag_projector(
+                analysis_document_preparer,
+                root / "analysis-rag-projection",
+            ),
         ),
         rag_factory=LegacyAnalysisRagAdapterFactory(FakeDocumentRagFactory()),
         knowledge=LegacyAnalysisKnowledgeAdapter(FakeKnowledgeIndexFactory()),
@@ -425,6 +427,10 @@ def build_offline_application_services(
             storage_root=None,
         ),
         report_infrastructure_config=ReportInfrastructureConfig.single_instance(),
+        debug_services=compose_debug_application_services(
+            chat_store=chat_store,
+            kb_service=knowledge_service,
+        ),
         analysis_submit=analysis_services.submit,
         analysis_callback_recovery=analysis_services.callback_recovery,
         analysis_dispatcher=analysis_services.dispatcher,

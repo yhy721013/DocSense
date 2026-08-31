@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from app.services.utils.mhtml_normalizer import (
+from app.modules.document_processing.adapters.path_compat import (
     extract_retrieval_text_from_mhtml,
     extract_text_from_mhtml,
     is_mhtml_file,

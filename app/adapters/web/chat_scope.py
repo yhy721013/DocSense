@@ -4,18 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from app.adapters.web.weaponry_ids import (
-    ArchitectureIdValidationError,
-    normalize_architecture_id,
-)
-from app.services.chat.domain.document_scope import ChatScopeSelector
-from app.services.chat.domain.limits import MAX_CHAT_ARCHITECTURE_ID
+from app.modules.chat.domain.document_scope import ChatScopeSelector
 
 
-CHAT_ARCHITECTURE_ID_EMPTY_ERROR = "architectureId不能为空"
-CHAT_ARCHITECTURE_ID_ERROR = (
-    f"architectureId必须为1到{MAX_CHAT_ARCHITECTURE_ID}之间的正整数"
-)
 CHAT_SCOPE_SELECTOR_CONFLICT_ERROR = "architectureId与fileNames不能同时传入"
 CHAT_FILE_NAMES_TYPE_ERROR = "fileNames必须为数组"
 CHAT_FILE_NAME_ITEM_ERROR = "fileNames中包含无效文件名"
@@ -26,43 +17,21 @@ class ChatScopeSelectorValidationError(ValueError):
 
 
 def parse_chat_scope_selector(params: Mapping[str, object]) -> ChatScopeSelector:
-    """按字段存在性解析 fileNames/architectureId 严格二选一选择器。
+    """解析文件对话的 fileNames 范围选择器。
 
     本函数不读取 Flask ``request``，便于用完整输入矩阵离线验证，也让未来更换 Web
-    框架时继续复用同一入站规则。两个字段都缺失时保持既有 fileNames 行为；只有调用方
-    明确提交了 ``architectureId`` 且值为 ``null`` 时，才返回 architecture 专用空值错误。
+    框架时继续复用同一入站规则。``architectureId`` 已迁移到独立的
+    ``/llm/weaponry-chat*`` 合同；旧路由不再把它解释为类别范围。
     """
     if not isinstance(params, Mapping):
         raise TypeError("params must be a mapping")
 
-    has_architecture_id = "architectureId" in params
-    has_file_names = "fileNames" in params
-    if has_architecture_id and has_file_names:
+    if "architectureId" in params:
         raise ChatScopeSelectorValidationError(
             CHAT_SCOPE_SELECTOR_CONFLICT_ERROR
         )
 
-    if has_architecture_id:
-        raw_architecture_id = params["architectureId"]
-        if raw_architecture_id is None:
-            raise ChatScopeSelectorValidationError(
-                CHAT_ARCHITECTURE_ID_EMPTY_ERROR
-            )
-        try:
-            architecture_id = normalize_architecture_id(
-                raw_architecture_id
-            ).value
-        except ArchitectureIdValidationError as exc:
-            raise ChatScopeSelectorValidationError(
-                CHAT_ARCHITECTURE_ID_ERROR
-            ) from exc
-        if architecture_id > MAX_CHAT_ARCHITECTURE_ID:
-            raise ChatScopeSelectorValidationError(
-                CHAT_ARCHITECTURE_ID_ERROR
-            )
-        return ChatScopeSelector.for_architecture(architecture_id)
-
-    # 缺少两个字段仍走原 fileNames 类型错误，防止 architecture 能力反向改变旧调用方。
+    # 缺少 fileNames 仍走原有类型错误，不反向改变文件对话合同。
     raw_file_names = params.get("fileNames")
     if not isinstance(raw_file_names, list):
         raise ChatScopeSelectorValidationError(CHAT_FILE_NAMES_TYPE_ERROR)
@@ -81,8 +50,6 @@ def parse_chat_scope_selector(params: Mapping[str, object]) -> ChatScopeSelector
 
 
 __all__ = [
-    "CHAT_ARCHITECTURE_ID_EMPTY_ERROR",
-    "CHAT_ARCHITECTURE_ID_ERROR",
     "CHAT_FILE_NAME_ITEM_ERROR",
     "CHAT_FILE_NAMES_TYPE_ERROR",
     "CHAT_SCOPE_SELECTOR_CONFLICT_ERROR",

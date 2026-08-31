@@ -9,7 +9,7 @@ from app.presenters.chat_stream import (
     format_sse_event,
     present_chat_stream,
 )
-from app.services.chat import ChatStreamEvent
+from app.modules.chat import ChatStreamEvent
 
 
 class ChatStreamPresenterTests(unittest.TestCase):

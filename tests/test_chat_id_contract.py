@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.chat.domain.chat_id import (
+from app.modules.chat.domain.chat_id import (
     chat_id_public_value,
     chat_id_storage_key,
     parse_query_chat_id,

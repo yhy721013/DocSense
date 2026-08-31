@@ -29,6 +29,7 @@
   accepted 事实，Weaponry 已在 1D-6 完成生产组合根和公开路由绑定；这仍是兼容执行器，不是
   tasks 可靠队列实现。
   check-task 按甲方要求保留请求内同步恢复：report 业务模块已装配共享 Callback Guard 的
-  专用 Adapter/Application，weaponry 也已装配等价的独立业务 Guard/Application，file 暂走兼容实现；
-  未来 MySQL/Outbox 只增加后台
-  可靠兜底，不替换同步入口。
+  专用 Adapter/Application，weaponry 也已装配等价的独立业务 Guard/Application，file 已路由到
+  Analysis 模块的 `RecoverAnalysisCallbackSynchronously`，缺少该链时明确失败并禁止回退到旧恢复器。
+  `LegacyTaskReadAdapter` 只读取现有任务投影，不拥有业务回调恢复逻辑。未来 MySQL/Outbox 只增加
+  后台可靠兜底，不替换同步入口。

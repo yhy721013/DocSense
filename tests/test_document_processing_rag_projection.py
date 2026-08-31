@@ -7,6 +7,7 @@ import tracemalloc
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from app.modules.document_processing.adapters import (
     BytesArtifactContent,
@@ -19,11 +20,14 @@ from app.modules.document_processing.adapters import (
 from app.modules.document_processing.application import (
     PrepareDocument,
     ProjectDocumentForRag,
+    RAG_PROJECTION_STEP_ID,
 )
 from app.modules.document_processing.domain import (
     ArtifactKind,
+    DocumentProcessingRequest,
     DocumentRepresentation,
     ProcessingOutcome,
+    RagProjectionError,
 )
 from app.modules.document_processing.ports import ArtifactPublication
 from app.modules.tasks.domain import TaskId
@@ -117,11 +121,19 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             )
             self.assertNotIn("aGVsbG8=", projected)
             self.assertNotIn("%%%not-valid-base64%%%", projected)
-            self.assertIn("内嵌图片已移除：alt=舰徽", projected)
-            self.assertIn(
-                hashlib.sha256(b"hello").hexdigest(),
-                projected,
-            )
+            # RAG 文本不能混入图片移除提示及其运维元数据；图片说明也属于被删除
+            # 语法的一部分，不应作为无上下文文本参与切块和向量化。
+            for removed_marker in (
+                "内嵌图片已移除",
+                "alt=",
+                "media_type=",
+                "sha256=",
+                "payload_sha256=",
+                "payload_bytes=",
+                "舰徽",
+                "损坏图片",
+            ):
+                self.assertNotIn(removed_marker, projected)
             # fenced 与四空格缩进代码不是可渲染图片，必须逐字保留。
             self.assertIn(
                 "![示例](data:image/png;base64,Y29kZS1leGFtcGxl)",
@@ -144,6 +156,68 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             self.assertTrue(store.verify(source))
             with store.open_reader(source) as reader:
                 self.assertEqual(payload, reader.read())
+
+    def test_removed_images_leave_only_a_token_separator_and_safe_metrics(
+        self,
+    ) -> None:
+        """图片不产生语义文本，同时不得把相邻英文单词拼接成新 Token。"""
+
+        payload = (
+            b"before![inline](data:image/jpeg;base64,aGVsbG8=)after\n"
+            b"![line](data:image/png;base64,d29ybGQ=)\n"
+        )
+        with workspace_tempdir() as temporary:
+            store, project = _build_runtime(temporary)
+            source = _publish_source(
+                store,
+                TaskId("rag-projection-empty-image-replacement"),
+                payload,
+            )
+
+            with self.assertLogs(
+                "app.modules.document_processing.adapters."
+                "markdown_rag_projection",
+                level="INFO",
+            ) as captured:
+                result = project.execute(
+                    source,
+                    trace_id="empty-image-replacement",
+                )
+
+            self.assertEqual(ProcessingOutcome.SUCCEEDED, result.outcome)
+            assert result.artifact is not None
+            with store.open_reader(result.artifact) as reader:
+                projected = reader.read().decode("utf-8")
+
+        self.assertEqual("before after\n \n", projected)
+        self.assertEqual(("rag_projection_removed_images:2",), result.warnings)
+        logs = "\n".join(captured.output)
+        self.assertIn("removed_images=2", logs)
+        self.assertIn("removed_payload_bytes=16", logs)
+        self.assertNotIn("inline", projected)
+        self.assertNotIn("line", projected)
+
+    def test_profile_identifies_no_semantic_image_replacement_v2(self) -> None:
+        """行为变化必须进入冻结 Profile，禁止复用带旧占位符的 v1 Artifact。"""
+
+        profile = build_markdown_rag_projection_profile()
+        parameters = profile.to_dict()["parameters"]
+
+        self.assertEqual(
+            "docsense-markdown-rag-projection-v2",
+            profile.processor_fingerprint,
+        )
+        self.assertEqual(
+            "remove-image-syntax-with-space-v2",
+            parameters["dataUriImagePolicy"],
+        )
+        self.assertEqual(
+            "single-ascii-space-v1",
+            parameters["replacementPolicy"],
+        )
+        self.assertEqual("rag-markdown-projection-v2", RAG_PROJECTION_STEP_ID)
+        self.assertNotIn("altMaxChars", parameters)
+        self.assertNotIn("placeholderMaxChars", parameters)
 
     def test_same_source_and_profile_reuses_identical_projection(self) -> None:
         with workspace_tempdir() as temporary:
@@ -177,6 +251,83 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             self.assertEqual("rag_projection_utf8_invalid", result.error_code)
             self.assertIsNone(result.artifact)
             self.assertTrue(store.verify(source))
+
+    def test_source_open_failure_does_not_leave_part_file(self) -> None:
+        """源流尚未取得时不得提前占用目标句柄或遗留临时文件。"""
+
+        with workspace_tempdir() as temporary:
+            root = Path(temporary)
+            scratch_root = root / "scratch"
+            store = LocalArtifactStoreAdapter(root / "artifacts")
+            processor = MarkdownRagProjectionProcessorAdapter(
+                source_store=store,
+                materialization_root=scratch_root,
+            )
+            task_id = TaskId("rag-projection-source-open-failure")
+            source = _publish_source(store, task_id, b"# title\n")
+            request = DocumentProcessingRequest(
+                task_id=task_id,
+                step_id="rag-projection",
+                source_artifact=source,
+                profile=build_markdown_rag_projection_profile(),
+                trace_id="source-open-failure",
+            )
+
+            # 这里模拟 Artifact Store 在进入源读取上下文之前失败。Windows 下若目标文件
+            # 已提前打开，异常清理会因句柄仍被占用而留下 .part 文件。
+            with patch.object(
+                store,
+                "open_reader",
+                side_effect=OSError("source unavailable"),
+            ):
+                with self.assertRaises(RagProjectionError) as raised:
+                    processor.process(request)
+
+            self.assertEqual(
+                "rag_projection_unexpected_error",
+                raised.exception.code,
+            )
+            self.assertEqual([], list(scratch_root.rglob("*.part")))
+            self.assertEqual([], list(scratch_root.iterdir()))
+
+    def test_same_task_outputs_use_full_namespace_and_distinct_short_names(
+        self,
+    ) -> None:
+        """同任务并发候选必须隔离，且不能靠截断到 32 bit 的随机名碰运气。"""
+
+        with workspace_tempdir() as temporary:
+            root = Path(temporary)
+            store = LocalArtifactStoreAdapter(root / "artifacts")
+            processor = MarkdownRagProjectionProcessorAdapter(
+                source_store=store,
+                materialization_root=root / "scratch",
+            )
+            task_id = TaskId("rag-projection-same-task")
+            source = _publish_source(store, task_id, b"# title\n")
+            request = DocumentProcessingRequest(
+                task_id=task_id,
+                step_id="rag-projection",
+                source_artifact=source,
+                profile=build_markdown_rag_projection_profile(),
+                trace_id="same-task-output",
+            )
+
+            first = processor.process(request)
+            second = processor.process(request)
+            try:
+                with first.content.open_reader() as reader:
+                    first_path = Path(reader.name)
+                with second.content.open_reader() as reader:
+                    second_path = Path(reader.name)
+
+                self.assertNotEqual(first_path, second_path)
+                self.assertEqual(64, len(first_path.parents[1].name))
+                self.assertEqual(64, len(second_path.parents[1].name))
+                self.assertLessEqual(len(first_path.name), 32)
+                self.assertLessEqual(len(second_path.name), 32)
+            finally:
+                first.close()
+                second.close()
 
     def test_ten_mib_data_uri_uses_bounded_memory_and_linear_streaming(self) -> None:
         with workspace_tempdir() as temporary:
@@ -220,6 +371,7 @@ class MarkdownRagProjectionTests(unittest.TestCase):
             with store.open_reader(result.artifact) as reader:
                 projected = reader.read()
             self.assertNotIn(payload_chunk, projected)
+            self.assertNotIn(b"payload_bytes", projected)
             self.assertIn(b"after", projected)
 
     def test_fifty_tasks_with_same_content_do_not_share_artifact_identity(self) -> None:

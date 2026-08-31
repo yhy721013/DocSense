@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from app.modules.tasks.domain import TaskId
 
@@ -50,8 +50,26 @@ class WeaponryBoundedMaintenancePort(Protocol):
         ...
 
 
+@runtime_checkable
+class WeaponryResourceMaintenancePort(Protocol):
+    """可在逐资源检查点之间响应停机的资源维护边界。
+
+    ``stop_requested`` 只用于缩短单实例进程停止时间，不承载任务取消语义。资源事实必须
+    已经位于持久 Store，提示丢失或进程停止后仍能由下一实例继续扫描。
+    """
+
+    def run_once(
+        self,
+        *,
+        limit: int,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> object:
+        ...
+
+
 __all__ = [
     "WeaponryBoundedMaintenancePort",
+    "WeaponryResourceMaintenancePort",
     "WeaponryTaskDispatcherLifecyclePort",
     "WeaponryTaskDispatcherPort",
     "WeaponryTaskRunnerPort",

@@ -9,6 +9,7 @@ import unittest
 
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 _ACQUIRED_AT = "2030-01-01T00:00:00+00:00"
@@ -27,7 +28,7 @@ def _create_terminal_task(
 
     request_payload = {"businessType": business_type, "testOnly": True}
     if business_type == "file":
-        task = service.create_file_task(business_key, request_payload)
+        task = seed_legacy_file_task(service,business_key, request_payload)
     elif business_type == "report":
         task = service.create_report_task(int(business_key), request_payload)
     elif business_type == "weaponry":
@@ -520,7 +521,7 @@ class CallbackAttemptAuditTests(unittest.TestCase):
         with workspace_tempdir() as runtime_directory:
             database_path = Path(runtime_directory) / "tasks.sqlite3"
             initial_service = LLMTaskService(str(database_path))
-            initial_service.create_file_task(
+            seed_legacy_file_task(initial_service,
                 "legacy-before-attempt-audit.pdf",
                 {"businessType": "file", "legacy": True},
             )

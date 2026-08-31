@@ -46,6 +46,7 @@ from app.modules.tasks.ports import (
 )
 from app.services.llm_service.task_service import LLMTaskService
 from tests import workspace_tempdir
+from tests.task_service_fixtures import seed_legacy_file_task
 from tests.fakes import (
     FakeProgressPublisherPort,
     FakeReportCallbackPort,
@@ -116,7 +117,7 @@ class ReportTaskAdapterPersistenceTests(unittest.TestCase):
         with workspace_tempdir() as runtime_directory:
             database = str(Path(runtime_directory) / "tasks.sqlite3")
             first_service = LLMTaskService(database)
-            legacy = first_service.create_file_task(
+            legacy = seed_legacy_file_task(first_service,
                 "legacy.pdf",
                 {"businessType": "file"},
             )

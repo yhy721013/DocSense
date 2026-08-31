@@ -17,7 +17,7 @@ from unittest.mock import patch
 from app import create_app
 from app.modules.tasks.domain import ProgressKey, ProgressSnapshot, TaskId
 from app.presenters.task_progress import ProgressWebSocketPresenter
-from app.services.core.architecture_tree import (
+from app.modules.analysis.domain.architecture_tree import (
     MAX_ARCHITECTURE_DEPTH,
     MAX_ARCHITECTURE_NAME_CHARS,
     MAX_ARCHITECTURE_NODE_COUNT,
@@ -29,22 +29,22 @@ from app.services.core.architecture_tree import (
     build_architecture_tree_index,
 )
 from app.services.core.config import load_analysis_classification_config
-from app.services.core.prompts import (
+from app.modules.analysis.domain.prompts import (
     build_architecture_classification_prompt,
     build_architecture_reselect_prompt,
     build_file_extraction_prompt,
 )
-from app.services.llm_service.analysis_service import (
+from app.modules.analysis.domain.models import (
     MAX_ANALYSIS_MODEL_CALLS,
     MAX_ANALYSIS_PARAMS_PER_REQUEST,
     MAX_ANALYSIS_PHASE_CALLS,
     MAX_ANALYSIS_PROMPT_CHARS,
     MAX_ANALYSIS_REQUEST_BYTES,
-    build_effective_analysis_ranges,
-    build_file_callback_payload,
-    map_analysis_result,
 )
-from app.services.llm_service.architecture_recall_service import (
+from app.modules.analysis.domain.ranges import build_effective_analysis_ranges
+from app.modules.analysis.domain.callback_payloads import build_file_callback_payload
+from app.modules.analysis.domain.result_mapping import map_analysis_result
+from app.modules.analysis.domain.architecture_recall import (
     build_document_architecture_signals,
     recall_architecture_candidates,
 )
@@ -54,6 +54,7 @@ from app.modules.analysis.ports import (
 )
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -325,7 +326,7 @@ class AnalysisContractAssetTests(unittest.TestCase):
         submission = self.contract["analysisSubmission"]
         active_case, callback_case = submission["conflicts"]
 
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "golden-active.txt",
             {"businessType": "file"},
             status="1",
@@ -337,7 +338,7 @@ class AnalysisContractAssetTests(unittest.TestCase):
         self.assertEqual(active_case["status"], response.status_code)
         self.assertEqual(active_case["body"], response.get_json())
 
-        previous = self.task_service.create_file_task(
+        previous = seed_legacy_file_task(self.task_service,
             "golden-callback-pending.txt",
             {"businessType": "file"},
         )
@@ -394,7 +395,7 @@ class AnalysisContractAssetTests(unittest.TestCase):
 
         self._ensure_route_runtime()
         check_task = self.contract["fileCheckTask"]
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "golden-check.txt",
             {"businessType": "file"},
             status="1",
@@ -690,13 +691,27 @@ class AnalysisContractAssetTests(unittest.TestCase):
             inventory["stageOrder"],
         )
         self.assertEqual(9, len(inventory["externalSideEffects"]))
-        # 资产中的第一个条目是 1F-0 的历史路线记录；它不能因为 1F-5B 已切换而被
-        # 重写。剩余兼容模块仍保留到 1G 物理删除前，故继续验证其导出没有被意外移除。
+        # 资产中的引用清单是 1F-0 的历史快照，不能因为后续切换或物理删除而改写。
+        # 1G-5 已删除旧 Analysis 执行器和 Task Service 文件任务兼容入口，因此这里
+        # 验证“历史记录仍在、旧实体/符号已退出”；其余现役引用继续验证导出。
         for reference in inventory["references"][1:]:
-            source = (_ROOT / reference["path"]).read_text(encoding="utf-8")
+            reference_path = _ROOT / reference["path"]
+            if reference["path"] == "app/services/llm_service/analysis_service.py":
+                self.assertFalse(reference_path.exists())
+                continue
+
+            source = reference_path.read_text(encoding="utf-8")
             for symbol in reference["symbols"]:
                 with self.subTest(path=reference["path"], symbol=symbol):
-                    self.assertIn(symbol, source)
+                    if reference["path"] == (
+                        "app/services/llm_service/task_service.py"
+                    ) and symbol in {
+                        "def create_file_tasks_if_available",
+                        "def replay_callback_if_needed",
+                    }:
+                        self.assertNotIn(symbol, source)
+                    else:
+                        self.assertIn(symbol, source)
 
         route_source = (_ROOT / "app" / "blueprints" / "llm.py").read_text(
             encoding="utf-8"

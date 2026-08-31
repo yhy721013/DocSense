@@ -1,8 +1,6 @@
 """HTTP、SSE 与 WebSocket 入站适配器命名空间。"""
 
 from .chat_scope import (
-    CHAT_ARCHITECTURE_ID_EMPTY_ERROR,
-    CHAT_ARCHITECTURE_ID_ERROR,
     CHAT_FILE_NAME_ITEM_ERROR,
     CHAT_FILE_NAMES_TYPE_ERROR,
     CHAT_SCOPE_SELECTOR_CONFLICT_ERROR,
@@ -21,10 +19,14 @@ from .weaponry_ids import (
     NormalizedArchitectureId,
     normalize_architecture_id,
 )
+from .weaponry_chat import (
+    WeaponryChatRequest,
+    WeaponryChatRequestValidationError,
+    parse_weaponry_chat_history_query,
+    parse_weaponry_chat_post,
+)
 
 __all__ = [
-    "CHAT_ARCHITECTURE_ID_EMPTY_ERROR",
-    "CHAT_ARCHITECTURE_ID_ERROR",
     "CHAT_FILE_NAME_ITEM_ERROR",
     "CHAT_FILE_NAMES_TYPE_ERROR",
     "CHAT_SCOPE_SELECTOR_CONFLICT_ERROR",
@@ -35,7 +37,11 @@ __all__ = [
     "NormalizedArchitectureId",
     "NormalizedReportId",
     "ReportIdValidationError",
+    "WeaponryChatRequest",
+    "WeaponryChatRequestValidationError",
     "normalize_architecture_id",
     "normalize_report_id",
     "parse_chat_scope_selector",
+    "parse_weaponry_chat_history_query",
+    "parse_weaponry_chat_post",
 ]

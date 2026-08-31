@@ -7,6 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
+
 from app.modules.analysis.adapters import (
     ArtifactAnalysisTranslationAdapter,
     LegacyAnalysisFilePreparationAdapter,
@@ -14,7 +16,6 @@ from app.modules.analysis.adapters import (
 from app.modules.analysis.ports import (
     AnalysisExecutionRef,
     AnalysisFilePreparationRequest,
-    AnalysisTranslationKind,
     AnalysisTranslationOutcome,
     AnalysisTranslationRequest,
 )
@@ -349,9 +350,6 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             adapter = LegacyReportFileAdapter(
                 report_store,
                 document_preparer=document_preparer,
-                upload_preparer=lambda _: self.fail(
-                    "新 Report 路径不得再次调用旧 OCR 上传准备器"
-                ),
             )
 
             normalized = adapter.normalize_source(source)
@@ -391,15 +389,6 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
                 downloader=downloader,
                 document_preparer=document_preparer,
                 rag_projector=rag_projector,
-                normalizer=lambda _: self.fail(
-                    "新 Analysis 路径不得调用旧 normalizer"
-                ),
-                upload_preparer=lambda *_: self.fail(
-                    "新 Analysis 路径不得调用旧 OCR 上传准备器"
-                ),
-                text_reader=lambda _: self.fail(
-                    "正文必须从同一 Artifact 读取"
-                ),
             )
             execution = _execution("stage1h-cutover-analysis")
             prepared = adapter.prepare(
@@ -463,15 +452,15 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             document = adapter.translate(
                 AnalysisTranslationRequest(
                     execution=execution,
-                    kind=AnalysisTranslationKind.DOCUMENT,
                     prepared_artifact=artifact,
                 )
             )
-            summary = adapter.translate(
+            # 生产 Adapter 不得因兼容路径存在而绕过 Artifact 边界；没有 Artifact 时
+            # 必须给业务层一个可降级失败结果，也不能误调用纯文本翻译引擎。
+            missing_artifact = adapter.translate(
                 AnalysisTranslationRequest(
                     execution=execution,
-                    kind=AnalysisTranslationKind.SUMMARY,
-                    text="<summary>",
+                    source_path=str(source),
                 )
             )
 
@@ -481,14 +470,81 @@ class Stage1HConsumerCutoverTests(unittest.TestCase):
             )
             self.assertIn("译文:English paragraph", document.document_translation_one)
             self.assertIs(
-                AnalysisTranslationOutcome.SUCCEEDED,
-                summary.outcome,
+                AnalysisTranslationOutcome.FAILED,
+                missing_artifact.outcome,
             )
             self.assertEqual(
-                '<div class="translated-text">译文:&lt;summary&gt;</div>',
-                summary.document_translation_one,
+                "document_translation_artifact_missing",
+                missing_artifact.error_code,
             )
-            self.assertEqual(2, len(engine.calls))
+            self.assertEqual(1, len(engine.calls))
+
+    def test_analysis_translation_maps_validated_raw_table_to_both_outputs(
+        self,
+    ) -> None:
+        """Analysis 两个结果字段都应得到真实表格，Engine 只接收单元格文本。"""
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "table.md"
+            source.write_text(
+                "<table border=\"1\">\n"
+                "<tr><th>Name</th><th>Value</th></tr>\n"
+                "<tr><td>Speed</td><td>30 knots</td></tr>\n"
+                "</table>\n",
+                encoding="utf-8",
+            )
+            preparer = self._document_preparer(root / "document")
+            artifact = preparer.prepare(
+                LocalDocumentPreparationRequest(
+                    task_id=TaskId("stage1h-cutover-table-translation"),
+                    source_path=source,
+                    logical_step="input",
+                    trace_id="stage1h-cutover-table-translation-trace",
+                )
+            ).prepared_artifact
+            engine = _RecordingTranslationEngine()
+            renderer = SafeHTMLTranslationRendererAdapter()
+            application = TranslatePreparedDocument(
+                reader=preparer.artifact_store,
+                engine=engine,
+                renderer=renderer,
+            )
+            adapter = ArtifactAnalysisTranslationAdapter(
+                document_translation=application,
+                engine=engine,
+                renderer=renderer,
+                mode_resolver=lambda: TranslationMode.MACHINE,
+            )
+
+            document = adapter.translate(
+                AnalysisTranslationRequest(
+                    execution=_execution(
+                        "stage1h-cutover-table-translation",
+                        file_name="table.md",
+                    ),
+                    prepared_artifact=artifact,
+                )
+            )
+
+            self.assertIs(
+                AnalysisTranslationOutcome.SUCCEEDED,
+                document.outcome,
+            )
+            self.assertEqual(
+                ["Name", "Value", "Speed", "30 knots"],
+                [call[0] for call in engine.calls],
+            )
+            for output in (
+                document.document_translation_one,
+                document.document_translation_two,
+            ):
+                soup = BeautifulSoup(output, "html.parser")
+                table = soup.select_one(".document-container > table")
+                self.assertIsNotNone(table)
+                self.assertEqual(2, len(table.find_all("tr")))
+                self.assertNotIn("border", table.attrs)
+                self.assertNotIn("&lt;td", output)
 
 
 if __name__ == "__main__":

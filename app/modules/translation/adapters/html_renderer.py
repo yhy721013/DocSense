@@ -18,9 +18,11 @@ from app.modules.translation.domain import (
     split_translation_units,
 )
 
+from .safe_table_html import restore_validated_table_html
+
 
 HTML_RENDERER_ID = "safe-structured-translation-html"
-HTML_RENDERER_FINGERPRINT = "docsense-translation-html-v2"
+HTML_RENDERER_FINGERPRINT = "docsense-translation-html-v3"
 _PLACEHOLDER_PREFIX = "DOCSENSE_TRANSLATION_UNIT_"
 _RAW_HTML = re.compile(
     r"<!--.*?-->|</?[A-Za-z][^>]*>",
@@ -41,7 +43,9 @@ body { margin: 0; padding: 20px; background: #f5f5f5; font-family: sans-serif; l
 .translated-text { color: #0066cc; }
 .translation-pair > .original-text,
 .translation-pair > .translated-text { display: block; }
-.translation-pair > .translated-text { border-top: 1px dashed #e0e0e0; margin-top: 8px; padding-top: 8px; }
+.translation-pair > .translated-text {
+  border-top: 1px dashed #e0e0e0; margin-top: 8px; padding-top: 8px;
+}
 img { max-width: 100%; height: auto; }
 pre { overflow-x: auto; padding: 12px; background: #f3f3f3; }
 table { border-collapse: collapse; width: 100%; }
@@ -66,8 +70,9 @@ class SafeHTMLTranslationRendererAdapter:
     """保留 Markdown 结构，只让 TranslationEngine 接触可翻译文本节点。
 
     Renderer 每次都从 ``source_text`` 重新构造模板，不缓存 BeautifulSoup 或节点对象，
-    因而可被多个任务并发复用。原始 HTML 标签先转义，生成后的 URL 属性再执行协议
-    白名单，避免通过 Markdown 原文注入脚本。
+    因而可被多个任务并发复用。普通原始 HTML 始终转义；只有完整通过独立白名单、
+    DOM 结构和资源上限校验的表格才会恢复。生成后的 URL 属性还会执行协议白名单，
+    避免通过 Markdown 原文或表格属性注入脚本。
     """
 
     @property
@@ -113,9 +118,7 @@ class SafeHTMLTranslationRendererAdapter:
                     f'<span class="translated-text">{translated}</span>'
                     "</span>"
                 )
-                monolingual = (
-                    f'<span class="translated-text">{translated}</span>'
-                )
+                monolingual = f'<span class="translated-text">{translated}</span>'
             else:
                 failure_attribute = (
                     ' data-translation-failed="true"' if unit.failed else ""
@@ -160,6 +163,8 @@ class SafeHTMLTranslationRendererAdapter:
         if representation.value != "markdown":
             raise ValueError("Renderer 只接受 Markdown/Text Artifact")
 
+        # 普通 HTML 先一律转义。Markdown 生成 DOM 后，仅由独立安全组件恢复严格
+        # 校验的表格片段；因此 script/iframe/style 等内容不会进入可执行 DOM。
         escaped_source = _RAW_HTML.sub(
             lambda match: html.escape(match.group(0), quote=True),
             source_text,
@@ -170,12 +175,20 @@ class SafeHTMLTranslationRendererAdapter:
             output_format="html5",
         )
         soup = BeautifulSoup(body, "html.parser")
+        restore_validated_table_html(soup, task_id=request.task_id)
         self._sanitize_generated_html(soup)
+
+        # 表格恢复发生在节点提取前，所以标题和每个单元格都独立形成翻译单元；
+        # TranslationEngine 从始至终不会接触任何 HTML 标签。
         source_units: list[str] = []
         for node in tuple(soup.find_all(string=True)):
             if not isinstance(node, NavigableString):
                 continue
-            parent_name = node.parent.name.casefold() if node.parent and node.parent.name else ""
+            parent_name = (
+                node.parent.name.casefold()
+                if node.parent and node.parent.name
+                else ""
+            )
             raw = str(node)
             source = raw.strip()
             if not source or parent_name in _SKIPPED_TEXT_PARENTS:
@@ -184,7 +197,7 @@ class SafeHTMLTranslationRendererAdapter:
             prefix_length = len(raw) - len(raw.lstrip())
             suffix_length = len(raw) - len(raw.rstrip())
             prefix = raw[:prefix_length]
-            suffix = raw[len(raw) - suffix_length:] if suffix_length else ""
+            suffix = raw[len(raw) - suffix_length :] if suffix_length else ""
             node.replace_with(
                 NavigableString(
                     f"{prefix}{self._placeholder(len(source_units))}{suffix}"
@@ -220,7 +233,10 @@ class SafeHTMLTranslationRendererAdapter:
         lowered = normalized.casefold()
         if image and lowered.startswith("data:image/"):
             return ";base64," in lowered
-        scheme = urlsplit(normalized).scheme.casefold()
+        try:
+            scheme = urlsplit(normalized).scheme.casefold()
+        except ValueError:
+            return False
         return scheme in {"http", "https", "mailto"}
 
     @staticmethod

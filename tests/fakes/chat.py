@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from threading import RLock
 from typing import Any, Iterator, Sequence
 
-from app.ports import (
+from app.modules.chat.ports import (
     ChatChunk,
     ChatConversationNotFoundError,
     ChatDocumentRef,
@@ -15,6 +15,8 @@ from app.ports import (
     ChatResourceError,
     ChatRole,
     ChatSessionRefs,
+    ChatSourceFinalization,
+    ChatSourceEvidence,
 )
 
 
@@ -58,6 +60,7 @@ class FakeChatConversationPort:
         *,
         state: _FakeChatConversationState | None = None,
         stream_contents: Sequence[str] | None = None,
+        stream_sources: Sequence[ChatSourceEvidence] = (),
         standalone_reply: str = "模拟标题",
         open_conversation_error_message: str = "",
         open_conversation_resource_refs: Sequence[str] = (),
@@ -68,6 +71,9 @@ class FakeChatConversationPort:
         self._state = state or _FakeChatConversationState()
         self._lock = self._state.lock
         self._stream_contents = tuple(stream_contents or ("模拟回答",))
+        self._stream_sources = tuple(stream_sources)
+        if any(not isinstance(item, ChatSourceEvidence) for item in self._stream_sources):
+            raise TypeError("stream_sources 只能包含 ChatSourceEvidence")
         self._standalone_reply = _required_content(
             standalone_reply,
             name="standalone_reply",
@@ -94,6 +100,7 @@ class FakeChatConversationPort:
         self.stream_message_calls: list[
             tuple[ChatSessionRefs, str, tuple[str, ...]]
         ] = []
+        self.open_conversation_calls: list[tuple[str, str]] = []
         self.standalone_prompts = self._state.standalone_prompts
 
     def open_conversation(
@@ -103,8 +110,17 @@ class FakeChatConversationPort:
         conversation_name: str,
     ) -> ChatSessionRefs:
         """创建一个可用于后续测试调用的对话引用。"""
-        _required_text(context_name, name="context_name")
-        _required_text(conversation_name, name="conversation_name")
+        normalized_context_name = _required_text(
+            context_name,
+            name="context_name",
+        )
+        normalized_conversation_name = _required_text(
+            conversation_name,
+            name="conversation_name",
+        )
+        self.open_conversation_calls.append(
+            (normalized_context_name, normalized_conversation_name)
+        )
         if self._open_conversation_error_message:
             raise ChatResourceError(
                 self._open_conversation_error_message,
@@ -161,7 +177,7 @@ class FakeChatConversationPort:
         message: str,
         *,
         document_refs: Sequence[str] = (),
-    ) -> Iterator[ChatChunk]:
+    ) -> Iterator[ChatChunk | ChatSourceFinalization]:
         """记录用户消息，流式返回预设片段，并在完整消费后提交助手消息。"""
         with self._lock:
             known_session = self._require_session(session)
@@ -193,6 +209,9 @@ class FakeChatConversationPort:
             content = _required_content(raw_content, name="stream_content")
             response_parts.append(content)
             yield ChatChunk(content=content, sequence_no=index)
+        # v1.15.0 的常规流必须以唯一 Finalization 收尾；文件对话会等待该事实但
+        # 按策略抑制公开来源。Fake 显式返回空来源，避免用“迭代结束”伪装终态。
+        yield ChatSourceFinalization(sources=self._stream_sources)
 
         with self._lock:
             self._require_session(session)

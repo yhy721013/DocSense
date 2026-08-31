@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.services.core.architecture_tree import build_architecture_tree_index
-from app.services.llm_service.architecture_recall_service import (
+from app.modules.analysis.domain.architecture_tree import build_architecture_tree_index
+from app.modules.analysis.domain.architecture_recall import (
     build_document_architecture_signals,
     recall_architecture_candidates,
 )

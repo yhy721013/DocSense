@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 import unittest
-from unittest.mock import patch
 
-from app.services.core.architecture_tree import build_architecture_tree_index
-from app.services.llm_service import analysis_service
+from app.modules.analysis.domain import classification_rules as analysis_service
+from app.modules.analysis.domain.architecture_tree import build_architecture_tree_index
 
 
 DETAIL_KINDS = (
@@ -739,62 +737,6 @@ class JaneScopeResolutionTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, "legacy_identifier_parent")
         self.assertEqual(decision.post_architecture_id, 47)
         self.assertEqual(wrapped_id, decision.post_architecture_id)
-
-
-class JaneConstraintAuditLogTests(unittest.TestCase):
-    def test_log_records_filename_trust_and_separate_identity_gates(self) -> None:
-        profile = analysis_service._build_jane_classification_profile(
-            file_name="technical-upload.pdf",
-            original_name="JFS_3567-JFS_-17-Jul-2024.pdf",
-            original_text=_jane_text("America class (LHA-6)"),
-        )
-        standard_profile = (
-            analysis_service._build_data_standard_classification_profile(
-                file_name="technical-upload.pdf",
-                original_name="GJB 9001C-2017.pdf",
-                original_text="\n".join(
-                    (
-                        "中华人民共和国国家军用标准",
-                        "GJB 9001C-2017",
-                        "质量管理体系要求",
-                        "1 范围",
-                        "2 规范性引用文件",
-                    )
-                ),
-            )
-        )
-        decision = analysis_service._ArchitectureConstraintDecision(
-            pre_architecture_id=91,
-            post_architecture_id=91,
-            reason_code="no_constraint_insufficient_evidence",
-            matched_scope_parent_id=242,
-            tree_gap=False,
-        )
-
-        with patch.object(analysis_service.logger, "info") as log_info:
-            analysis_service._log_architecture_constraint_decision(
-                execution_id="execution-1",
-                file_name="technical-upload.pdf",
-                filename_constraint_mode="scope_guard",
-                profile=profile,
-                decision=decision,
-                data_standard_mode="scope_guard",
-                data_standard_profile=standard_profile,
-            )
-
-        payload = json.loads(log_info.call_args.args[1])
-        self.assertEqual(payload["dataStandardMode"], "scope_guard")
-        self.assertEqual(payload["standardNumber"], "GJB 9001C-2017")
-        self.assertEqual(payload["standardTitle"], "质量管理体系要求")
-        self.assertTrue(payload["standardIdentityConfirmed"])
-        self.assertIn("coverIdentifier", payload["standardEvidenceSources"])
-        self.assertEqual(payload["filenameIdentityKind"], "catalog")
-        self.assertTrue(payload["filenameIdentifiers"])
-        self.assertEqual(payload["trustedFilenameIdentifiers"], [])
-        self.assertEqual(payload["titleIdentifiers"], ["lha6"])
-        self.assertTrue(payload["recallIdentityEnabled"])
-        self.assertFalse(payload["identityConfirmed"])
-        self.assertFalse(payload["identityConflict"])
 
 
 if __name__ == "__main__":

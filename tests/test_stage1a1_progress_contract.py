@@ -17,6 +17,7 @@ from typing import Any, Iterable
 from app import create_app
 from tests import workspace_tempdir
 from tests.offline_application import build_offline_application_services
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 _TARGET_CONTRACT_PATH = (
@@ -141,7 +142,7 @@ class ProgressRouteContractTests(unittest.TestCase):
         return websocket, thread, errors
 
     def test_invalid_json_returns_error_then_connection_accepts_valid_message(self) -> None:
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "valid-after-json.pdf",
             {"businessType": "file"},
             status="1",
@@ -163,7 +164,7 @@ class ProgressRouteContractTests(unittest.TestCase):
         self.assertEqual("valid-after-json.pdf", websocket.sent_messages[1]["data"]["fileName"])
 
     def test_explicit_action_is_rejected_without_ack_and_connection_stays_open(self) -> None:
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "after-action.pdf",
             {"businessType": "file"},
             status="1",
@@ -295,7 +296,7 @@ class ProgressRouteContractTests(unittest.TestCase):
 
     def test_batch_current_snapshots_keep_request_order_and_duplicate_positions(self) -> None:
         for name, progress in (("a.pdf", 0.2), ("b.pdf", 0.4)):
-            self.task_service.create_file_task(
+            seed_legacy_file_task(self.task_service,
                 name,
                 {"businessType": "file"},
                 status="1",
@@ -331,7 +332,7 @@ class ProgressRouteContractTests(unittest.TestCase):
         self.assertTrue(all("type" not in item for item in websocket.sent_messages))
 
     def test_hub_latest_wins_and_progress_is_normalized(self) -> None:
-        self.task_service.create_file_task(
+        seed_legacy_file_task(self.task_service,
             "latest.pdf",
             {"businessType": "file"},
             status="1",
@@ -405,7 +406,7 @@ class ProgressRouteContractTests(unittest.TestCase):
         self.assertIs(int, type(weaponry.sent_messages[0]["data"]["architectureId"]))
 
     def test_live_notification_is_sent_only_by_connection_route_thread(self) -> None:
-        task = self.task_service.create_file_task(
+        task = seed_legacy_file_task(self.task_service,
             "live.pdf",
             {"businessType": "file"},
             status="1",
@@ -434,7 +435,7 @@ class ProgressRouteContractTests(unittest.TestCase):
         self.assertEqual([], errors)
 
     def test_two_connections_same_key_are_isolated_when_one_closes(self) -> None:
-        task = self.task_service.create_file_task(
+        task = seed_legacy_file_task(self.task_service,
             "shared.pdf",
             {"businessType": "file"},
             status="1",
@@ -484,7 +485,7 @@ class ProgressRouteContractTests(unittest.TestCase):
         self.assertEqual([], second_errors)
 
     def test_initial_send_failure_aborts_barrier_and_releases_subscription(self) -> None:
-        task = self.task_service.create_file_task(
+        task = seed_legacy_file_task(self.task_service,
             "send-failure.pdf",
             {"businessType": "file"},
             status="1",

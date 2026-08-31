@@ -10,11 +10,6 @@ from app.modules.document_processing.domain import ArtifactRef
 from .common import AnalysisExecutionRef
 
 
-class AnalysisTranslationKind(str, Enum):
-    DOCUMENT = "document"
-    SUMMARY = "summary"
-
-
 class AnalysisTranslationOutcome(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -22,48 +17,43 @@ class AnalysisTranslationOutcome(str, Enum):
 
 @dataclass(frozen=True)
 class AnalysisTranslationRequest:
-    """一次翻译只绑定一个 execution，禁止通过全局 callback 回传任务进度。"""
+    """一次全文翻译只绑定一个 execution 和一份受控文档。
+
+    Analysis 已不再支持“关闭全文翻译后改译摘要”的兼容分支，因此请求中不保留
+    ``kind`` 或裸 ``text``。生产链优先传入 prepared Artifact；``source_path`` 仅用于
+    尚未迁移完的离线兼容 Adapter，不能重新成为生产文件处理入口。
+    """
 
     execution: AnalysisExecutionRef
-    kind: AnalysisTranslationKind
     target_language: str = "Chinese"
     source_path: str = ""
     prepared_artifact: ArtifactRef | None = None
-    text: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
             raise TypeError("execution 必须是 AnalysisExecutionRef")
-        if not isinstance(self.kind, AnalysisTranslationKind):
-            raise TypeError("kind 必须是 AnalysisTranslationKind")
         if not isinstance(self.target_language, str) or not self.target_language.strip():
             raise ValueError("target_language 必须是非空 str")
-        if not isinstance(self.source_path, str) or not isinstance(self.text, str):
-            raise TypeError("source_path 与 text 必须是 str")
-        if self.kind is AnalysisTranslationKind.DOCUMENT:
-            if self.text:
-                raise ValueError("document 翻译不得携带 text")
-            if self.prepared_artifact is not None and not isinstance(
-                self.prepared_artifact,
-                ArtifactRef,
-            ):
-                raise TypeError("prepared_artifact 必须是 ArtifactRef 或 None")
-            if not self.source_path.strip() and self.prepared_artifact is None:
-                raise ValueError("document 翻译必须携带受控 Artifact 或兼容 source_path")
-            if (
-                self.prepared_artifact is not None
-                and self.prepared_artifact.task_id != self.execution.task_id
-            ):
-                raise ValueError("prepared_artifact 不属于当前 analysis task")
-        elif not self.text:
-            raise ValueError("summary 翻译必须携带非空 text")
+        if not isinstance(self.source_path, str):
+            raise TypeError("source_path 必须是 str")
+        if self.prepared_artifact is not None and not isinstance(
+            self.prepared_artifact,
+            ArtifactRef,
+        ):
+            raise TypeError("prepared_artifact 必须是 ArtifactRef 或 None")
+        if not self.source_path.strip() and self.prepared_artifact is None:
+            raise ValueError("全文翻译必须携带受控 Artifact 或兼容 source_path")
+        if (
+            self.prepared_artifact is not None
+            and self.prepared_artifact.task_id != self.execution.task_id
+        ):
+            raise ValueError("prepared_artifact 不属于当前 analysis task")
         object.__setattr__(self, "target_language", self.target_language.strip())
 
 
 @dataclass(frozen=True)
 class AnalysisTranslationResult:
     execution: AnalysisExecutionRef
-    kind: AnalysisTranslationKind
     outcome: AnalysisTranslationOutcome
     document_translation_one: str = ""
     document_translation_two: str = ""
@@ -72,8 +62,6 @@ class AnalysisTranslationResult:
     def __post_init__(self) -> None:
         if not isinstance(self.execution, AnalysisExecutionRef):
             raise TypeError("execution 必须是 AnalysisExecutionRef")
-        if not isinstance(self.kind, AnalysisTranslationKind):
-            raise TypeError("kind 必须是 AnalysisTranslationKind")
         if not isinstance(self.outcome, AnalysisTranslationOutcome):
             raise TypeError("outcome 必须是 AnalysisTranslationOutcome")
         for field_name in (
@@ -109,7 +97,6 @@ class AnalysisTranslationPort(Protocol):
 
 
 __all__ = (
-    "AnalysisTranslationKind",
     "AnalysisTranslationOutcome",
     "AnalysisTranslationPort",
     "AnalysisTranslationRequest",

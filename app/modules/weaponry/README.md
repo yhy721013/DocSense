@@ -44,6 +44,17 @@ Weaponry 薄适配、严格基础设施配置、共享 limiter、进程锁、离
 不会自动重发 unknown，维护线程只冻结过期 Guard；接收端必须按规范化 `architectureId` 和
 业务结果幂等。该改造没有增加任何公开字段，也没有改变 200/400/404/409/202 契约。
 
+2026-08-02 起，Weaponry Worker 在业务终态提交、资源收口状态可由持久事实恢复后，只向独立
+资源维护线程发送一个可合并的常量空间唤醒提示；正常路径已提交 `cleanup_pending`，清理意图
+提交异常则由终态 execution 与 `tracking` 记录保守收敛。业务终态与 Callback 均不等待远端
+DELETE。资源恢复批次按“逐项资源恢复尝试数”而不是“唯一任务数”计量，并在任务之间轮转
+推进，避免一个含数百个
+extraction workspace/thread 的任务每个固定周期只清理一项。批次有可证明进展且仍可能有积压时
+会在批次边界继续唤醒，进程停止信号则在两项远端副作用之间生效；定时扫描和启动扫描仍是
+提示丢失、进程重启及历史积压的持久兜底。所有权不明、pending Interaction Audit、DELETE 结果
+未知和检查点不可靠的资源仍只隔离，禁止按名称前缀或记录年龄盲删。公开接口与数据库 Schema
+均未改变。
+
 1D-3B 的“生产 Adapter”表示可以在组合根注入的真实基础设施实现；1D-6 已完成源码装配，但不
 表示已经部署或完成真实模型/回调端联调。当前 1D-6 自动测试仍使用受控 Fake Transport、Mock HTTP
 和临时 SQLite，不修改现有 AnythingLLM workspace/文档。1D-5 的 50 个 SQLite accepted 任务只形成持久行、一条

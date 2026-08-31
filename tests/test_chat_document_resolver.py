@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import Mock
 
-from app.services.chat import (
+from app.modules.chat import (
     ChatDocumentCatalogConflictError,
     DatabaseChatDocumentResolver,
 )
@@ -36,6 +37,7 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
         document_id: str,
         doc_path: str | None = None,
         original_name: str | None = None,
+        source_key: str | None = None,
     ) -> None:
         self.knowledge_base.save_document_record(
             file_name=file_name,
@@ -48,6 +50,10 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
             ),
             original_name=original_name or f"{file_name}.original",
             ingested_file_name=f"{architecture_id}-{file_name}",
+            metadata={
+                "docSource": source_key
+                or f"docsense_ref:{hashlib.sha256(document_id.encode()).hexdigest()[:32]}"
+            },
         )
 
     def test_empty_catalog_returns_empty_tuple(self) -> None:
@@ -247,6 +253,7 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
                     "original_name": "",
                     "anything_doc_id": "doc-empty-original",
                     "doc_path": "custom-documents/empty-original.json",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000001"},
                 }
             ],
             [
@@ -255,12 +262,14 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
                     "original_name": "good.pdf",
                     "anything_doc_id": "doc-good",
                     "doc_path": "custom-documents/good.json",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000002"},
                 },
                 {
                     "file_name": "broken.pdf",
                     "original_name": "broken.pdf",
                     "anything_doc_id": "",
                     "doc_path": "",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000003"},
                 },
             ],
             [
@@ -269,12 +278,14 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
                     "original_name": "a.pdf",
                     "anything_doc_id": "same",
                     "doc_path": "custom-documents/a.json",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000004"},
                 },
                 {
                     "file_name": "b.pdf",
                     "original_name": "b.pdf",
                     "anything_doc_id": "same",
                     "doc_path": "custom-documents/b.json",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000005"},
                 },
             ],
             [
@@ -283,12 +294,14 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
                     "original_name": "a.pdf",
                     "anything_doc_id": "doc-a",
                     "doc_path": "custom-documents/same.json",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000006"},
                 },
                 {
                     "file_name": "b.pdf",
                     "original_name": "b.pdf",
                     "anything_doc_id": "doc-b",
                     "doc_path": r"custom-documents\same.json",
+                    "metadata": {"docSource": "docsense_ref:00000000000000000000000000000007"},
                 },
             ],
         )
@@ -317,6 +330,7 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
                 "original_name": "Alpha.pdf",
                 "anything_doc_id": "doc-alpha",
                 "doc_path": "custom-documents/alpha.json",
+                "metadata": {"docSource": "docsense_ref:11111111111111111111111111111111"},
             }
         ]
         resolver = DatabaseChatDocumentResolver(knowledge_base)
@@ -329,6 +343,40 @@ class DatabaseChatDocumentResolverTests(unittest.TestCase):
         )
         knowledge_base.list_document_records.assert_not_called()
         knowledge_base.get_document_record.assert_not_called()
+
+    def test_architecture_resolver_strictly_rejects_original_name_and_source_key(self) -> None:
+        """类别快照禁止原名回退，也禁止缺失、坏格式或重复的结构化来源键。"""
+        base = {
+            "file_name": "alpha.pdf",
+            "original_name": "Alpha.pdf",
+            "anything_doc_id": "doc-alpha",
+            "doc_path": "custom-documents/alpha.json",
+            "metadata": {"docSource": "docsense_ref:" + "a" * 32},
+        }
+        cases = []
+        for original_name in (None, 7, "", "   "):
+            record = dict(base)
+            record["original_name"] = original_name
+            cases.append([record])
+        for metadata in (None, {}, {"docSource": 7}, {"docSource": "bad"}):
+            record = dict(base)
+            record["metadata"] = metadata
+            cases.append([record])
+        duplicate = dict(base)
+        duplicate["file_name"] = "beta.pdf"
+        duplicate["anything_doc_id"] = "doc-beta"
+        duplicate["doc_path"] = "custom-documents/beta.json"
+        cases.append([base, duplicate])
+
+        for records in cases:
+            with self.subTest(records=records):
+                knowledge_base = Mock(spec=DatabaseService)
+                knowledge_base.list_document_records_by_architecture_id.return_value = records
+                candidates = DatabaseChatDocumentResolver(
+                    knowledge_base
+                ).resolve_by_architecture_id(7)
+                self.assertEqual("invalid", candidates.resolution_outcome)
+                self.assertEqual("architecture_catalog_invalid", candidates.error_code)
 
     def test_architecture_resolver_reads_only_limit_plus_one_candidates(
         self,

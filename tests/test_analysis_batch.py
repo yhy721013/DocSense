@@ -44,6 +44,7 @@ from app.modules.tasks.ports import (
 from app.services.llm_service.task_service import LLMTaskService, TaskAdmissionBusyError
 from tests import workspace_tempdir
 from tests.fakes.analysis import StrictAnalysisFakeScript, StrictAnalysisPortFake
+from tests.task_service_fixtures import seed_legacy_file_task
 
 
 def _raw_params(index: int, *, prefix: str = "batch") -> dict[str, object]:
@@ -119,7 +120,7 @@ class AnalysisBatchSchemaAndAdapterTests(unittest.TestCase):
         with workspace_tempdir() as runtime_directory:
             database = str(Path(runtime_directory) / "tasks.sqlite3")
             first_service = LLMTaskService(database)
-            legacy = first_service.create_file_task(
+            legacy = seed_legacy_file_task(first_service,
                 "legacy-file.txt",
                 {"businessType": "file", "params": []},
             )
@@ -295,7 +296,7 @@ class AnalysisBatchSchemaAndAdapterTests(unittest.TestCase):
         with workspace_tempdir() as runtime_directory:
             database = str(Path(runtime_directory) / "tasks.sqlite3")
             service = LLMTaskService(database)
-            service.create_file_task(
+            seed_legacy_file_task(service,
                 "legacy-only.txt",
                 {"businessType": "file", "params": []},
             )
@@ -423,7 +424,7 @@ class AnalysisBatchSchemaAndAdapterTests(unittest.TestCase):
             service = LLMTaskService(database)
             adapter = _adapter(service)
             active_command = _command(2, prefix="active")
-            service.create_file_task(
+            seed_legacy_file_task(service,
                 active_command.submissions[0].file_name,
                 {"businessType": "file", "params": []},
                 status="1",
@@ -463,7 +464,7 @@ class AnalysisBatchSchemaAndAdapterTests(unittest.TestCase):
             service = LLMTaskService(database)
             adapter = _adapter(service)
             command = _command(1, prefix="expired-claim")
-            service.create_file_task(
+            seed_legacy_file_task(service,
                 command.submissions[0].file_name,
                 {"businessType": "file", "params": []},
                 status="1",

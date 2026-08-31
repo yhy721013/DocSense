@@ -147,6 +147,47 @@ def clean_runtime():
         )
         _remove_database_files(database_path)
 
+def _resolve_anythingllm_storage_root(configured_root: str | None) -> str | None:
+    """解析 AnythingLLM Desktop 本地存储目录，保持既有跨平台回退顺序。"""
+
+    normalized_root = str(configured_root or "").strip()
+    if normalized_root:
+        return normalized_root
+
+    candidates: list[str] = []
+    if os.name == "nt":
+        appdata = os.getenv("APPDATA", "").strip()
+        if appdata:
+            candidates.append(
+                os.path.join(appdata, "anythingllm-desktop", "storage")
+            )
+    elif sys.platform == "darwin":
+        candidates.append(
+            os.path.expanduser(
+                "~/Library/Application Support/anythingllm-desktop/storage"
+            )
+        )
+    else:
+        xdg_config_home = os.getenv("XDG_CONFIG_HOME", "").strip()
+        if xdg_config_home:
+            candidates.append(
+                os.path.join(
+                    xdg_config_home,
+                    "anythingllm-desktop",
+                    "storage",
+                )
+            )
+        candidates.append(
+            os.path.expanduser("~/.config/anythingllm-desktop/storage")
+        )
+    candidates.append(os.path.expanduser("~/.anythingllm/storage"))
+
+    for candidate in candidates:
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return next((candidate for candidate in candidates if candidate), None)
+
+
 def clean_anythingllm():
     """
     清理 AnythingLLM 相关测试数据
@@ -158,38 +199,72 @@ def clean_anythingllm():
     # 【重点策略】：我们在这里进行包的即时（延迟）导入，而不是在文件头部导入。
     # 因为导入 app.services.core.config 时系统有可能在后台初始化配置所关连的一些数据库（比如连接并创建 SQLite 文件），
     # 这会导致运行时目录下的 SQLite 立即被数据库引擎创建并获得文件锁，如果将导入置放于头部则会导致先前的 clean_runtime() 无法删除被锁定的文件。
+    from app.integrations.anythingllm import (
+        AnythingLLMTransport,
+        AnythingLLMWorkspaceClient,
+    )
     from app.services.core.config import load_anythingllm_config
-    from app.services.utils.anythingllm_client import AnythingLLMClient
 
     try:
         # 加载现有环境中的 AnythingLLM 环境配置（含 URL 和 API 密钥等）
         config = load_anythingllm_config()
-        # 实例化我们项目内置提供的通信客户端，用于后续与 AnythingLLM 交互通信
-        client = AnythingLLMClient(config=config)
-    except Exception as e:
-        logger.error(f"加载 AnythingLLM 配置或客户端失败: {e}")
+        # 清理脚本只需要 Workspace 原子客户端，不再构造已经删除的聚合兼容对象。
+        transport = AnythingLLMTransport(
+            base_url=config.base_url,
+            api_key=config.api_key,
+            timeout=config.timeout,
+        )
+        workspaces_client = AnythingLLMWorkspaceClient(transport)
+    except Exception as exc:
+        logger.error(
+            "加载 AnythingLLM 配置或客户端失败: error_type=%s",
+            type(exc).__name__,
+        )
         return
 
     # === [环节 1] 删除所有 Workspaces ===
     logger.info("获取所有 AnythingLLM Workspaces ...")
-    workspaces = client.list_workspaces()
-    for ws in workspaces:
-        ws_slug = ws.get("slug")
-        ws_name = ws.get("name")
-        if ws_slug:
-            logger.info(f"正在准备调用 API 删除 Workspace: {ws_name} (标识: {ws_slug})...")
-            # 通过官方提供的 HTTP 接口请求删除（在 AnythingLLM 会产生系统级联清理并解除对应的关系绑定）
-            success = client.delete_workspace(ws_slug)
-            if success:
-                logger.info(f"成功删除 Workspace: {ws_name}")
-            else:
-                logger.error(f"删除 Workspace: {ws_name} 失败。")
+    try:
+        try:
+            workspaces = workspaces_client.list_workspaces()
+        except Exception as exc:
+            logger.error(
+                "获取 AnythingLLM Workspace 清单失败: error_type=%s",
+                type(exc).__name__,
+            )
+            workspaces = ()
+        for index, workspace in enumerate(workspaces):
+            if not workspace.slug:
+                continue
+            logger.info(
+                "正在调用 API 删除 Workspace: index=%d",
+                index,
+            )
+            try:
+                # 原子客户端成功返回即表示删除调用已完成；异常按单项失败记录，
+                # 不阻止其余 Workspace 和本地存储继续清理。
+                workspaces_client.delete_workspace(workspace.slug)
+                logger.info("成功删除 Workspace: index=%d", index)
+            except Exception as exc:
+                logger.error(
+                    "删除 Workspace 失败: index=%d error_type=%s",
+                    index,
+                    type(exc).__name__,
+                )
+    finally:
+        try:
+            transport.close()
+        except Exception as exc:
+            logger.error(
+                "关闭 AnythingLLM 清理传输失败: error_type=%s",
+                type(exc).__name__,
+            )
 
     # === [环节 2] 清理所有上传给 AnythingLLM 的文档及底层文件 ===
     # AnythingLLM 默认本地运行时，会把用户文档放置在 Storage 目录底下。我们采用了从文件系统直接干预的方案，彻底重置文档目录内容而避免繁琐复杂的 API ID查询或失效 404 调用。
     
-    # 内部提供的 _resolve_storage_root() 能跨系统自动寻找 AnythingLLM 专属本地存储包根目录 (AppData, ~/.anythingllm 等)
-    storage_root = client._resolve_storage_root()
+    # 解析逻辑已收回 clean.py，避免为了本地目录定位继续保留聚合 HTTP Client。
+    storage_root = _resolve_anythingllm_storage_root(config.storage_root)
     if storage_root:
         # documents 是接收任何原始文件及拆解分片文件的主要存放所
         docs_dir = Path(storage_root) / "documents"

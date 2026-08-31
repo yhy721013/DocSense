@@ -110,6 +110,11 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
         """按确定性名称复用或创建目标 workspace，并严格校验创建响应。"""
 
         self._require_workspace_request(request)
+        logger.info(
+            "开始准备分类节点变更目标 workspace: operation_id=%s workspace_name=%s",
+            request.operation_id,
+            request.desired_workspace_name,
+        )
         try:
             matches = self._find_target_workspaces(request, use_recovery_budget=False)
         except Exception as exc:
@@ -120,8 +125,9 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
             )
             logger.warning(
                 "分类节点变更无法确认目标 workspace 是否已存在: operation_id=%s "
-                "error_code=%s",
+                "workspace_name=%s error_code=%s",
                 request.operation_id,
+                request.desired_workspace_name,
                 failure.error_code,
             )
             return ReassignmentWorkspacePreparationResult(
@@ -132,8 +138,10 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
 
         if len(matches) == 1:
             logger.info(
-                "分类节点变更复用已存在目标 workspace: operation_id=%s",
+                "分类节点变更复用已存在目标 workspace: operation_id=%s "
+                "workspace_name=%s",
                 request.operation_id,
+                request.desired_workspace_name,
             )
             return ReassignmentWorkspacePreparationResult(
                 ReassignmentKnowledgeOutcome.ALREADY_IN_DESIRED_STATE,
@@ -142,8 +150,10 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
             )
         if len(matches) > 1:
             logger.warning(
-                "分类节点变更目标 workspace 名称存在多重精确匹配: operation_id=%s count=%d",
+                "分类节点变更目标 workspace 名称存在多重精确匹配: operation_id=%s "
+                "workspace_name=%s count=%d",
                 request.operation_id,
+                request.desired_workspace_name,
                 len(matches),
             )
             return ReassignmentWorkspacePreparationResult(
@@ -167,8 +177,10 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
         # ``false`` 是供应商显式拒绝，当前调用可以确定没有取得可提交的 workspace 引用。
         if created is False:
             logger.warning(
-                "分类节点变更目标 workspace 创建被供应商明确拒绝: operation_id=%s",
+                "分类节点变更目标 workspace 创建被供应商明确拒绝: operation_id=%s "
+                "workspace_name=%s",
                 request.operation_id,
+                request.desired_workspace_name,
             )
             return ReassignmentWorkspacePreparationResult(
                 ReassignmentKnowledgeOutcome.KNOWN_FAILURE,
@@ -187,8 +199,10 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
             return self._resolve_uncertain_workspace_creation(request, exc)
 
         logger.info(
-            "分类节点变更目标 workspace 已创建并取得有效 slug: operation_id=%s",
+            "分类节点变更目标 workspace 已创建并取得有效 slug: operation_id=%s "
+            "workspace_name=%s",
             request.operation_id,
+            request.desired_workspace_name,
         )
         return ReassignmentWorkspacePreparationResult(
             ReassignmentKnowledgeOutcome.APPLIED,
@@ -670,8 +684,9 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
             # 因而只能持久化 UNKNOWN 归属。它允许流程继续，却永远不能作为自动删除依据。
             logger.info(
                 "分类节点变更目标 workspace 创建后已查回唯一资源: "
-                "operation_id=%s ownership=%s",
+                "operation_id=%s workspace_name=%s ownership=%s",
                 request.operation_id,
+                request.desired_workspace_name,
                 ReassignmentWorkspaceOwnership.UNKNOWN.value,
             )
             return ReassignmentWorkspacePreparationResult(
@@ -682,8 +697,9 @@ class AnythingLLMReassignmentKnowledgeAdapter(ReassignmentKnowledgePort):
 
         logger.warning(
             "分类节点变更目标 workspace 创建结果无法确认: operation_id=%s "
-            "error_code=%s probe_state=%s",
+            "workspace_name=%s error_code=%s probe_state=%s",
             request.operation_id,
+            request.desired_workspace_name,
             failure.error_code,
             probe.state.value,
         )

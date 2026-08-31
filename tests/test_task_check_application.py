@@ -20,6 +20,7 @@ from app.modules.tasks.application import (
 from app.modules.tasks.domain import (
     CALLBACK_FAILED,
     CALLBACK_PENDING,
+    CALLBACK_SENDING,
     CALLBACK_SKIPPED,
     CALLBACK_SUCCESS,
     TaskBusinessRef,
@@ -80,6 +81,19 @@ class CheckTaskDomainContractTests(unittest.TestCase):
         self.assertEqual(0.28, snapshot.progress)
         with self.assertRaises(FrozenInstanceError):
             snapshot.progress = 0.5  # type: ignore[misc]
+
+    def test_snapshot_and_recovery_result_accept_active_sending_status(self) -> None:
+        """Guard owner 活跃期间的 sending 必须能穿过内部查询模型。"""
+
+        snapshot = _snapshot("sending.pdf", callback_status=CALLBACK_SENDING)
+        result = CallbackRecoveryResult(
+            attempted=False,
+            replayed=False,
+            final_status=CALLBACK_SENDING,
+        )
+
+        self.assertEqual(CALLBACK_SENDING, snapshot.callback_status)
+        self.assertEqual(CALLBACK_SENDING, result.final_status)
 
     def test_request_rejects_empty_or_mixed_business_types(self) -> None:
         with self.assertRaises(ValueError):
