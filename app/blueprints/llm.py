@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 from flask_sock import Sock
 
 from app.container import ApplicationServices, get_application_services
@@ -48,12 +48,36 @@ from app.services.llm_service.weaponry_service import (
     run_weaponry_task,
 )
 from app.services.utils.anythingllm_client import AnythingLLMClient
+from docsense_license import LicenseValidationError
 
 
 llm_bp = Blueprint("llm", __name__)
 sock = Sock()
 
 logger = logging.getLogger(__name__)
+
+_LICENSED_LLM_ENDPOINTS = frozenset(
+    {
+        "llm.llm_analysis",
+        "llm.llm_generate_report",
+        "llm.llm_weaponry",
+        "llm.llm_chat",
+        "llm.llm_chat_title",
+    }
+)
+
+
+@llm_bp.before_request
+def enforce_llm_feature_license():
+    if request.endpoint not in _LICENSED_LLM_ENDPOINTS:
+        return None
+    guard = current_app.extensions["docsense_license_guard"]
+    try:
+        guard.validate()
+    except LicenseValidationError as exc:
+        logger.warning("大模型功能授权校验拒绝请求: code=%s", exc.code)
+        return "", 403
+    return None
 
 
 def _services() -> ApplicationServices:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from app.services.core.settings import (
     MINERU_CACHE_DIR,
     OCR_CACHE_DIR,
 )
+from docsense_license import LICENSE_PRODUCT, LicenseConfig
 
 
 @dataclass(frozen=True)
@@ -175,3 +177,27 @@ def load_chat_infrastructure_config() -> ChatInfrastructureConfig:
         CHAT_RUNTIME_MODE_SINGLE_INSTANCE,
     )
     return ChatInfrastructureConfig(runtime_mode=raw_mode)
+
+
+def _parse_optional_absolute_path(
+    raw_value: Optional[str],
+    environment_name: str,
+) -> Path | None:
+    value = _parse_optional_str(raw_value)
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise RuntimeError(f"{environment_name}必须配置为绝对路径")
+    return path.resolve()
+
+
+def load_license_config() -> LicenseConfig:
+    return LicenseConfig(
+        required=_parse_bool(os.getenv("DOCSENSE_LICENSE_REQUIRED"), False),
+        license_file=_parse_optional_absolute_path(
+            os.getenv("DOCSENSE_LICENSE_FILE"),
+            "DOCSENSE_LICENSE_FILE",
+        ),
+        product=LICENSE_PRODUCT,
+    )

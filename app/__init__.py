@@ -16,10 +16,16 @@ from app.container import (
     create_application_services,
 )
 from app.services.core.logging import setup_logging
+from app.services.core.config import load_license_config
+from docsense_license import LicenseGuard
 from app.services.core.settings import MAX_CONTENT_LENGTH
 
 
-def create_app(*, services: ApplicationServices | None = None) -> Flask:
+def create_app(
+    *,
+    services: ApplicationServices | None = None,
+    license_guard: LicenseGuard | None = None,
+) -> Flask:
     """创建 Flask 应用，并允许测试注入完全离线的依赖容器。
 
     参数:
@@ -31,6 +37,9 @@ def create_app(*, services: ApplicationServices | None = None) -> Flask:
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
     )
+    resolved_license_guard = license_guard or LicenseGuard(load_license_config())
+    app.extensions["docsense_license_guard"] = resolved_license_guard
+
     resolved_services = (
         services if services is not None else create_application_services()
     )
