@@ -8,6 +8,8 @@
 | --- | --- |
 | `__init__.py` | 导出领域模型、状态常量和资源标识辅助函数。 |
 | `models.py` | 会话、运行、运行输入、文档绑定、消息、资源租约、清理任务及其状态集合。 |
+| `document_candidates.py` | 受理前冻结的供应商无关文档候选。 |
+| `document_scope.py` | Requested/Active/Effective Scope 的不可变 DTO、严格内部 Schema 和纯状态转换。 |
 | `events.py` | 供应商无关的 `ChatStreamEvent`，作为应用层到展示层的内部事件载体。 |
 | `resource_ids.py` | 生成稳定租约标识，并以自描述 JSON 封装工作区归属的远端资源引用。 |
 

@@ -85,6 +85,15 @@ class FakeChatConversationPort:
         self._delete_context_error_message = str(
             delete_context_error_message or ""
         ).strip()
+        # 下列调用轨迹只服务于严格离线契约测试。每个 Fake Port 都由 Factory
+        # 按执行租约独立创建，因此轨迹不会跨请求混写，也不会把可变网络会话伪装成
+        # 可安全共享的测试对象。
+        self.attach_document_calls: list[
+            tuple[ChatSessionRefs, tuple[ChatDocumentRef, ...]]
+        ] = []
+        self.stream_message_calls: list[
+            tuple[ChatSessionRefs, str, tuple[str, ...]]
+        ] = []
         self.standalone_prompts = self._state.standalone_prompts
 
     def open_conversation(
@@ -122,15 +131,20 @@ class FakeChatConversationPort:
         """把文档引用加入测试对话，重复引用保持幂等。"""
         with self._lock:
             known_session = self._require_session(session)
+            document_snapshot = tuple(documents)
+            for document in document_snapshot:
+                if not isinstance(document, ChatDocumentRef):
+                    raise TypeError("documents 只能包含 ChatDocumentRef")
+            self.attach_document_calls.append(
+                (known_session, document_snapshot)
+            )
             existing = list(
                 self._state.documents_by_conversation[
                     known_session.conversation_ref
                 ]
             )
             seen = {document.document_ref for document in existing}
-            for document in documents:
-                if not isinstance(document, ChatDocumentRef):
-                    raise TypeError("documents 只能包含 ChatDocumentRef")
+            for document in document_snapshot:
                 if document.document_ref in seen:
                     continue
                 existing.append(document)
@@ -152,9 +166,17 @@ class FakeChatConversationPort:
         with self._lock:
             known_session = self._require_session(session)
             normalized_message = _required_text(message, name="message")
+            requested_document_refs = tuple(document_refs)
             linked_documents = self._resolve_linked_documents(
                 known_session,
-                document_refs,
+                requested_document_refs,
+            )
+            self.stream_message_calls.append(
+                (
+                    known_session,
+                    normalized_message,
+                    requested_document_refs,
+                )
             )
             self._state.messages_by_conversation[
                 known_session.conversation_ref
@@ -325,12 +347,14 @@ class FakeChatConversationFactory:
     @property
     def ports(self) -> tuple[FakeChatConversationPort, ...]:
         """返回已经进入过请求作用域的 Port 快照。"""
-        return tuple(self._ports)
+        with self._state.lock:
+            return tuple(self._ports)
 
     @property
     def active_leases(self) -> int:
         """返回当前尚未退出的请求租约数量。"""
-        return self._active_leases
+        with self._state.lock:
+            return self._active_leases
 
     @contextmanager
     def create(self) -> Iterator[FakeChatConversationPort]:
@@ -339,9 +363,14 @@ class FakeChatConversationFactory:
             state=self._state,
             **self._port_options,
         )
-        self._ports.append(port)
-        self._active_leases += 1
+        # Factory 的调用轨迹也会被 50 个并发路由测试读取。即使每个 Port 都是请求级
+        # 独立对象，创建列表和活动租约计数仍属于共享测试状态，必须与 Fake 后端使用
+        # 同一把锁保护，避免测试替身自身制造丢计数或不完整快照。
+        with self._state.lock:
+            self._ports.append(port)
+            self._active_leases += 1
         try:
             yield port
         finally:
-            self._active_leases -= 1
+            with self._state.lock:
+                self._active_leases -= 1

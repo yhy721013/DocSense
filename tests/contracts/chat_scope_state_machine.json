@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "publicContract": {
+    "requestField": "fileNames",
+    "historyField": "files",
+    "historyItemFields": [
+      "name"
+    ],
+    "newRequestFields": [],
+    "newResponseFields": [],
+    "sseEventTypes": [
+      "chatInfo",
+      "textChunk",
+      "done",
+      "error",
+      "aborted"
+    ]
+  },
+  "selectionModes": [
+    "automatic_initial",
+    "explicit",
+    "active_scope_reuse"
+  ],
+  "cases": [
+    {
+      "id": "new_empty_with_catalog",
+      "sessionExists": false,
+      "requestedFiles": [],
+      "currentScope": null,
+      "initialCatalog": [
+        "a.pdf",
+        "b.pdf"
+      ],
+      "expectedEffectiveFiles": [
+        "a.pdf",
+        "b.pdf"
+      ],
+      "expectedHistoryFiles": [],
+      "expectedSelectionMode": "automatic_initial",
+      "createsScopeRevision": true
+    },
+    {
+      "id": "new_empty_without_catalog",
+      "sessionExists": false,
+      "requestedFiles": [],
+      "currentScope": null,
+      "initialCatalog": [],
+      "expectedEffectiveFiles": [],
+      "expectedHistoryFiles": [],
+      "expectedSelectionMode": "automatic_initial",
+      "createsScopeRevision": true
+    },
+    {
+      "id": "new_explicit",
+      "sessionExists": false,
+      "requestedFiles": [
+        "a.pdf"
+      ],
+      "currentScope": null,
+      "initialCatalog": [
+        "ignored.pdf"
+      ],
+      "expectedEffectiveFiles": [
+        "a.pdf"
+      ],
+      "expectedHistoryFiles": [
+        "a.pdf"
+      ],
+      "expectedSelectionMode": "explicit",
+      "createsScopeRevision": true
+    },
+    {
+      "id": "existing_empty_reuses_automatic_scope",
+      "sessionExists": true,
+      "requestedFiles": [],
+      "currentScope": [
+        "a.pdf",
+        "b.pdf"
+      ],
+      "initialCatalog": [
+        "a.pdf",
+        "b.pdf",
+        "new.pdf"
+      ],
+      "expectedEffectiveFiles": [
+        "a.pdf",
+        "b.pdf"
+      ],
+      "expectedHistoryFiles": [],
+      "expectedSelectionMode": "active_scope_reuse",
+      "createsScopeRevision": false
+    },
+    {
+      "id": "existing_explicit_replaces_scope",
+      "sessionExists": true,
+      "requestedFiles": [
+        "c.pdf"
+      ],
+      "currentScope": [
+        "a.pdf",
+        "b.pdf"
+      ],
+      "initialCatalog": [
+        "a.pdf",
+        "b.pdf",
+        "c.pdf"
+      ],
+      "expectedEffectiveFiles": [
+        "c.pdf"
+      ],
+      "expectedHistoryFiles": [
+        "c.pdf"
+      ],
+      "expectedSelectionMode": "explicit",
+      "createsScopeRevision": true
+    },
+    {
+      "id": "empty_after_explicit_keeps_last_explicit_scope",
+      "sessionExists": true,
+      "requestedFiles": [],
+      "currentScope": [
+        "c.pdf"
+      ],
+      "initialCatalog": [
+        "a.pdf",
+        "b.pdf",
+        "c.pdf",
+        "new.pdf"
+      ],
+      "expectedEffectiveFiles": [
+        "c.pdf"
+      ],
+      "expectedHistoryFiles": [],
+      "expectedSelectionMode": "active_scope_reuse",
+      "createsScopeRevision": false
+    }
+  ]
+}

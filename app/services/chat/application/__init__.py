@@ -29,7 +29,13 @@ from app.services.chat.application.delete_service import (
     ChatDeleteResult,
     ChatDeleteService,
 )
+from app.services.chat.application.document_candidates import (
+    ChatDocumentCandidate,
+    ChatDocumentSelectionCandidates,
+)
 from app.services.chat.application.document_resolver import (
+    ChatArchitectureDocumentResolver,
+    ChatDocumentCatalogConflictError,
     ChatDocumentNotFoundError,
     ChatDocumentResolver,
     DatabaseChatDocumentResolver,
@@ -54,11 +60,15 @@ from app.services.chat.application.title_service import (
 )
 
 __all__ = [
+    "ChatArchitectureDocumentResolver",
     "ChatAbortResult",
     "ChatAbortService",
     "AbortNotificationCapabilities",
     "AbortNotifier",
     "ChatCommandService",
+    "ChatDocumentCatalogConflictError",
+    "ChatDocumentCandidate",
+    "ChatDocumentSelectionCandidates",
     "ChatDocumentNotFoundError",
     "ChatDocumentResolver",
     "ChatDeleteBusyError",

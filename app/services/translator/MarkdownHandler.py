@@ -4,7 +4,7 @@ import logging
 from typing import Optional, List, Dict, Tuple
 from .core import HYMTTranslator
 from .chunk_processor import ChunkProcessor
-from .MinerUConverter import MinerUConverter
+from app.modules.document_processing.adapters.mineru import MinerUConverter
 import markdown
 import shutil
 from pathlib import Path

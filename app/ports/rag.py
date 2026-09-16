@@ -20,6 +20,13 @@ MAX_RAG_QUERY_ATTEMPTS = 3
 1 到该值之间选择更小次数，但不得通过配置错误或参数透传制造无界模型调用。
 """
 
+MAX_RAG_FRESH_CONVERSATION_SWITCHES = 2
+"""单个文档 RAG 会话允许创建的阶段隔离对话数量上限。
+
+初始对话不计入该值。两次切换分别供可选的身份分支重选和最终字段抽取使用；每次创建
+尝试在发出外部请求前即消费名额，避免超时或失败后盲目重放有副作用的创建请求。
+"""
+
 
 def normalize_rag_prompt(value: str) -> str:
     """返回模型调用、摘要计算和审计持久化共同使用的规范 Prompt。
@@ -40,15 +47,19 @@ def normalize_rag_prompt(value: str) -> str:
 class RagPromptKind(str, Enum):
     """文档 RAG 模型调用的稳定用途分类。
 
-    使用受控枚举而不是自由文本，可以让审计系统可靠区分首次分析、JSON 修复和领域分类
-    修复。``FOLLOW_UP`` 仅用于尚未迁移的通用追问；阶段 9 的文件分析修复必须使用更具体
-    的枚举值，不能继续把所有调用归类为 follow_up。
+    使用受控枚举而不是自由文本，可以让审计系统可靠区分兼容分析、领域分类、字段抽取
+    和各类修复。``FOLLOW_UP`` 仅用于尚未迁移的通用追问；文件分析阶段调用必须使用更
+    具体的枚举值，不能继续把所有调用归类为 follow_up。
     """
 
     ANALYSIS = "analysis"
+    ARCHITECTURE_CLASSIFICATION = "architecture_classification"
+    ANALYSIS_EXTRACTION = "analysis_extraction"
     JSON_REPAIR = "json_repair"
     ARCHITECTURE_REPAIR = "architecture_repair"
+    ARCHITECTURE_RESELECT = "architecture_reselect"
     FOLLOW_UP = "follow_up"
+    REPORT_GENERATION = "report_generation"
 
 
 def validate_rag_prompt_kind(value: RagPromptKind) -> RagPromptKind:
@@ -138,6 +149,7 @@ class RagAttempt:
     missing_marker_count: int = 0
     mismatched_marker_count: int = 0
     source_marker_status: str = ""
+    call_id: str = ""
 
     def __post_init__(self) -> None:
         """冻结来源集合并校验审计记录的最小结构。"""
@@ -182,8 +194,10 @@ class RagAttempt:
             raise ValueError("失败的 RagAttempt 必须包含 error_message")
         if not normalized_failure_stage and normalized_error:
             raise ValueError("成功的 RagAttempt 不得包含 error_message")
-        if not normalized_failure_stage and not str(self.raw_response or "").strip():
-            raise ValueError("成功的 RagAttempt 必须包含 raw_response")
+        # 报告生成契约允许模型成功返回空字符串。``None`` 仍表示上游尚未产生响应，空串
+        # 则是需要审计的真实成功结果，二者不能用 ``or ''`` 混为一谈。
+        if not normalized_failure_stage and self.raw_response is None:
+            raise ValueError("成功的 RagAttempt 必须明确包含 raw_response")
         object.__setattr__(self, "failure_stage", normalized_failure_stage)
         object.__setattr__(self, "error_message", normalized_error)
         object.__setattr__(self, "sources", tuple(self.sources))
@@ -234,6 +248,9 @@ class RagAttempt:
         object.__setattr__(self, "source_count", source_count)
         object.__setattr__(self, "verified_source_count", verified_count)
         object.__setattr__(self, "source_marker_status", marker_status)
+        if not isinstance(self.call_id, str):
+            raise TypeError("RagAttempt.call_id 必须是 str")
+        object.__setattr__(self, "call_id", self.call_id.strip())
 
 
 @dataclass(frozen=True)
@@ -304,6 +321,7 @@ class RagExecutionTrace:
     failure_stage: Optional[str]
     error_message: Optional[str]
     lifecycle_events: tuple[RagLifecycleEvent, ...] = ()
+    trace_id: str = ""
 
     def __post_init__(self) -> None:
         """冻结模型调用和生命周期序列，并保证上下文名称可用于审计关联。"""
@@ -330,6 +348,9 @@ class RagExecutionTrace:
             raise ValueError("成功的 RagExecutionTrace 不得包含 error_message")
         object.__setattr__(self, "failure_stage", normalized_failure_stage)
         object.__setattr__(self, "error_message", normalized_error)
+        if not isinstance(self.trace_id, str):
+            raise TypeError("RagExecutionTrace.trace_id 必须是 str")
+        object.__setattr__(self, "trace_id", self.trace_id.strip())
         sequence_numbers = tuple(
             event.sequence_no for event in self.lifecycle_events
         )
@@ -373,10 +394,9 @@ class PreparedDocumentRef:
             str(self.ingested_file_name or "")
             .replace("\\", "/")
             .rsplit("/", 1)[-1]
-            .strip()
         )
         if (
-            not normalized_ingested_file_name
+            not normalized_ingested_file_name.strip()
             or normalized_ingested_file_name in {".", ".."}
         ):
             raise ValueError("PreparedDocumentRef.ingested_file_name 必须是有效文件名")
@@ -448,6 +468,27 @@ class RagOperationError(RuntimeError):
         self.trace = trace
 
 
+@dataclass(frozen=True)
+class RagDocumentUploadOptions:
+    """业务层交给 RAG Provider Adapter 的不可变上传展示选项。
+
+    本 DTO 不包含具体供应商字段名。``transport_file_name`` 控制文档内容的传输文件名，
+    ``display_title`` 表示业务展示标题；本地 Artifact 路径始终由调用方单独提供。
+    """
+
+    transport_file_name: str
+    display_title: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("transport_file_name", "display_title"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} 必须是非空 str")
+        file_name = self.transport_file_name.replace("\\", "/").rsplit("/", 1)[-1]
+        if file_name != self.transport_file_name or file_name in {"", ".", ".."}:
+            raise ValueError("transport_file_name 必须是有效 basename")
+
+
 @runtime_checkable
 class DocumentRagSession(Protocol):
     """一个文件任务独占的隔离 RAG 会话。"""
@@ -457,10 +498,28 @@ class DocumentRagSession(Protocol):
         file_path: str,
         prompt: str,
         *,
+        prompt_kind: RagPromptKind = RagPromptKind.ANALYSIS,
         require_sources: bool = True,
         max_attempts: int = 2,
+        document_upload: RagDocumentUploadOptions | None = None,
     ) -> RagResult:
-        """准备目标文档并完成首次查询；Prompt 按公共契约规范化且只允许调用一次。"""
+        """准备目标文档并按显式用途完成首次查询；整个会话只允许调用一次。"""
+        ...
+
+    def start_fresh_conversation(
+        self,
+        *,
+        conversation_name: str,
+        failure_is_fatal: bool = True,
+    ) -> bool:
+        """在同一隔离上下文内切换到一个无历史的新对话。
+
+        只有 ``analyse`` 成功后才允许调用，且每个 Session 最多尝试切换两次。新对话继续
+        使用已经上传、绑定并 Pin 的唯一目标文档，不得重复执行文档准备。默认创建失败
+        直接抛出带完整轨迹的 ``RagOperationError``；显式传入
+        ``failure_is_fatal=False`` 时，预期的外部创建失败返回 ``False``，保持原活动对话
+        和会话成功态不变，但仍记录生命周期事件并消费一次切换名额。
+        """
         ...
 
     def ask(
@@ -472,6 +531,22 @@ class DocumentRagSession(Protocol):
         max_attempts: int = 1,
     ) -> RagResult:
         """在已准备会话中按显式用途和规范 Prompt 查询，不重复准备文档。"""
+        ...
+
+    def ask_optional(
+        self,
+        prompt: str,
+        *,
+        prompt_kind: RagPromptKind = RagPromptKind.FOLLOW_UP,
+        require_sources: bool = True,
+        max_attempts: int = 1,
+    ) -> Optional[RagResult]:
+        """执行一次可失败开放的增强查询，并保留全部尝试审计。
+
+        只有已经真正进入模型调用边界的预期 ``RagOperationError`` 才返回 ``None``；参数
+        错误、状态机错误和适配器编程异常继续抛出。可选失败不得要求清理目标文档，也不得
+        污染此前成功会话的总体失败状态。
+        """
         ...
 
     @property

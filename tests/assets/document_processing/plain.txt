@@ -1,0 +1,2 @@
+Stage 1H plain text baseline.
+第二行用于验证 UTF-8 文本透传。

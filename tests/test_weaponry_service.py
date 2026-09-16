@@ -1,10 +1,10 @@
 """tests/test_weaponry_service.py — weaponry_service 核心映射函数的单元测试"""
 import os
 import unittest
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from app.modules.weaponry.domain import DeprecatedWeaponryModeError
 from app.services.llm_service import weaponry_service as weaponry_service_module
 from app.services.llm_service.weaponry_service import (
     WeaponrySelectedDocument,
@@ -13,8 +13,6 @@ from app.services.llm_service.weaponry_service import (
     WeaponryRetrievalContext,
     _count_query_fields,
     _strip_document_metadata,
-    _map_source_to_analyse_data_source,
-    _build_analyse_data_sources,
     _extract_chunk_source_name,
     _ensure_terms_workspace,
     _format_terms_rule_context,
@@ -89,6 +87,29 @@ class TestAnythingLLMHTTPBoundary(unittest.TestCase):
                 self.assertNotIn(fragment, source)
 
 
+class TestWeaponryExtractionStrategy(unittest.TestCase):
+    """模式 1 必须在任何检索或模型副作用之前被明确拒绝。"""
+
+    @patch.dict(os.environ, {"WEAPONRY_ANALYSE_MODE": "1"})
+    def test_explicit_mode_one_is_rejected_before_vector_search(self) -> None:
+        client = MagicMock()
+
+        with self.assertRaises(DeprecatedWeaponryModeError):
+            _query_input_field(
+                client,
+                "workspace",
+                "thread",
+                {
+                    "fieldName": "舰级名称",
+                    "fieldType": "INPUT",
+                    "fieldDescription": "提取正式舰级名称",
+                },
+            )
+
+        client.vector_search.assert_not_called()
+        client.send_prompt_to_thread.assert_not_called()
+
+
 class TestStripDocumentMetadata(unittest.TestCase):
     """测试 _strip_document_metadata 去除 <document_metadata> 前缀。"""
 
@@ -118,80 +139,6 @@ class TestStripDocumentMetadata(unittest.TestCase):
         text = "<document_metadata>\nfoo\n</document_metadata>"
         result = _strip_document_metadata(text)
         self.assertEqual(result, "")
-
-
-class TestMapSourceToAnalyseDataSource(unittest.TestCase):
-    """测试 _map_source_to_analyse_data_source 字段映射。"""
-
-    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="translated")
-    def test_basic_mapping(self, mock_translate):
-        source = {
-            "text": (
-                "<document_metadata>\n"
-                "sourceDocument: test.pdf\n"
-                "</document_metadata>\n\n"
-                "实际的 chunk 正文"
-            ),
-            "score": 0.85,
-            "metadata": {"title": "test.pdf"},
-        }
-        result = _map_source_to_analyse_data_source(source, text_response="LLM的回答")
-
-        self.assertEqual(result["content"], "LLM的回答")
-        self.assertEqual(result["source"], "实际的 chunk 正文")
-        self.assertEqual(result["translate"], "translated")
-        # time 应该是日期时间格式
-        self.assertRegex(result["time"], r"\d{4}-\d{2}-\d{2}")
-
-        # 翻译应基于清理后的 chunk text
-        mock_translate.assert_called_once_with("实际的 chunk 正文")
-
-    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
-    def test_empty_source(self, mock_translate):
-        result = _map_source_to_analyse_data_source({}, text_response="回答")
-        self.assertEqual(result["content"], "回答")
-        self.assertEqual(result["source"], "")
-
-
-class TestBuildAnalyseDataSources(unittest.TestCase):
-    """测试 _build_analyse_data_sources 排序和空值处理。"""
-
-    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
-    def test_sorted_by_score_descending(self, mock_translate):
-        sources = [
-            {"text": "chunk-low", "score": 0.3},
-            {"text": "chunk-high", "score": 0.9},
-            {"text": "chunk-mid", "score": 0.5},
-        ]
-        result = _build_analyse_data_sources(sources, text_response="回答")
-        self.assertEqual(len(result), 3)
-        self.assertEqual(result[0]["source"], "chunk-high")
-        self.assertEqual(result[1]["source"], "chunk-mid")
-        self.assertEqual(result[2]["source"], "chunk-low")
-
-    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
-    def test_empty_sources_returns_empty_object(self, mock_translate):
-        result = _build_analyse_data_sources([], text_response="回答")
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["source"], "")
-        self.assertEqual(result[0]["content"], "回答")
-
-    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
-    def test_strips_metadata_from_chunks(self, mock_translate):
-        sources = [
-            {
-                "text": "<document_metadata>\nfoo\n</document_metadata>\n\n实际内容",
-                "score": 0.8,
-            },
-        ]
-        result = _build_analyse_data_sources(sources, text_response="回答")
-        self.assertEqual(result[0]["source"], "实际内容")
-
-    @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
-    def test_non_dict_items_skipped(self, mock_translate):
-        sources = [{"text": "valid", "score": 0.5}, "not-a-dict", None]
-        result = _build_analyse_data_sources(sources, text_response="回答")
-        self.assertEqual(len(result), 1)
 
 
 class TestWeaponryRetrievalSplitting(unittest.TestCase):
@@ -620,9 +567,12 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
             ["Nimitz (CVN 68) class", "The class serves in the United States Navy."],
         )
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
-        self.assertIn("术语规则参考开始", client.prompts[0])
+        self.assertIn("辅助语境开始", client.prompts[0])
         self.assertIn("中文型号规则", client.prompts[0])
         self.assertEqual(calls[0][1], 8)
+        self.assertIn("字段：舰级名称", calls[0][2])
+        self.assertIn("语义说明：提取舰级名称。", calls[0][2])
+        self.assertNotIn("未找到", calls[0][2])
         self.assertEqual(calls[1][1], 3)
 
     @patch("app.services.llm_service.weaponry_service._translate_if_needed", return_value="")
@@ -691,7 +641,7 @@ class TestWeaponryRetrievalSplitting(unittest.TestCase):
         )
         self.assertEqual(result["analyseDataSource"][0]["rows"], ["Nimitz (CVN 68) class"])
         self.assertNotIn("term_rule_0005_中文型号.md", result["analyseDataSource"][0]["source"])
-        self.assertNotIn("术语规则参考开始", client.prompts[0])
+        self.assertNotIn("辅助语境开始", client.prompts[0])
         self.assertNotIn("中文型号规则", client.prompts[0])
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "target-ws")
@@ -1054,6 +1004,7 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
         }
 
         kb_service = MagicMock()
+        task_service = MagicMock()
         selected_document = WeaponrySelectedDocument(
             file_name="selected.pdf",
             original_name="跨分类选中文件.pdf",
@@ -1063,14 +1014,15 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
             ingested_file_name="selected.mhtml.normalized.pdf",
         )
 
+        progress_hub = MagicMock()
         run_weaponry_task(
-            task_service=MagicMock(),
+            task_service=task_service,
             kb_service=kb_service,
-            progress_hub=MagicMock(),
+            progress_hub=progress_hub,
             request_payload={
                 "businessType": "weaponry",
                 "params": {
-                    "architectureId": 10502,
+                    "architectureId": "00010502",
                     "filePathList": ["selected.pdf"],
                     "weaponryTemplateFieldList": [
                         {"fieldName": "舰级名称", "fieldType": "INPUT"}
@@ -1097,6 +1049,15 @@ class TestWeaponrySelectedFilesTask(unittest.TestCase):
             user_id=1,
             selected_documents=(selected_document,),
         )
+        # 遗留快照即使保存带前导零的兼容字符串，Worker 也必须访问规范业务键并
+        # 生成数值型回调身份，不能产生与主接口/check-task 不同的第二份任务。
+        for call in task_service.update_task_progress.call_args_list:
+            self.assertEqual(("weaponry", "10502"), call.args[:2])
+        callback_payload = task_service.mark_business_result.call_args.args[2]
+        self.assertEqual(10502, callback_payload["data"]["architectureId"])
+        for call in progress_hub.publish.call_args_list:
+            self.assertEqual(("weaponry", "10502"), call.args[:2])
+            self.assertEqual(10502, call.args[2]["data"]["architectureId"])
         kb_service.get_workspace_slug.assert_not_called()
         kb_service.list_document_records.assert_not_called()
         self.assertEqual(mock_query_input.call_args.args[1], "selected-ws")

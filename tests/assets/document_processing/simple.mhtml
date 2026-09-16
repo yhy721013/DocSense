@@ -1,0 +1,21 @@
+From: <Saved by Blink>
+Subject: Stage 1H baseline sample
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="----=_Stage1HBaseline"
+
+------=_Stage1HBaseline
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<html>
+  <head>
+    <title>Stage 1H Baseline</title>
+    <style>.hidden { display:none; }</style>
+  </head>
+  <body>
+    <h1>Hello Document Processing</h1>
+    <p>Second baseline paragraph.</p>
+    <script>console.log('must be removed');</script>
+  </body>
+</html>
+------=_Stage1HBaseline--

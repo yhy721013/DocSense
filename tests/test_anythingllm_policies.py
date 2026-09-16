@@ -9,6 +9,10 @@ from app.integrations.anythingllm.policies import (
     DEFAULT_UPLOAD_RETRIES,
     MAX_EMBEDDING_ATTEMPTS,
     MAX_UPLOAD_RETRIES,
+    analysis_rag_workspace_settings,
+    chat_workspace_settings,
+    document_rag_workspace_settings,
+    knowledge_index_workspace_settings,
     validate_embedding_max_attempts,
     validate_upload_max_retries,
     validate_upload_retry_base_delay,
@@ -62,6 +66,30 @@ class AnythingLLMPolicyTests(unittest.TestCase):
                     validate_upload_retry_base_delay(  # type: ignore[arg-type]
                         invalid_value
                     )
+
+    def test_analysis_and_knowledge_history_policies_are_explicitly_separated(self) -> None:
+        """分析和永久知识库都只保留修复所需的一轮最小历史。"""
+        analysis_settings = analysis_rag_workspace_settings()
+        knowledge_settings = knowledge_index_workspace_settings()
+
+        self.assertEqual(1, analysis_settings["openAiHistory"])
+        self.assertEqual(1, knowledge_settings["openAiHistory"])
+        self.assertEqual(
+            {key: value for key, value in analysis_settings.items() if key != "openAiHistory"},
+            {key: value for key, value in knowledge_settings.items() if key != "openAiHistory"},
+        )
+
+    def test_legacy_and_chat_workspace_policies_remain_compatible(self) -> None:
+        """旧混合 Facade 与文件对话不得被临时 analysis 的历史隔离误改。"""
+        self.assertEqual(1, document_rag_workspace_settings()["openAiHistory"])
+        self.assertEqual(20, chat_workspace_settings()["openAiHistory"])
+
+    def test_workspace_policy_calls_return_independent_dicts(self) -> None:
+        """调用方修改一次策略副本不得污染后续任务。"""
+        first = analysis_rag_workspace_settings()
+        first["openAiHistory"] = 99
+
+        self.assertEqual(1, analysis_rag_workspace_settings()["openAiHistory"])
 
 
 if __name__ == "__main__":

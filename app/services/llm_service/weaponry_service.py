@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import json
 import re
 import time
 from dataclasses import dataclass
@@ -19,11 +18,33 @@ from app.services.utils.callback_client import post_callback_payload
 from app.services.core.progress_hub import LLMProgressHub
 from app.services.llm_service.task_service import LLMTaskService
 from app.services.llm_service.translation_service import get_translation_service
-from app.services.core.prompts import (
-    build_input_field_prompt,
-    build_chunk_based_field_prompt,
-    build_multi_chunk_based_field_prompt,
+from app.modules.weaponry.domain import (
+    AuxiliaryGuidance,
+    DeprecatedWeaponryModeError,
+    MergedTableRow,
+    ParsedTableRow,
+    RetrievalColumn,
+    RetrievalField,
+    SelectedEvidence,
+    SourceNameMapping,
+    TableRowResult,
+    WeaponryAnalyseDataSource,
+    WeaponryDomainValidationError,
+    WeaponryFieldSpecification,
+    assemble_table_rows,
+    build_input_extraction_prompt,
+    build_retrieval_query,
     build_table_extraction_prompt,
+    is_terms_source_name as _domain_is_terms_source_name,
+    normalize_evidence_rows,
+    merge_table_rows,
+    normalize_architecture_id_value,
+    normalize_evidence_text,
+    normalize_source_name as _domain_normalize_source_name,
+    normalize_table_cell_value as _domain_normalize_table_cell_value,
+    parse_table_json_rows,
+    resolve_legacy_extraction_strategy,
+    source_lookup_keys as _domain_source_lookup_keys,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,8 +53,6 @@ logger = logging.getLogger(__name__)
 TARGET_EVIDENCE_TOP_N = 8
 TABLE_EVIDENCE_TOP_N = 16
 TERMS_RULE_TOP_N = 3
-MAX_TARGET_CHUNKS_PER_FILE = 8
-MAX_TARGET_CONTEXT_CHARS = 12000
 MAX_TABLE_ROWS = 100
 TERMS_RULE_CONTEXT_MAX_CHARS = 1200
 PROMPT_SEND_MAX_ATTEMPTS = 2
@@ -222,24 +241,15 @@ def _translate_if_needed(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _strip_document_metadata(text: str) -> str:
-    """去除 AnythingLLM chunk 文本中的 <document_metadata>...</document_metadata> 前缀。"""
-    if not text:
-        return ""
-    tag_end = "</document_metadata>"
-    idx = text.find(tag_end)
-    if idx != -1:
-        return text[idx + len(tag_end):].strip()
-    return text.strip()
+    """兼容入口：转发到 1D 领域层的供应商包装清理规则。"""
+
+    return normalize_evidence_text(str(text or ""))
 
 
 def _normalize_source_name(name: str) -> str:
-    """归一化 AnythingLLM 文档来源名，便于判断目标 PDF 与术语文件。"""
-    if not name:
-        return ""
-    normalized = str(name).replace("\\", "/").strip()
-    if "custom-documents/" in normalized:
-        normalized = normalized.split("custom-documents/")[-1]
-    return Path(normalized).name
+    """兼容入口：转发到供应商无关来源名纯规则。"""
+
+    return _domain_normalize_source_name(str(name or ""))
 
 
 def _extract_chunk_source_name(chunk: Dict[str, Any]) -> str:
@@ -258,24 +268,9 @@ def _extract_chunk_source_name(chunk: Dict[str, Any]) -> str:
 
 
 def _source_lookup_keys(name: str) -> Set[str]:
-    """生成来源名查库映射 key，兼容 AnythingLLM 返回的多种文档标识。"""
-    raw = str(name or "").replace("\\", "/").strip()
-    if not raw:
-        return set()
+    """兼容入口：调用确定性别名规则后返回遗留调用方所需集合。"""
 
-    candidates = {raw}
-    if "custom-documents/" in raw:
-        candidates.add("custom-documents/" + raw.split("custom-documents/", 1)[1])
-
-    normalized = _normalize_source_name(raw)
-    if normalized:
-        candidates.add(normalized)
-
-    basename = Path(raw).name
-    if basename:
-        candidates.add(basename)
-
-    return {candidate.lower() for candidate in candidates if candidate}
+    return set(_domain_source_lookup_keys(str(name or "")))
 
 
 def _add_source_name_mapping(
@@ -295,20 +290,17 @@ def _resolve_original_source_name(
     context: Optional[WeaponryRetrievalContext],
 ) -> str:
     """将 Mode 2 的内部来源文件名映射为 documents.original_name。"""
-    normalized = _normalize_source_name(source_name)
-    if _is_terms_source_name(normalized):
-        return normalized
-
-    if not source_name:
-        return context.single_target_original_name if context else ""
-
-    mapping = context.source_original_names if context and context.source_original_names else {}
-    for key in _source_lookup_keys(source_name):
-        original_name = mapping.get(key)
-        if original_name:
-            return original_name
-
-    return normalized or str(source_name or "")
+    mapping = SourceNameMapping(
+        original_names=tuple(
+            (context.source_original_names or {}).items()
+            if context
+            else ()
+        ),
+        fallback_original_name=(
+            context.single_target_original_name if context else ""
+        ),
+    )
+    return mapping.resolve_original_name(str(source_name or ""))
 
 
 def _resolve_hashed_source_name(
@@ -316,25 +308,19 @@ def _resolve_hashed_source_name(
     context: Optional[WeaponryRetrievalContext],
 ) -> str:
     """将 AnythingLLM 来源标识映射为 documents.file_name（哈希文件名）。"""
-    normalized = _normalize_source_name(source_name)
-    if _is_terms_source_name(normalized):
-        return normalized
-
-    if not source_name:
-        return context.single_target_file_name if context else ""
-
-    mapping = context.source_file_names if context and context.source_file_names else {}
-    for key in _source_lookup_keys(source_name):
-        file_name = mapping.get(key)
-        if file_name:
-            return file_name
-
-    return normalized or str(source_name or "")
+    mapping = SourceNameMapping(
+        file_names=tuple(
+            (context.source_file_names or {}).items()
+            if context
+            else ()
+        ),
+        fallback_file_name=(context.single_target_file_name if context else ""),
+    )
+    return mapping.resolve_file_name(str(source_name or ""))
 
 
 def _is_terms_source_name(source_name: str) -> bool:
-    name = _normalize_source_name(source_name).lower()
-    return name.startswith("term_rule_") or (name.endswith(".md") and "term_rule_" in name)
+    return _domain_is_terms_source_name(str(source_name or ""))
 
 
 def _is_target_source(source_name: str, context: Optional[WeaponryRetrievalContext]) -> bool:
@@ -643,21 +629,76 @@ def _fallback_target_file_name(context: Optional[WeaponryRetrievalContext]) -> s
     return sorted(context.target_file_names)[0]
 
 
-def _limit_chunks_for_prompt(chunks: List[str]) -> List[str]:
-    limited: List[str] = []
-    remaining = MAX_TARGET_CONTEXT_CHARS
-    for chunk in chunks[:MAX_TARGET_CHUNKS_PER_FILE]:
-        text = (chunk or "").strip()
-        if not text:
-            continue
-        if len(text) > remaining:
-            text = text[:remaining].rstrip()
-        if text:
-            limited.append(text)
-            remaining -= len(text)
-        if remaining <= 0:
-            break
-    return limited
+def _normalize_chunks_for_prompt(chunks: List[str]) -> List[str]:
+    """清理旧链路 Chunk，但保留每条完整正文和全部已选 Evidence。
+
+    这里不再执行单条、总量或单文档配额裁剪。记录数量与字符数便于联调时识别供应商
+    上下文窗口错误，但日志不输出任何业务正文。
+    """
+
+    normalized = list(normalize_evidence_rows(chunks))
+    logger.info(
+        "武器谱 Prompt Evidence 已完整保留: row_count=%s total_chars=%s",
+        len(normalized),
+        sum(len(item) for item in normalized),
+    )
+    return normalized
+
+
+def _legacy_prompt_evidence(
+    document_key: str,
+    rows: Sequence[str],
+) -> tuple[SelectedEvidence, ...]:
+    """把旧模式 2 已选中的行映射为新 Prompt 所需的强类型 Evidence。
+
+    该适配只服务尚未切换的遗留执行链，不宣称已经通过生产 relevance profile。稳定的
+    ``legacy-mode2-unprofiled`` 标识会阻止这些对象与未来 1D-3B 的生产 Selection 结果混用。
+    """
+
+    normalized_document_key = str(document_key or "").strip()
+    if not normalized_document_key:
+        raise WeaponryDomainValidationError("旧链路 Prompt 缺少 document_key")
+    return tuple(
+        SelectedEvidence(
+            candidate_id=f"legacy-{index}",
+            document_key=normalized_document_key,
+            text=row,
+            provider_rank=index,
+            provider_score=1.0,
+            score_profile_id="legacy-mode2-unprofiled",
+            score_mode="score",
+            original_index=index - 1,
+        )
+        for index, row in enumerate(rows, 1)
+    )
+
+
+def _legacy_guidance(value: str) -> tuple[AuxiliaryGuidance, ...]:
+    """把遗留术语文本封装为通用辅助语境，Domain 不感知 workspace。"""
+
+    text = str(value or "").strip()
+    if not text:
+        return ()
+    return (AuxiliaryGuidance(guidance_id="legacy-terms-rules", text=text),)
+
+
+def _require_file_aggregate_strategy() -> None:
+    """拒绝已废弃模式 1；本函数不在字段间动态选择算法。"""
+
+    raw_mode = os.getenv("WEAPONRY_ANALYSE_MODE")
+    try:
+        resolve_legacy_extraction_strategy(raw_mode)
+    except DeprecatedWeaponryModeError:
+        logger.error(
+            "检测到已废弃的武器谱模式配置，任务拒绝执行: configured_mode=1"
+        )
+        raise
+    except WeaponryDomainValidationError:
+        logger.error(
+            "检测到非法武器谱模式配置，任务拒绝执行: configured_mode_chars=%d",
+            len(raw_mode or ""),
+        )
+        raise
 
 
 def _extract_thread_slug_from_client(client: AnythingLLMClient, thread_info: Dict[str, Any]) -> Optional[str]:
@@ -944,48 +985,6 @@ def _restore_target_workspace_terms(
         logger.warning("恢复目标工作区中的术语文档失败")
 
 
-def _map_source_to_analyse_data_source(source: Dict[str, Any], text_response: str = "") -> Dict[str, Any]:
-    """将 AnythingLLM 的 source 对象映射为甲方 analyseDataSource 格式。
-
-    每条记录以检索来源片段为单位组织：
-    - content: LLM 解析出的内容（text_response）
-    - source: 检索片段的原文文本（不同来源片段可能不一样）
-    - time: 得到解析结果的时间
-    - translate: 对原文片段的翻译
-    """
-    chunk_text = _strip_document_metadata(source.get("text", ""))
-    return {
-        "content": text_response,
-        "source": chunk_text,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "translate": _translate_if_needed(chunk_text),
-    }
-
-
-def _build_analyse_data_sources(sources: List[Dict[str, Any]], text_response: str = "") -> List[Dict[str, Any]]:
-    """将 sources 列表转换为 analyseDataSource 列表并按 score 降序排列。
-
-    每个检索到的相关来源片段都作为一条独立记录。
-    """
-    scored = []
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        mapped = _map_source_to_analyse_data_source(src, text_response=text_response)
-        score = 0.0
-        try:
-            score = float(src.get("score", 0))
-        except (TypeError, ValueError):
-            pass
-        scored.append((score, mapped))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    res = [item for _, item in scored]
-    if not res:
-        # 甲方接口要求：无来源时返回空内容对象
-        return [_map_source_to_analyse_data_source({}, text_response=text_response)]
-    return res
-
-
 def _build_file_analyse_data_source(
     *,
     content: str,
@@ -993,26 +992,31 @@ def _build_file_analyse_data_source(
     file_name: str,
     rows: List[str],
 ) -> Dict[str, Any]:
-    """构造按文件聚合模式的溯源对象，rows 必须是实际进入 Prompt 的 Chunk。"""
-    return {
-        "content": content,
-        "source": source,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "fileName": file_name,
-        "rows": list(rows),
-        "translate": _translate_if_needed(content),
-    }
+    """兼容入口：用 1D DTO 构造按文件聚合溯源对象。"""
+
+    return WeaponryAnalyseDataSource(
+        content=str(content or ""),
+        source=str(source or ""),
+        occurred_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        file_name=str(file_name or ""),
+        rows=tuple(str(item) for item in rows),
+        translation=_translate_if_needed(str(content or "")),
+    ).to_public_dict()
 
 
 def _build_empty_file_analyse_data_sources(content: str = "") -> List[Dict[str, Any]]:
-    return [
-        _build_file_analyse_data_source(
-            content=content,
-            source="",
-            file_name="",
-            rows=[],
-        )
-    ]
+    if content:
+        return [
+            WeaponryAnalyseDataSource(
+                content=str(content),
+                source="",
+                occurred_at="",
+                file_name="",
+                rows=(),
+                translation=_translate_if_needed(str(content)),
+            ).to_public_dict()
+        ]
+    return [WeaponryAnalyseDataSource.empty().to_public_dict()]
 
 
 # ---------------------------------------------------------------------------
@@ -1021,12 +1025,13 @@ def _build_empty_file_analyse_data_sources(content: str = "") -> List[Dict[str, 
 
 def _publish_progress(
     progress_hub: LLMProgressHub,
-    architecture_id: str,
+    architecture_id: int,
     progress: float,
 ) -> None:
+    business_key = str(architecture_id)
     progress_hub.publish(
         "weaponry",
-        architecture_id,
+        business_key,
         {
             "businessType": "weaponry",
             "data": {"architectureId": architecture_id, "progress": progress},
@@ -1084,16 +1089,26 @@ def _query_input_field(
     user_id: int = 1,
     retrieval_context: Optional[WeaponryRetrievalContext] = None,
 ) -> Dict[str, Any]:
-    """查询 INPUT 类型字段并返回填充后的字段对象。"""
-    field_name = field.get("fieldName", "")
-    field_desc = field.get("fieldDescription", "")
+    """查询 INPUT 字段；迁移期只保留按文件聚合语义。"""
 
-    # 步骤 1：目标 PDF 检索；术语规则辅助上下文由环境变量控制。
-    prompt = build_input_field_prompt(field_name, field_desc)
+    _require_file_aggregate_strategy()
+    specification = WeaponryFieldSpecification.from_mapping(field)
+    field_name = specification.field_name
+    field_desc = specification.field_description
+
+    # Retrieval Query 与 Extraction Prompt 已在类型和文本上分离。旧链路尚未接入
+    # Schema v2 production profile 已属于新模块；遗留链路仍只负责兼容召回，1D-6
+    # 切换公开路由前不得把新 profile、evaluation 阈值或 score/rank 逻辑反向写回此处。
+    retrieval_query = build_retrieval_query(
+        RetrievalField(
+            field_name=field_name,
+            field_description=field_desc,
+        )
+    )
     vs_results = _vector_search_with_top_n(
         client,
         workspace_slug,
-        prompt,
+        retrieval_query.text,
         top_n=TARGET_EVIDENCE_TOP_N,
         user_id=user_id,
     )
@@ -1119,219 +1134,138 @@ def _query_input_field(
     if not vs_results:
         logger.info("字段向量检索未命中，使用空来源: field_name=%s", field_name)
         filled["analyseData"] = ""
-        analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
-        filled["analyseDataSource"] = (
-            _build_empty_file_analyse_data_sources()
-            if analyse_mode == "2"
-            else _build_analyse_data_sources([], text_response="")
-        )
+        filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
         return filled
 
-    analyse_mode = os.getenv("WEAPONRY_ANALYSE_MODE", "2").strip()
+    file_chunks: Dict[str, List[str]] = defaultdict(list)
+    file_max_score: Dict[str, float] = defaultdict(float)
+    for chunk in vs_results:
+        chunk_text = _strip_document_metadata(chunk.get("text", ""))
+        if not chunk_text:
+            continue
+        file_name = _extract_chunk_source_name(chunk) or _fallback_target_file_name(
+            retrieval_context
+        )
+        if not file_name:
+            raise ValueError("未能从文档片段中提取出明确的文件名。")
+        file_chunks[file_name].append(chunk_text)
+        file_max_score[file_name] = max(file_max_score[file_name], _get_score(chunk))
 
-    if analyse_mode == "2":
-        # 模式 2：按文件聚合
-        file_chunks = defaultdict(list)
-        file_max_score = defaultdict(float)
-
-        for chunk in vs_results:
-            chunk_text = _strip_document_metadata(chunk.get("text", ""))
-            if not chunk_text:
-                continue
-            
-            file_name = _extract_chunk_source_name(chunk)
-            if not file_name:
-                file_name = _fallback_target_file_name(retrieval_context)
-
-            if not file_name:
-                raise ValueError("未能从文档片段中提取出明确的文件名。")
-            
-            file_chunks[file_name].append(chunk_text)
-            score = _get_score(chunk)
-            if score > file_max_score[file_name]:
-                file_max_score[file_name] = score
-
-        # 按照文件最高置信度降序排序
-        sorted_files = sorted(file_chunks.keys(), key=lambda f: file_max_score[f], reverse=True)
-        
-        data_sources = []
-        first_valid_content = ""
-
-        for file_name in sorted_files:
-            chunks = _limit_chunks_for_prompt(file_chunks[file_name])
-            if not chunks:
-                continue
-            chunk_prompt = build_multi_chunk_based_field_prompt(
-                field_name,
-                chunks,
-                field_desc,
-                terms_rule_context=terms_rule_context,
-            )
-            
-            result = _send_prompt_to_isolated_thread(
-                client,
-                workspace_slug,
-                thread_slug,
-                chunk_prompt,
-                user_id=user_id,
-                mode="chat",
-            )
-            
-            if not result:
-                continue
-                
-            text_response = result.get("textResponse", "").strip()
-            
-            if "未找到" in text_response or not text_response:
-                continue
-
-            # 组装针对文件的 data_source，此时 translate 为 content 的翻译
-            original_source_name = _resolve_original_source_name(file_name, retrieval_context)
-            hashed_file_name = _resolve_hashed_source_name(file_name, retrieval_context)
-            mapped_source = _build_file_analyse_data_source(
+    sorted_files = sorted(
+        file_chunks,
+        key=lambda value: (-file_max_score[value], value),
+    )
+    data_sources: List[Dict[str, Any]] = []
+    first_valid_content = ""
+    for file_name in sorted_files:
+        chunks = _normalize_chunks_for_prompt(file_chunks[file_name])
+        if not chunks:
+            continue
+        extraction_prompt = build_input_extraction_prompt(
+            specification,
+            _legacy_prompt_evidence(file_name, chunks),
+            guidance=_legacy_guidance(terms_rule_context),
+        )
+        result = _send_prompt_to_isolated_thread(
+            client,
+            workspace_slug,
+            thread_slug,
+            extraction_prompt.text,
+            user_id=user_id,
+            mode="chat",
+        )
+        if not result:
+            continue
+        text_response = str(result.get("textResponse", "")).strip()
+        if "未找到" in text_response or not text_response:
+            continue
+        data_sources.append(
+            _build_file_analyse_data_source(
                 content=text_response,
-                source=original_source_name,
-                file_name=hashed_file_name,
-                rows=chunks,
+                source=_resolve_original_source_name(file_name, retrieval_context),
+                file_name=_resolve_hashed_source_name(file_name, retrieval_context),
+                rows=list(extraction_prompt.rows),
             )
-            data_sources.append(mapped_source)
-            
-            if not first_valid_content:
-                first_valid_content = text_response
-
-        if not data_sources:
-            logger.info(
-                "字段按文件提取完成，但未得到有效信息: field_name=%s",
-                field_name,
-            )
-            filled["analyseData"] = ""
-            filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
-            return filled
-
-        logger.info(
-            "字段按文件提取完成: field_name=%s valid_file_count=%d result_chars=%d",
-            field_name,
-            len(data_sources),
-            len(first_valid_content),
         )
-        
-        filled["analyseData"] = first_valid_content
-        filled["analyseDataSource"] = data_sources
+        if not first_valid_content:
+            first_valid_content = text_response
+
+    if not data_sources:
+        logger.info(
+            "字段按文件提取完成，但未得到有效信息: field_name=%s",
+            field_name,
+        )
+        filled["analyseData"] = ""
+        filled["analyseDataSource"] = _build_empty_file_analyse_data_sources()
         return filled
 
-    else:
-        # 模式 1：按 Chunk 提问 (现存逻辑)
-        sorted_chunks = sorted(vs_results, key=_get_score, reverse=True)
-
-        data_sources = []
-        first_valid_content = ""
-
-        for chunk in sorted_chunks:
-            chunk_text = _strip_document_metadata(chunk.get("text", ""))
-            if not chunk_text:
-                continue
-            chunk_text = _limit_chunks_for_prompt([chunk_text])[0]
-                
-            chunk_prompt = build_chunk_based_field_prompt(
-                field_name,
-                chunk_text,
-                field_desc,
-                terms_rule_context=terms_rule_context,
-            )
-            
-            # 步骤 2：对每个 Chunk，使用 chat 模式向模型提问
-            result = _send_prompt_to_isolated_thread(
-                client,
-                workspace_slug,
-                thread_slug,
-                chunk_prompt,
-                user_id=user_id,
-                mode="chat",
-            )
-            
-            if not result:
-                continue
-                
-            text_response = result.get("textResponse", "").strip()
-            
-            # 如果 LLM 回答"未找到"则过滤掉
-            if "未找到" in text_response or not text_response:
-                continue
-                
-            # 组装这一条来源
-            mapped_source = _map_source_to_analyse_data_source(chunk, text_response=text_response)
-            data_sources.append(mapped_source)
-            
-            if not first_valid_content:
-                first_valid_content = text_response
-
-        if not data_sources:
-            logger.info(
-                "字段按片段提取完成，但未得到有效信息: field_name=%s",
-                field_name,
-            )
-            filled["analyseData"] = ""
-            filled["analyseDataSource"] = _build_analyse_data_sources([], text_response="")
-            return filled
-
-        logger.info(
-            "字段按片段提取完成: field_name=%s valid_chunk_count=%d result_chars=%d",
-            field_name,
-            len(data_sources),
-            len(first_valid_content),
-        )
-        
-        filled["analyseData"] = first_valid_content
-        filled["analyseDataSource"] = data_sources
-        return filled
+    logger.info(
+        "字段按文件提取完成: field_name=%s valid_file_count=%d result_chars=%d",
+        field_name,
+        len(data_sources),
+        len(first_valid_content),
+    )
+    filled["analyseData"] = first_valid_content
+    filled["analyseDataSource"] = data_sources
+    return filled
 
 
 # ---------------------------------------------------------------------------
 # TABLE 类型字段处理
 # ---------------------------------------------------------------------------
 
+
+def _legacy_table_specification(
+    field: Mapping[str, Any],
+    column_defs: Sequence[Mapping[str, Any]],
+) -> WeaponryFieldSpecification:
+    """把遗留字典边界转换为 1D 不可变 TABLE specification。"""
+
+    payload = dict(field)
+    payload.setdefault("fieldName", "表格")
+    payload["fieldType"] = "TABLE"
+    normalized_columns: List[Dict[str, Any]] = []
+    for column in column_defs:
+        normalized_column = dict(column)
+        # 该默认值只存在于遗留内部 helper；HTTP Parser 在 1D-2 仍须严格要求公开单元格
+        # 显式携带 fieldType=INPUT，不能把此兼容行为外扩为接口宽松解析。
+        normalized_column.setdefault("fieldType", "INPUT")
+        normalized_columns.append(normalized_column)
+    payload["tableFieldList"] = [normalized_columns]
+    return WeaponryFieldSpecification.from_mapping(payload)
+
+
 def _extract_table_column_defs(field: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """从请求中的 tableFieldList 提取列模板定义。"""
+    """兼容入口：从不可变 TABLE specification 投影遗留列字典。"""
+
+    specification = WeaponryFieldSpecification.from_mapping(field)
     columns: List[Dict[str, Any]] = []
-    seen_names: Set[str] = set()
-    for row in field.get("tableFieldList") or []:
-        if not isinstance(row, list):
-            continue
-        for cell in row:
-            if not isinstance(cell, dict):
-                continue
-            column_name = str(cell.get("fieldName") or "").strip()
-            if not column_name or column_name in seen_names:
-                continue
-            column = dict(cell)
-            column["fieldName"] = column_name
-            column.setdefault("fieldType", "INPUT")
-            column.pop("analyseData", None)
-            column.pop("analyseDataSource", None)
-            columns.append(column)
-            seen_names.add(column_name)
+    for item in specification.columns:
+        column = item.template.to_dict()
+        column["fieldName"] = item.field_name
+        column.setdefault("fieldType", "INPUT")
+        column.pop("analyseData", None)
+        column.pop("analyseDataSource", None)
+        columns.append(column)
     return columns
 
 
 def _build_table_retrieval_query(field: Dict[str, Any], column_defs: List[Dict[str, Any]]) -> str:
-    table_name = str(field.get("fieldName") or "表格").strip()
-    table_desc = str(field.get("fieldDescription") or "").strip()
-    column_parts = []
-    for column in column_defs:
-        column_name = str(column.get("fieldName") or "").strip()
-        column_desc = str(column.get("fieldDescription") or "").strip()
-        if not column_name:
-            continue
-        if column_desc:
-            column_parts.append(f"{column_name}（{column_desc}）")
-        else:
-            column_parts.append(column_name)
-    desc_part = f"\n表格说明：{table_desc}" if table_desc else ""
-    columns_part = "、".join(column_parts)
-    return (
-        f"请检索与表格“{table_name}”相关的多行数据。{desc_part}\n"
-        f"每一行应对应一个独立对象、部件、型号或记录；需要关注的列包括：{columns_part}。"
+    """兼容入口：构造不含生成指令的 TABLE RetrievalQuery。"""
+
+    retrieval_field = RetrievalField(
+        field_name=str(field.get("fieldName") or "表格"),
+        field_description=str(field.get("fieldDescription") or ""),
+        field_type="TABLE",
+        columns=tuple(
+            RetrievalColumn(
+                field_name=str(column.get("fieldName") or ""),
+                field_description=str(column.get("fieldDescription") or ""),
+            )
+            for column in column_defs
+        ),
     )
+    return build_retrieval_query(retrieval_field).text
 
 
 def _build_table_terms_rule_query(field: Dict[str, Any], column_defs: List[Dict[str, Any]]) -> str:
@@ -1352,246 +1286,75 @@ def _build_table_terms_rule_query(field: Dict[str, Any], column_defs: List[Dict[
     return _build_terms_rule_query(table_name, "\n".join(desc_parts))
 
 
-def _normalize_json_key(value: Any) -> str:
-    return re.sub(r"\s+", "", str(value or "")).strip().lower()
-
-
-def _clean_table_json_response(text: str) -> str:
-    cleaned = str(text or "").strip()
-    if "</think>" in cleaned:
-        cleaned = cleaned.split("</think>")[-1]
-    cleaned = cleaned.replace("<think>", "").strip()
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"```(?:json)?\s*([\s\S]*)", cleaned, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return cleaned
-
-
-def _json_substring(text: str, start_char: str, end_char: str) -> str:
-    start = text.find(start_char)
-    end = text.rfind(end_char)
-    if start == -1 or end == -1 or end <= start:
-        return ""
-    return text[start:end + 1]
-
-
-def _load_table_json_response(text: str) -> Any:
-    cleaned = _clean_table_json_response(text)
-    candidates = [
-        cleaned,
-        _json_substring(cleaned, "[", "]"),
-        _json_substring(cleaned, "{", "}"),
-    ]
-    seen: Set[str] = set()
-    for candidate in candidates:
-        candidate = candidate.strip()
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-def _normalize_table_cell_value(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        values = [_normalize_table_cell_value(item) for item in value]
-        return ", ".join(item for item in values if item)
-    if isinstance(value, dict):
-        if not value:
-            return ""
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    text = str(value).strip()
-    if text.lower() in {"null", "none", "nan"}:
-        return ""
-    if text in {"未找到", "未检索到", "无明确依据", "未知", "不详"}:
-        return ""
-    return text
-
-
-def _lookup_table_value(row: Dict[str, Any], field_name: str) -> Any:
-    if field_name in row:
-        return row[field_name]
-    target_key = _normalize_json_key(field_name)
-    for key, value in row.items():
-        if _normalize_json_key(key) == target_key:
-            return value
-    return None
-
-
 def _parse_table_json_rows(text: str, column_defs: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    parsed = _load_table_json_response(text)
-    if parsed is None:
-        return []
-
-    row_items: List[Any]
-    if isinstance(parsed, list):
-        row_items = parsed
-    elif isinstance(parsed, dict):
-        row_items = []
-        for key in ("rows", "data", "items", "result", "tableRows", "tableFieldList"):
-            value = parsed.get(key)
-            if isinstance(value, list):
-                row_items = value
-                break
-        if not row_items:
-            row_items = [parsed]
-    else:
-        return []
-
-    column_names = [str(column.get("fieldName") or "").strip() for column in column_defs]
-    column_names = [name for name in column_names if name]
-    parsed_rows: List[Dict[str, str]] = []
-
-    for item in row_items:
-        row: Dict[str, str] = {}
-        if isinstance(item, list):
-            for index, column_name in enumerate(column_names):
-                value = item[index] if index < len(item) else None
-                row[column_name] = _normalize_table_cell_value(value)
-        elif isinstance(item, dict):
-            row_key = (
-                item.get("__rowKey")
-                or item.get("rowKey")
-                or item.get("row_key")
-                or item.get("行标识")
-                or item.get("主键")
-            )
-            row["__rowKey"] = _normalize_table_cell_value(row_key)
-            for column_name in column_names:
-                row[column_name] = _normalize_table_cell_value(_lookup_table_value(item, column_name))
-        else:
-            continue
-
-        if any(row.get(column_name) for column_name in column_names):
-            parsed_rows.append(row)
-        if len(parsed_rows) >= MAX_TABLE_ROWS:
-            break
-
-    return parsed_rows
-
-
-def _normalize_table_row_identity(value: str) -> str:
-    text = _normalize_table_cell_value(value)
-    text = re.sub(r"\s+", "", text).lower()
-    return text.strip("，,;；。.")
-
-
-def _table_row_identity(row: Dict[str, str], column_defs: List[Dict[str, Any]], fallback_index: int) -> str:
-    explicit = _normalize_table_row_identity(row.get("__rowKey", ""))
-    if explicit:
-        return explicit
-
-    preferred_tokens = ("名称", "型号", "编号", "代号", "标识", "类型")
-    for column in column_defs:
-        column_name = str(column.get("fieldName") or "").strip()
-        if not column_name or not any(token in column_name for token in preferred_tokens):
-            continue
-        identity = _normalize_table_row_identity(row.get(column_name, ""))
-        if identity:
-            return identity
-
-    for column in column_defs:
-        column_name = str(column.get("fieldName") or "").strip()
-        identity = _normalize_table_row_identity(row.get(column_name, ""))
-        if identity:
-            return identity
-
-    return f"row-{fallback_index}"
-
-
-def _build_table_cell_source(
-    value: str,
-    source_name: str,
-    file_name: str,
-    rows: List[str],
-) -> Dict[str, Any]:
-    return _build_file_analyse_data_source(
-        content=value,
-        source=source_name,
-        file_name=file_name,
-        rows=rows,
-    )
-
-
-def _append_unique_source(sources: List[Dict[str, Any]], source: Dict[str, Any]) -> None:
-    source_key = (
-        source.get("content", ""),
-        source.get("source", ""),
-        source.get("fileName", ""),
-        tuple(source.get("rows") or []),
-    )
-    for existing in sources:
-        existing_key = (
-            existing.get("content", ""),
-            existing.get("source", ""),
-            existing.get("fileName", ""),
-            tuple(existing.get("rows") or []),
+    specification = _legacy_table_specification({}, column_defs)
+    return [
+        item.to_legacy_dict()
+        for item in parse_table_json_rows(
+            text,
+            specification,
+            max_rows=MAX_TABLE_ROWS,
         )
-        if existing_key == source_key:
-            return
-    sources.append(source)
+    ]
 
 
-def _merge_table_rows(row_results: List[Dict[str, Any]], column_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    merged: List[Dict[str, Any]] = []
-    by_identity: Dict[str, Dict[str, Any]] = {}
+def _merge_table_rows(
+    row_results: List[Dict[str, Any]],
+    column_defs: List[Dict[str, Any]],
+) -> List[MergedTableRow]:
+    """兼容入口：把遗留行结果交给纯领域合并规则。"""
 
-    for index, row_result in enumerate(row_results):
-        row = row_result.get("row") or {}
-        if not isinstance(row, dict):
+    specification = _legacy_table_specification({}, column_defs)
+    column_names = tuple(item.field_name for item in specification.columns)
+    typed_results: List[TableRowResult] = []
+    for row_result in row_results:
+        row = row_result.get("row")
+        if not isinstance(row, Mapping):
             continue
-        identity = _table_row_identity(row, column_defs, index)
-        item = by_identity.get(identity)
-        if item is None:
-            item = {"values": {}, "sources": defaultdict(list)}
-            by_identity[identity] = item
-            merged.append(item)
-
-        source_name = str(row_result.get("source") or "")
-        file_name = str(row_result.get("fileName") or "")
-        rows = list(row_result.get("rows") or [])
-        for column in column_defs:
-            column_name = str(column.get("fieldName") or "").strip()
-            if not column_name:
-                continue
-            value = _normalize_table_cell_value(row.get(column_name))
-            if not value:
-                continue
-            if not item["values"].get(column_name):
-                item["values"][column_name] = value
-            _append_unique_source(
-                item["sources"][column_name],
-                _build_table_cell_source(value, source_name, file_name, rows),
+        parsed = ParsedTableRow(
+            row_key=str(row.get("__rowKey") or ""),
+            values=tuple(
+                (name, _domain_normalize_table_cell_value(row.get(name)))
+                for name in column_names
+            ),
+        )
+        translations = tuple(
+            (name, _translate_if_needed(parsed.get(name)))
+            for name in column_names
+            if parsed.get(name)
+        )
+        typed_results.append(
+            TableRowResult(
+                row=parsed,
+                source_name=str(row_result.get("source") or ""),
+                file_name=str(row_result.get("fileName") or ""),
+                evidence_rows=tuple(
+                    str(item) for item in row_result.get("rows") or ()
+                ),
+                occurred_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                translations=translations,
             )
+        )
+    return list(
+        merge_table_rows(
+            typed_results,
+            specification,
+            max_rows=MAX_TABLE_ROWS,
+        )
+    )
 
-    return merged[:MAX_TABLE_ROWS]
 
+def _assemble_table_rows(
+    merged_rows: List[MergedTableRow],
+    column_defs: List[Dict[str, Any]],
+) -> List[List[Dict[str, Any]]]:
+    """兼容入口：使用不可变列模板组装二维公开结果。"""
 
-def _assemble_table_rows(merged_rows: List[Dict[str, Any]], column_defs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    assembled_rows: List[List[Dict[str, Any]]] = []
-    for merged_row in merged_rows:
-        row: List[Dict[str, Any]] = []
-        for column in column_defs:
-            column_name = str(column.get("fieldName") or "").strip()
-            if not column_name:
-                continue
-            cell = dict(column)
-            value = str(merged_row.get("values", {}).get(column_name) or "")
-            sources = list(merged_row.get("sources", {}).get(column_name) or [])
-            cell["analyseData"] = value
-            cell["analyseDataSource"] = sources if sources else _build_empty_file_analyse_data_sources()
-            row.append(cell)
-        if any(str(cell.get("analyseData") or "").strip() for cell in row):
-            assembled_rows.append(row)
-    return assembled_rows
+    specification = _legacy_table_specification({}, column_defs)
+    return [
+        [cell.to_public_dict() for cell in row]
+        for row in assemble_table_rows(merged_rows, specification)
+    ]
 
 
 def _query_table_field(
@@ -1604,6 +1367,8 @@ def _query_table_field(
     retrieval_context: Optional[WeaponryRetrievalContext] = None,
 ) -> Dict[str, Any]:
     """查询 TABLE 类型字段：按整表抽取多行结果。"""
+    _require_file_aggregate_strategy()
+
     def _finish(filled_field: Dict[str, Any]) -> Dict[str, Any]:
         if on_cell_done:
             on_cell_done()
@@ -1622,6 +1387,7 @@ def _query_table_field(
     column_defs = _extract_table_column_defs(field)
     if not column_defs:
         return _finish(_preserve_original_table_rows())
+    specification = _legacy_table_specification(field, column_defs)
 
     table_name = field.get("fieldName", "表格")
     logger.info("开始提取表格字段: table_name=%s column_count=%d", table_name, len(column_defs))
@@ -1668,23 +1434,24 @@ def _query_table_field(
         file_max_score[file_name] = max(file_max_score[file_name], _get_score(chunk))
 
     row_results: List[Dict[str, Any]] = []
-    sorted_files = sorted(file_chunks.keys(), key=lambda file_name: file_max_score[file_name], reverse=True)
+    sorted_files = sorted(
+        file_chunks,
+        key=lambda file_name: (-file_max_score[file_name], file_name),
+    )
     for file_name in sorted_files:
-        chunks = _limit_chunks_for_prompt(file_chunks[file_name])
+        chunks = _normalize_chunks_for_prompt(file_chunks[file_name])
         if not chunks:
             continue
-        prompt = build_table_extraction_prompt(
-            str(table_name),
-            str(field.get("fieldDescription") or ""),
-            column_defs,
-            chunks,
-            terms_rule_context=terms_rule_context,
+        extraction_prompt = build_table_extraction_prompt(
+            specification,
+            _legacy_prompt_evidence(file_name, chunks),
+            guidance=_legacy_guidance(terms_rule_context),
         )
         result = _send_prompt_to_isolated_thread(
             client,
             workspace_slug,
             thread_slug,
-            prompt,
+            extraction_prompt.text,
             user_id=user_id,
             mode="chat",
         )
@@ -1710,7 +1477,7 @@ def _query_table_field(
                     "row": row,
                     "source": original_source_name,
                     "fileName": hashed_file_name,
-                    "rows": chunks,
+                    "rows": list(extraction_prompt.rows),
                     "score": file_max_score[file_name],
                 }
             )
@@ -1750,7 +1517,18 @@ def run_weaponry_task(
     """
 
     params = request_payload.get("params", {})
-    architecture_id = params.get("architectureId")
+    raw_architecture_id = params.get("architectureId")
+    try:
+        # 即使遗留任务快照仍保存 ``"00042"``，Worker 也必须与受理、查询和进度入口
+        # 使用同一规范业务键 ``42``。这里只规范内部身份，不修改任何公开参数集合。
+        architecture_id = normalize_architecture_id_value(raw_architecture_id)
+    except WeaponryDomainValidationError:
+        logger.error(
+            "武器装备任务输入损坏: architectureId格式或范围非法 "
+            "architecture_id_type=%s",
+            type(raw_architecture_id).__name__,
+        )
+        return
     architecture_id_str = str(architecture_id)
     field_list: List[Dict[str, Any]] = params.get("weaponryTemplateFieldList", [])
     raw_file_path_list = params.get("filePathList")
@@ -1766,6 +1544,9 @@ def run_weaponry_task(
     terms_restored = False
 
     try:
+        # 迁移期先在任何数据库写入、AnythingLLM 调用或 Callback 之前拒绝模式 1。
+        # 1D-5 将把这项检查进一步前移到组合根启动配置校验。
+        _require_file_aggregate_strategy()
         if selected_documents is None and has_explicit_file_scope:
             # 生产路由会直接传入同一份快照；此分支服务于未来携带 execution_id 的
             # 可靠调度器，确保异步重试不会重新按当前分类查询文档。
@@ -1789,7 +1570,7 @@ def run_weaponry_task(
             "weaponry", architecture_id_str,
             progress=0.05, message="正在查找知识库", status="1",
         )
-        _publish_progress(progress_hub, architecture_id_str, 0.05)
+        _publish_progress(progress_hub, architecture_id, 0.05)
 
         client = AnythingLLMClient(load_anythingllm_config())
         if resolved_selected_documents:
@@ -1867,7 +1648,7 @@ def run_weaponry_task(
             "weaponry", architecture_id_str,
             progress=0.10, message="正在创建检索会话",
         )
-        _publish_progress(progress_hub, architecture_id_str, 0.10)
+        _publish_progress(progress_hub, architecture_id, 0.10)
 
         thread_name = f"weaponry-{architecture_id}-{int(time.time() * 1000)}"
         thread_info = client.create_thread(workspace_slug, thread_name, user_id=1)
@@ -1910,7 +1691,7 @@ def run_weaponry_task(
                 progress=progress,
                 message=f"正在提取字段 ({completed_fields}/{total_query_fields})",
             )
-            _publish_progress(progress_hub, architecture_id_str, progress)
+            _publish_progress(progress_hub, architecture_id, progress)
 
         result_fields: List[Dict[str, Any]] = []
         try:
@@ -1950,7 +1731,7 @@ def run_weaponry_task(
             "weaponry", architecture_id_str,
             progress=0.92, message="正在清理检索会话",
         )
-        _publish_progress(progress_hub, architecture_id_str, 0.92)
+        _publish_progress(progress_hub, architecture_id, 0.92)
 
         thread_deleted = client.delete_thread(workspace_slug, thread_slug, user_id=1)
         if not thread_deleted:
@@ -1966,7 +1747,7 @@ def run_weaponry_task(
             "weaponry", architecture_id_str,
             callback_payload, status="2", message="解析完成",
         )
-        _publish_progress(progress_hub, architecture_id_str, 1.0)
+        _publish_progress(progress_hub, architecture_id, 1.0)
 
         if callback_url:
             if post_callback_payload(
@@ -2050,7 +1831,7 @@ def _fail_task(
         "weaponry", architecture_id_str,
         callback_payload, status="3", message=msg,
     )
-    _publish_progress(progress_hub, architecture_id_str, 1.0)
+    _publish_progress(progress_hub, architecture_id, 1.0)
 
     if callback_url:
         if post_callback_payload(

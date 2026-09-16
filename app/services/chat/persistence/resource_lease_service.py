@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 
@@ -39,6 +40,18 @@ _LEASE_STATUS_TRANSITIONS = {
     LEASE_CLEANUP_FAILED: frozenset({LEASE_CLEANUP_PENDING, LEASE_CLOSED}),
     LEASE_CLOSED: frozenset(),
 }
+
+
+def _lease_log_token(lease_id: str) -> str:
+    """生成只用于日志关联的短摘要，避免租约结构泄漏文件或远端资源身份。
+
+    文档绑定租约的持久化主键会包含业务文件名；该值必须继续原样参与数据库幂等，
+    但不得直接进入日志。固定长度 SHA-256 摘要既能关联同一租约的多条状态日志，
+    又不会暴露文件名、文档引用或供应商位置。
+    """
+
+    normalized_lease_id = _required_text(lease_id, name="lease_id")
+    return hashlib.sha256(normalized_lease_id.encode("utf-8")).hexdigest()[:12]
 
 
 class ChatResourceLeaseSessionUnavailableError(RuntimeError):
@@ -131,8 +144,8 @@ class ChatResourceLeaseService:
                             "非 planned chat_resource_lease 不能补写 external_ref"
                         )
                     logger.info(
-                        "已补充文件对话资源租约的远端引用: lease_id=%s chat_id=%s resource_type=%s has_external_ref=%s",
-                        normalized_lease_id,
+                        "已补充文件对话资源租约的远端引用: lease_token=%s chat_id=%s resource_type=%s has_external_ref=%s",
+                        _lease_log_token(normalized_lease_id),
                         normalized_chat_id,
                         normalized_type,
                         True,
@@ -156,8 +169,8 @@ class ChatResourceLeaseService:
                         )
                     return self._get_with_connection(connection, normalized_lease_id)
                 logger.debug(
-                    "文件对话资源租约已存在，直接复用: lease_id=%s chat_id=%s status=%s",
-                    normalized_lease_id,
+                    "文件对话资源租约已存在，直接复用: lease_token=%s chat_id=%s status=%s",
+                    _lease_log_token(normalized_lease_id),
                     normalized_chat_id,
                     existing["status"],
                 )
@@ -181,8 +194,8 @@ class ChatResourceLeaseService:
                 ),
             )
             logger.info(
-                "已创建文件对话资源租约: lease_id=%s chat_id=%s run_id=%s resource_type=%s has_external_ref=%s",
-                normalized_lease_id,
+                "已创建文件对话资源租约: lease_token=%s chat_id=%s run_id=%s resource_type=%s has_external_ref=%s",
+                _lease_log_token(normalized_lease_id),
                 normalized_chat_id,
                 normalized_run_id,
                 normalized_type,
@@ -208,8 +221,8 @@ class ChatResourceLeaseService:
                 ):
                     raise ValueError("chat_resource_lease external_ref 冲突")
                 logger.debug(
-                    "文件对话资源租约已处于活动状态: lease_id=%s has_external_ref=%s",
-                    normalized_lease_id,
+                    "文件对话资源租约已处于活动状态: lease_token=%s has_external_ref=%s",
+                    _lease_log_token(normalized_lease_id),
                     bool(current.external_ref),
                 )
                 return current
@@ -239,8 +252,8 @@ class ChatResourceLeaseService:
             if cursor.rowcount != 1:
                 raise ValueError("chat_resource_lease status was changed concurrently")
             logger.info(
-                "已激活文件对话资源租约: lease_id=%s has_external_ref=%s",
-                normalized_lease_id,
+                "已激活文件对话资源租约: lease_token=%s has_external_ref=%s",
+                _lease_log_token(normalized_lease_id),
                 bool(resolved_external_ref),
             )
             return self._get_with_connection(connection, normalized_lease_id)
@@ -367,8 +380,8 @@ class ChatResourceLeaseService:
             )
             if current.status == normalized_status:
                 logger.debug(
-                    "文件对话资源租约状态无需变更: lease_id=%s status=%s",
-                    normalized_lease_id,
+                    "文件对话资源租约状态无需变更: lease_token=%s status=%s",
+                    _lease_log_token(normalized_lease_id),
                     normalized_status,
                 )
                 return current
@@ -389,8 +402,8 @@ class ChatResourceLeaseService:
             if cursor.rowcount != 1:
                 raise ValueError("chat_resource_lease status was changed concurrently")
             logger.info(
-                "文件对话资源租约状态变更: lease_id=%s previous_status=%s current_status=%s has_error=%s",
-                normalized_lease_id,
+                "文件对话资源租约状态变更: lease_token=%s previous_status=%s current_status=%s has_error=%s",
+                _lease_log_token(normalized_lease_id),
                 current.status,
                 normalized_status,
                 bool(_optional_text(error_message)),

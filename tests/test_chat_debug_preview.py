@@ -7,7 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.services.chat import ChatStore
+from app.services.chat import (
+    ChatDocumentCandidate,
+    ChatDocumentSelectionCandidates,
+    ChatRunLockService,
+    ChatStore,
+)
 from app.services.core.database import DatabaseService
 from app.services.utils.chat_debug_preview import load_chat_debug_bootstrap
 
@@ -17,16 +22,32 @@ class ChatDebugPreviewTests(unittest.TestCase):
         self._tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.tmp = self._tempdir.__enter__()
         self.kb_service = DatabaseService(db_path=f"{self.tmp}/knowledge.sqlite3")
-        self.chat_store = ChatStore(db_path=f"{self.tmp}/chat.sqlite3")
+        self.chat_db_path = f"{self.tmp}/chat.sqlite3"
+        self.chat_store = ChatStore(db_path=self.chat_db_path)
 
     def tearDown(self) -> None:
         self._tempdir.__exit__(None, None, None)
 
-    def test_bootstrap_reads_new_sessions_and_business_file_names(self) -> None:
-        self.chat_store.sessions.create_or_get(
+    def test_bootstrap_uses_active_scope_and_counts_bindings_separately(
+        self,
+    ) -> None:
+        """既有 fileNames 字段表示活动范围，累计绑定只进入独立脱敏计数。"""
+
+        ChatRunLockService(self.chat_db_path).try_acquire_chat_run(
             chat_id="10001",
-            workspace_ref="ws-1",
-            thread_ref="thread-1",
+            run_id="run-active-scope",
+            user_message="question",
+            document_candidates=ChatDocumentSelectionCandidates(
+                explicit_documents=(
+                    ChatDocumentCandidate(
+                        file_name="hash-alpha.pdf",
+                        original_name="测试文件.pdf",
+                        document_ref="document:alpha",
+                        external_location="custom-documents/alpha.json",
+                    ),
+                )
+            ),
+            max_files_per_request=5,
         )
         self.chat_store.document_bindings.add(
             chat_id="10001",
@@ -34,6 +55,13 @@ class ChatDebugPreviewTests(unittest.TestCase):
             original_name="测试文件.pdf",
             document_ref="document:alpha",
             external_location="custom-documents/alpha.json",
+        )
+        self.chat_store.document_bindings.add(
+            chat_id="10001",
+            file_name="hash-stale.pdf",
+            original_name="旧绑定.pdf",
+            document_ref="document:stale",
+            external_location="custom-documents/stale.json",
         )
         self.kb_service.save_document_record(
             "hash-alpha.pdf",
@@ -44,10 +72,14 @@ class ChatDebugPreviewTests(unittest.TestCase):
             ingested_file_name="hash-alpha.pdf",
         )
 
-        result = load_chat_debug_bootstrap(
-            chat_store=self.chat_store,
-            kb_service=self.kb_service,
-        )
+        with self.assertLogs(
+            "app.services.utils.chat_debug_preview",
+            level="INFO",
+        ) as captured:
+            result = load_chat_debug_bootstrap(
+                chat_store=self.chat_store,
+                kb_service=self.kb_service,
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(10001, result["data"]["sessions"][0]["chatId"])
@@ -59,6 +91,16 @@ class ChatDebugPreviewTests(unittest.TestCase):
             "hash-alpha.pdf",
             result["data"]["availableFiles"][0]["fileName"],
         )
+        completed_log = next(
+            message
+            for message in captured.output
+            if "调试初始化数据读取完成" in message
+        )
+        self.assertIn("session_count=1", completed_log)
+        self.assertIn("active_scope_member_count=1", completed_log)
+        self.assertIn("workspace_binding_count=2", completed_log)
+        self.assertIn("available_file_count=1", completed_log)
+        self.assertNotIn("hash-alpha.pdf", completed_log)
 
     def test_deleted_session_is_hidden_from_debug_list(self) -> None:
         self.chat_store.sessions.create_or_get(chat_id="10002")

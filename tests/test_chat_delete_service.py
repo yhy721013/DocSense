@@ -13,6 +13,7 @@ from app.services.chat import (
     ChatCommandService,
     ChatRunLockService,
     ChatHistoryService,
+    ChatSessionScopeBinding,
     ChatStore,
     LEASE_CLEANUP_FAILED,
     LEASE_CLOSED,
@@ -56,6 +57,14 @@ class ChatDeleteServiceTests(unittest.TestCase):
             chat_id=chat_id,
             workspace_ref=refs.context_ref,
             thread_ref=refs.conversation_ref,
+        )
+        self.store.session_scope_bindings.create(
+            ChatSessionScopeBinding(
+                chat_id=chat_id,
+                scope_mode="files",
+                architecture_id=None,
+                created_at="2026-07-28T00:00:00+00:00",
+            )
         )
         self.store.resource_leases.ensure_active(
             lease_id=chat_workspace_lease_id(chat_id),

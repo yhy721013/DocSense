@@ -97,6 +97,40 @@ class AnythingLLMProtocolError(AnythingLLMTransportError):
     code = "protocol_error"
 
 
+class AnythingLLMCleanupUncertainError(AnythingLLMProtocolError):
+    """破坏性清理请求的最终状态无法确认。
+
+    调用方必须把该错误写入生命周期审计并保留恢复凭据；禁止把网络超时、成员漂移或
+    上游版本能力不明确解释成清理成功。
+    """
+
+    code = "cleanup_uncertain"
+
+
+class AnythingLLMUploadRejectedError(AnythingLLMProtocolError):
+    """上传已经产生供应商副作用，但返回集合因安全策略被拒绝。
+
+    ``cleanup_attempted``/``cleanup_confirmed`` 只表达客户端已掌握的确定事实。
+    ``folder_cleanup_token`` 是供受控恢复流程重试的内部 opaque token，不得写入甲方协议
+    或普通日志。
+    """
+
+    code = "upload_rejected"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cleanup_attempted: bool = False,
+        cleanup_confirmed: bool = False,
+        folder_cleanup_token: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.cleanup_attempted = bool(cleanup_attempted)
+        self.cleanup_confirmed = bool(cleanup_confirmed)
+        self.folder_cleanup_token = str(folder_cleanup_token or "")
+
+
 class AnythingLLMTransportClosedError(AnythingLLMTransportError):
     """任务级传输对象关闭后仍被用于发起请求。
 

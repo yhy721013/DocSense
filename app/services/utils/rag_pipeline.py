@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from app.services.utils.anythingllm_client import AnythingLLMClient
 from app.services.core.config import load_ocr_config
-from app.services.utils.ocr_preprocessor import prepare_file_for_upload
+from app.modules.document_processing.adapters.builtin_ocr import (
+    prepare_file_for_upload,
+)
 
 
 OCR_CONFIG = load_ocr_config()

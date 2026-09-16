@@ -6,8 +6,8 @@ import json
 import logging
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
-from app.services.chat import ChatStreamEvent
 from app.services.chat.domain.chat_id import chat_id_public_value
+from app.services.chat.domain.events import ChatStreamEvent
 
 
 logger = logging.getLogger(__name__)

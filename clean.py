@@ -38,7 +38,56 @@ def _runtime_dir() -> Path:
     runtime_dir = Path(raw_value).expanduser()
     if not runtime_dir.is_absolute():
         raise RuntimeError("DOCSENSE_RUNTIME_DIR必须配置为绝对路径")
-    return runtime_dir.resolve()
+    resolved = runtime_dir.resolve()
+    filesystem_root = Path(resolved.anchor).resolve()
+    if resolved in {filesystem_root, root_dir.resolve()}:
+        raise RuntimeError(
+            "DOCSENSE_RUNTIME_DIR禁止指向文件系统根目录或项目根目录"
+        )
+    return resolved
+
+
+def _component_database_path(
+    env_names: tuple[str, ...],
+    default_name: str,
+) -> Path:
+    """按正式配置规则解析数据库路径，避免兼容覆盖项逃逸清理范围。"""
+
+    for env_name in env_names:
+        raw_value = os.getenv(env_name, "").strip()
+        if not raw_value:
+            continue
+        candidate = Path(raw_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root_dir / candidate
+        return candidate.resolve()
+    return (_runtime_dir() / default_name).resolve()
+
+
+def _is_within(path: Path, directory: Path) -> bool:
+    """使用 Path 关系判断归属，避免字符串前缀把相邻目录误判为子目录。"""
+
+    try:
+        path.relative_to(directory)
+    except ValueError:
+        return False
+    return True
+
+
+def _remove_database_files(database_path: Path) -> None:
+    """删除 SQLite 主文件及同目录 WAL/SHM；任何失败都必须阻断发布。"""
+
+    for candidate in (
+        database_path,
+        Path(f"{database_path}-wal"),
+        Path(f"{database_path}-shm"),
+    ):
+        if not candidate.exists():
+            continue
+        if not candidate.is_file() and not candidate.is_symlink():
+            raise RuntimeError(f"数据库清理目标不是文件: {candidate}")
+        candidate.unlink()
+        logger.info("成功删除运行时数据库文件: %s", candidate)
 
 
 def clean_runtime():
@@ -66,9 +115,37 @@ def clean_runtime():
                 logger.warning(f"清理运行时目录失败: {e}，等待后重试...")
                 time.sleep(1)
         else:
-            logger.error("重试多次后仍无法清理运行时目录。可能由于残留进程占用。")
+            # 发布流程以退出码判断清理结果；只记日志会让旧任务库被误带入新版本。
+            raise RuntimeError(
+                "重试多次后仍无法清理运行时目录，可能存在残留进程占用"
+            )
     else:
         logger.info("运行时目录不存在或已被删除，无需操作。")
+
+    # 组件级数据库变量拥有高于 DOCSENSE_RUNTIME_DIR 的兼容优先级。显式路径位于
+    # runtime 外时，上面的目录清空不会覆盖它们，必须逐一删除并让失败非零退出。
+    database_paths = {
+        _component_database_path(
+            ("DOCSENSE_LLM_TASK_DB",),
+            "llm_tasks.sqlite3",
+        ),
+        _component_database_path(
+            ("DOCSENSE_KNOWLEDGE_BASE_DB", "KNOWLEDGE_BASE_DB_PATH"),
+            "knowledge_base.sqlite3",
+        ),
+        _component_database_path(
+            ("DOCSENSE_CHAT_DB",),
+            "chat_sessions.sqlite3",
+        ),
+    }
+    for database_path in sorted(database_paths, key=str):
+        if _is_within(database_path, runtime_dir):
+            continue
+        logger.warning(
+            "检测到运行时目录外的组件数据库，将按发布清库策略显式删除: %s",
+            database_path,
+        )
+        _remove_database_files(database_path)
 
 def clean_anythingllm():
     """

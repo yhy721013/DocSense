@@ -50,6 +50,12 @@ def _payload_data(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return data if isinstance(data, Mapping) else {}
 
 
+def _first_present(*values: Any) -> Any:
+    """返回第一个非 ``None`` 值；业务标识 ``0`` 不能被 ``or`` 当成缺失。"""
+
+    return next((value for value in values if value is not None), None)
+
+
 def build_callback_history_stem(
     payload: Mapping[str, Any],
     callback_context: Mapping[str, Any] | None = None,
@@ -81,7 +87,11 @@ def build_callback_history_stem(
             parts.append(_safe_filename_component(file_name, fallback="file"))
         base = "-".join(parts) or "file"
     elif business_type == "report":
-        report_id = context.get("reportId") or data.get("reportId") or context.get("businessKey")
+        report_id = _first_present(
+            context.get("reportId"),
+            data.get("reportId"),
+            context.get("businessKey"),
+        )
         base = f"report-{_safe_filename_component(report_id, fallback='unknown')}"
     elif business_type == "weaponry":
         architecture_id = context.get("architectureId") or data.get("architectureId") or context.get("businessKey")
@@ -97,19 +107,6 @@ def build_callback_history_stem(
     return f"{_limit_utf8_bytes(base, 180)}-{suffix}"
 
 
-def _unique_json_path(history_dir: Path, stem: str) -> Path:
-    candidate = history_dir / f"{stem}.json"
-    if not candidate.exists():
-        return candidate
-
-    index = 2
-    while True:
-        candidate = history_dir / f"{stem}-{index}.json"
-        if not candidate.exists():
-            return candidate
-        index += 1
-
-
 def save_callback_history_payload(
     payload: dict,
     *,
@@ -120,12 +117,21 @@ def save_callback_history_payload(
     target_dir = history_dir or CALLBACK_HISTORY_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     stem = build_callback_history_stem(payload, callback_context, timestamp=timestamp)
-    dump_path = _unique_json_path(target_dir, stem)
-    dump_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return dump_path
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    index = 1
+    while True:
+        suffix = "" if index == 1 else f"-{index}"
+        dump_path = target_dir / f"{stem}{suffix}.json"
+        try:
+            # ``x`` 由文件系统原子完成“不存在才创建”。并发 Worker 即使使用同一微秒
+            # 时间戳，也只会有一个取得当前名称，其余循环选择新序号，杜绝先 exists
+            # 再 write 导致的覆盖竞争。
+            with dump_path.open("x", encoding="utf-8") as file_object:
+                file_object.write(serialized)
+        except FileExistsError:
+            index += 1
+            continue
+        return dump_path
 
 
 def post_callback_payload(
@@ -141,9 +147,11 @@ def post_callback_payload(
     except Exception as e:
         logger.warning("保存回调历史数据失败: error_type=%s", type(e).__name__)
 
+    response = None
     try:
         response = requests.post(callback_url, json=payload, timeout=timeout)
-        return bool(response.ok)
+        # requests.Response.ok 会把 3xx 也视为 True；外部回调契约只接受 2xx。
+        return 200 <= response.status_code < 300
     except requests.exceptions.RequestException as exc:
         logger.warning(
             "向外部回调地址发送请求失败: timeout_seconds=%s error_type=%s",
@@ -151,3 +159,10 @@ def post_callback_payload(
             type(exc).__name__,
         )
         return False
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                # 响应清理异常不能覆盖甲方已经返回的 HTTP 状态；连接池故障单独记录。
+                logger.warning("关闭外部回调响应失败", exc_info=True)

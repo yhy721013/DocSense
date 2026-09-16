@@ -7,6 +7,7 @@ __pycache__
 .runtime/
 mineru_output/
 uploads/
+测试文件/
 tests/
 docs/
 data/

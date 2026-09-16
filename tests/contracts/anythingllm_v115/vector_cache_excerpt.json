@@ -1,0 +1,18 @@
+{
+  "chunks": [
+    {
+      "id": "fixture-chunk-1",
+      "metadata": {
+        "id": "8bd127c1-bf39-43f5-be98-7013ec77c9dd",
+        "title": "Nimitz (CVN 68) class.pdf",
+        "url": "file:///sanitized/hotdir/Nimitz-CVN-68-class.md",
+        "docSource": "docsense_ref:0123456789abcdef0123456789abcdef",
+        "text": "<document_metadata>\nsourceDocument: Nimitz (CVN 68) class.pdf\npublished: 2026-07-30T00:00:00.000Z\n</document_metadata>\n\nFixture body text."
+      },
+      "values": [
+        0.125,
+        -0.25
+      ]
+    }
+  ]
+}

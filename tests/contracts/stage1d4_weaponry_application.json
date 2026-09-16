@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "stage": "1D-4",
+  "interfaceParametersChanged": false,
+  "productionRouteSwitched": false,
+  "goldenCallbacks": {
+    "inputSuccess": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "2",
+        "architectureId": 10502,
+        "weaponryTemplateFieldList": [
+          {
+            "templateClassifyId": 1772442376645740,
+            "fieldName": "舰级名称",
+            "fieldType": "INPUT",
+            "fieldDescription": "提取装备所属舰级的正式名称，不要与单舰名称混淆",
+            "analyseData": "该舰属于乙级",
+            "analyseDataSource": [
+              {
+                "content": "该舰属于乙级",
+                "source": "乙舰资料.pdf",
+                "time": "",
+                "fileName": "b-hash.pdf",
+                "rows": [
+                  "乙舰是乙级二号舰,主要承担近海巡逻、护航和区域防御等任务。"
+                ],
+                "translate": ""
+              },
+              {
+                "content": "该舰属于甲级",
+                "source": "甲舰资料.pdf",
+                "time": "",
+                "fileName": "a-hash.pdf",
+                "rows": [
+                  "甲舰是甲级首舰,承担远洋警戒、防空指挥和编队协同等多项任务。",
+                  "甲级舰艇采用远洋任务设计,并具备持续部署和综合保障能力。"
+                ],
+                "translate": ""
+              }
+            ]
+          }
+        ]
+      },
+      "msg": "解析成功"
+    },
+    "tableSuccess": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "2",
+        "architectureId": 10502,
+        "weaponryTemplateFieldList": [
+          {
+            "templateClassifyId": 1772442376645741,
+            "fieldName": "雷达设备",
+            "fieldType": "TABLE",
+            "fieldDescription": "按雷达型号逐行提取，不合并不同设备",
+            "tableFieldList": [
+              [
+                {
+                  "fieldName": "型号",
+                  "fieldType": "INPUT",
+                  "fieldDescription": "雷达的正式型号",
+                  "analyseData": "AN/SPY-1",
+                  "analyseDataSource": [
+                    {
+                      "content": "AN/SPY-1",
+                      "source": "甲舰资料.pdf",
+                      "time": "",
+                      "fileName": "a-hash.pdf",
+                      "rows": [
+                        "AN/SPY-1和AN/SPY-2雷达分别承担搜索跟踪与火控任务,均有明确设备记录。"
+                      ],
+                      "translate": "AN/SPY-1"
+                    }
+                  ]
+                },
+                {
+                  "fieldName": "用途",
+                  "fieldType": "INPUT",
+                  "fieldDescription": "搜索、跟踪或火控用途",
+                  "analyseData": "搜索与跟踪",
+                  "analyseDataSource": [
+                    {
+                      "content": "搜索与跟踪",
+                      "source": "甲舰资料.pdf",
+                      "time": "",
+                      "fileName": "a-hash.pdf",
+                      "rows": [
+                        "AN/SPY-1和AN/SPY-2雷达分别承担搜索跟踪与火控任务,均有明确设备记录。"
+                      ],
+                      "translate": "search and track"
+                    }
+                  ]
+                }
+              ],
+              [
+                {
+                  "fieldName": "型号",
+                  "fieldType": "INPUT",
+                  "fieldDescription": "雷达的正式型号",
+                  "analyseData": "AN/SPY-2",
+                  "analyseDataSource": [
+                    {
+                      "content": "AN/SPY-2",
+                      "source": "甲舰资料.pdf",
+                      "time": "",
+                      "fileName": "a-hash.pdf",
+                      "rows": [
+                        "AN/SPY-1和AN/SPY-2雷达分别承担搜索跟踪与火控任务,均有明确设备记录。"
+                      ],
+                      "translate": "AN/SPY-2"
+                    }
+                  ]
+                },
+                {
+                  "fieldName": "用途",
+                  "fieldType": "INPUT",
+                  "fieldDescription": "搜索、跟踪或火控用途",
+                  "analyseData": "火控",
+                  "analyseDataSource": [
+                    {
+                      "content": "火控",
+                      "source": "甲舰资料.pdf",
+                      "time": "",
+                      "fileName": "a-hash.pdf",
+                      "rows": [
+                        "AN/SPY-1和AN/SPY-2雷达分别承担搜索跟踪与火控任务,均有明确设备记录。"
+                      ],
+                      "translate": "fire control"
+                    }
+                  ]
+                }
+              ]
+            ]
+          }
+        ]
+      },
+      "msg": "解析成功"
+    },
+    "failure": {
+      "businessType": "weaponry",
+      "data": {
+        "status": "3",
+        "architectureId": 10502
+      },
+      "msg": "解析失败"
+    }
+  }
+}

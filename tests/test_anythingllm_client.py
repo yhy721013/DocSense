@@ -147,6 +147,27 @@ class AnythingLLMClientFacadeTests(unittest.TestCase):
         self.assertEqual(results[0]["distance"], 0.1)
         self.assertEqual(results[0]["document_ref"], "name:example.pdf")
 
+    def test_vector_search_delegates_explicit_calibration_threshold(self) -> None:
+        """兼容 Facade 只在调用方显式请求时传递内部阈值覆盖。"""
+
+        self.client.workspaces.vector_search.return_value = []
+
+        self.client.vector_search(
+            "workspace-1",
+            "校准查询",
+            user_id=5,
+            top_n=100,
+            score_threshold=0.0,
+        )
+
+        self.client.workspaces.vector_search.assert_called_once_with(
+            "workspace-1",
+            "校准查询",
+            top_n=100,
+            score_threshold=0.0,
+            user_id=5,
+        )
+
     def test_list_workspace_documents_returns_legacy_aliases(self) -> None:
         """公开文档列表接口应委托 Workspace Client 并提供旧字段别名。"""
         self.client.workspaces.list_documents.return_value = [

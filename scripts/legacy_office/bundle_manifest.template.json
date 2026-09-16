@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "product": "DocSense Legacy Office offline dependency",
+  "libreOfficeVersion": null,
+  "allowedVersionSeries": null,
+  "platform": null,
+  "architecture": null,
+  "certification": null,
+  "installer": null,
+  "licenses": [],
+  "smokeSamples": [],
+  "docsense": {
+    "automaticInstallation": false,
+    "featureFlag": "DOCSENSE_LEGACY_OFFICE_ENABLED",
+    "executableVariable": "DOCSENSE_LIBREOFFICE_EXECUTABLE"
+  }
+}

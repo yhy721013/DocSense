@@ -749,7 +749,7 @@
         const node = document.createElement("button");
         node.type = "button";
         node.className = `session-item${item.chatId === state.activeChatId ? " active" : ""}`;
-        node.innerHTML = `<strong>${escapeHtml(item.chatId)}</strong><div>文件数：${item.fileNames.length}</div><div>更新时间：${escapeHtml(item.updatedAt)}</div>`;
+        node.innerHTML = `<strong>${escapeHtml(item.chatId)}</strong><div>活动范围文件数：${item.fileNames.length}</div><div>更新时间：${escapeHtml(item.updatedAt)}</div>`;
         node.addEventListener("click", async () => {
           if (state.isStreaming) {
             setMessage("当前流式响应尚未结束");

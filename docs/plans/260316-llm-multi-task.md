@@ -1,5 +1,7 @@
 # LLM Multi-Task Implementation Plan
 
+> 历史协议提示（2026-07-15）：本文记录当时的实施过程，不再作为当前对外契约。check-task 成功 JSON 与 Progress 显式 `subscribe/query/unsubscribe`/ack 已批准在重构波次 1B 下线；请以 `docs/接口文档/` 和当前重构记录为准。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Extend the formal `/llm/*` integration to support multi-file analysis submission, serial task execution, batch `check-task`, and single-WebSocket multi-subscription while preserving existing single-task compatibility.

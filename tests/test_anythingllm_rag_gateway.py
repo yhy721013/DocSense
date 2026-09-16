@@ -18,10 +18,14 @@ _TEST_DIRECTORY = tempfile.TemporaryDirectory(prefix="docsense-rag-tests-")
 _SAMPLE_FILE_PATH = Path(_TEST_DIRECTORY.name) / "sample.pdf"
 _SAMPLE_FILE_PATH.write_bytes(b"offline rag test document")
 
-from app.integrations.anythingllm.documents import AnythingLLMDocumentClient
+from app.integrations.anythingllm.documents import (
+    AnythingLLMDocumentClient,
+    XlsxFolderCleanupToken,
+)
 from app.integrations.anythingllm.errors import (
     AnythingLLMHTTPError,
     AnythingLLMProtocolError,
+    AnythingLLMUploadRejectedError,
 )
 from app.integrations.anythingllm.models import (
     AnythingLLMAnswer,
@@ -36,6 +40,7 @@ from app.integrations.anythingllm.workspaces import AnythingLLMWorkspaceClient
 from app.ports import (
     DocumentRagPort,
     DocumentRagSession,
+    RagDocumentUploadOptions,
     RagOperationError,
     RagPromptKind,
 )
@@ -200,6 +205,40 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
         self.assertIn("AnythingLLM 查询完成", log_text)
         self.assertNotIn(harness.SOURCE_MARKER, log_text)
 
+    def test_analyse_uses_business_upload_name_and_original_title(self) -> None:
+        """文件分析可独立指定 multipart 名称和业务展示标题。"""
+
+        harness = _GatewayHarness()
+        result = harness.open_session().analyse(
+            str(_SAMPLE_FILE_PATH),
+            "分析文档",
+            document_upload=RagDocumentUploadOptions(
+                transport_file_name="Nimitz (CVN 68) class.md",
+                display_title="Nimitz (CVN 68) class.pdf",
+            ),
+        )
+
+        upload_call = harness.document_client.upload_document.call_args
+        uploaded_snapshot = Path(upload_call.args[0])
+        self.assertEqual(_SAMPLE_FILE_PATH.name, uploaded_snapshot.name)
+        self.assertEqual(
+            "Nimitz (CVN 68) class.md",
+            upload_call.kwargs["upload_file_name"],
+        )
+        self.assertEqual(
+            {
+                "docSource": harness.SOURCE_MARKER,
+                "title": "Nimitz (CVN 68) class.pdf",
+            },
+            upload_call.kwargs["metadata"],
+        )
+        self.assertEqual(
+            "Nimitz (CVN 68) class.md",
+            result.prepared_document.ingested_file_name,
+        )
+        # 上传使用任务私有快照；离开上传函数后临时文件必须已经清理。
+        self.assertFalse(uploaded_snapshot.exists())
+
     def test_prepared_document_records_actual_mhtml_normalized_upload_name(self) -> None:
         """RAG 端口必须携带 MHTML 转换后真正提交给 AnythingLLM 的文件名。"""
         harness = _GatewayHarness()
@@ -286,6 +325,384 @@ class AnythingLLMRagGatewaySuccessTests(unittest.TestCase):
             harness.thread_client.ask.call_count,
         )
 
+    def test_analyse_records_explicit_two_stage_prompt_kinds(self) -> None:
+        """首次真实查询必须把分类或字段抽取用途原样写入审计轨迹。"""
+        for prompt_kind in (
+            RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+            RagPromptKind.ANALYSIS_EXTRACTION,
+        ):
+            with self.subTest(prompt_kind=prompt_kind):
+                harness = _GatewayHarness()
+                session = harness.open_session()
+
+                session.analyse(
+                    str(_SAMPLE_FILE_PATH),
+                    "执行阶段查询",
+                    prompt_kind=prompt_kind,
+                )
+
+                self.assertEqual(
+                    prompt_kind.value,
+                    session.trace.attempts[0].prompt_kind,
+                )
+
+    def test_invalid_analyse_prompt_kind_fails_before_upload(self) -> None:
+        """非法首次用途不得上传文档，且修正参数后同一 Session 仍可执行。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+
+        with self.assertRaises(TypeError):
+            session.analyse(
+                str(_SAMPLE_FILE_PATH),
+                "执行分类",
+                prompt_kind="architecture_classification",  # type: ignore[arg-type]
+            )
+
+        harness.document_client.upload_document.assert_not_called()
+        result = session.analyse(
+            str(_SAMPLE_FILE_PATH),
+            "执行分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        self.assertEqual("分析结果", result.text)
+
+    def test_gateway_records_classification_then_extraction_sequence(self) -> None:
+        """生产 Session 应复用文档，并把分类和字段抽取发送到不同线程。"""
+        harness = _GatewayHarness()
+        fresh_thread = AnythingLLMThread(
+            id="thread-id-extraction",
+            slug="conversation-ref-extraction",
+        )
+        harness.thread_client.create_thread.side_effect = [
+            harness.thread,
+            fresh_thread,
+        ]
+        session = harness.open_session()
+
+        session.analyse(
+            str(_SAMPLE_FILE_PATH),
+            "领域分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        session.start_fresh_conversation(
+            conversation_name="analysis-extraction",
+        )
+        session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+
+        self.assertEqual(
+            ["architecture_classification", "analysis_extraction"],
+            [attempt.prompt_kind for attempt in session.trace.attempts],
+        )
+        self.assertEqual(2, harness.thread_client.ask.call_count)
+        self.assertEqual(
+            ["conversation-ref", "conversation-ref-extraction"],
+            [call.args[1] for call in harness.thread_client.ask.call_args_list],
+        )
+        self.assertEqual(1, harness.document_client.upload_document.call_count)
+        self.assertEqual(1, harness.workspace_client.update_embeddings.call_count)
+        self.assertEqual(1, harness.workspace_client.update_pin.call_count)
+        conversation_events = [
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "conversation_create" and event.success
+        ]
+        self.assertEqual([1, 2], [event.attempt for event in conversation_events])
+        self.assertEqual(
+            ["conversation-ref", "conversation-ref-extraction"],
+            [event.external_ref for event in conversation_events],
+        )
+        # 主引用保持稳定，第二线程由生命周期事件审计。
+        self.assertEqual("conversation-ref", session.trace.conversation_ref)
+
+    def test_gateway_supports_reselect_then_extraction_conversations(self) -> None:
+        """分类、身份重选和字段抽取可各用独立线程，且来源隔离校验仍成立。"""
+        harness = _GatewayHarness()
+        reselect_thread = AnythingLLMThread(
+            id="thread-id-reselect",
+            slug="conversation-ref-reselect",
+        )
+        extraction_thread = AnythingLLMThread(
+            id="thread-id-extraction",
+            slug="conversation-ref-extraction",
+        )
+        harness.thread_client.create_thread.side_effect = [
+            harness.thread,
+            reselect_thread,
+            extraction_thread,
+        ]
+        session = harness.open_session()
+
+        session.analyse(
+            str(_SAMPLE_FILE_PATH),
+            "领域分类",
+            prompt_kind=RagPromptKind.ARCHITECTURE_CLASSIFICATION,
+        )
+        self.assertTrue(
+            session.start_fresh_conversation(conversation_name="reselect")
+        )
+        session.ask(
+            "受限重选",
+            prompt_kind=RagPromptKind.ARCHITECTURE_RESELECT,
+        )
+        self.assertTrue(
+            session.start_fresh_conversation(conversation_name="extraction")
+        )
+        session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+
+        self.assertEqual(
+            [
+                "conversation-ref",
+                "conversation-ref-reselect",
+                "conversation-ref-extraction",
+            ],
+            [call.args[1] for call in harness.thread_client.ask.call_args_list],
+        )
+        conversation_events = [
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "conversation_create"
+        ]
+        self.assertEqual(
+            [1, 2, 3],
+            [event.attempt for event in conversation_events],
+        )
+        self.assertTrue(all(event.success for event in conversation_events))
+
+    def test_fresh_conversation_state_gates_precede_external_creation(self) -> None:
+        """analyse 前、第三次切换和关闭后均不得产生额外线程创建请求。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as before_analyse:
+            session.start_fresh_conversation(conversation_name="extraction")
+        self.assertEqual(
+            "session_not_prepared",
+            before_analyse.exception.trace.failure_stage,
+        )
+        self.assertEqual(1, harness.thread_client.create_thread.call_count)
+
+        session.analyse(str(_SAMPLE_FILE_PATH), "领域分类")
+        harness.thread_client.create_thread.side_effect = [
+            AnythingLLMThread(
+                id="thread-id-reselect",
+                slug="conversation-ref-reselect",
+            ),
+            AnythingLLMThread(
+                id="thread-id-extraction",
+                slug="conversation-ref-extraction",
+            ),
+        ]
+        session.start_fresh_conversation(conversation_name="reselect")
+        session.start_fresh_conversation(conversation_name="extraction")
+        self.assertEqual(3, harness.thread_client.create_thread.call_count)
+
+        with self.assertRaises(RagOperationError) as repeated:
+            session.start_fresh_conversation(conversation_name="third")
+        self.assertEqual(
+            "conversation_switch_repeated",
+            repeated.exception.trace.failure_stage,
+        )
+        self.assertEqual(3, harness.thread_client.create_thread.call_count)
+
+        session.close(retain_document=False)
+        with self.assertRaises(RagOperationError) as after_close:
+            session.start_fresh_conversation(conversation_name="closed")
+        self.assertEqual("session_closed", after_close.exception.trace.failure_stage)
+        self.assertEqual(3, harness.thread_client.create_thread.call_count)
+
+    def test_second_fresh_conversation_failure_never_falls_back(self) -> None:
+        """第二次阶段线程创建失败必须阻断原重选线程上的后续抽取。"""
+        harness = _GatewayHarness()
+        reselect_thread = AnythingLLMThread(
+            id="thread-id-reselect",
+            slug="conversation-ref-reselect",
+        )
+        harness.thread_client.create_thread.side_effect = [
+            harness.thread,
+            reselect_thread,
+            _http_error(503),
+        ]
+        session = harness.open_session()
+        session.analyse(str(_SAMPLE_FILE_PATH), "领域分类")
+        session.start_fresh_conversation(conversation_name="reselect")
+        session.ask(
+            "受限重选",
+            prompt_kind=RagPromptKind.ARCHITECTURE_RESELECT,
+        )
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.start_fresh_conversation(conversation_name="extraction")
+
+        self.assertEqual("conversation_create", raised.exception.trace.failure_stage)
+        self.assertEqual(3, harness.thread_client.create_thread.call_count)
+        with self.assertRaises(RagOperationError) as ask_raised:
+            session.ask("不得退回重选线程抽取")
+        self.assertEqual(
+            "session_not_prepared",
+            ask_raised.exception.trace.failure_stage,
+        )
+        self.assertEqual(2, harness.thread_client.ask.call_count)
+
+    def test_optional_fresh_failure_consumes_attempt_and_allows_extraction(self) -> None:
+        """可选重选线程创建失败后，第二次名额仍可创建字段抽取线程。"""
+        harness = _GatewayHarness()
+        extraction_thread = AnythingLLMThread(
+            id="thread-id-extraction",
+            slug="conversation-ref-extraction",
+        )
+        harness.thread_client.create_thread.side_effect = [
+            harness.thread,
+            _http_error(503),
+            extraction_thread,
+        ]
+        session = harness.open_session()
+        session.analyse(str(_SAMPLE_FILE_PATH), "领域分类")
+
+        created = session.start_fresh_conversation(
+            conversation_name="reselect",
+            failure_is_fatal=False,
+        )
+        self.assertFalse(created)
+        self.assertIsNone(session.trace.failure_stage)
+        with self.assertRaises(RagOperationError) as repeated:
+            session.start_fresh_conversation(
+                conversation_name="reselect",
+                failure_is_fatal=False,
+            )
+        self.assertEqual(
+            "conversation_switch_repeated",
+            repeated.exception.trace.failure_stage,
+        )
+        self.assertEqual(2, harness.thread_client.create_thread.call_count)
+        self.assertTrue(
+            session.start_fresh_conversation(conversation_name="extraction")
+        )
+        session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+
+        self.assertEqual(
+            ["conversation-ref", "conversation-ref-extraction"],
+            [call.args[1] for call in harness.thread_client.ask.call_args_list],
+        )
+        conversation_events = [
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "conversation_create"
+        ]
+        self.assertEqual(
+            [True, False, True],
+            [event.success for event in conversation_events],
+        )
+
+    def test_optional_ask_failure_keeps_audit_and_allows_extraction(self) -> None:
+        """可选重选查询失败应保留 attempt，并在新线程继续字段抽取。"""
+        harness = _GatewayHarness()
+        reselect_thread = AnythingLLMThread(
+            id="thread-id-reselect",
+            slug="conversation-ref-reselect",
+        )
+        extraction_thread = AnythingLLMThread(
+            id="thread-id-extraction",
+            slug="conversation-ref-extraction",
+        )
+        harness.thread_client.create_thread.side_effect = [
+            harness.thread,
+            reselect_thread,
+            extraction_thread,
+        ]
+        harness.thread_client.ask.side_effect = [
+            harness.answer,
+            _http_error(503),
+            harness.answer,
+        ]
+        session = harness.open_session()
+        session.analyse(str(_SAMPLE_FILE_PATH), "领域分类")
+        session.start_fresh_conversation(conversation_name="reselect")
+
+        optional_result = session.ask_optional(
+            "受限重选",
+            prompt_kind=RagPromptKind.ARCHITECTURE_RESELECT,
+        )
+
+        self.assertIsNone(optional_result)
+        self.assertIsNone(session.trace.failure_stage)
+        self.assertEqual("query", session.trace.attempts[-1].failure_stage)
+        session.start_fresh_conversation(conversation_name="extraction")
+        extraction_result = session.ask(
+            "字段抽取",
+            prompt_kind=RagPromptKind.ANALYSIS_EXTRACTION,
+        )
+        self.assertEqual("分析结果", extraction_result.text)
+        self.assertEqual(3, harness.thread_client.ask.call_count)
+
+    def test_optional_ask_does_not_swallow_programming_error(self) -> None:
+        """普通适配器异常即使发生在可选查询中也必须继续抛出。"""
+        harness = _GatewayHarness()
+        reselect_thread = AnythingLLMThread(
+            id="thread-id-reselect",
+            slug="conversation-ref-reselect",
+        )
+        harness.thread_client.create_thread.side_effect = [
+            harness.thread,
+            reselect_thread,
+        ]
+        harness.thread_client.ask.side_effect = [
+            harness.answer,
+            RuntimeError("programming error"),
+        ]
+        session = harness.open_session()
+        session.analyse(str(_SAMPLE_FILE_PATH), "领域分类")
+        session.start_fresh_conversation(conversation_name="reselect")
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.ask_optional(
+                "受限重选",
+                prompt_kind=RagPromptKind.ARCHITECTURE_RESELECT,
+            )
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+
+    def test_fresh_conversation_creation_failure_never_falls_back(self) -> None:
+        """第二线程创建失败必须审计失败并阻断原线程上的后续抽取。"""
+        harness = _GatewayHarness()
+        session = harness.open_session()
+        session.analyse(str(_SAMPLE_FILE_PATH), "领域分类")
+        harness.thread_client.create_thread.side_effect = _http_error(503)
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.start_fresh_conversation(conversation_name="extraction")
+
+        trace = raised.exception.trace
+        self.assertEqual("conversation_create", trace.failure_stage)
+        self.assertEqual("conversation-ref", trace.conversation_ref)
+        self.assertEqual(2, harness.thread_client.create_thread.call_count)
+        failed_event = trace.lifecycle_events[-1]
+        self.assertEqual("conversation_create", failed_event.operation)
+        self.assertEqual(2, failed_event.attempt)
+        self.assertFalse(failed_event.success)
+        with self.assertRaises(RagOperationError) as ask_raised:
+            session.ask("不得回退抽取")
+        self.assertEqual(
+            "session_not_prepared",
+            ask_raised.exception.trace.failure_stage,
+        )
+        self.assertEqual(1, harness.thread_client.ask.call_count)
+
+        cleanup = session.close(retain_document=True)
+        self.assertTrue(cleanup.success)
+        harness.document_client.delete_document.assert_called_once_with(
+            harness.document.location,
+            user_id=7,
+        )
+
     def test_explicit_non_source_query_can_succeed_without_sources(self) -> None:
         """调用方关闭来源要求时，有效文本可以在无来源条件下成功返回。"""
         harness = _GatewayHarness()
@@ -339,6 +756,118 @@ class AnythingLLMRagGatewayPreparationFailureTests(unittest.TestCase):
             harness.open_session().analyse(str(_SAMPLE_FILE_PATH), "分析文档")
 
         self.assertEqual("upload_protocol", raised.exception.trace.failure_stage)
+
+    def test_malformed_upload_without_cleanup_scope_is_audited_as_unknown(self) -> None:
+        """无法定位外部成员时必须保留 outcome-unknown，不得伪装成已清理。"""
+        harness = _GatewayHarness()
+        harness.document_client.upload_document.side_effect = (
+            AnythingLLMUploadRejectedError(
+                "上传响应包含畸形成员",
+                cleanup_attempted=False,
+                cleanup_confirmed=False,
+            )
+        )
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
+
+        self.assertEqual(
+            "upload_outcome_unknown",
+            raised.exception.trace.failure_stage,
+        )
+        upload_event = next(
+            event
+            for event in raised.exception.trace.lifecycle_events
+            if event.operation == "document_upload"
+        )
+        self.assertFalse(upload_event.success)
+        self.assertEqual("upload_outcome_unknown", upload_event.failure_stage)
+        harness.document_client.delete_document.assert_not_called()
+        harness.document_client.delete_document_artifact.assert_not_called()
+
+    def test_multi_sheet_confirmed_cleanup_is_audited_before_analysis_failure(self) -> None:
+        """多 Sheet 已整批删除时仍要失败，但不得留下待恢复 folder token。"""
+        harness = _GatewayHarness()
+        folder = "prepared-a.xlsx-6f2a"
+        token = XlsxFolderCleanupToken.issue(
+            (
+                f"{folder}/sheet-summary.json",
+                f"{folder}/sheet-details.json",
+            )
+        )
+        harness.document_client.upload_document.side_effect = (
+            AnythingLLMUploadRejectedError(
+                "当前仅支持单 Sheet XLSX",
+                cleanup_attempted=True,
+                cleanup_confirmed=True,
+                folder_cleanup_token=token.value,
+            )
+        )
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
+
+        self.assertEqual("upload_protocol", raised.exception.trace.failure_stage)
+        folder_event = next(
+            event
+            for event in raised.exception.trace.lifecycle_events
+            if event.operation == "global_document_folder_delete"
+        )
+        self.assertTrue(folder_event.success)
+        self.assertEqual(token.value, folder_event.external_ref)
+        cleanup = session.close(retain_document=False)
+        self.assertTrue(cleanup.success)
+        harness.document_client.delete_xlsx_folder.assert_not_called()
+
+    def test_multi_sheet_unknown_cleanup_is_retried_after_analysis_audit(self) -> None:
+        """首次结果未知时 Session close 必须使用 opaque token 恢复清理。"""
+        harness = _GatewayHarness()
+        folder = "prepared-a.xlsx-6f2a"
+        token = XlsxFolderCleanupToken.issue(
+            (
+                f"{folder}/sheet-summary.json",
+                f"{folder}/sheet-details.json",
+            )
+        )
+        harness.document_client.upload_document.side_effect = (
+            AnythingLLMUploadRejectedError(
+                "多 Sheet 清理结果未确认",
+                cleanup_attempted=True,
+                cleanup_confirmed=False,
+                folder_cleanup_token=token.value,
+            )
+        )
+        session = harness.open_session()
+
+        with self.assertRaises(RagOperationError) as raised:
+            session.analyse(str(_SAMPLE_FILE_PATH), "分析文档")
+
+        self.assertEqual(
+            "upload_outcome_unknown",
+            raised.exception.trace.failure_stage,
+        )
+        initial_folder_event = next(
+            event
+            for event in raised.exception.trace.lifecycle_events
+            if event.operation == "global_document_folder_delete"
+        )
+        self.assertFalse(initial_folder_event.success)
+        self.assertEqual(token.value, initial_folder_event.external_ref)
+        cleanup = session.close(retain_document=False)
+        self.assertTrue(cleanup.success)
+        recovered_folder_event = tuple(
+            event
+            for event in session.trace.lifecycle_events
+            if event.operation == "global_document_folder_delete"
+        )[-1]
+        self.assertTrue(recovered_folder_event.success)
+        self.assertEqual(token.value, recovered_folder_event.external_ref)
+        harness.document_client.delete_xlsx_folder.assert_called_once_with(
+            XlsxFolderCleanupToken(token.value),
+            user_id=7,
+        )
 
     def test_embedding_missing_empty_or_conflicting_workspace_is_protocol_failure(self) -> None:
         """嵌入响应必须返回非空且与目标一致的工作区引用。"""

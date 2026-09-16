@@ -30,9 +30,9 @@ def _ocr_config(tmp: str, *, engine: str = "mineru", enabled: bool = True) -> OC
 
 
 class OCRPreprocessorTests(unittest.TestCase):
-    @patch("app.services.utils.ocr_preprocessor.is_scanned_pdf", return_value=True)
-    @patch("app.services.utils.ocr_preprocessor.mineru_pdf_to_markdown")
-    @patch("app.services.utils.ocr_preprocessor.ocr_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.is_scanned_pdf", return_value=True)
+    @patch("app.modules.document_processing.adapters.builtin_ocr.mineru_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.ocr_pdf_to_markdown")
     def test_analysis_scanned_pdf_uses_mineru_first(self, mock_ocr, mock_mineru, _mock_scanned):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "scan.pdf"
@@ -47,9 +47,9 @@ class OCRPreprocessorTests(unittest.TestCase):
         mock_mineru.assert_called_once()
         mock_ocr.assert_not_called()
 
-    @patch("app.services.utils.ocr_preprocessor.is_scanned_pdf", return_value=True)
-    @patch("app.services.utils.ocr_preprocessor.mineru_pdf_to_markdown", side_effect=RuntimeError("mineru failed"))
-    @patch("app.services.utils.ocr_preprocessor.ocr_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.is_scanned_pdf", return_value=True)
+    @patch("app.modules.document_processing.adapters.builtin_ocr.mineru_pdf_to_markdown", side_effect=RuntimeError("mineru failed"))
+    @patch("app.modules.document_processing.adapters.builtin_ocr.ocr_pdf_to_markdown")
     def test_analysis_scanned_pdf_falls_back_to_builtin_ocr(self, mock_ocr, _mock_mineru, _mock_scanned):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "scan.pdf"
@@ -63,9 +63,9 @@ class OCRPreprocessorTests(unittest.TestCase):
         self.assertEqual(result, str(ocr_md))
         mock_ocr.assert_called_once()
 
-    @patch("app.services.utils.ocr_preprocessor.is_scanned_pdf", return_value=True)
-    @patch("app.services.utils.ocr_preprocessor.mineru_pdf_to_markdown", side_effect=RuntimeError("mineru failed"))
-    @patch("app.services.utils.ocr_preprocessor.ocr_pdf_to_markdown", side_effect=RuntimeError("ocr failed"))
+    @patch("app.modules.document_processing.adapters.builtin_ocr.is_scanned_pdf", return_value=True)
+    @patch("app.modules.document_processing.adapters.builtin_ocr.mineru_pdf_to_markdown", side_effect=RuntimeError("mineru failed"))
+    @patch("app.modules.document_processing.adapters.builtin_ocr.ocr_pdf_to_markdown", side_effect=RuntimeError("ocr failed"))
     def test_analysis_scanned_pdf_falls_back_to_original_pdf(self, _mock_ocr, _mock_mineru, _mock_scanned):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "scan.pdf"
@@ -75,9 +75,9 @@ class OCRPreprocessorTests(unittest.TestCase):
 
         self.assertEqual(result, str(pdf_path))
 
-    @patch("app.services.utils.ocr_preprocessor.is_scanned_pdf", return_value=True)
-    @patch("app.services.utils.ocr_preprocessor.mineru_pdf_to_markdown")
-    @patch("app.services.utils.ocr_preprocessor.ocr_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.is_scanned_pdf", return_value=True)
+    @patch("app.modules.document_processing.adapters.builtin_ocr.mineru_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.ocr_pdf_to_markdown")
     def test_analysis_engine_ocr_skips_mineru(self, mock_ocr, mock_mineru, _mock_scanned):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "scan.pdf"
@@ -91,9 +91,9 @@ class OCRPreprocessorTests(unittest.TestCase):
         self.assertEqual(result, str(ocr_md))
         mock_mineru.assert_not_called()
 
-    @patch("app.services.utils.ocr_preprocessor.is_scanned_pdf", return_value=False)
-    @patch("app.services.utils.ocr_preprocessor.mineru_pdf_to_markdown")
-    @patch("app.services.utils.ocr_preprocessor.ocr_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.is_scanned_pdf", return_value=False)
+    @patch("app.modules.document_processing.adapters.builtin_ocr.mineru_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.ocr_pdf_to_markdown")
     def test_non_scanned_pdf_keeps_original(self, mock_ocr, mock_mineru, _mock_scanned):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "text.pdf"
@@ -105,9 +105,9 @@ class OCRPreprocessorTests(unittest.TestCase):
         mock_mineru.assert_not_called()
         mock_ocr.assert_not_called()
 
-    @patch("app.services.utils.ocr_preprocessor.is_scanned_pdf", return_value=True)
-    @patch("app.services.utils.ocr_preprocessor.mineru_pdf_to_markdown")
-    @patch("app.services.utils.ocr_preprocessor.ocr_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.is_scanned_pdf", return_value=True)
+    @patch("app.modules.document_processing.adapters.builtin_ocr.mineru_pdf_to_markdown")
+    @patch("app.modules.document_processing.adapters.builtin_ocr.ocr_pdf_to_markdown")
     def test_default_prepare_file_for_upload_keeps_builtin_ocr(self, mock_ocr, mock_mineru, _mock_scanned):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "scan.pdf"
@@ -121,7 +121,7 @@ class OCRPreprocessorTests(unittest.TestCase):
         self.assertEqual(result, str(ocr_md))
         mock_mineru.assert_not_called()
 
-    @patch("app.services.translator.MinerUConverter.MinerUConverter")
+    @patch("app.modules.document_processing.adapters.mineru.MinerUConverter")
     def test_mineru_pdf_to_markdown_caches_markdown_with_metadata(self, MockConverter):
         with workspace_tempdir() as tmp:
             pdf_path = Path(tmp) / "scan.pdf"

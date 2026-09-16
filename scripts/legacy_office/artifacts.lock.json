@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "libreOfficeVersion": "26.2.5",
+  "allowedVersionSeries": "26.2",
+  "installers": {
+    "windows-x64": {
+      "architecture": "x86_64",
+      "filename": "LibreOffice_26.2.5_Win_x86-64.msi",
+      "url": "https://download.documentfoundation.org/libreoffice/stable/26.2.5/win/x86_64/LibreOffice_26.2.5_Win_x86-64.msi",
+      "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.2.5/win/x86_64/LibreOffice_26.2.5_Win_x86-64.msi.sha256",
+      "sha256": "f15ba07bfcb0186986cf3171063506f5d207c11f8cc051ba0d135209e9e915f9",
+      "certification": "static-and-mock-only"
+    },
+    "macos-arm64": {
+      "architecture": "aarch64",
+      "filename": "LibreOffice_26.2.5_MacOS_aarch64.dmg",
+      "url": "https://download.documentfoundation.org/libreoffice/stable/26.2.5/mac/aarch64/LibreOffice_26.2.5_MacOS_aarch64.dmg",
+      "checksumUrl": "https://download.documentfoundation.org/libreoffice/stable/26.2.5/mac/aarch64/LibreOffice_26.2.5_MacOS_aarch64.dmg.sha256",
+      "sha256": "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad",
+      "certification": "requires-real-smoke"
+    }
+  },
+  "licenses": [
+    {
+      "filename": "MPL-2.0.txt",
+      "url": "https://www.mozilla.org/media/MPL/2.0/index.txt",
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+    },
+    {
+      "filename": "Apache-2.0.txt",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  ],
+  "smokeSamples": {
+    "word-sample.doc": {
+      "format": "doc",
+      "origin": "project-local-generated",
+      "sha256": "65632882063cc80edc4d46a7a54420412d2616de59702b2b7fe1dec8018a13a4"
+    },
+    "excel-sample.xls": {
+      "format": "xls",
+      "origin": "project-local-generated",
+      "sha256": "3ff7a0f0e9d8e31ce11e0622ae33c0e59618efcdecc104cad84bbda33e7d6ce9"
+    },
+    "powerpoint-2002-apache-poi.ppt": {
+      "format": "ppt",
+      "origin": "apache-poi",
+      "repository": "https://github.com/apache/poi",
+      "commit": "63eda92cc63b39d4e8956e7775ccddb1f0d925cf",
+      "sourcePath": "test-data/slideshow/bug60345_Jankovic_final_Retreat_2002.ppt",
+      "url": "https://raw.githubusercontent.com/apache/poi/63eda92cc63b39d4e8956e7775ccddb1f0d925cf/test-data/slideshow/bug60345_Jankovic_final_Retreat_2002.ppt",
+      "license": "Apache-2.0",
+      "sha256": "7d485f5d3fbfc18191854b3a6c370e7195df736442e29799d38786c62259173f"
+    }
+  }
+}

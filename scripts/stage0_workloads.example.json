@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "description": "阶段0容量场景定义。默认只启用不触发模型任务的短请求与Progress长连接场景。",
+  "scenarios": [
+    {
+      "name": "short_history_50",
+      "type": "http",
+      "enabled": true,
+      "requiresHeavyServices": false,
+      "method": "GET",
+      "path": "/llm/chat/history",
+      "query": {
+        "chatId": 10001
+      },
+      "concurrency": 50,
+      "totalRequests": 500,
+      "timeoutSeconds": 10,
+      "expectedStatuses": [
+        200
+      ],
+      "purpose": "验证50条稳定短请求并发；测试会话数据需在执行前准备。"
+    },
+    {
+      "name": "progress_connections_50",
+      "type": "websocket",
+      "enabled": true,
+      "requiresHeavyServices": false,
+      "path": "/llm/progress",
+      "concurrency": 50,
+      "holdSeconds": 10,
+      "livenessProbeSeconds": 1,
+      "receiveTimeoutSeconds": 10,
+      "message": {
+        "businessType": "file",
+        "params": [
+          {
+            "fileName": "stage0-progress-probe.pdf"
+          }
+        ]
+      },
+      "purpose": "验证50条无action Progress长连接在保持窗口内持续存活，并分别统计首帧与保持耗时；客户端会显式关闭连接，但服务端订阅清理仍需结合内部指标验证。"
+    },
+    {
+      "name": "chat_sse_50",
+      "type": "sse",
+      "enabled": false,
+      "templateOnly": true,
+      "requiresHeavyServices": true,
+      "method": "POST",
+      "path": "/llm/chat",
+      "concurrency": 50,
+      "totalRequests": 50,
+      "timeoutSeconds": 180,
+      "maxEvents": 20000,
+      "expectedStatuses": [
+        200
+      ],
+      "json": {
+        "businessType": "chat",
+        "params": {
+          "chatId": 10001,
+          "fileNames": [],
+          "message": "阶段0容量探针"
+        }
+      },
+      "purpose": "需要为50条流生成互不冲突的chatId，并准备完整AnythingLLM/模型依赖；模板不能直接运行。"
+    },
+    {
+      "name": "inflight_tasks_50",
+      "type": "http",
+      "enabled": false,
+      "templateOnly": true,
+      "requiresHeavyServices": true,
+      "method": "POST",
+      "path": "/llm/analysis",
+      "concurrency": 50,
+      "totalRequests": 50,
+      "timeoutSeconds": 30,
+      "expectedStatuses": [
+        202
+      ],
+      "json": {
+        "businessType": "file",
+        "params": []
+      },
+      "purpose": "仅占位定义50个在途任务口径。执行前必须生成互不冲突的真实请求，且按重型资源限流排队；本示例正文不可直接运行。"
+    }
+  ]
+}

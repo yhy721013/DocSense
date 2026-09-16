@@ -156,10 +156,9 @@ class KnowledgeDocumentMetadata:
             str(self.ingested_file_name or "")
             .replace("\\", "/")
             .rsplit("/", 1)[-1]
-            .strip()
         )
         if (
-            not normalized_ingested_file_name
+            not normalized_ingested_file_name.strip()
             or normalized_ingested_file_name in {".", ".."}
         ):
             raise ValueError("KnowledgeDocumentMetadata.ingested_file_name 必须是有效文件名")

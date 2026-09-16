@@ -6,14 +6,18 @@ from unittest.mock import patch
 
 from app import create_app
 from tests import workspace_tempdir
+from tests.offline_application import build_offline_application_services
 
 
 class CallbackDebugRouteTests(unittest.TestCase):
     def setUp(self):
-        self.app = create_app()
-        self.client = self.app.test_client()
         self._tempdir = workspace_tempdir()
         self.tmp = Path(self._tempdir.__enter__())
+        self.services = build_offline_application_services(
+            self.tmp / "application"
+        )
+        self.app = create_app(services=self.services)
+        self.client = self.app.test_client()
         self.history_dir = self.tmp / "callback"
         self.path_patcher = patch(
             "app.services.utils.callback_preview.CALLBACK_HISTORY_DIR",
@@ -23,6 +27,7 @@ class CallbackDebugRouteTests(unittest.TestCase):
 
     def tearDown(self):
         self.path_patcher.stop()
+        self.services.close()
         self._tempdir.__exit__(None, None, None)
 
     def write_callback_record(self, name, payload, *, mtime=1000):

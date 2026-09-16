@@ -28,10 +28,39 @@ def chat_debug_bootstrap_api():
         kb_service=services.kb_service,
     )
     data = payload.get("data") if isinstance(payload, dict) else {}
+    sessions = data.get("sessions", []) if isinstance(data, dict) else []
+    active_scope_member_count = 0
+    workspace_binding_count = 0
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        file_names = item.get("fileNames", [])
+        # bootstrap 继续使用既有 `fileNames` 字段，但该字段现在只承载 Active
+        # Scope。这里采用防御性计数，避免异常预览数据影响调试响应。
+        if isinstance(file_names, list):
+            active_scope_member_count += len(file_names)
+        chat_id = item.get("chatId")
+        try:
+            workspace_binding_count += len(
+                services.chat_store.document_bindings.list_current_by_chat(
+                    str(chat_id)
+                )
+            )
+        except (TypeError, ValueError):
+            # 调试聚合服务已经过滤非规范 chatId；此处仅防止未来异常预览对象
+            # 反过来中断原本可返回的调试响应。
+            logger.warning(
+                "文件对话调试响应统计跳过非规范会话",
+            )
     logger.info(
-        "文件对话调试初始化数据响应已生成: ok=%s session_count=%d available_file_count=%d",
+        "文件对话调试初始化数据响应已生成: "
+        "ok=%s session_count=%d active_scope_member_count=%d "
+        "workspace_binding_count=%d "
+        "available_file_count=%d",
         bool(payload.get("ok")) if isinstance(payload, dict) else False,
-        len(data.get("sessions", [])) if isinstance(data, dict) else 0,
+        len(sessions),
+        active_scope_member_count,
+        workspace_binding_count,
         len(data.get("availableFiles", [])) if isinstance(data, dict) else 0,
     )
     return jsonify(payload)

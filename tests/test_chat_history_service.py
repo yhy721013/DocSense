@@ -7,6 +7,7 @@ import unittest
 
 from app.services.chat import (
     ChatHistoryService,
+    ChatSessionScopeBinding,
     ChatStore,
     MESSAGE_COMMITTED,
     MESSAGE_DISCARDED,
@@ -102,6 +103,47 @@ class ChatHistoryServiceTests(unittest.TestCase):
         self.assertEqual(1, len(result))
         self.assertEqual("user", result[0]["role"])
         self.assertEqual("继续", result[0]["content"])
+
+    def test_architecture_user_history_exposes_id_without_files(self) -> None:
+        """architecture user 与 assistant 的公开字段必须严格互斥。"""
+        self.store.sessions.create_or_get(chat_id="chat-architecture-history")
+        self.store.session_scope_bindings.create(
+            ChatSessionScopeBinding(
+                chat_id="chat-architecture-history",
+                scope_mode="architecture",
+                architecture_id=7,
+                created_at="2026-07-28T00:00:00+00:00",
+            )
+        )
+        self.store.runs.create(
+            run_id="run-architecture-history",
+            chat_id="chat-architecture-history",
+        )
+        self.store.messages.append(
+            message_id="message-architecture-user",
+            chat_id="chat-architecture-history",
+            run_id="run-architecture-history",
+            role=MESSAGE_ROLE_USER,
+            content="请总结类别",
+            status=MESSAGE_COMMITTED,
+            architecture_id=7,
+        )
+        self.store.messages.append(
+            message_id="message-architecture-assistant",
+            chat_id="chat-architecture-history",
+            run_id="run-architecture-history",
+            role=MESSAGE_ROLE_ASSISTANT,
+            content="总结完成",
+            status=MESSAGE_COMMITTED,
+        )
+
+        result = self.history.list_history("chat-architecture-history")
+
+        self.assertEqual(7, result[0]["architectureId"])
+        self.assertIsInstance(result[0]["architectureId"], int)
+        self.assertNotIn("files", result[0])
+        self.assertNotIn("architectureId", result[1])
+        self.assertNotIn("files", result[1])
 
     def test_title_messages_use_only_role_and_trimmed_content(self) -> None:
         self.store.sessions.create_or_get(chat_id="chat-title")
